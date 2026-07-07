@@ -1,0 +1,34 @@
+{
+  "$schema": "../../../../schema/schemas/skill.manifest.schema.json",
+  "id": "tdd",
+  "name": "测试驱动开发",
+  "source": {
+    "type": "github",
+    "url": "https://github.com/mattpocock/skills/blob/main/skills/engineering/tdd/SKILL.md",
+    "rawUrl": "https://raw.githubusercontent.com/mattpocock/skills/main/skills/engineering/tdd/SKILL.md",
+    "ref": "main"
+  },
+  "requires": [
+    {
+      "capability": "foundation.testing",
+      "satisfiedBy": [
+        "jest",
+        "vitest",
+        "@mutil-skills/foundation/testing"
+      ],
+      "whenMissing": {
+        "action": "prompt-install",
+        "package": "@mutil-skills/foundation",
+        "import": "@mutil-skills/foundation/testing"
+      }
+    }
+  ],
+  "templateReferences": [
+    {
+      "id": "foundation.testing.sample-test"
+    },
+    {
+      "id": "foundation.testing.package-scripts"
+    }
+  ]
+}
