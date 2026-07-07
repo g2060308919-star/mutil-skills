@@ -1,0 +1,25 @@
+{
+  "name": "@mutil-skills/cli",
+  "version": "0.0.0",
+  "type": "module",
+  "files": [
+    "dist/src"
+  ],
+  "bin": {
+    "repo-test": "./dist/src/bin/repo-test.js",
+    "repo-tdd": "./dist/src/bin/repo-tdd.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "dependencies": {
+    "@mutil-skills/core": "0.0.0",
+    "@mutil-skills/foundation": "0.0.0",
+    "@mutil-skills/schema": "0.0.0",
+    "@mutil-skills/skills": "0.0.0",
+    "@mutil-skills/template": "0.0.0"
+  }
+}

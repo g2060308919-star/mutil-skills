@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@mutil-skills/core": ["packages/core/src/index.ts"],
+      "@mutil-skills/schema": ["packages/schema/src/index.ts"],
+      "@mutil-skills/template": ["packages/template/src/index.ts"],
+      "@mutil-skills/foundation/testing": ["packages/foundation/src/testing/index.ts"],
+      "@mutil-skills/skills": ["packages/skills/src/index.ts"]
+    },
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  }
+}
