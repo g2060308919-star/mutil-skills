@@ -5,7 +5,7 @@ export interface SkillRegistryEntry {
   id: string
   name: string
   relativePath: string
-  files: Array<{ name: 'SKILL.md' | 'skill.manifest.json' | 'README.md' | 'tests.md' | 'mocking.md'; relativePath: string }>
+  files: Array<{ name: string; relativePath: string }>
 }
 
 const tddSkill: SkillRegistryEntry = {
@@ -21,8 +21,29 @@ const tddSkill: SkillRegistryEntry = {
   ],
 }
 
+const e2eSkill: SkillRegistryEntry = {
+  id: 'e2e',
+  name: 'PRD 驱动 E2E 浏览器验收',
+  relativePath: 'skills/testing/e2e',
+  files: [
+    { name: 'SKILL.md', relativePath: 'skills/testing/e2e/SKILL.md' },
+    { name: 'skill.manifest.json', relativePath: 'skills/testing/e2e/skill.manifest.json' },
+    { name: 'prd-intake.md', relativePath: 'skills/testing/e2e/prd-intake.md' },
+    { name: 'acceptance-scope.md', relativePath: 'skills/testing/e2e/acceptance-scope.md' },
+    { name: 'requirement-model.md', relativePath: 'skills/testing/e2e/requirement-model.md' },
+    { name: 'interaction-flow.md', relativePath: 'skills/testing/e2e/interaction-flow.md' },
+    { name: 'coverage-cases.md', relativePath: 'skills/testing/e2e/coverage-cases.md' },
+    { name: 'execution-contract.md', relativePath: 'skills/testing/e2e/execution-contract.md' },
+    { name: 'browser-verification.md', relativePath: 'skills/testing/e2e/browser-verification.md' },
+    { name: 'automation-healing.md', relativePath: 'skills/testing/e2e/automation-healing.md' },
+    { name: 'regression-assets.md', relativePath: 'skills/testing/e2e/regression-assets.md' },
+    { name: 'visual-report.md', relativePath: 'skills/testing/e2e/visual-report.md' },
+    { name: 'artifact-protocol.md', relativePath: 'skills/testing/e2e/artifact-protocol.md' },
+  ],
+}
+
 export function listSkills(): SkillRegistryEntry[] {
-  return [tddSkill]
+  return [tddSkill, e2eSkill]
 }
 
 export function resolveSkill(id: string): SkillRegistryEntry | undefined {

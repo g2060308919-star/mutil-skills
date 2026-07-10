@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../../schema/schemas/skill.manifest.schema.json",
+  "id": "e2e",
+  "name": "PRD 驱动 E2E 浏览器验收",
+  "source": {
+    "type": "github",
+    "url": "https://github.com/mutil-skills/mutil-skills/blob/main/packages/skills/skills/testing/e2e/SKILL.md",
+    "rawUrl": "https://raw.githubusercontent.com/mutil-skills/mutil-skills/main/packages/skills/skills/testing/e2e/SKILL.md",
+    "ref": "main"
+  },
+  "requires": []
+}
