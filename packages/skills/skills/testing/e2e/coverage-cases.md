@@ -39,4 +39,3 @@ coverage-matrix.json、test-cases.json 和 design-audit.json。
 ## 独立使用示例
 
 为列表筛选创建真实链路 Case，为接口 500 创建 fault-injection Case，并分别关联同一规则的不同 coverage item。
-

@@ -39,4 +39,3 @@ PRD-ID、Asset ID、Revision 和来源都已确定，且产物通过 Schema。
 ## 独立使用示例
 
 已提供规范化 PRD 和 productSpace 时，输出当前 Revision 与首次执行的空变更集；缺 PRD-ID 的纯文本请求先向用户确认建议 ID。
-

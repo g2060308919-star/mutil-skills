@@ -39,4 +39,3 @@ final-report.json、report.md、report.html 和准备发布的 latest 目录。
 ## 独立使用示例
 
 10 个已执行 Case 全通过但另有 10 个必要 Case 被拒绝时，报告 executionCoverage 50% 且 verdict 为 incomplete。
-

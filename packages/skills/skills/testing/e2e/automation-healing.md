@@ -39,4 +39,3 @@ diagnosis.json、修订 browser-action-map.json，以及可选重跑结果。
 ## 独立使用示例
 
 找不到按钮时先用 Trace 确认页面身份，再替换 role locator；审核提交后未知是否生效时标记 automation-blocked 而非重试。
-

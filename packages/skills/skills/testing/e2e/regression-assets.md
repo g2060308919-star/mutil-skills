@@ -39,4 +39,3 @@ regression/<prd-id>/current 目录与 regression-manifest.json。
 ## 独立使用示例
 
 更新 CASE-SEARCH-001 对应 spec 块并保留标题；缺登录态的 CASE-ADMIN-001 只在 manifest 标为 blocked。
-

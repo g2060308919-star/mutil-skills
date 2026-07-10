@@ -39,4 +39,3 @@ testWorkspace、artifact 名称、待读写 JSON 或目录，以及对应 Schema
 ## 独立使用示例
 
 渲染报告前把 tasks/<prd-id>/.staging 校验通过后替换 latest；切换失败时恢复上一份 latest。
-

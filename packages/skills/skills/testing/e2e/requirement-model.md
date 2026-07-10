@@ -39,4 +39,3 @@ requirement-model.json，含 REQ、RULE、actor、状态、转换和 observable 
 ## 独立使用示例
 
 将城市筛选拆为筛选规则、空态规则和请求结果可观察项，并分别关联 REQ-ID 与 RULE-ID。
-

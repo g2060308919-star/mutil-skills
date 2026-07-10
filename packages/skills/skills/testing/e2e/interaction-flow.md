@@ -39,4 +39,3 @@ interaction-flow.json 与可选 interaction-flow.mmd。
 ## 独立使用示例
 
 筛选流程包含页面入口、选择城市、加载、列表更新、空态和请求失败恢复分支。
-
