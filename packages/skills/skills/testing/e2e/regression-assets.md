@@ -4,6 +4,10 @@
 
 把已绑定的可执行 Case 编译为可独立运行的标准 Playwright current 资产，并安全更新 manifest。
 
+## 触发条件
+
+当已有 Case、动作映射和执行结果，且需要生成或更新可重复执行的 Playwright 回归资产时使用。
+
 ## 必需输入
 
 test-cases.json、browser-action-map.json、browser-results.json、prd-manifest.json 和 testWorkspace。

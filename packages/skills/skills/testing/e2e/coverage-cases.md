@@ -4,6 +4,10 @@
 
 将需求、规则、流程和关键节点映射为可独立诊断的浏览器 Case，并以设计审计锁定完整性。
 
+## 触发条件
+
+当需求模型和交互流程已完成且需要设计覆盖矩阵、Case 或检查设计覆盖时使用。
+
 ## 必需输入
 
 requirement-model.json、interaction-flow.json 和 confirmed acceptance-scope.json。

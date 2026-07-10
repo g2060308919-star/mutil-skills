@@ -4,6 +4,10 @@
 
 仅消费 Schema 已验证的结构化事实，渲染最终 JSON、Markdown 和静态 HTML，并给出严格结论。
 
+## 触发条件
+
+当结构化执行和证据产物齐备，且需要生成最终验收报告或解释严格结论时使用。
+
 ## 必需输入
 
 acceptance-scope.json、coverage-matrix.json、test-cases.json、browser-results.json、browser-evidence.json、diagnosis.json、regression-manifest.json 和 execution-contract.json。

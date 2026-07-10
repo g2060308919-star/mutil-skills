@@ -4,6 +4,10 @@
 
 在确认的执行契约下预检、绑定、编译和执行真实链路与浏览器级故障注入，并收集脱敏证据。
 
+## 触发条件
+
+当执行契约已确认且需要用 Playwright 预检、绑定、执行或采集浏览器证据时使用。
+
 ## 必需输入
 
 confirmed execution-contract.json、test-cases.json、coverage-matrix.json 和浏览器运行时能力。

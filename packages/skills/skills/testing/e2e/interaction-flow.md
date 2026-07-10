@@ -4,6 +4,10 @@
 
 将需求模型组织为用户入口、动作、决策、反馈和状态变化构成的预期流程。
 
+## 触发条件
+
+当需求模型已完成且需要设计预期用户交互流程和风险分类时使用。
+
 ## 必需输入
 
 requirement-model.json 和 confirmed acceptance-scope.json。

@@ -4,6 +4,10 @@
 
 将已确认范围中的每个 REQ 转成可追溯、可观察的业务和交互规则。
 
+## 触发条件
+
+当验收范围已确认且需要把 PRD 语义转成规则、状态和可观察结果时使用。
+
 ## 必需输入
 
 confirmed acceptance-scope.json、normalized-prd.md 和 prd-manifest.json。

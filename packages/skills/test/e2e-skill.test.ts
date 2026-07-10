@@ -50,6 +50,10 @@ describe('E2E skill package', () => {
       id: 'e2e',
       name: 'PRD 驱动 E2E 浏览器验收',
       requires: [],
+      source: {
+        url: 'https://github.com/g2060308919-star/mutil-skills/blob/main/packages/skills/skills/testing/e2e/SKILL.md',
+        rawUrl: 'https://raw.githubusercontent.com/g2060308919-star/mutil-skills/main/packages/skills/skills/testing/e2e/SKILL.md',
+      },
     })
   })
 
@@ -58,6 +62,7 @@ describe('E2E skill package', () => {
 
     for (const heading of [
       '## 目的',
+      '## 触发条件',
       '## 必需输入',
       '## 可选输入',
       '## 工作流',

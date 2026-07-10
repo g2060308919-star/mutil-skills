@@ -4,6 +4,10 @@
 
 为所有 PRD、设计、浏览器、回归和报告产物提供 Schema、路径、脱敏和原子发布纪律。
 
+## 触发条件
+
+当需要读取、校验、写入或发布任意 .biztest 产物时使用。
+
 ## 必需输入
 
 testWorkspace、artifact 名称、待读写 JSON 或目录，以及对应 Schema。

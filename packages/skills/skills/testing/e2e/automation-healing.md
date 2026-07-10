@@ -4,6 +4,10 @@
 
 区分业务、输入、环境、未决需求和自动化问题，并只修复自动化层中允许变化的部分。
 
+## 触发条件
+
+当浏览器 Case 失败或阻塞，且需要诊断自动化问题并决定是否可安全重试时使用。
+
 ## 必需输入
 
 browser-results.json、browser-evidence.json、browser-action-map.json、execution-contract.json 和 test-cases.json。
