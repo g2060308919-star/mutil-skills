@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { describe, expect, test } from 'vitest'
 import { parseSkillManifest } from '../../schema/src/index.js'
-import { resolveSkill, resolveSkillDirectory } from '../src/index.js'
+import { listSkills, resolveSkill, resolveSkillDirectory } from '../src/index.js'
 
 const workflowFiles = [
   'prd-intake.md',
@@ -81,5 +81,11 @@ describe('E2E skill package', () => {
     expect(text).toContain('未完成执行契约确认')
     expect(text).toContain('生产环境默认只读')
     expect(text).toContain('不得通过弱化断言')
+  })
+
+  test('E2E workflow files stay local and preserve the TDD skill', () => {
+    expect(listSkills().map((skill) => skill.id)).toEqual(['tdd', 'e2e'])
+    expect(resolveSkill('tdd')?.files.map((file) => file.name)).toContain('tests.md')
+    expect(resolveSkill('e2e')?.files.every((file) => file.relativePath.startsWith('skills/testing/e2e/'))).toBe(true)
   })
 })
