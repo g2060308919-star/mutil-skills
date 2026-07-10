@@ -16,6 +16,10 @@ testWorkspace、artifact 名称、待读写 JSON 或目录，以及对应 Schema
 
 现有 requirements、current、latest 目录和 rollback 目录。
 
+## 独立调用守则
+
+独立调用时，缺少任一上述命名输入，明确列出缺失的文件或信息并请求用户提供；返回 blocked，不得推断、重建、补写或执行任何上游阶段。
+
 ## 工作流
 
 解析并校验 Schema，解析安全路径，写入临时文件或 staging，校验完整性，切换目标，失败时恢复 rollback。

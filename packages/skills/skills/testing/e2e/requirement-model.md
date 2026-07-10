@@ -16,6 +16,10 @@ confirmed acceptance-scope.json、normalized-prd.md 和 prd-manifest.json。
 
 用户确认的补充规则、被引用设计或交互规范。
 
+## 独立调用守则
+
+独立调用时，缺少任一上述命名输入，明确列出缺失的文件或信息并请求用户提供；返回 blocked，不得推断、重建、补写或执行任何上游阶段。
+
 ## 工作流
 
 逐个 REQ 提取 actor、前置条件、RULE、状态、转换、UI 与 Network 可观察结果，再校验来源和确定性。

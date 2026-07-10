@@ -75,17 +75,23 @@ describe('E2E skill package', () => {
     ]) {
       expect(text).toContain(heading)
     }
+    expect(text).toContain('独立调用时，缺少任一上述命名输入')
+    expect(text).toContain('不得推断、重建、补写或执行任何上游阶段')
   })
 
   test('entrypoint enforces confirmations and non-negotiable browser safety', async () => {
     const text = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
 
-    expect(text).toContain('[acceptance-scope.md](acceptance-scope.md)')
-    expect(text).toContain('[execution-contract.md](execution-contract.md)')
+    for (const file of workflowFiles) {
+      expect(text).toContain(`[${file}](${file})`)
+    }
     expect(text).toContain('未完成验收范围确认')
     expect(text).toContain('未完成执行契约确认')
     expect(text).toContain('生产环境默认只读')
+    expect(text).toContain('真实链路和故障注入分别统计和报告')
+    expect(text).toContain('到达真实服务端前 fulfill 或 abort')
     expect(text).toContain('不得通过弱化断言')
+    expect(text).toContain('删除 Case、skip、改写 PRD')
   })
 
   test('E2E workflow files stay local and preserve the TDD skill', () => {

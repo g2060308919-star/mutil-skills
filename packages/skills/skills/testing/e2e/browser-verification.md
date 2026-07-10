@@ -16,6 +16,10 @@ confirmed execution-contract.json、test-cases.json、coverage-matrix.json 和�
 
 storageState 引用、Host Browser Server、用户提供的请求协议、已发布 current 回归资产。
 
+## 独立调用守则
+
+独立调用时，缺少任一上述命名输入，明确列出缺失的文件或信息并请求用户提供；返回 blocked，不得推断、重建、补写或执行任何上游阶段。
+
 ## 工作流
 
 预检 URL、登录、角色、页面身份和数据；绑定语义步骤；发现新风险则回流契约；编译 staging；先跑真实链路和健康基线，再跑注入 Case。

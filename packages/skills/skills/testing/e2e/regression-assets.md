@@ -16,6 +16,10 @@ test-cases.json、browser-action-map.json、browser-results.json、prd-manifest.
 
 现有 regression manifest、支持文件与网络 mock 模板。
 
+## 独立调用守则
+
+独立调用时，缺少任一上述命名输入，明确列出缺失的文件或信息并请求用户提供；返回 blocked，不得推断、重建、补写或执行任何上游阶段。
+
 ## 工作流
 
 在 staging 编译 ready Case，校验 TypeScript 和 playwright test --list，执行 secret scan，再原子发布 current 与 manifest。

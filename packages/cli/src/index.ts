@@ -202,6 +202,9 @@ export function formatBootstrapPlan(plan: BootstrapPlan): string {
 
 export function resolveRepoTddSkillDirectory(args: string[]): string {
   const skillId = parseRepoTddArgs(args).skill
+  if (skillId !== 'tdd') {
+    throw new Error(`repo-tdd 仅支持 tdd skill：${skillId}`)
+  }
   const skillDirectory = resolveSkillDirectory(skillId)
   if (!skillDirectory) {
     throw new Error(`未知 skill：${skillId}`)

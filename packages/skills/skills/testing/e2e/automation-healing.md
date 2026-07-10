@@ -16,6 +16,10 @@ browser-results.json、browser-evidence.json、browser-action-map.json、executi
 
 Console、Network、Trace、视频和 DOM 证据引用。
 
+## 独立调用守则
+
+独立调用时，缺少任一上述命名输入，明确列出缺失的文件或信息并请求用户提供；返回 blocked，不得推断、重建、补写或执行任何上游阶段。
+
 ## 工作流
 
 依序诊断页面身份、账号角色、数据、环境请求、定位器等待、PRD 歧义和业务行为；仅自动化问题进入有界自愈。
