@@ -1,8 +1,8 @@
-import { mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, test, vi } from 'vitest'
-import { createTemporaryTelemetryVerification, reconcileTranscript, runTelemetryHook, type TelemetryLifecycleEvent, type TelemetrySink } from '../src/index.js'
+import { createTemporaryTelemetryVerification, reconcileTranscript, runTelemetryHook, TemporaryJsonlTelemetrySink, type TelemetryLifecycleEvent, type TelemetrySink } from '../src/index.js'
 
 describe('runTelemetryHook', () => {
   test('explicit verification captures events in a private temporary file and cleans them up', async () => {
@@ -34,6 +34,21 @@ describe('runTelemetryHook', () => {
     expect((await stat(verification.outputPath)).mode & 0o777).toBe(0o600)
     await verification.cleanup()
     await expect(readFile(verification.outputPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('refuses a symlinked verification output instead of following it outside the root', async () => {
+    const verification = await createTemporaryTelemetryVerification()
+    const outsidePath = join(tmpdir(), `telemetry-outside-${Date.now()}.jsonl`)
+    const linkedPath = join(verification.outputPath, '..', 'linked-events.jsonl')
+    await writeFile(outsidePath, 'unchanged\n')
+    await symlink(outsidePath, linkedPath)
+    const sink = new TemporaryJsonlTelemetrySink(linkedPath)
+
+    await expect(sink.send({} as TelemetryLifecycleEvent)).rejects.toThrow(/symbolic link|symlink/i)
+    expect(await readFile(outsidePath, 'utf8')).toBe('unchanged\n')
+    await rm(linkedPath, { force: true })
+    await rm(outsidePath, { force: true })
+    await verification.cleanup()
   })
 
   test('exits before transcript access or sink calls for an excluded project', async () => {

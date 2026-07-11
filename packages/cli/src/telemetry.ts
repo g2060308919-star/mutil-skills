@@ -66,12 +66,15 @@ export async function installStableTelemetryRuntime(options: StableTelemetryRunt
   const destinationBin = join(destinationCli, 'bin')
   const destinationTelemetry = join(runtimeRoot, 'node_modules', '@mutil-skills', 'telemetry')
   const markerPath = join(runtimeRoot, '.mutil-skills-telemetry-runtime')
+  const backupCli = join(runtimeRoot, '.previous-cli')
+  const backupTelemetry = join(runtimeRoot, '.previous-telemetry')
 
   if (existsSync(runtimeRoot) && !await isOwnedTelemetryRuntime(runtimeRoot)) {
     throw new Error(`Refusing to replace an unowned runtime directory: ${runtimeRoot}`)
   }
 
   await mkdir(runtimeRoot, { recursive: true, mode: 0o700 })
+  await recoverInterruptedRuntimeSwap(destinationCli, destinationTelemetry, backupCli, backupTelemetry)
   const stagingRoot = await mkdtemp(join(runtimeRoot, '.staging-'))
   const stagingCli = join(stagingRoot, 'cli')
   const stagingBin = join(stagingCli, 'bin')
@@ -92,17 +95,41 @@ export async function installStableTelemetryRuntime(options: StableTelemetryRunt
       }
     }
     await copyFile(join(sourceTelemetryRoot, 'package.json'), join(stagingTelemetry, 'package.json'))
-    await rm(destinationCli, { recursive: true, force: true })
-    await rm(destinationTelemetry, { recursive: true, force: true })
-    await rename(stagingCli, destinationCli)
-    await mkdir(dirname(destinationTelemetry), { recursive: true, mode: 0o700 })
-    await rename(stagingTelemetry, destinationTelemetry)
-    await writeFile(markerPath, 'mutil-skills telemetry runtime\n', { mode: 0o600 })
-    await chmod(runtimeRoot, 0o700)
+    await rm(backupCli, { recursive: true, force: true })
+    await rm(backupTelemetry, { recursive: true, force: true })
+    try {
+      if (existsSync(destinationCli)) await rename(destinationCli, backupCli)
+      if (existsSync(destinationTelemetry)) await rename(destinationTelemetry, backupTelemetry)
+      await rename(stagingCli, destinationCli)
+      await mkdir(dirname(destinationTelemetry), { recursive: true, mode: 0o700 })
+      await rename(stagingTelemetry, destinationTelemetry)
+      await writeFile(markerPath, 'mutil-skills telemetry runtime\n', { mode: 0o600 })
+      await chmod(runtimeRoot, 0o700)
+      await rm(backupCli, { recursive: true, force: true })
+      await rm(backupTelemetry, { recursive: true, force: true })
+    } catch (error) {
+      await rm(destinationCli, { recursive: true, force: true })
+      await rm(destinationTelemetry, { recursive: true, force: true })
+      if (existsSync(backupCli)) await rename(backupCli, destinationCli)
+      if (existsSync(backupTelemetry)) await rename(backupTelemetry, destinationTelemetry)
+      throw error
+    }
   } finally {
     await rm(stagingRoot, { recursive: true, force: true })
   }
   return join(destinationBin, 'telemetry-hook.js')
+}
+
+async function recoverInterruptedRuntimeSwap(
+  destinationCli: string,
+  destinationTelemetry: string,
+  backupCli: string,
+  backupTelemetry: string,
+): Promise<void> {
+  if (!existsSync(destinationCli) && existsSync(backupCli)) await rename(backupCli, destinationCli)
+  if (!existsSync(destinationTelemetry) && existsSync(backupTelemetry)) await rename(backupTelemetry, destinationTelemetry)
+  if (existsSync(destinationCli) && existsSync(backupCli)) await rm(backupCli, { recursive: true, force: true })
+  if (existsSync(destinationTelemetry) && existsSync(backupTelemetry)) await rm(backupTelemetry, { recursive: true, force: true })
 }
 
 async function isOwnedTelemetryRuntime(runtimeRoot: string): Promise<boolean> {
