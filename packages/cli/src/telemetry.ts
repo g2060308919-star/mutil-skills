@@ -50,15 +50,17 @@ export function verificationSinkFromEnvironment(
 
 export interface StableTelemetryRuntimeOptions {
   homeDir?: string
+  sourceCliDirectory?: string
+  sourceTelemetryRoot?: string
 }
 
 export async function installStableTelemetryRuntime(options: StableTelemetryRuntimeOptions = {}): Promise<string> {
   const homeDir = options.homeDir ?? process.env.HOME ?? process.cwd()
   const currentCliDirectory = dirname(fileURLToPath(import.meta.url))
-  const sourceCliDirectory = existsSync(join(currentCliDirectory, 'bin', 'telemetry-hook.js'))
+  const sourceCliDirectory = options.sourceCliDirectory ?? (existsSync(join(currentCliDirectory, 'bin', 'telemetry-hook.js'))
     ? currentCliDirectory
-    : resolve(currentCliDirectory, '../dist/src')
-  const sourceTelemetryRoot = resolveTelemetryPackageRoot(currentCliDirectory)
+    : resolve(currentCliDirectory, '../dist/src'))
+  const sourceTelemetryRoot = options.sourceTelemetryRoot ?? resolveTelemetryPackageRoot(currentCliDirectory)
   const runtimeRoot = join(homeDir, '.mutil-skills', 'runtime')
   const destinationCli = join(runtimeRoot, 'cli')
   const destinationBin = join(destinationCli, 'bin')

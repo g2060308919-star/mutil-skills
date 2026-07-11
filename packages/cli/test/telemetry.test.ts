@@ -58,7 +58,16 @@ describe('telemetryHookCommand', () => {
 
   test('copies the hook runner and telemetry runtime to a stable user directory', async () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'telemetry-runtime-home-'))
-    const executable = await installStableTelemetryRuntime({ homeDir })
+    const sourceRoot = await mkdtemp(join(tmpdir(), 'telemetry-runtime-source-'))
+    const sourceCliDirectory = join(sourceRoot, 'cli')
+    const sourceTelemetryRoot = join(sourceRoot, 'telemetry')
+    await mkdir(join(sourceCliDirectory, 'bin'), { recursive: true })
+    await mkdir(join(sourceTelemetryRoot, 'dist', 'src'), { recursive: true })
+    await writeFile(join(sourceCliDirectory, 'telemetry.js'), 'export {};\n')
+    await writeFile(join(sourceCliDirectory, 'bin', 'telemetry-hook.js'), '#!/usr/bin/env node\n')
+    await writeFile(join(sourceTelemetryRoot, 'dist', 'src', 'index.js'), 'export {};\n')
+    await writeFile(join(sourceTelemetryRoot, 'package.json'), JSON.stringify({ name: '@mutil-skills/telemetry' }))
+    const executable = await installStableTelemetryRuntime({ homeDir, sourceCliDirectory, sourceTelemetryRoot })
 
     expect(executable).toMatch(/\.mutil-skills\/runtime\/cli\/bin\/telemetry-hook\.js$/)
     await expect(import('node:fs/promises').then(({ access }) => access(executable))).resolves.toBeUndefined()
