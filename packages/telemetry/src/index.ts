@@ -581,8 +581,8 @@ function detectSkillTargets(toolName: string | null, input: Record<string, unkno
     const path = stringValue(input.file_path) ?? stringValue(input.path)
     return path ? skillTargetFromPath(path, cwd) : []
   }
-  if (toolName === 'Bash') {
-    const command = stringValue(input.command)
+  if (toolName && ['Bash', 'shell_command', 'exec_command', 'unified_exec'].includes(toolName)) {
+    const command = stringValue(input.command) ?? stringValue(input.cmd)
     return command ? skillTargetsFromShell(command, cwd) : []
   }
   return []
@@ -720,6 +720,12 @@ function stringValue(value: unknown): string | null {
 
 export { reduceTelemetry } from './reducer.js'
 export type { TelemetryQuery } from './reducer.js'
+export {
+  TELEMETRY_VERIFICATION_ROOT,
+  TemporaryJsonlTelemetrySink,
+  createTemporaryTelemetryVerification,
+} from './verification.js'
+export type { TemporaryTelemetryVerification } from './verification.js'
 
 export interface ProjectTelemetryOptions {
   cwd: string
@@ -828,8 +834,8 @@ const claudeEvents = [
 ] as const
 
 const codexEvents = [
-  ['PreToolUse', 'pre-tool-use', 'mcp__.*|Bash'],
-  ['PostToolUse', 'post-tool-use', 'mcp__.*|Bash'],
+  ['PreToolUse', 'pre-tool-use', 'mcp__.*|Bash|shell_command|exec_command|unified_exec'],
+  ['PostToolUse', 'post-tool-use', 'mcp__.*|Bash|shell_command|exec_command|unified_exec'],
   ['Stop', 'stop', ''],
 ] as const
 

@@ -20,6 +20,6 @@ npm run typecheck
 npm run lint:architecture
 ```
 
-Telemetry hook 使用 `install-hooks --runtime all` 显式安装，使用 `uninstall-hooks --runtime all` 卸载。第一期默认不保存或上传事件，详细口径见 [统计说明](./docs/telemetry-hook-statistics-guide.md)。
+Telemetry hook 使用 `install-hooks --runtime all` 显式安装，使用 `uninstall-hooks --runtime all` 卸载；安装后 runtime 位于用户目录，不依赖当前 checkout。第一期默认不保存或上传事件，详细口径见 [统计说明](./docs/telemetry-hook-statistics-guide.md)。
 
 本实现统一使用的包 scope 是 `@mutil-skills/*`。

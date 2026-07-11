@@ -1,10 +1,41 @@
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, test, vi } from 'vitest'
-import { reconcileTranscript, runTelemetryHook, type TelemetryLifecycleEvent, type TelemetrySink } from '../src/index.js'
+import { createTemporaryTelemetryVerification, reconcileTranscript, runTelemetryHook, type TelemetryLifecycleEvent, type TelemetrySink } from '../src/index.js'
 
 describe('runTelemetryHook', () => {
+  test('explicit verification captures events in a private temporary file and cleans them up', async () => {
+    const verification = await createTemporaryTelemetryVerification()
+    const event = {
+      schemaVersion: 1,
+      runtime: 'codex',
+      type: 'mcp',
+      target: 'smoke/ping',
+      callId: 'verify-call',
+      sessionId: 'verify-session',
+      turnId: 'verify-turn',
+      nativeTurnId: 'verify-turn',
+      phase: 'completed',
+      status: 'success',
+      failureKind: null,
+      errorCode: null,
+      nativeErrorCode: null,
+      errorMessage: null,
+      timestamp: '2026-07-11T10:00:00.000Z',
+      projectHash: 'project-hash',
+      source: 'post_tool_use',
+      log: { prompt: null, input: {}, output: { ok: true }, error: null },
+    } satisfies TelemetryLifecycleEvent
+
+    await verification.sink.send(event)
+
+    expect(await verification.readEvents()).toEqual([event])
+    expect((await stat(verification.outputPath)).mode & 0o777).toBe(0o600)
+    await verification.cleanup()
+    await expect(readFile(verification.outputPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   test('exits before transcript access or sink calls for an excluded project', async () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'telemetry-runner-'))
     const cwd = await mkdtemp(join(tmpdir(), 'excluded-project-'))

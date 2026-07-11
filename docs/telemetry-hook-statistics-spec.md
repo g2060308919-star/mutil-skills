@@ -288,7 +288,7 @@ projectHash = HMAC-SHA256(localSecret, canonicalWorkingDirectory)
 - 工具输出
 - 错误对象或错误文本
 
-第一期这些字段仅存在于当前进程内存中的事件对象；默认 sink 不得写磁盘、打印到 stdout/stderr 或访问网络。
+第一期这些字段仅存在于当前进程内存中的事件对象；默认 sink 不得写磁盘、打印到 stdout/stderr 或访问网络。只有显式设置 `MUTIL_TELEMETRY_VERIFICATION_OUTPUT` 的一次性验收模式可以将事件写入系统临时目录；验收完成必须清理该目录，不属于生产采集或持久化。
 
 ### FR-021：统计 reducer
 
@@ -495,13 +495,13 @@ export interface TelemetrySummary {
 | 用户拒绝或取消 | `PermissionDenied`、失败事件或 transcript | transcript 在 `Stop` 时收口 |
 | Skill 原生加载 | `Skill` 工具事件 | 无原生 hook |
 | Skill 直接命令 | `UserPromptExpansion` + transcript | 无结构化 hook；只统计实际文件读取 |
-| Skill 文件读取 | `Read`/`Bash` 工具事件 | 支持范围内的 `Bash` hook |
+| Skill 文件读取 | `Read`/`Bash` 工具事件 | `Bash`、`shell_command`、`exec_command`、`unified_exec` hook |
 | 分段读取 | 每个工具调用分别计数 | 每个工具调用分别计数 |
 | 回合 ID | 从用户消息和 transcript 推导 | 原生 `turn_id` |
 | 日志兜底 | `Stop`/`SessionEnd` | `Stop` |
 | 无结果收口 | 失败 | 失败 |
 
-已知限制：Codex 对新式 `unified_exec` 的 hook 拦截不完整，且 transcript 不是稳定接口；宿主直接注入 Skill 内容而不产生可观察事件时无法统计。
+已知限制：Codex 对新式 `unified_exec` 的 hook 拦截不完整，且 transcript 不是稳定接口；`codex exec --ephemeral` 在部分版本/运行面可能不执行用户级 `PreToolUse`/`PostToolUse` command hook；宿主直接注入 Skill 内容而不产生可观察事件时无法统计。
 
 ## 8. 项目结构
 

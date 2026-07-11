@@ -1,4 +1,17 @@
-import { installHooks, isProjectTelemetryEnabled, runTelemetryHook, uninstallHooks, type HookEventName, type InstallRuntime, type Runtime } from '@mutil-skills/telemetry'
+import {
+  TemporaryJsonlTelemetrySink,
+  installHooks,
+  isProjectTelemetryEnabled,
+  runTelemetryHook,
+  uninstallHooks,
+  type HookEventName,
+  type InstallRuntime,
+  type Runtime,
+  type TelemetrySink,
+} from '@mutil-skills/telemetry'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const eventNames: Record<string, HookEventName> = {
@@ -12,7 +25,12 @@ const eventNames: Record<string, HookEventName> = {
   'session-end': 'SessionEnd',
 }
 
-export async function telemetryHookCommand(args: readonly string[], input: string, options: { homeDir?: string } = {}): Promise<void> {
+export interface TelemetryHookCommandOptions {
+  homeDir?: string
+  sink?: TelemetrySink
+}
+
+export async function telemetryHookCommand(args: readonly string[], input: string, options: TelemetryHookCommandOptions = {}): Promise<void> {
   const runtime = parseRuntime(flag(args, '--runtime'))
   const eventFlag = flag(args, '--event')
   const eventName = eventNames[eventFlag]
@@ -20,7 +38,98 @@ export async function telemetryHookCommand(args: readonly string[], input: strin
   const cwd = extractTopLevelString(input, 'cwd') ?? process.cwd()
   if (!await isProjectTelemetryEnabled({ cwd, homeDir: options.homeDir })) return
   const payload: unknown = JSON.parse(input)
-  await runTelemetryHook({ runtime, eventName, payload, homeDir: options.homeDir })
+  await runTelemetryHook({ runtime, eventName, payload, homeDir: options.homeDir, sink: options.sink })
+}
+
+export function verificationSinkFromEnvironment(
+  environment: Record<string, string | undefined>,
+): TelemetrySink | undefined {
+  const outputPath = environment.MUTIL_TELEMETRY_VERIFICATION_OUTPUT
+  return outputPath ? new TemporaryJsonlTelemetrySink(outputPath) : undefined
+}
+
+export interface StableTelemetryRuntimeOptions {
+  homeDir?: string
+}
+
+export async function installStableTelemetryRuntime(options: StableTelemetryRuntimeOptions = {}): Promise<string> {
+  const homeDir = options.homeDir ?? process.env.HOME ?? process.cwd()
+  const currentCliDirectory = dirname(fileURLToPath(import.meta.url))
+  const sourceCliDirectory = existsSync(join(currentCliDirectory, 'bin', 'telemetry-hook.js'))
+    ? currentCliDirectory
+    : resolve(currentCliDirectory, '../dist/src')
+  const sourceTelemetryRoot = resolveTelemetryPackageRoot(currentCliDirectory)
+  const runtimeRoot = join(homeDir, '.mutil-skills', 'runtime')
+  const destinationCli = join(runtimeRoot, 'cli')
+  const destinationBin = join(destinationCli, 'bin')
+  const destinationTelemetry = join(runtimeRoot, 'node_modules', '@mutil-skills', 'telemetry')
+  const markerPath = join(runtimeRoot, '.mutil-skills-telemetry-runtime')
+
+  if (existsSync(runtimeRoot) && !await isOwnedTelemetryRuntime(runtimeRoot)) {
+    throw new Error(`Refusing to replace an unowned runtime directory: ${runtimeRoot}`)
+  }
+
+  await mkdir(runtimeRoot, { recursive: true, mode: 0o700 })
+  const stagingRoot = await mkdtemp(join(runtimeRoot, '.staging-'))
+  const stagingCli = join(stagingRoot, 'cli')
+  const stagingBin = join(stagingCli, 'bin')
+  const stagingTelemetry = join(stagingRoot, 'node_modules', '@mutil-skills', 'telemetry')
+  try {
+    await mkdir(stagingBin, { recursive: true, mode: 0o700 })
+    await mkdir(join(stagingTelemetry, 'dist', 'src'), { recursive: true, mode: 0o700 })
+    await copyFile(join(sourceCliDirectory, 'telemetry.js'), join(stagingCli, 'telemetry.js'))
+    await copyFile(join(sourceCliDirectory, 'bin', 'telemetry-hook.js'), join(stagingBin, 'telemetry-hook.js'))
+    await chmod(join(stagingBin, 'telemetry-hook.js'), 0o700)
+
+    for (const file of await readdir(join(sourceTelemetryRoot, 'dist', 'src'))) {
+      if (file.endsWith('.js')) {
+        await copyFile(
+          join(sourceTelemetryRoot, 'dist', 'src', file),
+          join(stagingTelemetry, 'dist', 'src', file),
+        )
+      }
+    }
+    await copyFile(join(sourceTelemetryRoot, 'package.json'), join(stagingTelemetry, 'package.json'))
+    await rm(destinationCli, { recursive: true, force: true })
+    await rm(destinationTelemetry, { recursive: true, force: true })
+    await rename(stagingCli, destinationCli)
+    await mkdir(dirname(destinationTelemetry), { recursive: true, mode: 0o700 })
+    await rename(stagingTelemetry, destinationTelemetry)
+    await writeFile(markerPath, 'mutil-skills telemetry runtime\n', { mode: 0o600 })
+    await chmod(runtimeRoot, 0o700)
+  } finally {
+    await rm(stagingRoot, { recursive: true, force: true })
+  }
+  return join(destinationBin, 'telemetry-hook.js')
+}
+
+async function isOwnedTelemetryRuntime(runtimeRoot: string): Promise<boolean> {
+  if (existsSync(join(runtimeRoot, '.mutil-skills-telemetry-runtime'))) return true
+  try {
+    const packageJson = JSON.parse(await readFile(join(runtimeRoot, 'node_modules', '@mutil-skills', 'telemetry', 'package.json'), 'utf8')) as { name?: string }
+    return packageJson.name === '@mutil-skills/telemetry' && existsSync(join(runtimeRoot, 'cli', 'bin', 'telemetry-hook.js'))
+  } catch {
+    return false
+  }
+}
+
+export async function removeStableTelemetryRuntime(homeDir = process.env.HOME ?? process.cwd()): Promise<void> {
+  const runtimeRoot = join(homeDir, '.mutil-skills', 'runtime')
+  if (!await isOwnedTelemetryRuntime(runtimeRoot)) return
+  await rm(join(runtimeRoot, 'cli'), { recursive: true, force: true })
+  await rm(join(runtimeRoot, 'node_modules', '@mutil-skills', 'telemetry'), { recursive: true, force: true })
+  await rm(join(runtimeRoot, '.mutil-skills-telemetry-runtime'), { force: true })
+}
+
+function resolveTelemetryPackageRoot(currentCliDirectory: string): string {
+  const candidates = [
+    resolve(currentCliDirectory, '../../../telemetry'),
+    resolve(currentCliDirectory, '../../../../node_modules/@mutil-skills/telemetry'),
+    resolve(process.cwd(), 'packages/telemetry'),
+  ]
+  const root = candidates.find((candidate) => existsSync(join(candidate, 'package.json')))
+  if (!root) throw new Error('Cannot locate the installed @mutil-skills/telemetry package')
+  return root
 }
 
 function extractTopLevelString(input: string, key: string): string | null {
@@ -77,7 +186,10 @@ function readJsonString(input: string, start: number): { value: string, end: num
 
 export async function installHooksCommand(args: readonly string[]): Promise<string> {
   const runtime = parseInstallRuntime(flag(args, '--runtime', 'all'))
-  await installHooks({ runtime, command: resolveTelemetryHookExecutable() })
+  const previousExecutable = resolveTelemetryHookExecutable()
+  const stableExecutable = await installStableTelemetryRuntime()
+  await installHooks({ runtime, command: stableExecutable })
+  await uninstallHooks({ runtime, command: previousExecutable })
   return runtime === 'codex' || runtime === 'all'
     ? 'Hooks installed. Codex may ask you to trust the user-level command hooks at runtime.'
     : 'Hooks installed.'
@@ -85,7 +197,12 @@ export async function installHooksCommand(args: readonly string[]): Promise<stri
 
 export async function uninstallHooksCommand(args: readonly string[]): Promise<string> {
   const runtime = parseInstallRuntime(flag(args, '--runtime', 'all'))
+  const stableExecutable = join(process.env.HOME ?? process.cwd(), '.mutil-skills', 'runtime', 'cli', 'bin', 'telemetry-hook.js')
+  await uninstallHooks({ runtime, command: stableExecutable })
   await uninstallHooks({ runtime, command: resolveTelemetryHookExecutable() })
+  if (runtime === 'all') {
+    await removeStableTelemetryRuntime()
+  }
   return 'Hooks uninstalled.'
 }
 

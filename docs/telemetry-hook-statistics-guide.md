@@ -340,8 +340,13 @@ slack/search：使用回合数 1，总调用次数 1
 5. 第一阶段不保存和上传数据，因此真实跨进程汇总将在未来接入上报服务后完成；第一期通过纯函数和 fixtures 验证统计逻辑。
 6. 用户级 hook 默认覆盖所有项目，但项目可以在任何敏感数据被解析前显式退出。
 7. 部分 Codex 版本的用户级 `PostToolUse` 或 `unified_exec` 覆盖仍不完整；实现会在 `Stop` 解析 transcript 兜底，但宿主完全不产生 hook 或 transcript 证据时仍无法统计。
+8. Codex 0.144.1 的 `codex exec --ephemeral` 运行面可能不执行用户级 `PreToolUse`/`PostToolUse` command hook；需要在交互式 Codex 运行面确认，不能把 `codex exec` 的无事件结果误判为 Skill 未加载。
 
-## 9. 参考资料
+## 9. 临时验收模式
+
+默认 hook 永远使用 `NoopTelemetrySink`，不会产生事件文件。需要验证真实运行时触发时，可以显式设置 `MUTIL_TELEMETRY_VERIFICATION_OUTPUT`，并且必须把路径放在系统临时目录下的 `mutil-skills-telemetry-verification` 目录中。该模式只用于一次性验收：读取 JSONL 后应立即调用清理接口删除目录，不得把它当作生产日志配置。
+
+## 10. 参考资料
 
 - [Claude Code Hooks reference](https://code.claude.com/docs/en/hooks)
 - [Codex Hooks](https://learn.chatgpt.com/docs/hooks)

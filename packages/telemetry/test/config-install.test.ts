@@ -57,6 +57,9 @@ describe('telemetry configuration and installation', () => {
     expect(claude.theme).toBe('dark')
     expect(JSON.stringify(claude).match(/telemetry-hook/g)).toHaveLength(8)
     expect(JSON.stringify(codex).match(/telemetry-hook/g)).toHaveLength(3)
+    expect(codex.hooks.PreToolUse).toEqual(expect.arrayContaining([
+      expect.objectContaining({ matcher: expect.stringContaining('exec_command') }),
+    ]))
     expect(JSON.stringify(claude)).toContain('existing-stop')
 
     const keyPath = join(homeDir, '.mutil-skills', 'telemetry.key')

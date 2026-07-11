@@ -4,6 +4,8 @@ MCP 与 Skill 调用统计包含运行时适配、transcript reconciliation、�
 
 `telemetry` 拥有统一生命周期事件、Claude Code/Codex 适配、统计规则、no-op sink、HMAC 项目标识和 hook 配置变更逻辑。`cli` 只提供 `telemetry-hook`、`install-hooks` 和 `uninstall-hooks` 命令并调用 Telemetry Package。第一期不得在 Telemetry Package 中加入网络上报或事件持久化。
 
+安装命令会把可执行 hook runtime 复制到 `~/.mutil-skills/runtime`，配置不依赖仓库 checkout 或 workspace `dist`。只有显式的一次性验收环境变量才允许把事件写入受限临时目录；默认运行路径仍然不落盘。
+
 ## 备选方案
 
 - 将 telemetry 领域逻辑放入 `core`

@@ -252,4 +252,24 @@ describe('normalizeHookEvent', () => {
       expect.objectContaining({ status: 'success', target: 'tdd' }),
     ])
   })
+
+  test('recognizes Codex exec_command Skill reads', () => {
+    const events = normalizeHookEvent('codex', 'PreToolUse', {
+      sessionId: 'codex-session',
+      turnId: 'codex-turn',
+      cwd: '/repo',
+      toolName: 'exec_command',
+      toolInput: { cmd: 'cat .agents/skills/tdd/SKILL.md' },
+      callId: 'codex-exec-call',
+    }, options)
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        runtime: 'codex',
+        type: 'skill',
+        target: 'tdd',
+        callId: 'codex-exec-call:skill:0',
+      }),
+    ])
+  })
 })
