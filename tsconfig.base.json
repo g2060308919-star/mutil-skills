@@ -13,7 +13,8 @@
       "@mutil-skills/schema": ["packages/schema/src/index.ts"],
       "@mutil-skills/template": ["packages/template/src/index.ts"],
       "@mutil-skills/foundation/testing": ["packages/foundation/src/testing/index.ts"],
-      "@mutil-skills/skills": ["packages/skills/src/index.ts"]
+      "@mutil-skills/skills": ["packages/skills/src/index.ts"],
+      "@mutil-skills/telemetry": ["packages/telemetry/src/index.ts"]
     },
     "declaration": true,
     "declarationMap": true,

@@ -45,7 +45,7 @@ async function assertFoundationHasNoBin() {
 
 async function assertWorkspacePackages() {
   const packages = new Set(await readdir(join(root, 'packages')))
-  for (const name of ['schema', 'template', 'skills', 'cli', 'core', 'foundation']) {
+  for (const name of ['schema', 'template', 'skills', 'telemetry', 'cli', 'core', 'foundation']) {
     if (!packages.has(name)) failures.push(`missing workspace package: ${name}`)
   }
 }

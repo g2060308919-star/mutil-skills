@@ -6,13 +6,5 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
   },
-  "references": [
-    { "path": "../core" },
-    { "path": "../schema" },
-    { "path": "../template" },
-    { "path": "../skills" },
-    { "path": "../telemetry" },
-    { "path": "../foundation" }
-  ],
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

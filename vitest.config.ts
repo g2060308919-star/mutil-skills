@@ -11,6 +11,7 @@ export default defineConfig({
       '@mutil-skills/template': `${root}packages/template/src/index.ts`,
       '@mutil-skills/foundation/testing': `${root}packages/foundation/src/testing/index.ts`,
       '@mutil-skills/skills': `${root}packages/skills/src/index.ts`,
+      '@mutil-skills/telemetry': `${root}packages/telemetry/src/index.ts`,
     },
   },
   test: {

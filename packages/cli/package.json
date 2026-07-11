@@ -7,7 +7,10 @@
   ],
   "bin": {
     "repo-test": "./dist/src/bin/repo-test.js",
-    "repo-tdd": "./dist/src/bin/repo-tdd.js"
+    "repo-tdd": "./dist/src/bin/repo-tdd.js",
+    "telemetry-hook": "./dist/src/bin/telemetry-hook.js",
+    "install-hooks": "./dist/src/bin/install-hooks.js",
+    "uninstall-hooks": "./dist/src/bin/uninstall-hooks.js"
   },
   "exports": {
     ".": {
@@ -20,6 +23,7 @@
     "@mutil-skills/foundation": "0.0.0",
     "@mutil-skills/schema": "0.0.0",
     "@mutil-skills/skills": "0.0.0",
+    "@mutil-skills/telemetry": "0.0.0",
     "@mutil-skills/template": "0.0.0"
   }
 }

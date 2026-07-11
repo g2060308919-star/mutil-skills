@@ -1,0 +1,5 @@
+{"type":"user","sessionId":"claude-fixture","cwd":"/repo","message":{"content":"use tdd"}}
+{"type":"assistant","sessionId":"claude-fixture","cwd":"/repo","message":{"content":[{"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"/skills/tdd/SKILL.md"}}]}}
+{"type":"user","sessionId":"claude-fixture","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"read-1","is_error":true,"content":"ENOENT: no such file"}]}}
+{"type":"assistant","sessionId":"claude-fixture","cwd":"/repo","message":{"content":[{"type":"tool_use","id":"read-2","name":"Read","input":{"file_path":"/skills/tdd/SKILL.md"}}]}}
+{"type":"user","sessionId":"claude-fixture","cwd":"/repo","message":{"content":[{"type":"tool_result","tool_use_id":"read-2","content":"# TDD"}]}}
