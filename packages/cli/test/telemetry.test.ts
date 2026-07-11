@@ -2,9 +2,13 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, test } from 'vitest'
-import { telemetryHookCommand } from '../src/telemetry.js'
+import { resolveTelemetryHookExecutable, telemetryHookCommand } from '../src/telemetry.js'
 
 describe('telemetryHookCommand', () => {
+  test('resolves the hook executable next to the installed CLI entrypoint', () => {
+    expect(resolveTelemetryHookExecutable()).toMatch(/packages\/cli\/src\/bin\/telemetry-hook\.js$/)
+  })
+
   test('checks project exclusion before parsing sensitive nested payload fields', async () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'telemetry-cli-home-'))
     const cwd = await mkdtemp(join(tmpdir(), 'telemetry-cli-project-'))

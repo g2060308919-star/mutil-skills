@@ -1,4 +1,5 @@
 import { installHooks, isProjectTelemetryEnabled, runTelemetryHook, uninstallHooks, type HookEventName, type InstallRuntime, type Runtime } from '@mutil-skills/telemetry'
+import { fileURLToPath } from 'node:url'
 
 const eventNames: Record<string, HookEventName> = {
   'pre-tool-use': 'PreToolUse',
@@ -76,7 +77,7 @@ function readJsonString(input: string, start: number): { value: string, end: num
 
 export async function installHooksCommand(args: readonly string[]): Promise<string> {
   const runtime = parseInstallRuntime(flag(args, '--runtime', 'all'))
-  await installHooks({ runtime, command: 'telemetry-hook' })
+  await installHooks({ runtime, command: resolveTelemetryHookExecutable() })
   return runtime === 'codex' || runtime === 'all'
     ? 'Hooks installed. Codex may ask you to trust the user-level command hooks at runtime.'
     : 'Hooks installed.'
@@ -84,8 +85,12 @@ export async function installHooksCommand(args: readonly string[]): Promise<stri
 
 export async function uninstallHooksCommand(args: readonly string[]): Promise<string> {
   const runtime = parseInstallRuntime(flag(args, '--runtime', 'all'))
-  await uninstallHooks({ runtime, command: 'telemetry-hook' })
+  await uninstallHooks({ runtime, command: resolveTelemetryHookExecutable() })
   return 'Hooks uninstalled.'
+}
+
+export function resolveTelemetryHookExecutable(): string {
+  return fileURLToPath(new URL('./bin/telemetry-hook.js', import.meta.url))
 }
 
 function flag(args: readonly string[], name: string, fallback?: string): string {
