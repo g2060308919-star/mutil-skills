@@ -9,8 +9,8 @@
 - `packages/template`: 可复用的 foundation/testing 模板和声明式模板注册表。
 - `packages/foundation`: 可安装的 `@mutil-skills/foundation` 包，只暴露 `@mutil-skills/foundation/testing`。
 - `packages/skills`: 声明式 skill 集合，包含可独立安装的 TDD skill 文件。
-- `packages/telemetry`: Claude Code/Codex 的 MCP 与 Skill 调用归一化、统计 reducer、transcript 兜底和 hook 安装逻辑。
-- `packages/cli`: `repo-test`、`repo-tdd`、telemetry hook 编排、manifest 校验、测试基建检测和确认式 bootstrap 流程。
+- `packages/hooks`: Claude Code/Codex 的 MCP 与 Skill Hook 适配、统计 reducer、transcript 兜底、安装和稳定运行时。
+- `packages/cli`: `repo-test`、`repo-tdd` 和兼容 CLI 包装器；Hook 业务逻辑由 `packages/hooks` 负责。
 
 ## 命令
 

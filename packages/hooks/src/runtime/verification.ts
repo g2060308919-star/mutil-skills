@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, lstat, open, readFile, rm } from 'node:fs/promis
 import { constants } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
-import type { TelemetryLifecycleEvent, TelemetrySink } from './index.js'
+import type { TelemetryLifecycleEvent, TelemetrySink } from '@mutil-skills/hooks'
 
 export const TELEMETRY_VERIFICATION_ROOT = join(tmpdir(), 'mutil-skills-telemetry-verification')
 

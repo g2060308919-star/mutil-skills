@@ -40,7 +40,7 @@
 - 用户身份识别、组织、角色和权限控制。
 - 云端部署与多租户平台。
 - 对 Skill 整体业务目标是否完成的判断。
-- 对没有文件读取、没有原生 Skill 工具事件、由宿主直接注入内容的 Codex Skill 加载进行猜测。
+- 对没有文件读取、没有原生 Skill 工具事件、且 transcript 也没有结构化注入记录的 Codex Skill 加载进行猜测。
 - 修改 Claude Code 或 Codex 内部实现。
 
 ## 4. 术语
@@ -114,6 +114,7 @@
 - Claude Code 的直接 Skill slash command 产生 `UserPromptExpansion` started 事件，并由 transcript 确认 Skill 内容已经展开给模型。
 - Shell 命令中的内容读取操作，例如 `cat`、`sed`、`head`、`tail`、`awk`、`bat`。
 - Transcript 中结构化记录的等价内容读取操作。
+- Codex transcript 中结构化记录的 Skill 注入包络：`response_item.message.role=user` 且 `input_text` 包含 `<skill>`、`<name>` 和指向 `SKILL.md` 的 `<path>`。
 
 不得仅因字符串中出现 `SKILL.md` 就计数。
 
@@ -145,6 +146,8 @@ Skill ID 默认取规范化 `SKILL.md` 路径的直接父目录名。适配器�
 ### FR-008：Skill 成功
 
 读取操作完成，且工具结果明确表明目标 `SKILL.md` 内容已经返回时，最终状态必须为 `success`。
+
+Codex transcript 中存在合法 Skill 注入包络且包络包含 Skill 内容时，必须直接产生一条 `success` 记录；该记录不要求额外的 `PreToolUse` 或 `PostToolUse` 事件。
 
 完整读取和分段读取都属于成功加载。每个独立工具操作分别计数。
 
@@ -494,51 +497,31 @@ export interface TelemetrySummary {
 | MCP 失败 | `PostToolUseFailure` | `PostToolUse.tool_response` 或 transcript |
 | 用户拒绝或取消 | `PermissionDenied`、失败事件或 transcript | transcript 在 `Stop` 时收口 |
 | Skill 原生加载 | `Skill` 工具事件 | 无原生 hook |
-| Skill 直接命令 | `UserPromptExpansion` + transcript | 无结构化 hook；只统计实际文件读取 |
+| Skill 直接命令 | `UserPromptExpansion` + transcript | transcript 中的结构化 Skill 注入包络，或实际文件读取 |
 | Skill 文件读取 | `Read`/`Bash` 工具事件 | `Bash`、`shell_command`、`exec_command`、`unified_exec` hook |
 | 分段读取 | 每个工具调用分别计数 | 每个工具调用分别计数 |
 | 回合 ID | 从用户消息和 transcript 推导 | 原生 `turn_id` |
 | 日志兜底 | `Stop`/`SessionEnd` | `Stop` |
 | 无结果收口 | 失败 | 失败 |
 
-已知限制：Codex 对新式 `unified_exec` 的 hook 拦截不完整，且 transcript 不是稳定接口；`codex exec --ephemeral` 在部分版本/运行面可能不执行用户级 `PreToolUse`/`PostToolUse` command hook；宿主直接注入 Skill 内容而不产生可观察事件时无法统计。
+已知限制：Codex 对新式 `unified_exec` 的 hook 拦截不完整，且 transcript 不是稳定接口；`codex exec --ephemeral` 在部分版本/运行面可能不执行用户级 `PreToolUse`/`PostToolUse` command hook；宿主既不记录结构化 Skill 注入包络，也不记录其他可观察加载事件时无法统计。
 
 ## 8. 项目结构
 
-建议新增独立 workspace 包，避免将 MCP/Skill 业务语义放入业务中立的 `@mutil-skills/core`：
+Hook 实现位于独立的 `@mutil-skills/hooks` workspace 包，避免将 MCP/Skill 业务语义放入业务中立的 `@mutil-skills/core`：
 
 ```text
-packages/telemetry/
+packages/hooks/
 ├── package.json
 ├── tsconfig.json
 ├── src/
-│   ├── index.ts
-│   ├── domain/
-│   │   ├── events.ts
-│   │   ├── errors.ts
-│   │   ├── reducer.ts
-│   │   └── summary.ts
-│   ├── adapters/
-│   │   ├── claude-code.ts
-│   │   └── codex.ts
-│   ├── detectors/
-│   │   ├── mcp.ts
-│   │   ├── skill-read.ts
-│   │   └── shell-read.ts
-│   ├── transcripts/
-│   │   ├── claude-code.ts
-│   │   └── codex.ts
-│   ├── project-id/
-│   │   └── hmac.ts
-│   ├── config/
-│   │   ├── project-opt-out.ts
-│   │   └── ignored-projects.ts
-│   ├── sinks/
-│   │   ├── sink.ts
-│   │   └── noop.ts
-│   └── install/
-│       ├── claude-code.ts
-│       └── codex.ts
+│   ├── index.ts                         # 公共 API
+│   ├── mcp-skill-telemetry/
+│   │   ├── shared/                      # 事件模型、reducer、统计与 sink
+│   │   ├── codex/                       # Codex hook 定义与 transcript 适配
+│   │   └── claude-code/                 # Claude Code hook 定义与 transcript 适配
+│   ├── runtime/                         # stdin、安装、卸载、稳定运行时
+│   └── bin/                             # telemetry-hook/install/uninstall 入口
 └── test/
     ├── fixtures/
     └── *.test.ts
@@ -552,10 +535,10 @@ packages/cli/src/bin/
 依赖方向：
 
 ```text
-cli -> telemetry
-telemetry -> core（仅允许复用业务中立技术原语）
-core -X-> telemetry
-skills -X-> telemetry runtime
+cli -> hooks（仅通过兼容包装器调用）
+hooks -X-> cli
+core -X-> hooks
+skills -X-> hooks runtime
 ```
 
 ## 9. 技术栈与依赖原则
@@ -727,6 +710,11 @@ Then 该调用状态为 `failure`，`failureKind = no_result`，`errorCode = MCP
 Given 内容读取操作成功返回一个 `SKILL.md` 的内容
 Then 产生一条 Skill 成功记录。
 
+### AC-005a：Codex 直接注入 Skill 成功
+
+Given Codex transcript 记录一个包含合法 `<name>`、`<path>.../SKILL.md</path>` 和 Skill 正文的结构化 Skill 注入包络
+Then 不依赖 PreToolUse/PostToolUse，直接产生一条 Skill 成功记录。
+
 ### AC-006：Skill 失败后成功
 
 Given 同一回合第一次 Skill 读取返回 EACCES、第二次成功
@@ -832,7 +820,7 @@ Then 两个原生回合归入同一个逻辑 `turnId`，`usedTurnCount = 1`。
 | Hook 多进程且第一期无状态 | 无法本机实时归并 | 生命周期事件 + 稳定 callId；reducer 纯函数；未来接收端幂等归并 |
 | 运行时 continuation 产生新原生回合 | 使用回合数虚高 | 保存原生回合 ID，并按真实用户输入边界归并逻辑回合 |
 | 敏感日志进入诊断输出 | 数据泄露 | Noop sink、禁止 stdout/stderr 打印 payload、测试脱敏 fixture |
-| 宿主直接注入 Skill 内容 | 无可观察读取事件 | 不猜测；文档声明不支持；未来可选 App Server 集成 |
+| 宿主直接注入 Skill 内容 | transcript 没有注入包络且没有其他可观察读取事件 | 不猜测；文档声明该次不可观测 |
 
 ## 17. 可追溯性矩阵
 

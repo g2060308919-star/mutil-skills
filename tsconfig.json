@@ -5,8 +5,8 @@
     { "path": "./packages/schema" },
     { "path": "./packages/template" },
     { "path": "./packages/foundation" },
+    { "path": "./packages/hooks" },
     { "path": "./packages/skills" },
-    { "path": "./packages/telemetry" },
     { "path": "./packages/cli" }
   ]
 }

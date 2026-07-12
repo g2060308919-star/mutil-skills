@@ -3,6 +3,10 @@ import { realpathSync } from 'node:fs'
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { CLAUDE_CODE_HOOK_DEFINITIONS } from '../claude-code/config.js'
+import { parseClaudeDirectExpansion } from '../claude-code/transcript.js'
+import { CODEX_HOOK_DEFINITIONS } from '../codex/config.js'
+import { parseCodexSkillInjections } from '../codex/transcript.js'
 
 export type Runtime = 'claude-code' | 'codex'
 export type HookEventName =
@@ -286,6 +290,9 @@ export function reconcileTranscript(
       const sessionId = stringValue(payload.session_id) ?? options.sessionId ?? 'unknown-session'
       if (type === 'user_message') {
         beginTurn(sessionId)
+      } else if (record.type === 'response_item' && type === 'message' && payload.role === 'user') {
+        if (turnSequence === 0) beginTurn(sessionId)
+        events.push(...codexInjectedSkillEvents(payload, sessionId, logicalTurnId, recordIndex, options, timestamp))
       } else if (type === 'mcp_tool_call' || type === 'function_call') {
         if (!stringValue(payload.name) || !stringValue(payload.call_id)) {
           errors.push({ line, code: 'MISSING_REQUIRED_FIELD', message: 'Tool call requires name and call_id' })
@@ -322,14 +329,13 @@ export function reconcileTranscript(
     const hasToolResult = content.some((item) => isRecord(item) && item.type === 'tool_result')
     if (record.type === 'user' && !hasToolResult) beginTurn(sessionId)
     const textContent = stringValue(message.content)
-    const directCommand = textContent ? /<command-name>\/?([^<]+)<\/command-name>/.exec(textContent)?.[1] : null
-    const expandedContent = textContent?.replace(/<command-(?:name|message)>[\s\S]*?<\/command-(?:name|message)>/g, '').trim()
-    if (directCommand && expandedContent) {
+    const directExpansion = textContent ? parseClaudeDirectExpansion(textContent) : null
+    if (directExpansion) {
       const directEvents = normalizeHookEvent('claude-code', 'UserPromptExpansion', {
         session_id: sessionId,
         cwd: record.cwd,
         expansion_type: 'slash_command',
-        command_name: directCommand,
+        command_name: directExpansion.command,
         turn_id: logicalTurnId,
         prompt: textContent,
       }, atTimestamp(options, timestamp))
@@ -566,6 +572,58 @@ function directSkillCallId(runtime: Runtime, payload: Record<string, unknown>, t
     .digest('hex')
 }
 
+function codexInjectedSkillEvents(
+  payload: Record<string, unknown>,
+  sessionId: string,
+  turnId: string,
+  recordIndex: number,
+  options: ReconcileTranscriptOptions,
+  timestamp: string | null,
+): TelemetryLifecycleEvent[] {
+  const content = Array.isArray(payload.content) ? payload.content : []
+  const texts = content
+    .filter((item): item is Record<string, unknown> => isRecord(item) && item.type === 'input_text')
+    .map((item) => stringValue(item.text))
+    .filter((text): text is string => text !== null)
+  const injections = texts.flatMap(parseCodexSkillInjections)
+
+  return injections.flatMap((injection, injectionIndex) => {
+    const callId = createHmac('sha256', 'codex')
+      .update(JSON.stringify([sessionId, turnId, recordIndex, injectionIndex, injection.target, injection.path]))
+      .digest('hex')
+    const base = baseEvent('codex', {
+      session_id: sessionId,
+      cwd: options.cwd,
+      prompt: injection.text,
+      tool_input: { skill: injection.target, path: injection.path },
+    }, atTimestamp(options, timestamp), {
+      type: 'skill',
+      target: injection.target,
+      callId,
+    })
+    const started: TelemetryLifecycleEvent = {
+      ...base,
+      turnId,
+      source: 'stop_transcript',
+      log: { ...base.log, output: injection.text },
+    }
+    return [
+      started,
+      {
+        ...started,
+        phase: 'reconciled',
+        status: 'success',
+        failureKind: null,
+        errorCode: null,
+        nativeErrorCode: null,
+        errorMessage: null,
+        source: 'reconciled',
+        log: { ...started.log, output: injection.text },
+      },
+    ]
+  })
+}
+
 function directSkillTargets(payload: Record<string, unknown>): string[] {
   if (payload.expansion_type !== 'slash_command') return []
   const commandName = stringValue(payload.command_name)
@@ -724,8 +782,8 @@ export {
   TELEMETRY_VERIFICATION_ROOT,
   TemporaryJsonlTelemetrySink,
   createTemporaryTelemetryVerification,
-} from './verification.js'
-export type { TemporaryTelemetryVerification } from './verification.js'
+} from '../../runtime/verification.js'
+export type { TemporaryTelemetryVerification } from '../../runtime/verification.js'
 
 export interface ProjectTelemetryOptions {
   cwd: string
@@ -822,36 +880,19 @@ type HookHandler = { type: 'command', command: string }
 type HookGroup = { matcher?: string, hooks: HookHandler[] }
 type HookConfiguration = Record<string, unknown> & { hooks?: Record<string, unknown> }
 
-const claudeEvents = [
-  ['UserPromptSubmit', 'user-prompt-submit', ''],
-  ['PreToolUse', 'pre-tool-use', 'mcp__.*|Skill|Read|Bash'],
-  ['PostToolUse', 'post-tool-use', 'mcp__.*|Skill|Read|Bash'],
-  ['PostToolUseFailure', 'post-tool-use-failure', 'mcp__.*|Skill|Read|Bash'],
-  ['PermissionDenied', 'permission-denied', 'mcp__.*|Skill|Read|Bash'],
-  ['UserPromptExpansion', 'user-prompt-expansion', ''],
-  ['Stop', 'stop', ''],
-  ['SessionEnd', 'session-end', ''],
-] as const
-
-const codexEvents = [
-  ['PreToolUse', 'pre-tool-use', 'mcp__.*|Bash|shell_command|exec_command|unified_exec'],
-  ['PostToolUse', 'post-tool-use', 'mcp__.*|Bash|shell_command|exec_command|unified_exec'],
-  ['Stop', 'stop', ''],
-] as const
-
 export async function installHooks(options: HookInstallationOptions): Promise<void> {
   const homeDir = options.homeDir ?? homedir()
   await ensureTelemetryKey(homeDir)
   if (options.runtime === 'all' || options.runtime === 'claude-code') {
     await updateHookConfiguration(
       join(homeDir, '.claude', 'settings.json'),
-      (config) => addOwnedHooks(config, 'claude-code', options.command, claudeEvents),
+      (config) => addOwnedHooks(config, 'claude-code', options.command, CLAUDE_CODE_HOOK_DEFINITIONS),
     )
   }
   if (options.runtime === 'all' || options.runtime === 'codex') {
     await updateHookConfiguration(
       join(homeDir, '.codex', 'hooks.json'),
-      (config) => addOwnedHooks(config, 'codex', options.command, codexEvents),
+      (config) => addOwnedHooks(config, 'codex', options.command, CODEX_HOOK_DEFINITIONS),
     )
   }
 }

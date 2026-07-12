@@ -51,6 +51,40 @@ describe('reconcileTranscript', () => {
     }))
   })
 
+  test('counts Codex direct Skill injections as successful loads, including retries in one turn', () => {
+    const injectedSkill = (name: string, path: string) => ({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: `<skill>\n<name>${name}</name>\n<path>${path}</path>\n---\n# ${name}\n</skill>` }],
+      },
+    })
+    const transcript = [
+      { type: 'event_msg', payload: { type: 'user_message', message: 'load tdd', turn_id: 'native-1' } },
+      injectedSkill('tdd', '/Users/me/.agents/skills/tdd/SKILL.md'),
+      injectedSkill('tdd', '/Users/me/.agents/skills/tdd/SKILL.md'),
+      { type: 'event_msg', payload: { type: 'user_message', message: 'load review', turn_id: 'native-2' } },
+      injectedSkill('code-review', '/Users/me/.agents/skills/code-review/SKILL.md'),
+    ]
+
+    const result = reconcileTranscript('codex', transcript, options)
+    expect(result.errors).toEqual([])
+    const reduction = reduceTelemetry(result.events)
+
+    expect(reduction.summary).toEqual(expect.objectContaining({
+      totalCalls: 3,
+      successCalls: 3,
+      failureCalls: 0,
+      usedTurnCount: 2,
+    }))
+    expect(reduction.calls.map((call) => [call.target, call.status, call.turnId]).sort((left, right) => left.join('\u0000').localeCompare(right.join('\u0000')))).toEqual([
+      ['tdd', 'success', 'session-fallback:turn:1'],
+      ['tdd', 'success', 'session-fallback:turn:1'],
+      ['code-review', 'success', 'session-fallback:turn:2'],
+    ].sort((left, right) => left.join('\u0000').localeCompare(right.join('\u0000'))))
+  })
+
   test('reconciles Claude Code SKILL.md read retries as separate failed and successful attempts', () => {
     const transcript = [
       { type: 'user', sessionId: 'claude-session', cwd: '/repo', message: { content: 'use tdd' } },

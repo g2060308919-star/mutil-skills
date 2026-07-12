@@ -3,12 +3,12 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, test } from 'vitest'
-import { createTemporaryTelemetryVerification } from '@mutil-skills/telemetry'
+import { createTemporaryTelemetryVerification } from '@mutil-skills/hooks'
 import { installStableTelemetryRuntime, resolveTelemetryHookExecutable, telemetryHookCommand, verificationSinkFromEnvironment } from '../src/telemetry.js'
 
 describe('telemetryHookCommand', () => {
   test('resolves the hook executable next to the installed CLI entrypoint', () => {
-    expect(resolveTelemetryHookExecutable()).toMatch(/packages\/cli\/src\/bin\/telemetry-hook\.js$/)
+    expect(resolveTelemetryHookExecutable()).toMatch(/packages\/hooks\/src\/bin\/telemetry-hook\.js$/)
   })
 
   test('checks project exclusion before parsing sensitive nested payload fields', async () => {
@@ -59,20 +59,23 @@ describe('telemetryHookCommand', () => {
   test('copies the hook runner and telemetry runtime to a stable user directory', async () => {
     const homeDir = await mkdtemp(join(tmpdir(), 'telemetry-runtime-home-'))
     const sourceRoot = await mkdtemp(join(tmpdir(), 'telemetry-runtime-source-'))
-    const sourceCliDirectory = join(sourceRoot, 'cli')
-    const sourceTelemetryRoot = join(sourceRoot, 'telemetry')
+    const sourceHooksRoot = join(sourceRoot, 'hooks')
+    const sourceCliDirectory = join(sourceHooksRoot, 'src')
     await mkdir(join(sourceCliDirectory, 'bin'), { recursive: true })
-    await mkdir(join(sourceTelemetryRoot, 'dist', 'src'), { recursive: true })
-    await writeFile(join(sourceCliDirectory, 'telemetry.js'), 'export {};\n')
+    await mkdir(join(sourceCliDirectory, 'runtime'), { recursive: true })
+    await mkdir(join(sourceHooksRoot, 'dist', 'src', 'mcp-skill-telemetry', 'codex'), { recursive: true })
+    await writeFile(join(sourceCliDirectory, 'runtime', 'cli.js'), 'export {};\n')
     await writeFile(join(sourceCliDirectory, 'bin', 'telemetry-hook.js'), '#!/usr/bin/env node\n')
-    await writeFile(join(sourceTelemetryRoot, 'dist', 'src', 'index.js'), 'export {};\n')
-    await writeFile(join(sourceTelemetryRoot, 'package.json'), JSON.stringify({ name: '@mutil-skills/telemetry' }))
-    const executable = await installStableTelemetryRuntime({ homeDir, sourceCliDirectory, sourceTelemetryRoot })
+    await writeFile(join(sourceHooksRoot, 'dist', 'src', 'index.js'), 'export {};\n')
+    await writeFile(join(sourceHooksRoot, 'dist', 'src', 'mcp-skill-telemetry', 'codex', 'config.js'), 'export {};\n')
+    await writeFile(join(sourceHooksRoot, 'package.json'), JSON.stringify({ name: '@mutil-skills/hooks' }))
+    const executable = await installStableTelemetryRuntime({ homeDir, sourceCliDirectory, sourceHooksRoot })
 
     expect(executable).toMatch(/\.mutil-skills\/runtime\/cli\/bin\/telemetry-hook\.js$/)
     await expect(import('node:fs/promises').then(({ access }) => access(executable))).resolves.toBeUndefined()
-    await expect(import('node:fs/promises').then(({ access }) => access(join(homeDir, '.mutil-skills', 'runtime', 'cli', 'telemetry.js')))).resolves.toBeUndefined()
-    await expect(import('node:fs/promises').then(({ access }) => access(join(homeDir, '.mutil-skills', 'runtime', 'node_modules', '@mutil-skills', 'telemetry', 'dist', 'src', 'index.js')))).resolves.toBeUndefined()
+    await expect(import('node:fs/promises').then(({ access }) => access(join(homeDir, '.mutil-skills', 'runtime', 'cli', 'cli.js')))).resolves.toBeUndefined()
+    await expect(import('node:fs/promises').then(({ access }) => access(join(homeDir, '.mutil-skills', 'runtime', 'node_modules', '@mutil-skills', 'hooks', 'dist', 'src', 'index.js')))).resolves.toBeUndefined()
+    await expect(import('node:fs/promises').then(({ access }) => access(join(homeDir, '.mutil-skills', 'runtime', 'node_modules', '@mutil-skills', 'hooks', 'dist', 'src', 'mcp-skill-telemetry', 'codex', 'config.js')))).resolves.toBeUndefined()
 
     await mkdir(join(homeDir, '.mutil-skills'), { recursive: true })
     await writeFile(join(homeDir, '.mutil-skills', 'telemetry.key'), 'd'.repeat(64))

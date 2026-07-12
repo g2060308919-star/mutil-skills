@@ -128,10 +128,11 @@ Skill 不是 Codex 原生 hook 中独立的工具事件，因此统计以“实�
 - Claude Code 的直接 `/skill-name` 触发 `UserPromptExpansion`，并由 transcript 确认 Skill 内容已经展开给模型。
 - Codex 或 Claude Code 执行 `cat`、`sed`、`head`、`tail`、`awk` 等内容读取命令，并返回了目标 `SKILL.md` 内容。
 - 会话 JSONL 明确记录了上述读取调用及其结果。
+- Codex transcript 明确记录了宿主注入的 Skill 包络（`response_item.message.role=user`，包含 `<skill><name>...</name><path>.../SKILL.md</path>...`）；该记录本身就是一次成功加载证据。
 
 一个工具调用读取多个 `SKILL.md` 时，每个文件操作分别形成一个 `callId`。同一次工具调用被实时 hook 和 JSONL 同时发现时，使用原始 `tool_use_id`、目标路径和操作序号进行幂等去重。
 
-Codex 对部分新式执行路径的 hook 覆盖并不完整，所以 `Stop` 时解析会话 JSONL 是必要兜底。JSONL 格式不是稳定公开接口，解析器需要按运行时版本隔离和测试。如果宿主直接注入 Skill 内容且完全没有文件读取或 Skill 加载事件，本方案无法观察到该次加载。
+Codex 对部分新式执行路径的 hook 覆盖并不完整，所以 `Stop` 时解析会话 JSONL 是必要兜底。JSONL 格式不是稳定公开接口，解析器需要按运行时版本隔离和测试。如果宿主既不记录 Skill 注入包络，也不记录文件读取或其他 Skill 加载事件，本方案无法观察到该次加载。
 
 ### 4.3 项目标识
 
@@ -333,10 +334,10 @@ slack/search：使用回合数 1，总调用次数 1
 
 ## 8. 已知边界
 
-1. MCP 是原生工具调用，hook 可以直接观察；Skill 在 Codex 中没有独立的 `SkillUse` hook，主要依赖实际文件读取证据。
+1. MCP 是原生工具调用，hook 可以直接观察；Skill 在 Codex 中没有独立的 `SkillUse` hook，统计依赖实际文件读取证据或 transcript 中的结构化 Skill 注入记录。
 2. Codex 的 `PostToolUse` 提供任意 JSON 形式的 `tool_response`，不是所有 MCP server 都以同一种结构表达业务失败；适配器会优先识别标准错误字段，无法确认时由日志兜底。
 3. Codex transcript 不是稳定接口，运行时升级可能需要更新 JSONL 适配器。
-4. 宿主直接注入 Skill 内容、且不产生可观察加载事件时无法统计。
+4. 宿主直接注入 Skill 内容但既不产生结构化注入记录，也不产生文件读取或其他可观察加载事件时无法统计。
 5. 第一阶段不保存和上传数据，因此真实跨进程汇总将在未来接入上报服务后完成；第一期通过纯函数和 fixtures 验证统计逻辑。
 6. 用户级 hook 默认覆盖所有项目，但项目可以在任何敏感数据被解析前显式退出。
 7. 部分 Codex 版本的用户级 `PostToolUse` 或 `unified_exec` 覆盖仍不完整；实现会在 `Stop` 解析 transcript 兜底，但宿主完全不产生 hook 或 transcript 证据时仍无法统计。

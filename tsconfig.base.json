@@ -9,12 +9,13 @@
     "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
+      "@mutil-skills/hooks": ["packages/hooks/src/index.ts"],
+      "@mutil-skills/hooks/cli": ["packages/hooks/src/runtime/cli.ts"],
       "@mutil-skills/core": ["packages/core/src/index.ts"],
       "@mutil-skills/schema": ["packages/schema/src/index.ts"],
       "@mutil-skills/template": ["packages/template/src/index.ts"],
       "@mutil-skills/foundation/testing": ["packages/foundation/src/testing/index.ts"],
-      "@mutil-skills/skills": ["packages/skills/src/index.ts"],
-      "@mutil-skills/telemetry": ["packages/telemetry/src/index.ts"]
+      "@mutil-skills/skills": ["packages/skills/src/index.ts"]
     },
     "declaration": true,
     "declarationMap": true,

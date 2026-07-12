@@ -11,7 +11,7 @@
     { "path": "../schema" },
     { "path": "../template" },
     { "path": "../skills" },
-    { "path": "../telemetry" },
+    { "path": "../hooks" },
     { "path": "../foundation" }
   ],
   "include": ["src/**/*.ts", "test/**/*.ts"]
