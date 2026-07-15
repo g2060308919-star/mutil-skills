@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('.', import.meta.url))
@@ -11,6 +11,12 @@ export const aliases = {
   '@mutil-skills/template': `${root}packages/template/src/index.ts`,
   '@mutil-skills/foundation/testing': `${root}packages/foundation/src/testing/index.ts`,
   '@mutil-skills/skills': `${root}packages/skills/src/index.ts`,
+  '@mutil-skills/e2e-contracts': `${root}packages/e2e-contracts/src/index.ts`,
+  '@mutil-skills/e2e-engine': `${root}packages/e2e-engine/src/index.ts`,
+  '@mutil-skills/e2e-authority': `${root}packages/e2e-authority/src/index.ts`,
+  '@mutil-skills/e2e-gateway': `${root}packages/e2e-gateway/src/index.ts`,
+  '@mutil-skills/e2e-playwright-runtime': `${root}packages/e2e-playwright-runtime/src/index.ts`,
+  '@mutil-skills/e2e-report': `${root}packages/e2e-report/src/index.ts`,
 }
 
 export default defineConfig({
@@ -19,6 +25,7 @@ export default defineConfig({
   },
   test: {
     include: ['packages/**/*.test.ts', 'scripts/**/*.test.ts'],
+    exclude: [...configDefaults.exclude, 'scripts/**/*.golden.test.ts'],
     pool: 'forks',
   },
 })

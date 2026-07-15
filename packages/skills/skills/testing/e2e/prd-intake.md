@@ -1,49 +1,48 @@
-# PRD 接入与身份
+# PRD 接入与来源冻结
 
-## 目的
+## 适用状态
 
-规范化 PRD，并稳定确定 PRD-ID、Revision 与 Asset ID；只负责来源与身份，不进入测试设计。
+`created → source-frozen`。
 
-## 触发条件
+## 必需 Artifact 与摘要
 
-当用户提供 PRD、需求文档或其规范化正文，并需要开始一次 PRD 驱动验收时使用。
+`project-policy`、`prd-request`，以及可读取的 PRD 正文/附件引用；秘密只允许 secret ref。
 
-## 必需输入
+## 允许的语义输出
 
-产品空间、PRD 标题、非空规范化正文、测试工作区。
+来源候选、PRD-ID 建议和无法判定的身份问题。标准输出为 `prd-manifest`、`prd-diff`
+（Schema 2.0.0）与 `semantic-generation` 候选。`prd-diff` 的决定前事实只包含 previous/current Revision、
+sectionChanges、typed `lineageMappings` 和 impactedEntityIds；`lineageReview` 不进入自身 subject projection。
+Core 只允许按 entityKind/semanticKey 精确对账；preserved 必须保持相同 ID，split/merged 必须
+authority-confirmed，禁止标题相似度或模型猜测。
 
-## 可选输入
+## 调用的确定性 API
 
-用户提供的 PRD-ID、来源引用、版本标签、附件清单、现有 PRD manifest。
+调用 Contracts parse/migrate、`E2EEngine.ingest()`、Authority 来源签名和 Engine `transition()`；摘要、Revision
+只采用 API 返回值。Lineage 决定必须由登记的 `lineage-approver` 通过专用 Decision key 签发
+`lineage-decision-receipt/v1`，不得复用通用 Artifact key。
 
-## 独立调用守则
+## 执行步骤
 
-独立调用时，缺少任一上述命名输入，明确列出缺失的文件或信息并请求用户提供；返回 blocked，不得推断、重建、补写或执行任何上游阶段。
+冻结正文与附件 bytes，记录来源和读取结果；让 Engine 生成稳定身份、Revision 和 diff；对显式
+`lineage-decision-subject/v1` 展示并请求决定。Authority 生成 checkedAt/nonce；Engine 从本代 diff 重建
+subject 并验专用 receipt 后，才追加 `source-frozen` 事件。
 
-## 工作流
+## 退出条件
 
-校验输入，规范化换行和标题，确定或请求确认 PRD-ID，计算 Revision，比较已有 Revision，再发布 PRD 资产。
+来源集合不可变，manifest 覆盖全部正文/附件，Revision 可复算且事件已验签；approved/rejected 必须有
+kind、decisionId、status 和 subject digest 全部匹配的 receipt，pending 必须没有 receipt。
 
-## 详细算法
+## 暂停条件
 
-使用用户 PRD-ID；没有 ID 时按 sourceRef 提出建议，纯粘贴正文则等待确认。对正文和按稳定顺序排列的附件摘要计算 SHA-256 Revision。相同 PRD-ID 复用 Asset ID，内容变化只形成新 Revision 与 diff。保留来源、读取时间和附件摘要。
-
-## 输出
-
-normalized-prd.md、prd-manifest.json、prd-diff.json，以及可追溯的 assetId。
-
-## 完成条件
-
-PRD-ID、Asset ID、Revision 和来源都已确定，且产物通过 Schema。
-
-## 阻塞条件
-
-正文为空、来源不可读、同名 PRD 无法判定是否同一需求，或建议 PRD-ID 未获确认。
+正文为空、附件不可读、PRD 身份冲突、Lineage 决定缺失/验签失败或 Contracts major 不兼容；保存
+`created` 为 resumeState。旧 `prd-diff` v1 一律 migration-required。
 
 ## 禁止行为
 
-不得改写需求语义、从业务源码补充 PRD、记录秘密，或生成需求模型与测试 Case。
+不得自行计算 SHA、从产品代码补写 PRD、复制 secret、生成规则/Case、猜测同名 PRD 身份，或用旧
+Lineage receipt 覆盖 currentRevision、sectionChanges、lineageMappings、impactedEntityIds 的变化。
 
-## 独立使用示例
+## 独立调用
 
-已提供规范化 PRD 和 productSpace 时，输出当前 Revision 与首次执行的空变更集；缺 PRD-ID 的纯文本请求先向用户确认建议 ID。
+缺少必需 artifact/digest 时，只返回最小缺失项；不得重建上游，不得推进状态。

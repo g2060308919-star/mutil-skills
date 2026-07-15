@@ -22,27 +22,64 @@
     "requires": {
       "type": "array",
       "items": {
-        "type": "object",
-        "required": ["capability", "satisfiedBy", "whenMissing"],
-        "properties": {
-          "capability": { "const": "foundation.testing" },
-          "satisfiedBy": {
-            "type": "array",
-            "minItems": 1,
-            "items": { "type": "string", "minLength": 1 }
-          },
-          "whenMissing": {
+        "oneOf": [
+          {
             "type": "object",
-            "required": ["action", "package", "import"],
+            "required": ["capability", "satisfiedBy", "whenMissing"],
             "properties": {
-              "action": { "const": "prompt-install" },
-              "package": { "type": "string", "minLength": 1 },
-              "import": { "type": "string", "minLength": 1 }
+              "capability": { "const": "foundation.testing" },
+              "satisfiedBy": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "whenMissing": {
+                "type": "object",
+                "required": ["action", "package", "import"],
+                "properties": {
+                  "action": { "const": "prompt-install" },
+                  "package": { "type": "string", "minLength": 1 },
+                  "import": { "type": "string", "minLength": 1 }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["capability", "satisfiedBy", "whenMissing"],
+            "properties": {
+              "capability": {
+                "enum": [
+                  "e2e.contracts", "e2e.engine", "e2e.authority", "e2e.gateway",
+                  "browser.chromium", "e2e.report", "e2e.sanitizer", "artifact.posix-local-fs"
+                ]
+              },
+              "satisfiedBy": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "whenMissing": {
+                "type": "object",
+                "required": ["action", "terminalState", "reasonCode"],
+                "properties": {
+                  "action": { "const": "block" },
+                  "terminalState": {
+                    "enum": [
+                      "input-blocked", "environment-blocked", "safety-blocked",
+                      "artifact-blocked", "migration-required"
+                    ]
+                  },
+                  "reasonCode": { "type": "string", "pattern": "^E2E_[A-Z0-9_]+$" }
+                },
+                "additionalProperties": false
+              }
             },
             "additionalProperties": false
           }
-        },
-        "additionalProperties": false
+        ]
       }
     },
     "templateReferences": {

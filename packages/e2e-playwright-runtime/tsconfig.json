@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": ".",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
+  },
+  "references": [
+    { "path": "../e2e-authority" },
+    { "path": "../e2e-contracts" },
+    { "path": "../e2e-engine" }
+  ],
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

@@ -1,0 +1,814 @@
+import { z } from 'zod'
+import {
+  RegressionBlockedCasesSchema,
+  RegressionDiscoveryAttestationSchema,
+  RegressionSourceFileSchema,
+  RegressionToolchainSchema,
+} from './regression-discovery.js'
+import {
+  ArtifactEnvelopeSchema, ArtifactSignatureSchema, AssetIdSchema, E2EError, RelativePathSchema,
+} from './common.js'
+import { RequirementModelSchema } from './design.js'
+import { ManualResultSchema } from './manual-result.js'
+import { SanitizationRecordSchema } from './privacy.js'
+import { PrivacyReviewReceiptSchema, SanitizerAttestationSchema } from './privacy-attestation.js'
+import { VerdictResultSchema } from './verdict.js'
+import { ApprovalCapabilityRecordSchema, ApprovalFreshnessReceiptSchema } from './approval-freshness.js'
+import {
+  CoverageDispositionDecisionReceiptSchema,
+  DecisionReceiptSchema,
+  EntityLineageMappingsSchema,
+  type DecisionReceipt,
+} from './decision-receipt.js'
+import { WorkflowEventsV2ContentSchema } from './attempt.js'
+import { ExecutionOutcomeReceiptSchema } from './execution-outcome.js'
+import { CleanupPlanDefinitionSchema } from './cleanup-plan.js'
+import { RuntimeIsolationPolicySchema } from './runtime-isolation.js'
+import { TrustedCompilerExecutionFactSchema } from './trusted-compiler-execution.js'
+
+const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
+const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
+const NonEmptyTextSchema = z.string().min(1).max(16 * 1024)
+const UniqueIdsSchema = z.array(SafeIdSchema).max(100_000)
+  .refine((values) => new Set(values).size === values.length, 'ID 必须唯一')
+
+export const ARTIFACT_TYPES = [
+  'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation',
+  'acceptance-scope', 'requirement-model', 'interaction-flow', 'coverage-universe', 'test-cases',
+  'design-audit', 'execution-contract', 'approval-grants', 'manual-results', 'data-leases',
+  'browser-preflight', 'browser-action-map', 'regression-manifest', 'run-bundle', 'workflow-events',
+  'browser-results', 'gateway-audit', 'browser-evidence', 'diagnosis', 'cleanup-results',
+  'final-report', 'generation-manifest',
+] as const
+
+export const ArtifactTypeSchema = z.enum(ARTIFACT_TYPES)
+export type ArtifactType = z.infer<typeof ArtifactTypeSchema>
+
+const GraphNodeSchema = z.object({
+  kind: SafeIdSchema,
+  id: SafeIdSchema,
+}).strict()
+
+export const ArtifactGraphSchema = z.object({
+  defines: z.array(GraphNodeSchema).max(100_000),
+  references: z.array(GraphNodeSchema).max(100_000),
+}).strict()
+
+const FileRecordSchema = z.object({
+  relativePath: RelativePathSchema,
+  digest: DigestSchema,
+  byteLength: z.number().int().nonnegative(),
+}).strict()
+
+const IdDigestSchema = z.object({ id: SafeIdSchema, digest: DigestSchema }).strict()
+const PendingDecisionSchema = z.object({
+  decisionId: SafeIdSchema,
+  status: z.literal('pending'),
+}).strict()
+const TerminalDecisionSchema = z.object({
+  decisionId: SafeIdSchema,
+  status: z.enum(['approved', 'rejected']),
+  receipt: DecisionReceiptSchema,
+}).strict()
+const DecisionSchema = z.discriminatedUnion('status', [PendingDecisionSchema, TerminalDecisionSchema])
+
+function decisionFor(kind: DecisionReceipt['kind']) {
+  return DecisionSchema.superRefine((decision, context) => {
+    if (decision.status === 'pending') return
+    if (decision.receipt.kind !== kind || decision.receipt.decisionId !== decision.decisionId
+      || decision.receipt.decisionStatus !== decision.status) {
+      context.addIssue({
+        code: 'custom', path: ['receipt'],
+        message: 'Decision receipt 的 kind、decisionId 与 decisionStatus 必须和外层决定一致',
+      })
+    }
+  })
+}
+const FindingSchema = z.object({
+  code: SafeIdSchema, severity: z.enum(['critical', 'high', 'medium', 'low', 'info']), ref: NonEmptyTextSchema,
+}).strict()
+
+const projectPolicyContent = z.object({
+  policyVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  environments: z.array(z.object({ environmentId: SafeIdSchema, baseOrigin: z.string().url() }).strict()).min(1).max(256),
+  originPolicies: z.array(z.object({ origin: z.string().url(), allowRead: z.boolean(), allowWrite: z.boolean() }).strict()).min(1).max(256),
+  browserMatrix: z.array(z.object({ browserId: SafeIdSchema, channel: SafeIdSchema, required: z.boolean() }).strict()).min(1).max(64),
+  coveragePolicy: IdDigestSchema,
+  evidencePolicy: IdDigestSchema,
+  retentionPolicy: IdDigestSchema,
+  riskPolicy: IdDigestSchema,
+  timeoutPolicy: IdDigestSchema,
+  runtimePolicy: IdDigestSchema,
+}).strict()
+
+const prdRequestContent = z.object({
+  productSpace: SafeIdSchema,
+  title: NonEmptyTextSchema,
+  sourceDescriptors: z.array(z.object({ sourceId: SafeIdSchema, kind: z.enum(['file', 'url', 'text']), ref: NonEmptyTextSchema }).strict()).min(1).max(1_000),
+  userRequest: NonEmptyTextSchema,
+  testWorkspaceId: SafeIdSchema,
+  secretRefs: z.array(SafeIdSchema).max(1_000),
+}).strict()
+
+const prdManifestContent = z.object({
+  prdId: SafeIdSchema,
+  assetId: AssetIdSchema,
+  revision: DigestSchema,
+  normalizedPrdDigest: DigestSchema,
+  sources: z.array(z.object({ sourceId: SafeIdSchema, digest: DigestSchema, byteLength: z.number().int().nonnegative() }).strict()).min(1).max(10_000),
+  attachments: z.array(z.object({
+    attachmentId: SafeIdSchema,
+    digest: DigestSchema,
+    byteLength: z.number().int().nonnegative(),
+  }).strict()).max(10_000),
+  sourceCacheIndexDigest: DigestSchema,
+}).strict()
+
+const prdDiffContent = z.object({
+  previousRevision: DigestSchema,
+  currentRevision: DigestSchema,
+  sectionChanges: z.array(z.object({ sectionId: SafeIdSchema, kind: z.enum(['added', 'changed', 'removed']), digest: DigestSchema }).strict()).max(10_000),
+  lineageMappings: EntityLineageMappingsSchema,
+  lineageReview: decisionFor('lineage'),
+  impactedEntityIds: UniqueIdsSchema,
+}).strict()
+
+const semanticGenerationContent = z.object({
+  modelProvider: SafeIdSchema,
+  modelId: SafeIdSchema,
+  modelVersion: NonEmptyTextSchema,
+  systemPromptDigest: DigestSchema,
+  toolOutputDigests: z.array(DigestSchema).max(10_000),
+  sampling: z.object({ temperature: z.number().min(0).max(2), seed: z.number().int().nonnegative() }).strict(),
+  candidateDigests: z.array(DigestSchema).min(1).max(1_000),
+  selectedDigest: DigestSchema,
+}).strict().refine(
+  (value) => value.candidateDigests.includes(value.selectedDigest),
+  { message: '选中候选必须存在于候选集合', path: ['selectedDigest'] },
+)
+
+const acceptanceScopeContent = z.object({
+  includedReqCandidates: z.array(z.object({ reqId: SafeIdSchema, sourceRefs: z.array(NonEmptyTextSchema).min(1) }).strict()).max(100_000),
+  exclusions: z.array(z.object({ reqId: SafeIdSchema, rationale: NonEmptyTextSchema, decisionId: SafeIdSchema }).strict()).max(100_000),
+  ambiguities: z.array(z.object({
+    ambiguityId: SafeIdSchema, question: NonEmptyTextSchema, status: z.enum(['resolved', 'pending']),
+    decisionId: SafeIdSchema.optional(), resolution: NonEmptyTextSchema.optional(),
+  }).strict().superRefine((ambiguity, context) => {
+    if (ambiguity.status === 'resolved' && (!ambiguity.decisionId || !ambiguity.resolution)) {
+      context.addIssue({ code: 'custom', message: 'resolved ambiguity 必须绑定 decisionId 与 resolution' })
+    }
+    if (ambiguity.status === 'pending' && ambiguity.resolution !== undefined) {
+      context.addIssue({ code: 'custom', message: 'pending ambiguity 不得提前写入 resolution' })
+    }
+  })).max(100_000),
+  dependencies: z.array(z.object({ dependencyId: SafeIdSchema, status: z.enum(['available', 'blocked']), digest: DigestSchema }).strict()).max(100_000),
+  visualScope: z.object({ required: z.boolean(), refs: z.array(SafeIdSchema) }).strict(),
+  browserScope: z.object({ browserIds: z.array(SafeIdSchema).min(1), viewportIds: z.array(SafeIdSchema).min(1) }).strict(),
+  scopeDecision: decisionFor('scope'),
+}).strict()
+
+const requirementModelContent = RequirementModelSchema
+
+const interactionFlowContent = z.object({
+  flows: z.array(z.object({
+    flowId: SafeIdSchema,
+    nodes: z.array(z.object({ nodeId: SafeIdSchema, reqId: SafeIdSchema, kind: z.enum(['entry', 'page', 'action', 'decision', 'state', 'feedback', 'exit']), effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']), oracleIds: z.array(SafeIdSchema) }).strict()).min(2),
+    edgeIds: z.array(SafeIdSchema).min(1), entryNodeId: SafeIdSchema, exitNodeIds: z.array(SafeIdSchema).min(1),
+  }).strict()).max(100_000),
+}).strict()
+
+const coverageDisposition = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('automated'), caseIds: z.array(SafeIdSchema).min(1).max(10_000) }).strict(),
+  z.object({ kind: z.literal('manual'), manualProcedureId: SafeIdSchema, blocking: z.boolean() }).strict(),
+  z.object({
+    kind: z.literal('not-applicable'), policyCode: SafeIdSchema,
+    rationale: NonEmptyTextSchema, decisionGrantId: SafeIdSchema,
+    decisionReceipt: CoverageDispositionDecisionReceiptSchema,
+  }).strict(),
+])
+
+const coverageUniverseContent = z.object({
+  coveragePolicyDigest: DigestSchema,
+  pairwiseSeed: z.number().int().nonnegative(),
+  universeDigest: DigestSchema,
+  obligations: z.array(z.object({
+    obligationId: SafeIdSchema,
+    reqId: SafeIdSchema,
+    ruleIds: z.array(SafeIdSchema).max(10_000),
+    nodeIds: z.array(SafeIdSchema).max(10_000),
+    actor: z.union([SafeIdSchema, z.literal('not-applicable')]),
+    transitionId: z.union([SafeIdSchema, z.literal('not-applicable')]),
+    scenario: NonEmptyTextSchema,
+    necessity: z.enum(['required', 'advisory']),
+    applicabilityRuleId: SafeIdSchema,
+    disposition: coverageDisposition,
+  }).strict()).max(100_000),
+}).strict()
+
+const testCasesContent = z.object({
+  cases: z.array(z.object({
+    caseId: SafeIdSchema,
+    revision: z.number().int().positive(),
+    obligationIds: z.array(SafeIdSchema).min(1).max(10_000),
+    title: NonEmptyTextSchema,
+    actor: SafeIdSchema,
+    necessity: z.enum(['required', 'advisory']),
+    preconditions: z.array(NonEmptyTextSchema).max(10_000),
+    dataNeedIds: z.array(SafeIdSchema).max(10_000),
+    steps: z.array(z.object({
+      stepId: SafeIdSchema,
+      ordinal: z.number().int().nonnegative(),
+      semanticAction: NonEmptyTextSchema,
+      semanticTarget: NonEmptyTextSchema,
+      oracles: z.array(z.object({ oracleId: SafeIdSchema, statement: NonEmptyTextSchema }).strict()).min(1).max(1_000),
+      evidenceKinds: z.array(SafeIdSchema).min(1).max(32),
+    }).strict()).min(1).max(10_000),
+    mode: z.enum(['real-environment', 'gateway-injection']),
+    effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']),
+    evidenceLevel: z.enum(['E1', 'E2', 'E3']),
+    cleanupPlanId: z.union([SafeIdSchema, z.literal('not-applicable')]),
+    timeoutMs: z.number().int().positive().max(3_600_000),
+    retryPolicy: z.enum(['none', 'read-automation-max-2', 'verified-not-applied-max-1']),
+    status: z.enum(['active', 'deprecated']),
+  }).strict()).max(100_000),
+  caseSetDigest: DigestSchema,
+}).strict()
+
+const designAuditContent = z.object({
+  inputDigests: z.array(DigestSchema).min(1).max(10_000),
+  metrics: z.array(z.object({ metricId: SafeIdSchema, numerator: z.number().nonnegative(), denominator: z.number().nonnegative() }).strict()).max(10_000),
+  findings: z.array(FindingSchema).max(100_000),
+  orphanIds: UniqueIdsSchema,
+  weakIds: UniqueIdsSchema,
+  status: z.enum(['passed', 'failed']),
+}).strict()
+
+const executionContractContent = z.object({
+  environment: SafeIdSchema,
+  baseOrigin: z.string().url(),
+  browserMatrix: z.array(z.object({ browserId: SafeIdSchema, channel: SafeIdSchema, viewportId: SafeIdSchema }).strict()).min(1).max(256),
+  identities: z.array(z.object({ identityId: SafeIdSchema, roleIds: z.array(SafeIdSchema).min(1), secretRef: SafeIdSchema }).strict()).max(10_000),
+  caseQueue: z.array(z.object({ ordinal: z.number().int().nonnegative(), caseId: SafeIdSchema }).strict()).max(100_000),
+  actionIntents: z.array(z.object({ actionId: SafeIdSchema, effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']), intentDigest: DigestSchema }).strict()).max(100_000),
+  dataNeeds: z.array(z.object({ leaseId: SafeIdSchema, resourceKey: SafeIdSchema, mode: z.enum(['read', 'write']) }).strict()).max(100_000),
+  manualProcedures: z.array(z.object({ manualProcedureId: SafeIdSchema, instructionDigest: DigestSchema }).strict()).max(100_000),
+  evidencePolicyDigest: DigestSchema,
+  runtimeIsolation: RuntimeIsolationPolicySchema.nullable(),
+  unresolvedItems: z.array(z.object({ itemId: SafeIdSchema, kind: SafeIdSchema, blocking: z.boolean() }).strict()).max(100_000),
+}).strict()
+
+const approvalGrantsContent = z.object({
+  runBundleDigest: DigestSchema,
+  grants: z.array(ApprovalFreshnessReceiptSchema).min(1).max(10_000),
+}).strict()
+
+const manualResultsContent = z.object({
+  results: z.array(ManualResultSchema).max(10_000),
+}).strict()
+
+const dataLeasesContent = z.object({
+  leases: z.array(z.object({
+    leaseId: SafeIdSchema,
+    resourceDigest: DigestSchema,
+    cleanupPlanDigest: DigestSchema,
+    status: z.enum(['reserved', 'active', 'released', 'cleanup-failed']),
+  }).strict()).max(100_000),
+  allocatorEpoch: z.number().int().nonnegative(),
+}).strict()
+
+const browserPreflightContent = z.object({
+  discoveryGrantId: SafeIdSchema,
+  authorityPreflightDigest: DigestSchema,
+  observedActor: SafeIdSchema,
+  checks: z.array(z.object({ code: SafeIdSchema, status: z.enum(['passed', 'failed']), digest: DigestSchema }).strict()).min(1).max(10_000),
+  observedIdentity: z.object({ identityId: SafeIdSchema, digest: DigestSchema }).strict(),
+  actorChecks: z.array(IdDigestSchema).max(10_000),
+  leaseChecks: z.array(IdDigestSchema).max(100_000),
+  gatewayChecks: z.array(IdDigestSchema).max(10_000),
+  sandboxChecks: z.array(IdDigestSchema).max(10_000),
+  status: z.enum(['passed', 'failed']),
+}).strict()
+
+const browserActionMapContent = z.object({
+  actionMapRevision: z.number().int().positive(),
+  pageIdentities: z.array(z.object({ pageId: SafeIdSchema, origin: z.string().url(), assertionDigest: DigestSchema }).strict()).min(1).max(10_000),
+  actions: z.array(z.object({
+    caseId: SafeIdSchema,
+    stepId: SafeIdSchema,
+    actionId: SafeIdSchema,
+    pageIdentityId: SafeIdSchema,
+    locatorCandidates: z.array(z.object({ strategy: SafeIdSchema, value: NonEmptyTextSchema, confidence: z.number().min(0).max(1) }).strict()).min(1).max(32),
+    playwrightAction: NonEmptyTextSchema,
+    waits: z.array(z.object({ kind: SafeIdSchema, timeoutMs: z.number().int().positive().max(3_600_000) }).strict()).max(32),
+    oracleIds: z.array(SafeIdSchema).min(1).max(1_000),
+    effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']),
+    capabilities: z.array(z.object({
+      operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request']),
+      capabilityId: SafeIdSchema,
+    }).strict()).min(1).max(16).refine((items) =>
+      new Set(items.map((item) => item.operation)).size === items.length,
+    '同一 action 的 operation 必须唯一'),
+  }).strict()).max(100_000),
+  unmappedSteps: z.array(z.object({ caseId: SafeIdSchema, stepId: SafeIdSchema, reasonCode: SafeIdSchema }).strict()).max(100_000),
+  discoveredRisks: z.array(FindingSchema).max(100_000),
+}).strict()
+
+const regressionManifestContent = z.object({
+  testDomain: z.literal('prd-e2e-trusted-compiler'),
+  executionProfile: z.enum(['trusted-read-only', 'trusted-reversible-write', 'production-isolated']),
+  templateDigest: DigestSchema,
+  toolchain: RegressionToolchainSchema,
+  sourceFiles: z.array(RegressionSourceFileSchema).max(100_000),
+  caseMappings: z.array(z.object({ caseId: SafeIdSchema, relativePath: RelativePathSchema, testTitle: NonEmptyTextSchema }).strict()).max(100_000),
+  blockedCases: RegressionBlockedCasesSchema,
+  deprecatedCases: UniqueIdsSchema,
+  listResult: z.object({
+    caseIds: UniqueIdsSchema,
+    digest: DigestSchema,
+    attestation: RegressionDiscoveryAttestationSchema,
+  }).strict(),
+}).strict()
+
+const runBundleContent = z.object({
+  runId: SafeIdSchema,
+  allInputRefs: z.array(z.object({ artifactId: SafeIdSchema, digest: DigestSchema }).strict()).min(1).max(100_000),
+  schedule: z.array(z.object({ ordinal: z.number().int().nonnegative(), caseId: SafeIdSchema, stepIds: z.array(SafeIdSchema).min(1), actionIds: z.array(SafeIdSchema).min(1) }).strict()).max(100_000),
+  attemptPlans: z.array(z.object({ caseId: SafeIdSchema, slots: z.number().int().positive().max(100) }).strict()).max(100_000),
+  signedCapabilities: z.array(ApprovalCapabilityRecordSchema).max(100_000),
+  secretRefs: z.array(SafeIdSchema).max(10_000),
+  runtimePolicyDigest: DigestSchema,
+  runtimeIsolationPolicyDigest: z.union([DigestSchema, z.literal('not-applicable')]),
+}).strict()
+
+const workflowEventsContent = WorkflowEventsV2ContentSchema
+
+const browserResultsContent = z.object({
+  runId: SafeIdSchema,
+  trustedCompilerExecution: TrustedCompilerExecutionFactSchema.optional(),
+  executedBrowserIds: UniqueIdsSchema.refine((values) => values.length > 0, '至少需要一个实际执行浏览器'),
+  caseResults: z.array(z.object({
+    caseId: SafeIdSchema,
+    attemptId: SafeIdSchema,
+    eventChainDigest: DigestSchema,
+    mode: z.enum(['real-environment', 'gateway-injection']),
+    effect: z.enum(['read', 'reversible-write', 'irreversible-write']),
+    status: z.enum(['passed', 'failed', 'input-blocked', 'environment-blocked', 'safety-blocked', 'automation-blocked', 'pending-decision', 'not-executed-user-declined', 'manual-required']),
+    stepResults: z.array(z.object({
+      stepId: SafeIdSchema,
+      actionId: SafeIdSchema,
+      status: z.enum(['passed', 'failed', 'skipped', 'unable']),
+      actualDigest: DigestSchema.optional(),
+      oracleResult: z.enum(['passed', 'failed', 'not-evaluated']),
+      evidenceIds: z.array(SafeIdSchema).max(10_000),
+    }).strict()).max(100_000),
+    effectObservation: z.enum(['not-applicable', 'proven-not-applied', 'applied', 'unknown']),
+    gatewayAuditRef: SafeIdSchema,
+    evidenceRefs: z.array(SafeIdSchema).max(100_000),
+    cleanupRef: SafeIdSchema.optional(),
+    executionOutcomeReceipts: z.array(ExecutionOutcomeReceiptSchema).max(100_000).optional(),
+  }).strict()).max(100_000),
+  startedAt: z.string().datetime(),
+  finishedAt: z.string().datetime(),
+}).strict().superRefine((content, context) => {
+  if (Date.parse(content.finishedAt) < Date.parse(content.startedAt)) {
+    context.addIssue({ code: 'custom', message: 'finishedAt 不能早于 startedAt', path: ['finishedAt'] })
+  }
+  content.caseResults.forEach((caseResult, caseIndex) => {
+    const receipts = caseResult.executionOutcomeReceipts ?? []
+    if (new Set(receipts.map((receipt) => receipt.actionId)).size !== receipts.length) {
+      context.addIssue({ code: 'custom', message: '同一 Case 的 ExecutionOutcomeReceipt actionId 必须唯一',
+        path: ['caseResults', caseIndex, 'executionOutcomeReceipts'] })
+    }
+    caseResult.stepResults.forEach((step, stepIndex) => {
+    if (['passed', 'failed'].includes(step.status)
+      && (step.actualDigest === undefined || step.oracleResult === 'not-evaluated' || step.evidenceIds.length === 0)) {
+      context.addIssue({
+        code: 'custom', message: '终态步骤必须包含 actual、Oracle 结果和证据',
+        path: ['caseResults', caseIndex, 'stepResults', stepIndex],
+      })
+    }
+    })
+  })
+})
+
+const gatewayAuditContent = z.object({
+  gatewayInstance: z.object({ instanceId: SafeIdSchema, version: NonEmptyTextSchema, publicKeyDigest: DigestSchema }).strict(),
+  policyDigest: DigestSchema,
+  signedCounters: z.object({
+    forwarded: z.number().int().nonnegative(), blocked: z.number().int().nonnegative(),
+    injected: z.number().int().nonnegative(), digest: DigestSchema, signature: ArtifactSignatureSchema,
+  }).strict(),
+  requestEvents: z.array(z.object({ sequence: z.number().int().nonnegative(), actionId: SafeIdSchema,
+    executionSessionId: SafeIdSchema.optional(),
+    decision: z.enum(['forwarded', 'blocked', 'injected']), digest: DigestSchema }).strict()).max(1_000_000),
+  capabilityReservations: z.array(z.object({
+    reservationId: SafeIdSchema, grantId: SafeIdSchema, capabilityId: SafeIdSchema,
+    actionId: SafeIdSchema, attemptId: SafeIdSchema,
+    attemptContext: z.object({ assetId: AssetIdSchema, generationId: SafeIdSchema, prdRevision: DigestSchema,
+      runId: SafeIdSchema, caseId: SafeIdSchema }).strict().optional(),
+    status: z.enum(['reserved', 'completed', 'unknown']), outcomeDigest: DigestSchema.optional(),
+    observation: NonEmptyTextSchema.optional(), reservedAt: z.string().datetime(),
+    consumed: z.boolean(), digest: DigestSchema,
+  }).strict()).max(100_000),
+}).strict()
+
+const browserEvidenceContent = z.object({
+  evidencePolicyDigest: DigestSchema,
+  artifacts: z.array(z.object({
+    evidenceId: SafeIdSchema,
+    caseId: SafeIdSchema,
+    relativePath: RelativePathSchema,
+    digest: DigestSchema,
+    byteLength: z.number().int().nonnegative(),
+    evidenceLevel: z.enum(['E1', 'E2', 'E3']),
+    sanitizationRecord: SanitizationRecordSchema,
+  }).strict()).max(1_000_000),
+  caseCoverage: z.array(z.object({ caseId: SafeIdSchema, evidenceIds: z.array(SafeIdSchema).min(1) }).strict()).max(100_000),
+  sanitizerProofs: z.array(z.object({
+    evidenceId: SafeIdSchema, record: SanitizationRecordSchema, attestation: SanitizerAttestationSchema,
+  }).strict()).max(1_000_000),
+  privacyReviews: z.array(z.discriminatedUnion('status', [
+    z.object({ evidenceId: SafeIdSchema, status: z.literal('not-required'), derivationDigest: DigestSchema }).strict(),
+    z.object({ evidenceId: SafeIdSchema, status: z.literal('pending') }).strict(),
+    z.object({ evidenceId: SafeIdSchema, status: z.enum(['approved', 'rejected']), receipt: PrivacyReviewReceiptSchema }).strict(),
+  ])).max(1_000_000),
+}).strict()
+
+const diagnosisContent = z.object({
+  caseDiagnoses: z.array(z.object({ caseId: SafeIdSchema, category: SafeIdSchema, retrySafe: z.boolean(), digest: DigestSchema }).strict()).max(100_000),
+  healingAttempts: z.array(z.object({ caseId: SafeIdSchema, attemptId: SafeIdSchema, changeDigest: DigestSchema, status: z.enum(['accepted', 'rejected']) }).strict()).max(100_000),
+  selectedAttemptExplanations: z.array(z.object({ caseId: SafeIdSchema, attemptId: SafeIdSchema, rationaleDigest: DigestSchema }).strict()).max(100_000),
+}).strict()
+
+const cleanupResultsContent = z.object({
+  leaseResults: z.array(z.object({
+    leaseId: SafeIdSchema,
+    status: z.enum(['not-needed', 'verified-clean', 'failed', 'unknown']),
+    digest: DigestSchema,
+    leaseReceiptDigest: DigestSchema.optional(),
+    plan: CleanupPlanDefinitionSchema.optional(),
+  }).strict()).max(100_000),
+}).strict()
+
+const ReportStatusSchema = SafeIdSchema
+const ReportFindingListSchema = z.array(FindingSchema).max(100_000)
+export const ReportGatewayAuditSchema = z.object({
+  status: z.enum(['valid', 'invalid', 'incomplete', 'not-required']),
+  digest: DigestSchema,
+  forwarded: z.number().int().nonnegative(),
+  blocked: z.number().int().nonnegative(),
+  injected: z.number().int().nonnegative(),
+  findings: ReportFindingListSchema,
+}).strict()
+
+export const FinalReportContentSchema = z.object({
+  verdictRuleVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  verdictInputDigest: DigestSchema,
+  verdict: VerdictResultSchema.shape.verdict,
+  reasonCodes: z.array(SafeIdSchema).min(1).max(10_000),
+  cannotClaim: z.array(NonEmptyTextSchema).max(10_000),
+  businessFailuresObserved: UniqueIdsSchema,
+  advisoryFailures: UniqueIdsSchema,
+  metrics: VerdictResultSchema.shape.metrics,
+  scope: z.array(IdDigestSchema).max(100_000),
+  traceability: z.array(z.object({ fromId: SafeIdSchema, toId: SafeIdSchema, kind: SafeIdSchema }).strict()).max(1_000_000),
+  realResults: z.array(IdDigestSchema).max(100_000),
+  injectionResults: z.array(IdDigestSchema).max(100_000),
+  manualResults: z.array(IdDigestSchema).max(100_000),
+  risks: z.array(FindingSchema).max(100_000),
+  regression: z.object({ manifestDigest: DigestSchema, command: NonEmptyTextSchema }).strict(),
+  title: NonEmptyTextSchema,
+  summaries: z.object({
+    prdId: SafeIdSchema,
+    prdTitle: NonEmptyTextSchema,
+    scopeDigest: DigestSchema,
+    executionContractDigest: DigestSchema,
+    approvalGrantDigests: z.array(DigestSchema).max(100_000),
+    generationDigest: DigestSchema,
+  }).strict(),
+  approvals: z.array(z.object({
+    kind: z.enum(['scope', 'lineage', 'execution']),
+    status: z.enum(['approved', 'rejected', 'pending', 'revoked', 'expired']),
+    subjectDigest: DigestSchema,
+    grantDigests: z.array(DigestSchema).max(100_000)
+      .refine((values) => new Set(values).size === values.length, '审批 grant digest 必须唯一'),
+  }).strict()).length(3),
+  environment: z.object({
+    environmentId: SafeIdSchema,
+    origins: z.array(z.string().url()).min(1).max(256),
+    browser: z.object({
+      name: z.literal('chromium'), version: NonEmptyTextSchema, channel: SafeIdSchema,
+    }).strict(),
+    roles: z.array(z.object({ roleId: SafeIdSchema, status: ReportStatusSchema }).strict()).max(10_000),
+    dataLeases: z.array(z.object({
+      leaseId: SafeIdSchema, status: ReportStatusSchema, resourceFingerprint: DigestSchema,
+    }).strict()).max(100_000),
+  }).strict(),
+  dispositions: z.array(z.object({
+    kind: z.enum(['excluded', 'not-applicable', 'manual', 'declined', 'blocked']),
+    id: SafeIdSchema,
+    title: NonEmptyTextSchema,
+    status: ReportStatusSchema,
+    reason: NonEmptyTextSchema,
+    refs: z.array(SafeIdSchema).max(100_000),
+  }).strict()).max(100_000),
+  coverageUniverse: z.object({
+    universeDigest: DigestSchema,
+    obligations: z.array(z.object({
+      obligationId: SafeIdSchema,
+      title: NonEmptyTextSchema,
+      necessity: z.enum(['required', 'advisory']),
+      disposition: z.enum(['automated', 'manual', 'not-applicable']),
+      caseIds: z.array(SafeIdSchema).max(256)
+        .refine((values) => new Set(values).size === values.length, 'obligation caseId 必须唯一'),
+    }).strict()).max(100_000),
+  }).strict(),
+  traceabilityMatrix: z.array(z.object({
+    reqId: SafeIdSchema,
+    ruleId: SafeIdSchema,
+    obligationId: SafeIdSchema,
+    caseId: SafeIdSchema,
+    stepId: SafeIdSchema,
+    evidenceId: SafeIdSchema,
+    evidencePath: RelativePathSchema,
+  }).strict()).max(1_000_000),
+  caseDetails: z.array(z.object({
+    caseId: SafeIdSchema,
+    title: NonEmptyTextSchema,
+    executionMode: z.enum(['real-environment', 'browser-injection', 'manual']),
+    necessity: z.enum(['required', 'advisory']),
+    status: ReportStatusSchema,
+    preconditions: z.array(NonEmptyTextSchema).max(10_000),
+    steps: z.array(z.object({
+      stepId: SafeIdSchema,
+      action: NonEmptyTextSchema,
+      expected: NonEmptyTextSchema,
+      actual: NonEmptyTextSchema,
+      oracle: NonEmptyTextSchema,
+      status: ReportStatusSchema,
+      evidenceLinks: z.array(RelativePathSchema).max(10_000),
+    }).strict()).max(100_000),
+  }).strict()).max(100_000),
+  injectionBoundary: NonEmptyTextSchema,
+  gatewayAudit: ReportGatewayAuditSchema,
+  browserHealth: ReportFindingListSchema,
+  diagnostics: z.array(z.object({
+    caseId: SafeIdSchema,
+    category: SafeIdSchema,
+    selectedAttemptId: SafeIdSchema.nullable(),
+    rationale: NonEmptyTextSchema,
+    attempts: z.array(z.object({
+      attemptId: SafeIdSchema,
+      slot: z.number().int().nonnegative().max(99),
+      status: ReportStatusSchema,
+      mode: z.enum(['real-environment', 'gateway-injection']),
+      effect: z.enum(['read', 'reversible-write', 'irreversible-write']),
+      eventChainDigest: DigestSchema,
+      reservationSafeToVoid: z.boolean(),
+      changeDigest: DigestSchema.nullable(),
+      sideEffectState: z.enum(['proven-not-applied', 'applied', 'unknown', 'not-applicable']),
+    }).strict()).max(1_000),
+  }).strict()).max(100_000),
+  sideEffects: z.array(z.object({
+    actionId: SafeIdSchema,
+    effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']),
+    status: ReportStatusSchema,
+    verification: NonEmptyTextSchema,
+    cleanupStatus: ReportStatusSchema,
+    digest: DigestSchema,
+  }).strict()).max(100_000),
+  regressionDetails: z.object({
+    testDomain: z.literal('prd-e2e-trusted-compiler'),
+    executionProfile: z.enum(['trusted-read-only', 'trusted-reversible-write', 'production-isolated']),
+    generationId: SafeIdSchema,
+    manifestDigest: DigestSchema,
+    command: NonEmptyTextSchema,
+    caseIds: z.array(SafeIdSchema).max(100_000),
+    trustedCompiler: z.object({
+      compilerInputDigest: DigestSchema,
+      compilerVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+      compilerDigest: DigestSchema,
+      templateVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+      templateDigest: DigestSchema,
+      sourceSetDigest: DigestSchema,
+      discoverySignedDigest: DigestSchema,
+      nodeVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+      playwrightVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+      playwrightCliDigest: DigestSchema,
+      executionDigest: DigestSchema,
+    }).strict(),
+  }).strict(),
+  recommendations: z.array(NonEmptyTextSchema).max(100_000),
+}).strict().superRefine((content, context) => {
+  const casesById = new Map(content.caseDetails.map((item) => [item.caseId, item]))
+  const caseIds = content.caseDetails.map((item) => item.caseId)
+  if (casesById.size !== caseIds.length) {
+    context.addIssue({ code: 'custom', message: 'caseDetails 的 caseId 必须唯一', path: ['caseDetails'] })
+  }
+  const approvalKinds = content.approvals.map((item) => item.kind)
+  if (new Set(approvalKinds).size !== approvalKinds.length
+    || [...approvalKinds].sort().join('\0') !== ['execution', 'lineage', 'scope'].join('\0')) {
+    context.addIssue({ code: 'custom', message: 'scope、lineage 和 execution 审批必须且只能各有一条', path: ['approvals'] })
+  }
+  const obligationIds = content.coverageUniverse.obligations.map((item) => item.obligationId)
+  if (new Set(obligationIds).size !== obligationIds.length) {
+    context.addIssue({ code: 'custom', message: 'coverage obligationId 必须唯一', path: ['coverageUniverse', 'obligations'] })
+  }
+  for (const [obligationIndex, obligation] of content.coverageUniverse.obligations.entries()) {
+    if (obligation.disposition === 'automated' && obligation.caseIds.length === 0) {
+      context.addIssue({ code: 'custom', message: '自动化 obligation 必须引用 Case', path: ['coverageUniverse', 'obligations', obligationIndex, 'caseIds'] })
+    }
+    if (obligation.disposition !== 'automated' && obligation.caseIds.length > 0) {
+      context.addIssue({ code: 'custom', message: '非自动化 obligation 不得引用 Case', path: ['coverageUniverse', 'obligations', obligationIndex, 'caseIds'] })
+    }
+    for (const [caseIndex, caseId] of obligation.caseIds.entries()) {
+      if (!casesById.has(caseId)) {
+        context.addIssue({ code: 'custom', message: 'obligation 引用了不存在的 Case', path: ['coverageUniverse', 'obligations', obligationIndex, 'caseIds', caseIndex] })
+      }
+    }
+  }
+  for (const [field, expectedNecessity] of [
+    ['businessFailuresObserved', 'required'], ['advisoryFailures', 'advisory'],
+  ] as const) {
+    for (const [failureIndex, caseId] of content[field].entries()) {
+      const testCase = casesById.get(caseId)
+      if (!testCase || testCase.necessity !== expectedNecessity || testCase.status !== 'failed') {
+        context.addIssue({
+          code: 'custom', message: `${field} 必须只引用已失败的 ${expectedNecessity} Case`, path: [field, failureIndex],
+        })
+      }
+    }
+  }
+  compareReportIds(
+    content.realResults.map((item) => item.id),
+    content.caseDetails.filter((item) => item.executionMode === 'real-environment'
+      && item.status !== 'not-executed').map((item) => item.caseId),
+    ['realResults'],
+    'realResults 必须与 real-environment Case 完全一致',
+  )
+  compareReportIds(
+    content.injectionResults.map((item) => item.id),
+    content.caseDetails.filter((item) => item.executionMode === 'browser-injection'
+      && item.status !== 'not-executed').map((item) => item.caseId),
+    ['injectionResults'],
+    'injectionResults 必须与 browser-injection Case 完全一致',
+  )
+  compareReportIds(
+    content.regressionDetails.caseIds,
+    content.caseDetails.filter((item) => item.executionMode !== 'manual').map((item) => item.caseId),
+    ['regressionDetails', 'caseIds'],
+    'regressionDetails.caseIds 必须覆盖全部自动化 Case 且不得包含手工 Case',
+  )
+  if (content.regressionDetails.manifestDigest !== content.regression.manifestDigest
+    || content.regressionDetails.command !== content.regression.command) {
+    context.addIssue({
+      code: 'custom', message: '回归摘要与 regressionDetails 不一致', path: ['regressionDetails'],
+    })
+  }
+  for (const [caseIndex, testCase] of content.caseDetails.entries()) {
+    const stepIds = testCase.steps.map((step) => step.stepId)
+    if (new Set(stepIds).size !== stepIds.length) {
+      context.addIssue({
+        code: 'custom', message: '同一 Case 的 stepId 必须唯一', path: ['caseDetails', caseIndex, 'steps'],
+      })
+    }
+  }
+  for (const [rowIndex, row] of content.traceabilityMatrix.entries()) {
+    const testCase = casesById.get(row.caseId)
+    const step = testCase?.steps.find((candidate) => candidate.stepId === row.stepId)
+    if (!testCase || !step || !step.evidenceLinks.includes(row.evidencePath)) {
+      context.addIssue({
+        code: 'custom',
+        message: '追踪行必须指向同一 Case 中存在且登记该 evidencePath 的 Step',
+        path: ['traceabilityMatrix', rowIndex],
+      })
+    }
+  }
+
+  function compareReportIds(actual: string[], expected: string[], path: Array<string | number>, message: string): void {
+    const left = [...actual].sort()
+    const right = [...expected].sort()
+    if (left.length !== new Set(left).size || left.length !== right.length
+      || left.some((value, index) => value !== right[index])) {
+      context.addIssue({ code: 'custom', message, path })
+    }
+  }
+})
+
+export type FinalReportContent = z.infer<typeof FinalReportContentSchema>
+
+const generationManifestContent = z.object({
+  generationId: SafeIdSchema,
+  fencingToken: z.number().int().positive(),
+  finalizationSnapshotDigest: DigestSchema,
+  // generation-manifest 不索引自身，避免真实文件摘要形成不可解的自引用；自身由 Envelope/Authority/active pointer 校验。
+  artifacts: z.array(z.object({
+    artifactId: SafeIdSchema,
+    artifactType: ArtifactTypeSchema,
+    relativePath: RelativePathSchema,
+    digest: DigestSchema,
+  }).strict()).length(26),
+  files: z.array(FileRecordSchema).min(1).max(1_000_000),
+  rootDigest: DigestSchema,
+  terminalVerdict: VerdictResultSchema.shape.verdict,
+  authoritySignature: ArtifactSignatureSchema,
+}).strict().superRefine((content, context) => {
+  const expectedTypes = ARTIFACT_TYPES.filter((type) => type !== 'generation-manifest')
+  const artifactIds = content.artifacts.map((artifact) => artifact.artifactId)
+  const artifactTypes = content.artifacts.map((artifact) => artifact.artifactType)
+  const artifactPaths = content.artifacts.map((artifact) => artifact.relativePath)
+  const filePaths = content.files.map((file) => file.relativePath)
+  if (new Set(artifactIds).size !== artifactIds.length) {
+    context.addIssue({ code: 'custom', message: 'manifest artifactId 必须唯一', path: ['artifacts'] })
+  }
+  if (new Set(artifactPaths).size !== artifactPaths.length) {
+    context.addIssue({ code: 'custom', message: 'manifest Artifact 路径必须唯一', path: ['artifacts'] })
+  }
+  if ([...artifactTypes].sort().join('\0') !== [...expectedTypes].sort().join('\0')) {
+    context.addIssue({ code: 'custom', message: 'manifest 必须且只能索引其余 26 类 Artifact', path: ['artifacts'] })
+  }
+  if (new Set(filePaths).size !== filePaths.length) {
+    context.addIssue({ code: 'custom', message: 'manifest 文件路径必须唯一', path: ['files'] })
+  }
+  if (content.authoritySignature.signedDigest !== content.rootDigest) {
+    context.addIssue({ code: 'custom', message: 'manifest Authority 签名必须绑定 rootDigest', path: ['authoritySignature', 'signedDigest'] })
+  }
+})
+
+const ContentSchemaRegistry = {
+  'project-policy': projectPolicyContent,
+  'prd-request': prdRequestContent,
+  'prd-manifest': prdManifestContent,
+  'prd-diff': prdDiffContent,
+  'semantic-generation': semanticGenerationContent,
+  'acceptance-scope': acceptanceScopeContent,
+  'requirement-model': requirementModelContent,
+  'interaction-flow': interactionFlowContent,
+  'coverage-universe': coverageUniverseContent,
+  'test-cases': testCasesContent,
+  'design-audit': designAuditContent,
+  'execution-contract': executionContractContent,
+  'approval-grants': approvalGrantsContent,
+  'manual-results': manualResultsContent,
+  'data-leases': dataLeasesContent,
+  'browser-preflight': browserPreflightContent,
+  'browser-action-map': browserActionMapContent,
+  'regression-manifest': regressionManifestContent,
+  'run-bundle': runBundleContent,
+  'workflow-events': workflowEventsContent,
+  'browser-results': browserResultsContent,
+  'gateway-audit': gatewayAuditContent,
+  'browser-evidence': browserEvidenceContent,
+  diagnosis: diagnosisContent,
+  'cleanup-results': cleanupResultsContent,
+  'final-report': FinalReportContentSchema,
+  'generation-manifest': generationManifestContent,
+} satisfies Record<ArtifactType, z.ZodTypeAny>
+
+function createArtifactSchema<T extends ArtifactType>(artifactType: T) {
+  return ArtifactEnvelopeSchema.extend({
+    artifactType: z.literal(artifactType),
+    schemaVersion: artifactType === 'final-report' || artifactType === 'cleanup-results'
+      || artifactType === 'approval-grants' || artifactType === 'browser-preflight'
+      || artifactType === 'browser-action-map' || artifactType === 'run-bundle'
+      || artifactType === 'project-policy' || artifactType === 'browser-evidence'
+      || artifactType === 'acceptance-scope' || artifactType === 'prd-diff'
+      || artifactType === 'regression-manifest' || artifactType === 'workflow-events'
+      || artifactType === 'browser-results'
+      ? z.literal('2.0.0')
+      : ArtifactEnvelopeSchema.shape.schemaVersion,
+    graph: ArtifactGraphSchema,
+    content: ContentSchemaRegistry[artifactType],
+  }).strict()
+}
+
+export const ArtifactSchemaRegistry = Object.fromEntries(
+  ARTIFACT_TYPES.map((artifactType) => [artifactType, createArtifactSchema(artifactType)]),
+) as { [T in ArtifactType]: ReturnType<typeof createArtifactSchema<T>> }
+
+export type ArtifactDocument = z.infer<(typeof ArtifactSchemaRegistry)[ArtifactType]>
+export type FinalReportArtifact = z.infer<(typeof ArtifactSchemaRegistry)['final-report']>
+
+export function parseArtifactDocument(candidate: unknown): ArtifactDocument {
+  const typeResult = z.object({ artifactType: ArtifactTypeSchema }).passthrough().safeParse(candidate)
+  if (!typeResult.success) {
+    throw new E2EError({
+      code: 'E2E_ARTIFACT_TYPE_INVALID', category: 'artifact', retryable: false,
+      message: '资产类型缺失或不在固定注册表中', cause: typeResult.error,
+    })
+  }
+  const versionResult = z.object({ schemaVersion: z.string() }).passthrough().safeParse(candidate)
+  if ((typeResult.data.artifactType === 'acceptance-scope' || typeResult.data.artifactType === 'prd-diff')
+    && (!versionResult.success || versionResult.data.schemaVersion !== '2.0.0')) {
+    throw new E2EError({
+      code: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED', category: 'artifact', retryable: false,
+      message: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED: acceptance-scope 与 prd-diff v1 必须迁移到 v2 DecisionReceipt',
+    })
+  }
+  if ((typeResult.data.artifactType === 'workflow-events' || typeResult.data.artifactType === 'browser-results')
+    && (!versionResult.success || versionResult.data.schemaVersion !== '2.0.0')) {
+    throw new E2EError({ code: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED', category: 'artifact', retryable: false,
+      message: `${typeResult.data.artifactType} v1 缺少可独立复验的 Attempt 落盘事实，必须迁移至 v2` })
+  }
+  return ArtifactSchemaRegistry[typeResult.data.artifactType].parse(candidate) as ArtifactDocument
+}

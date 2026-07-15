@@ -1,0 +1,384 @@
+export interface DiscoveryApprovalSubject {
+  schemaVersion: '1.0.0'
+  assetId: string
+  prdRevision: string
+  scopeDigest: string
+  environment: 'local' | 'test' | 'staging' | 'production'
+  baseOrigin: string
+  actor: string
+  expectedPageIdentity: {
+    url: string
+    title: string
+    heading: string
+    ariaSignals: string[]
+  }
+  bootstrapIntentsDigest: string
+  actions: Array<{
+    actionId: string
+    operation: 'dom-read' | 'screenshot' | 'local-navigation'
+    maxUses: number
+  }>
+}
+
+export interface DiscoveryCapability {
+  capabilityId: string
+  nonce: string
+  transport: 'browser-local'
+  effect: 'read'
+  actionId: string
+  operation: DiscoveryApprovalSubject['actions'][number]['operation']
+  targetUrl: string
+  actor: string
+  expectedPageIdentityDigest: string
+  bootstrapIntentsDigest: string
+  maxUses: number
+}
+
+export interface SignedDiscoveryGrant {
+  grantId: string
+  issuer: string
+  keyId: string
+  proofScope: 'local-os-user'
+  approver: ApproverIdentity
+  subject: DiscoveryApprovalSubject
+  subjectDigest: string
+  issuedAt: string
+  expiresAt: string
+  capabilities: DiscoveryCapability[]
+  revocationSequence: number
+  signature: string
+}
+
+export interface DiscoveryPreflightOutcome {
+  status: 'ready' | 'input-blocked' | 'environment-blocked' | 'safety-blocked'
+  reasonCode?: string
+  observedIdentity?: {
+    url: string
+    title: string
+    headings: string[]
+    role?: string
+    ariaSignals?: string[]
+  }
+}
+
+export interface ReadApprovalSubject {
+  schemaVersion: '2.0.0'
+  assetId: string
+  prdRevision: string
+  scopeDigest: string
+  requirementModelDigest: string
+  coveragePolicyDigest: string
+  universeDigest: string
+  caseDigest: string
+  actionMapDigest: string
+  policyDigest: string
+  executionContractDigest: string
+  runBundleProjectionDigest: string
+  environment: 'local' | 'test' | 'staging' | 'production'
+  baseOrigin: string
+  actor: string
+  discoveryGrantId: string
+  preflightDigest: string
+  actions: Array<{
+    actionId: string
+    operation: 'dom-read' | 'screenshot' | 'local-navigation'
+    maxUses: number
+  }>
+}
+
+export interface ApproverIdentity {
+  subject: string
+  roles: string[]
+}
+
+export interface ReadCapability {
+  capabilityId: string
+  nonce: string
+  transport: 'browser-local'
+  effect: 'read'
+  actionId: string
+  operation: ReadApprovalSubject['actions'][number]['operation']
+  maxUses: number
+}
+
+export interface SignedReadGrant {
+  grantId: string
+  issuer: string
+  keyId: string
+  proofScope: 'local-os-user'
+  approver: ApproverIdentity
+  subject: ReadApprovalSubject
+  subjectDigest: string
+  issuedAt: string
+  expiresAt: string
+  capabilities: ReadCapability[]
+  revocationSequence: number
+  signature: string
+}
+
+export type CanonicalPayload =
+  | { kind: 'no-body' }
+  | { kind: 'json'; digest: string }
+  | { kind: 'binary'; digest: string }
+
+export interface HttpIntent {
+  intentId: string
+  method: string
+  canonicalOrigin: string
+  exactPath: string
+  query: Array<[string, string]>
+  payload: CanonicalPayload
+  targetFingerprint: string
+  maxRequests: number
+  expectedOrder: number
+}
+
+export interface WriteApprovalSubject {
+  schemaVersion: '1.0.0' | '2.0.0'
+  assetId: string
+  prdRevision: string
+  executionDigest: string
+  scopeDigest?: string
+  requirementModelDigest?: string
+  coveragePolicyDigest?: string
+  universeDigest?: string
+  caseDigest?: string
+  actionMapDigest?: string
+  policyDigest?: string
+  executionContractDigest?: string
+  runBundleProjectionDigest?: string
+  actor?: string
+  discoveryGrantId?: string
+  preflightDigest?: string
+  environment: 'local' | 'test' | 'staging'
+  baseOrigin: string
+  actions: Array<{
+    actionId: string
+    effect: 'reversible-write'
+    dataLeaseId: string
+    fencingToken: number
+    cleanupPlanDigest: string
+    requests: HttpIntent[]
+  }>
+}
+
+export interface ReversibleWriteCapability {
+  capabilityId: string
+  nonce: string
+  transport: 'http'
+  effect: 'reversible-write'
+  operation: 'http-request'
+  actionId: string
+  dataLeaseId: string
+  fencingToken: number
+  cleanupPlanDigest: string
+  requests: HttpIntent[]
+  maxUses: 1
+}
+
+export interface SignedWriteGrant {
+  grantId: string
+  issuer: string
+  keyId: string
+  proofScope: 'local-os-user'
+  approver: ApproverIdentity
+  subject: WriteApprovalSubject
+  subjectDigest: string
+  issuedAt: string
+  expiresAt: string
+  capabilities: ReversibleWriteCapability[]
+  revocationSequence: number
+  signature: string
+}
+
+export type InjectionResponseBody =
+  | { kind: 'no-body' }
+  | { kind: 'utf8'; value: string; digest: string }
+
+export type CanonicalInjectionResponse =
+  | {
+      kind: 'http-response'
+      status: number
+      headers: Array<{ name: string; value: string }>
+      body: InjectionResponseBody
+      delayMs: number
+    }
+  | {
+      kind: 'connection-reset' | 'timeout'
+      status: 'not-applicable'
+      headers: []
+      body: { kind: 'no-body' }
+      delayMs: number
+    }
+
+export interface InjectionApprovalSubject {
+  schemaVersion: '1.0.0'
+  assetId: string
+  prdRevision: string
+  executionDigest: string
+  environment: 'local' | 'test'
+  baseOrigin: string
+  actions: Array<{
+    actionId: string
+    caseId: string
+    runId: string
+    attemptSlot: number
+    request: HttpIntent
+    response: CanonicalInjectionResponse
+    expectedMatches: number
+    expectedOrder: number
+    upstreamForwarding: 'forbidden'
+  }>
+}
+
+export interface InjectionCapability {
+  capabilityId: string
+  nonce: string
+  transport: 'gateway-injection'
+  actionId: string
+  caseId: string
+  runId: string
+  attemptSlot: number
+  request: HttpIntent
+  response: CanonicalInjectionResponse
+  expectedMatches: number
+  expectedOrder: number
+  upstreamForwarding: 'forbidden'
+  maxUses: number
+}
+
+export interface SignedInjectionGrant {
+  grantId: string
+  issuer: string
+  keyId: string
+  proofScope: 'local-os-user'
+  approver: ApproverIdentity
+  subject: InjectionApprovalSubject
+  subjectDigest: string
+  issuedAt: string
+  expiresAt: string
+  capabilities: InjectionCapability[]
+  revocationSequence: number
+  signature: string
+}
+
+export interface WebSocketReadApprovalSubject {
+  schemaVersion: '1.0.0'
+  assetId: string
+  prdRevision: string
+  executionDigest: string
+  environment: 'local' | 'test' | 'staging' | 'production'
+  baseOrigin: string
+  actions: Array<{
+    actionId: string
+    origin: string
+    path: string
+    maxInboundMessages: number
+    maxBytes: number
+  }>
+}
+
+export interface WebSocketReadCapability {
+  capabilityId: string
+  nonce: string
+  transport: 'websocket'
+  effect: 'read'
+  actionId: string
+  origin: string
+  path: string
+  maxInboundMessages: number
+  maxBytes: number
+  maxUses: 1
+}
+
+export interface SignedWebSocketReadGrant {
+  grantId: string
+  issuer: string
+  keyId: string
+  proofScope: 'local-os-user'
+  approver: ApproverIdentity
+  subject: WebSocketReadApprovalSubject
+  subjectDigest: string
+  issuedAt: string
+  expiresAt: string
+  capabilities: WebSocketReadCapability[]
+  revocationSequence: number
+  signature: string
+}
+
+export interface SseReadApprovalSubject {
+  schemaVersion: '1.0.0'
+  assetId: string
+  prdRevision: string
+  executionDigest: string
+  environment: 'local' | 'test' | 'staging' | 'production'
+  baseOrigin: string
+  actions: Array<{
+    actionId: string
+    origin: string
+    exactPath: string
+    query: Array<[string, string]>
+    maxReconnects: number
+  }>
+}
+
+export interface SseReadCapability {
+  capabilityId: string
+  nonce: string
+  transport: 'sse'
+  effect: 'read'
+  actionId: string
+  origin: string
+  exactPath: string
+  query: Array<[string, string]>
+  maxReconnects: number
+  maxUses: number
+}
+
+export interface SignedSseReadGrant {
+  grantId: string
+  issuer: string
+  keyId: string
+  proofScope: 'local-os-user'
+  approver: ApproverIdentity
+  subject: SseReadApprovalSubject
+  subjectDigest: string
+  issuedAt: string
+  expiresAt: string
+  capabilities: SseReadCapability[]
+  revocationSequence: number
+  signature: string
+}
+
+export function digestInjectionResponseBody(value: string): string {
+  return digestText('injection-response-body/v1', value)
+}
+
+export type SignedGrant = SignedDiscoveryGrant | SignedReadGrant | SignedWriteGrant | SignedInjectionGrant | SignedWebSocketReadGrant | SignedSseReadGrant
+export type ActionCapability = ReadCapability | ReversibleWriteCapability | InjectionCapability | WebSocketReadCapability | SseReadCapability
+
+export type GrantDecision =
+  | { allowed: true }
+  | { allowed: false; code: string; reason: string }
+
+export interface AttemptExecutionContext {
+  assetId: string
+  generationId: string
+  prdRevision: string
+  runId: string
+  caseId: string
+}
+
+export interface CapabilityReservation {
+  reservationId: string
+  grantId: string
+  capabilityId: string
+  actionId: string
+  attemptId: string
+  attemptContext?: AttemptExecutionContext
+  status: 'reserved' | 'completed' | 'unknown'
+  reservedAt: string
+  observation?: string
+  outcomeDigest?: string
+}
+import { digestText } from './common.js'

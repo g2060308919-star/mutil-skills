@@ -1,0 +1,62 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { randomBytes } from 'node:crypto'
+import { expect, test } from 'vitest'
+import { digestText } from '@mutil-skills/e2e-contracts'
+import {
+  LocalApprovalAuthority,
+  LocalLeaseAuthority,
+  createAuthenticatedRpcHttpTransport,
+  createAuthorityExecutionRpcClients,
+  startAuthorityExecutionRpcHostProcess,
+} from '../src/index.js'
+
+test('Authority/Lease Host 在独立 OS 进程打开持久状态并提供认证 RPC', async ({ skip }) => {
+  const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-rpc-host-'))
+  const approvalPath = join(directory, 'approval.sqlite')
+  const leasePath = join(directory, 'lease.sqlite')
+  const encryptionKey = randomBytes(32)
+  const fixedNow = '2026-07-14T10:00:00.000Z'
+  const now = () => new Date(fixedNow)
+  let host: Awaited<ReturnType<typeof startAuthorityExecutionRpcHostProcess>> | undefined
+  try {
+    const approval = await LocalApprovalAuthority.open({ issuer: 'authority', keyId: 'key-1', now,
+      statePath: approvalPath, stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()] })
+    approval.close()
+    const lease = await LocalLeaseAuthority.open({ now, statePath: leasePath, testWorkspaceRoots: [process.cwd()] })
+    const fingerprint = digestText('rpc-host-test/v1', 'resource')
+    const acquired = await lease.acquire({ runId: 'RUN-1', resourceKey: 'order:1',
+      resourceFingerprint: fingerprint, exclusive: true, ttlMs: 60_000 })
+    const active = await lease.activate(acquired.leaseId)
+    lease.close()
+
+    try {
+      host = await startAuthorityExecutionRpcHostProcess({
+        rpc: { issuer: 'authority-host', keyId: 'rpc-key-1', clientId: 'runner-1' },
+        approval: { issuer: 'authority', keyId: 'key-1', statePath: approvalPath,
+          stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()] },
+        lease: { statePath: leasePath, testWorkspaceRoots: [process.cwd()] },
+        clock: { kind: 'fixed-test-only', now: fixedNow },
+      })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') { skip(); return }
+      throw error
+    }
+    expect(host.pid).not.toBe(process.pid)
+    const clients = createAuthorityExecutionRpcClients({ credential: host.credential,
+      verifierMaterial: host.verifierMaterial,
+      expectedPublicKeyDigest: host.verifierMaterial.publicKeyDigest,
+      transport: createAuthenticatedRpcHttpTransport(host.endpoint), now })
+    await expect(clients.lease.verifyTarget(active.leaseId, active.fencingToken, fingerprint)).resolves.toBe(true)
+    await expect(clients.lease.verifyTarget(active.leaseId, active.fencingToken + 1, fingerprint)).resolves.toBe(false)
+    const closedHost = host
+    await closedHost.close()
+    expect(closedHost.credential.sessionKeyBase64Url).toBe('')
+    host = undefined
+  } finally {
+    await host?.close()
+    encryptionKey.fill(0)
+    await rm(directory, { recursive: true, force: true })
+  }
+})
