@@ -23,7 +23,6 @@ import {
   type RuntimeDoctorReport,
 } from './runtime-doctor.js'
 import { isExactRuntimeVersion } from './runtime-manifest.js'
-import { runtimeLayout } from './runtime-layout.js'
 import { E2ERuntimeHost } from './runtime-host.js'
 import { RuntimeRunStore } from './run-store.js'
 import {
@@ -97,11 +96,13 @@ export async function runCli(
     }))
   }
 
-  const json = await readUtf8(stdin)
+  let json = ''
   try {
+    const requestBytes = await readBytes(stdin)
+    json = decodeRequestBytes(requestBytes)
     const request = parseRuntimeRequest(json)
     if (dependencies.runtimeHost !== undefined) {
-      const response = await dependencies.runtimeHost.handle(request, json)
+      const response = await dependencies.runtimeHost.handle(request, requestBytes)
       await writeText(stdout, `${canonicalizeJson(response)}\n`)
       return exitCodeForResponse(response)
     }
@@ -121,8 +122,8 @@ export async function runCli(
     }
     const projectRoot = 'projectRoot' in request ? request.projectRoot : undefined
     const runStore = await RuntimeRunStore.open({
-      stateRoot: runtimeLayout(dependencies.homeDir).state,
-      ...(projectRoot === undefined ? {} : { forbiddenRoots: [projectRoot] }),
+      homeDir: dependencies.homeDir,
+      ...(projectRoot === undefined ? {} : { projectRoot }),
     })
     try {
       const host = new E2ERuntimeHost({
@@ -131,7 +132,7 @@ export async function runCli(
         runStore,
         now: () => new Date(),
       })
-      const response = await host.handle(request, json)
+      const response = await host.handle(request, requestBytes)
       await writeText(stdout, `${canonicalizeJson(response)}\n`)
       return exitCodeForResponse(response)
     } finally {
@@ -219,10 +220,24 @@ async function writeErrorResponse(stdout: Writable, requestId: string, error: E2
   return exitCodeForResponse(response)
 }
 
-async function readUtf8(stream: Readable): Promise<string> {
+async function readBytes(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = []
   for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
-  return Buffer.concat(chunks).toString('utf8')
+  return Buffer.concat(chunks)
+}
+
+function decodeRequestBytes(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch (cause) {
+    throw new E2EError({
+      code: 'E2E_RUNTIME_REQUEST_INVALID',
+      category: 'input',
+      message: 'Runtime request 必须是 UTF-8 JSON',
+      retryable: false,
+      cause,
+    })
+  }
 }
 
 async function writeText(stream: Writable, text: string): Promise<void> {

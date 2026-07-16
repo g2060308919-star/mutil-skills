@@ -1,4 +1,4 @@
-import { cp, mkdir, symlink, writeFile } from 'node:fs/promises'
+import { cp, link, mkdir, rename, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { createRuntimeTestRoots } from './fixtures.js'
@@ -6,6 +6,7 @@ import {
   rebindProjectIdentity,
   resolveProjectIdentity,
 } from '../src/project-identity.js'
+import { SecureProjectFileReader } from '../src/secure-project-files.js'
 
 async function writeProjectIdentity(projectRoot: string, projectId = 'PROJECT-1'): Promise<void> {
   await mkdir(join(projectRoot, '.biztest'), { recursive: true })
@@ -48,6 +49,40 @@ describe('project identity', () => {
     }))
 
     await expect(resolveProjectIdentity(roots.project)).rejects.toThrow(/E2E_RUNTIME_PROJECT_IDENTITY_INVALID/)
+  })
+
+  test('does not read an outside canary when a parent is swapped to a symlink before open', async () => {
+    const roots = await createRuntimeTestRoots()
+    await writeProjectIdentity(roots.project)
+    const outside = join(roots.root, 'outside')
+    await mkdir(join(outside, '.biztest'), { recursive: true })
+    await writeFile(join(outside, '.biztest', 'project.json'), JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'OUTSIDE-CANARY',
+    }))
+    let beforeReadCalled = false
+    const reader = new SecureProjectFileReader({
+      beforeOpenFile: async ({ relativePath }) => {
+        if (relativePath !== '.biztest/project.json') return
+        await rename(join(roots.project, '.biztest'), join(roots.project, '.biztest-original'))
+        await symlink(join(outside, '.biztest'), join(roots.project, '.biztest'))
+      },
+      beforeRead: async () => { beforeReadCalled = true },
+    })
+
+    await expect(resolveProjectIdentity(roots.project, reader))
+      .rejects.toThrow(/E2E_RUNTIME_PROJECT_FILE_UNSAFE/)
+    expect(beforeReadCalled).toBe(false)
+  })
+
+  test('rejects a hard-linked project declaration', async () => {
+    const roots = await createRuntimeTestRoots()
+    const outsideDeclaration = join(roots.root, 'outside-project.json')
+    await writeFile(outsideDeclaration, JSON.stringify({ schemaVersion: '1.0.0', projectId: 'PROJECT-1' }))
+    await mkdir(join(roots.project, '.biztest'), { recursive: true })
+    await link(outsideDeclaration, join(roots.project, '.biztest', 'project.json'))
+
+    await expect(resolveProjectIdentity(roots.project))
+      .rejects.toThrow(/E2E_RUNTIME_PROJECT_FILE_UNSAFE/)
   })
 
   test('normalizes a missing project root to the stable identity error', async () => {

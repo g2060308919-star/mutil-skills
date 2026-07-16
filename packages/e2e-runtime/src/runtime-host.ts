@@ -18,19 +18,19 @@ import {
   createWorkflow,
   transitionWorkflow,
 } from '@mutil-skills/e2e-engine'
-import { lstat, readFile, realpath } from 'node:fs/promises'
-import { isAbsolute, relative, resolve } from 'node:path'
 import { runtimeErrorResponse } from './protocol.js'
-import { resolveProjectIdentity, type ProjectIdentity } from './project-identity.js'
+import { resolveProjectIdentity } from './project-identity.js'
 import type { RuntimeInstallation } from './runtime-discovery.js'
 import type { RuntimeDoctorReport } from './runtime-doctor.js'
 import { RuntimeRunStore, type RuntimeRunSnapshot } from './run-store.js'
+import { SecureProjectFileReader } from './secure-project-files.js'
 
 export interface RuntimeHostDependencies {
   installation: RuntimeInstallation
   doctor(): Promise<RuntimeDoctorReport>
   runStore: RuntimeRunStore
   now(): Date
+  projectFileReader?: SecureProjectFileReader
 }
 
 export class E2ERuntimeHost {
@@ -38,20 +38,45 @@ export class E2ERuntimeHost {
 
   async handle(
     request: RuntimeRequestEnvelope,
-    requestBytes?: string | Uint8Array,
+    requestBytes: string | Uint8Array,
   ): Promise<RuntimeResponseEnvelope> {
-    let requestDigest: string | undefined
+    let requestDigest: string
     try {
       requestDigest = runtimeRequestDigest(request, requestBytes)
-      if (request.command === 'doctor') return await this.doctorResponse(request)
+    } catch (error) {
+      return this.errorResponse(request.requestId, asRuntimeError(error))
+    }
+
+    try {
+      const reservation = await this.dependencies.runStore.beginRequest(request.requestId, requestDigest)
+      if (reservation.kind === 'replay') {
+        return RuntimeResponseEnvelopeSchema.parse(reservation.response)
+      }
+    } catch (error) {
+      return this.errorResponse(request.requestId, asRuntimeError(error))
+    }
+
+    try {
+      if (request.command === 'doctor') {
+        const response = await this.doctorResponse(request)
+        return await this.completeGlobalResponse(request.requestId, requestDigest, response)
+      }
       if (request.command === 'create-run') return await this.createRun(request, requestDigest)
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
       throw blockedError('E2E_RUNTIME_COMMAND_NOT_READY')
     } catch (error) {
       const response = this.errorResponse(request.requestId, asRuntimeError(error))
-      if (requestDigest !== undefined) await this.persistErrorReplay(request, requestDigest, response)
-      return response
+      try {
+        return await this.completeGlobalResponse(request.requestId, requestDigest, response)
+      } catch (persistenceError) {
+        return this.errorResponse(request.requestId, runtimeHostError(
+          'E2E_RUNTIME_REPLAY_PERSISTENCE_FAILED',
+          'safety',
+          '请求结果无法原子写入 replay ledger，Runtime 已阻止继续处理',
+          persistenceError,
+        ))
+      }
     }
   }
 
@@ -67,178 +92,146 @@ export class E2ERuntimeHost {
     request: Extract<RuntimeRequestEnvelope, { command: 'create-run' }>,
     requestDigest: string,
   ): Promise<RuntimeResponseEnvelope> {
-    const identity = await resolveProjectIdentity(request.projectRoot)
+    const reader = this.projectFileReader()
+    const identity = await resolveProjectIdentity(request.projectRoot, reader)
     const runId = runIdForRequest(request.requestId)
-    const lock = await this.dependencies.runStore.acquireRunLock(identity.digest, runId)
-    try {
-      const replay = await this.dependencies.runStore.getRecordedResponse(
-        identity.digest, runId, request.requestId, requestDigest,
+    const doctor = RuntimeDoctorReportSchema.parse(await this.dependencies.doctor())
+    if (!doctor.ready) {
+      throw runtimeHostError(
+        'E2E_RUNTIME_NOT_READY',
+        'environment',
+        'Runtime Doctor 尚未证明基础运行能力就绪',
       )
-      if (replay !== undefined) return RuntimeResponseEnvelopeSchema.parse(replay)
-
-      const existing = await this.dependencies.runStore.getRun(identity.digest, runId)
-      if (existing !== undefined) {
-        const recovered = this.successResponse(request.requestId, createRunResult(existing))
-        await this.dependencies.runStore.recordResponse(
-          identity.digest, runId, request.requestId, requestDigest, recovered,
-        )
-        return recovered
-      }
-
-      const doctor = RuntimeDoctorReportSchema.parse(await this.dependencies.doctor())
-      if (!doctor.ready) {
-        throw runtimeHostError(
-          'E2E_RUNTIME_NOT_READY',
-          'environment',
-          'Runtime Doctor 尚未证明基础运行能力就绪',
-        )
-      }
-
-      const prdBytes = await readBoundProjectFile(identity, request.payload.prdSource.path)
-      const projectPolicyBytes = await readBoundProjectFile(identity, request.payload.projectPolicyPath)
-      const prdRevision = computePrdRevision({
-        normalizedPrd: decodeUtf8(prdBytes, 'PRD'),
-        sourceIdentity: { sourceId: 'PRD-BODY', version: '1', kind: 'file' },
-        attachments: [],
-      }).prdRevision
-      const timestamp = this.dependencies.now().toISOString()
-      const snapshot: RuntimeRunSnapshot = {
-        schemaVersion: '1.0.0',
-        runId,
-        assetId: request.payload.assetId,
-        projectIdentityDigest: identity.digest,
-        runtimeInstallationDigest: this.dependencies.installation.installationDigest,
-        workflow: createWorkflow(),
-        artifactDigests: {
-          'prd-source': prdRevision,
-          'project-policy-source': digestBytes('e2e-project-policy-source/v1', projectPolicyBytes),
-        },
-        requestResponses: {},
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      }
-      await this.dependencies.runStore.createRun(snapshot)
-      const response = this.successResponse(request.requestId, createRunResult(snapshot))
-      await this.dependencies.runStore.recordResponse(
-        identity.digest, runId, request.requestId, requestDigest, response,
-      )
-      return response
-    } finally {
-      await lock.close()
     }
+
+    const prdBytes = await reader.readFile(identity, request.payload.prdSource.path)
+    const projectPolicyBytes = await reader.readFile(identity, request.payload.projectPolicyPath)
+    const prdRevision = computePrdRevision({
+      normalizedPrd: decodeUtf8(prdBytes, 'PRD'),
+      sourceIdentity: { sourceId: 'PRD-BODY', version: '1', kind: 'file' },
+      attachments: [],
+    }).prdRevision
+    const timestamp = this.dependencies.now().toISOString()
+    const snapshot: RuntimeRunSnapshot = {
+      schemaVersion: '1.0.0',
+      runId,
+      assetId: request.payload.assetId,
+      projectIdentityDigest: identity.digest,
+      runtimeInstallationDigest: this.dependencies.installation.installationDigest,
+      workflow: createWorkflow(),
+      artifactDigests: {
+        'prd-source': prdRevision,
+        'project-policy-source': digestBytes('e2e-project-policy-source/v1', projectPolicyBytes),
+      },
+      requestResponses: {},
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }
+    const response = this.successResponse(request.requestId, createRunResult(snapshot))
+    return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.createRunOutcome(
+      snapshot,
+      request.requestId,
+      requestDigest,
+      response,
+    ))
   }
 
   private async getStatus(
     request: Extract<RuntimeRequestEnvelope, { command: 'get-status' }>,
     requestDigest: string,
   ): Promise<RuntimeResponseEnvelope> {
-    const identity = await resolveProjectIdentity(request.projectRoot)
-    const lock = await this.dependencies.runStore.acquireRunLock(identity.digest, request.payload.runId)
-    try {
-      const replay = await this.dependencies.runStore.getRecordedResponse(
-        identity.digest, request.payload.runId, request.requestId, requestDigest,
-      )
-      if (replay !== undefined) return RuntimeResponseEnvelopeSchema.parse(replay)
-      const snapshot = await this.requireRun(identity.digest, request.payload.runId)
-      const response = this.successResponse(request.requestId, statusResult(snapshot))
-      await this.dependencies.runStore.recordResponse(
-        identity.digest, snapshot.runId, request.requestId, requestDigest, response,
-      )
-      return response
-    } finally {
-      await lock.close()
-    }
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.readRunOutcome(
+      identity.digest,
+      request.payload.runId,
+      request.requestId,
+      requestDigest,
+      (snapshot) => {
+        this.requireInstallation(snapshot)
+        return this.successResponse(request.requestId, statusResult(snapshot))
+      },
+    ))
   }
 
   private async submitCandidate(
     request: Extract<RuntimeRequestEnvelope, { command: 'submit-candidate' }>,
     requestDigest: string,
   ): Promise<RuntimeResponseEnvelope> {
-    const identity = await resolveProjectIdentity(request.projectRoot)
-    const lock = await this.dependencies.runStore.acquireRunLock(identity.digest, request.payload.runId)
-    try {
-      const replay = await this.dependencies.runStore.getRecordedResponse(
-        identity.digest, request.payload.runId, request.requestId, requestDigest,
-      )
-      if (replay !== undefined) return RuntimeResponseEnvelopeSchema.parse(replay)
-      const snapshot = await this.requireRun(identity.digest, request.payload.runId)
-      if (request.payload.expectedState !== snapshot.workflow.current) {
-        throw runtimeHostError(
-          'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH',
-          'input',
-          'expectedState 只能作为当前状态的并发前置条件，不能指定 next state',
-        )
-      }
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+      identity.digest,
+      request.payload.runId,
+      request.requestId,
+      requestDigest,
+      (snapshot) => {
+        this.requireInstallation(snapshot)
+        if (request.payload.expectedState !== snapshot.workflow.current) {
+          throw runtimeHostError(
+            'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH',
+            'input',
+            'expectedState 只能作为当前状态的并发前置条件，不能指定 next state',
+          )
+        }
 
-      const candidate = parseCandidate(request.payload.artifactType, request.payload.candidate)
-      const expectedDigest = digestArtifactContent(
-        `artifact-content/${candidate.schemaVersion}/${candidate.artifactType}`,
-        candidate as unknown as Record<string, unknown>,
-      )
-      if (candidate.contentDigest !== expectedDigest) {
-        throw runtimeHostError(
-          'E2E_RUNTIME_CANDIDATE_DIGEST_MISMATCH',
-          'artifact',
-          'Candidate contentDigest 与 Runtime 重算结果不一致',
+        const candidate = parseCandidate(request.payload.artifactType, request.payload.candidate)
+        const expectedDigest = digestArtifactContent(
+          `artifact-content/${candidate.schemaVersion}/${candidate.artifactType}`,
+          candidate as unknown as Record<string, unknown>,
         )
-      }
-      if (candidate.assetId !== snapshot.assetId
-        || candidate.prdRevision !== snapshot.artifactDigests['prd-source']
-        || candidate.generationId !== snapshot.runId) {
-        throw runtimeHostError(
-          'E2E_RUNTIME_CANDIDATE_BINDING_MISMATCH',
-          'artifact',
-          'Candidate assetId、prdRevision 或 generationId 未绑定当前 Run',
-        )
-      }
+        if (candidate.contentDigest !== expectedDigest) {
+          throw runtimeHostError(
+            'E2E_RUNTIME_CANDIDATE_DIGEST_MISMATCH',
+            'artifact',
+            'Candidate contentDigest 与 Runtime 重算结果不一致',
+          )
+        }
+        if (candidate.assetId !== snapshot.assetId
+          || candidate.prdRevision !== snapshot.artifactDigests['prd-source']
+          || candidate.generationId !== snapshot.runId) {
+          throw runtimeHostError(
+            'E2E_RUNTIME_CANDIDATE_BINDING_MISMATCH',
+            'artifact',
+            'Candidate assetId、prdRevision 或 generationId 未绑定当前 Run',
+          )
+        }
 
-      const next = nextWorkflowNode(snapshot.workflow.current, request.payload.artifactType)
-      if (next === undefined) {
-        throw blockedError(missingCapabilityCode(snapshot.workflow.current))
-      }
-      const transition = transitionWorkflow({
-        state: snapshot.workflow,
-        next,
-        reason: `accepted candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
-        timestamp: this.dependencies.now().toISOString(),
-        engineVersion: this.dependencies.installation.version,
-      })
-      const updated = await this.dependencies.runStore.updateRun(
-        identity.digest,
-        snapshot.runId,
-        (current) => ({
-          ...current,
+        const next = nextWorkflowNode(snapshot.workflow.current, request.payload.artifactType)
+        if (next === undefined) {
+          throw blockedError(missingCapabilityCode(snapshot.workflow.current))
+        }
+        const transition = transitionWorkflow({
+          state: snapshot.workflow,
+          next,
+          reason: `accepted candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
+          timestamp: this.dependencies.now().toISOString(),
+          engineVersion: this.dependencies.installation.version,
+        })
+        const updated: RuntimeRunSnapshot = {
+          ...snapshot,
           workflow: transition.state,
           artifactDigests: {
-            ...current.artifactDigests,
+            ...snapshot.artifactDigests,
             [request.payload.artifactType]: candidate.contentDigest,
           },
           updatedAt: this.dependencies.now().toISOString(),
-        }),
-        'candidate-accepted',
-      )
-      const response = this.successResponse(request.requestId, {
-        runId: updated.runId,
-        workflow: updated.workflow,
-        acceptedArtifact: {
-          artifactType: request.payload.artifactType,
-          contentDigest: candidate.contentDigest,
-        },
-      })
-      await this.dependencies.runStore.recordResponse(
-        identity.digest, updated.runId, request.requestId, requestDigest, response,
-      )
-      return response
-    } finally {
-      await lock.close()
-    }
+        }
+        return {
+          snapshot: updated,
+          response: this.successResponse(request.requestId, {
+            runId: updated.runId,
+            workflow: updated.workflow,
+            acceptedArtifact: {
+              artifactType: request.payload.artifactType,
+              contentDigest: candidate.contentDigest,
+            },
+          }),
+        }
+      },
+      'candidate-accepted',
+    ))
   }
 
-  private async requireRun(projectIdentityDigest: string, runId: string): Promise<RuntimeRunSnapshot> {
-    const snapshot = await this.dependencies.runStore.getRun(projectIdentityDigest, runId)
-    if (snapshot === undefined) {
-      throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', '当前项目身份下不存在该 Run')
-    }
+  private requireInstallation(snapshot: RuntimeRunSnapshot): void {
     if (snapshot.runtimeInstallationDigest !== this.dependencies.installation.installationDigest) {
       throw runtimeHostError(
         'E2E_RUNTIME_INSTALLATION_BINDING_MISMATCH',
@@ -246,31 +239,24 @@ export class E2ERuntimeHost {
         'Run 绑定的 active Runtime generation 已改变',
       )
     }
-    return snapshot
   }
 
-  private async persistErrorReplay(
-    request: RuntimeRequestEnvelope,
+  private async completeGlobalResponse(
+    requestId: string,
     requestDigest: string,
     response: RuntimeResponseEnvelope,
-  ): Promise<void> {
-    if (request.command === 'doctor') return
-    try {
-      const identity = await resolveProjectIdentity(request.projectRoot)
-      const runId = request.command === 'create-run'
-        ? runIdForRequest(request.requestId)
-        : request.payload.runId
-      const lock = await this.dependencies.runStore.acquireRunLock(identity.digest, runId)
-      try {
-        await this.dependencies.runStore.recordResponse(
-          identity.digest, runId, request.requestId, requestDigest, response,
-        )
-      } finally {
-        await lock.close()
-      }
-    } catch {
-      // The original fail-closed response wins; journal/lock failures must not be hidden by replay bookkeeping.
-    }
+  ): Promise<RuntimeResponseEnvelope> {
+    return RuntimeResponseEnvelopeSchema.parse(
+      await this.dependencies.runStore.completeGlobalRequest(
+        requestId,
+        requestDigest,
+        response,
+      ),
+    )
+  }
+
+  private projectFileReader(): SecureProjectFileReader {
+    return this.dependencies.projectFileReader ?? new SecureProjectFileReader()
   }
 
   private successResponse(requestId: string, result: unknown): RuntimeResponseEnvelope {
@@ -365,22 +351,6 @@ function statusResult(snapshot: RuntimeRunSnapshot): Record<string, unknown> {
   }
 }
 
-async function readBoundProjectFile(identity: ProjectIdentity, inputPath: string): Promise<Buffer> {
-  const candidate = isAbsolute(inputPath) ? inputPath : resolve(identity.realRoot, inputPath)
-  const resolved = await realpath(candidate)
-  const fromRoot = relative(identity.realRoot, resolved)
-  if (fromRoot === '' || fromRoot.startsWith('..') || isAbsolute(fromRoot)
-    || (await lstat(candidate)).isSymbolicLink()) {
-    throw runtimeHostError(
-      'E2E_RUNTIME_PROJECT_FILE_OUTSIDE_ROOT',
-      'safety',
-      'PRD 与 project policy 必须是项目真实根目录内的普通文件',
-    )
-  }
-  const bytes = await readFile(resolved)
-  return bytes
-}
-
 function decodeUtf8(bytes: Uint8Array, label: string): string {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
@@ -391,10 +361,14 @@ function decodeUtf8(bytes: Uint8Array, label: string): string {
 
 function runtimeRequestDigest(
   request: RuntimeRequestEnvelope,
-  requestBytes?: string | Uint8Array,
+  requestBytes: string | Uint8Array,
 ): string {
   if (requestBytes === undefined) {
-    return digestText('e2e-runtime-request/v1', canonicalizeJson(request))
+    throw runtimeHostError(
+      'E2E_RUNTIME_REQUEST_BYTES_REQUIRED',
+      'input',
+      'Runtime Host 必须接收 parser 实际消费的原始 request bytes',
+    )
   }
   const bytes = typeof requestBytes === 'string' ? Buffer.from(requestBytes, 'utf8') : requestBytes
   let parsed: unknown

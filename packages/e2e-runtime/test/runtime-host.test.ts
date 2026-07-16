@@ -5,13 +5,14 @@ import {
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
 } from '@mutil-skills/e2e-contracts'
-import { cp, mkdir, writeFile } from 'node:fs/promises'
+import { cp, mkdir, rename, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { createRuntimeTestRoots } from './fixtures.js'
 import type { RuntimeInstallation } from '../src/runtime-discovery.js'
 import { E2ERuntimeHost } from '../src/runtime-host.js'
-import { RuntimeRunStore } from '../src/run-store.js'
+import { RuntimeRunStore, type RuntimeRunStoreTestHooks } from '../src/run-store.js'
+import { SecureProjectFileReader } from '../src/secure-project-files.js'
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`
 
@@ -27,7 +28,7 @@ const installation: RuntimeInstallation = {
 describe('E2ERuntimeHost', () => {
   test('creates a persistent run and reports status only under the same physical project identity', async () => {
     const fixture = await hostFixture()
-    const created = await fixture.host.handle(createRunRequest('REQUEST-CREATE-1', fixture.roots.project))
+    const created = await handleRequest(fixture.host, createRunRequest('REQUEST-CREATE-1', fixture.roots.project))
     const createdResult = successResult(created)
 
     expect(createdResult).toMatchObject({
@@ -38,7 +39,7 @@ describe('E2ERuntimeHost', () => {
       workflow: { current: 'created', sequence: 0 },
     })
 
-    const status = await fixture.host.handle(getStatusRequest(
+    const status = await handleRequest(fixture.host, getStatusRequest(
       'REQUEST-STATUS-1',
       fixture.roots.project,
       createdResult.runId as string,
@@ -51,7 +52,7 @@ describe('E2ERuntimeHost', () => {
 
     const copied = join(fixture.roots.root, 'project-copy')
     await cp(fixture.roots.project, copied, { recursive: true })
-    const copiedStatus = await fixture.host.handle(getStatusRequest(
+    const copiedStatus = await handleRequest(fixture.host, getStatusRequest(
       'REQUEST-STATUS-2', copied, createdResult.runId as string,
     ))
     expect(copiedStatus).toMatchObject({
@@ -64,14 +65,15 @@ describe('E2ERuntimeHost', () => {
   test('replays identical requests but fails closed when a request id is rebound', async () => {
     const fixture = await hostFixture()
     const request = createRunRequest('REQUEST-CREATE-1', fixture.roots.project)
-    const first = await fixture.host.handle(request)
-    const replay = await fixture.host.handle(request)
+    const first = await handleRequest(fixture.host, request)
+    const replay = await handleRequest(fixture.host, request)
 
     expect(replay).toEqual(first)
-    const rebound = await fixture.host.handle({
+    const reboundRequest = {
       ...request,
       payload: { ...request.payload, assetId: 'ASSET-2' },
-    })
+    }
+    const rebound = await handleRequest(fixture.host, reboundRequest)
     expect(rebound).toMatchObject({
       ok: false,
       error: { code: 'E2E_RUNTIME_REQUEST_REPLAY_MISMATCH' },
@@ -96,7 +98,7 @@ describe('E2ERuntimeHost', () => {
 
   test('parses and re-digests a candidate before advancing exactly one Engine edge', async () => {
     const fixture = await hostFixture()
-    const created = successResult(await fixture.host.handle(
+    const created = successResult(await handleRequest(fixture.host,
       createRunRequest('REQUEST-CREATE-1', fixture.roots.project),
     ))
     const candidate = prdRequestCandidate({
@@ -104,7 +106,7 @@ describe('E2ERuntimeHost', () => {
       generationId: created.generationId as string,
       prdRevision: created.prdRevision as string,
     })
-    const response = await fixture.host.handle(submitCandidateRequest({
+    const response = await handleRequest(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-SUBMIT-1',
       projectRoot: fixture.roots.project,
       runId: created.runId as string,
@@ -117,7 +119,7 @@ describe('E2ERuntimeHost', () => {
       workflow: { current: 'source-frozen', sequence: 1 },
       acceptedArtifact: { artifactType: 'prd-request', contentDigest: candidate.contentDigest },
     })
-    const status = successResult(await fixture.host.handle(getStatusRequest(
+    const status = successResult(await handleRequest(fixture.host, getStatusRequest(
       'REQUEST-STATUS-1', fixture.roots.project, created.runId as string,
     )))
     expect(status.workflow).toMatchObject({ current: 'source-frozen', sequence: 1 })
@@ -126,7 +128,7 @@ describe('E2ERuntimeHost', () => {
 
   test('rejects caller state jumps, candidate rebinding, and false content digests without mutating state', async () => {
     const fixture = await hostFixture()
-    const created = successResult(await fixture.host.handle(
+    const created = successResult(await handleRequest(fixture.host,
       createRunRequest('REQUEST-CREATE-1', fixture.roots.project),
     ))
     const candidate = prdRequestCandidate({
@@ -135,7 +137,7 @@ describe('E2ERuntimeHost', () => {
       prdRevision: created.prdRevision as string,
     })
 
-    const stateJump = await fixture.host.handle(submitCandidateRequest({
+    const stateJump = await handleRequest(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-SUBMIT-JUMP', projectRoot: fixture.roots.project,
       runId: created.runId as string, expectedState: 'accepted', candidate,
     }))
@@ -146,19 +148,19 @@ describe('E2ERuntimeHost', () => {
       `artifact-content/${reboundCandidate.schemaVersion}/${reboundCandidate.artifactType}`,
       reboundCandidate,
     )
-    const rebound = await fixture.host.handle(submitCandidateRequest({
+    const rebound = await handleRequest(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-SUBMIT-REBIND', projectRoot: fixture.roots.project,
       runId: created.runId as string, expectedState: 'created', candidate: reboundCandidate,
     }))
     expect(rebound).toMatchObject({ ok: false, error: { code: 'E2E_RUNTIME_CANDIDATE_BINDING_MISMATCH' } })
 
-    const falseDigest = await fixture.host.handle(submitCandidateRequest({
+    const falseDigest = await handleRequest(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-SUBMIT-DIGEST', projectRoot: fixture.roots.project,
       runId: created.runId as string, expectedState: 'created',
       candidate: { ...candidate, contentDigest: digest('f') },
     }))
     expect(falseDigest).toMatchObject({ ok: false, error: { code: 'E2E_RUNTIME_CANDIDATE_DIGEST_MISMATCH' } })
-    const reboundAfterError = await fixture.host.handle(submitCandidateRequest({
+    const reboundAfterError = await handleRequest(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-SUBMIT-DIGEST', projectRoot: fixture.roots.project,
       runId: created.runId as string, expectedState: 'created', candidate,
     }))
@@ -167,7 +169,7 @@ describe('E2ERuntimeHost', () => {
       error: { code: 'E2E_RUNTIME_REQUEST_REPLAY_MISMATCH' },
     })
 
-    const status = successResult(await fixture.host.handle(getStatusRequest(
+    const status = successResult(await handleRequest(fixture.host, getStatusRequest(
       'REQUEST-STATUS-1', fixture.roots.project, created.runId as string,
     )))
     expect(status.workflow).toMatchObject({ current: 'created', sequence: 0 })
@@ -176,7 +178,7 @@ describe('E2ERuntimeHost', () => {
 
   test('returns the strict doctor report through the host envelope', async () => {
     const fixture = await hostFixture()
-    const response = await fixture.host.handle(RuntimeRequestEnvelopeSchema.parse({
+    const response = await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
       schemaVersion: '1.0.0', requestId: 'REQUEST-DOCTOR-1',
       client: { name: 'test-client', version: '1.0.0' }, command: 'doctor', payload: {},
     }))
@@ -184,18 +186,90 @@ describe('E2ERuntimeHost', () => {
     expect(successResult(response)).toMatchObject({ ready: true, runtimeVersion: '0.0.0' })
     await fixture.store.close()
   })
+
+  test('globally reserves invalid-project errors before identity parsing', async () => {
+    const fixture = await hostFixture()
+    const invalid = createRunRequest('REQUEST-GLOBAL-1', join(fixture.roots.root, 'missing-project'))
+    const first = await handleRequest(fixture.host, invalid)
+    expect(first).toMatchObject({ ok: false, error: { code: 'E2E_RUNTIME_PROJECT_IDENTITY_INVALID' } })
+
+    const rebound = createRunRequest('REQUEST-GLOBAL-1', fixture.roots.project)
+    const second = await handleRequest(fixture.host, rebound)
+    expect(second).toMatchObject({
+      ok: false,
+      error: { code: 'E2E_RUNTIME_REQUEST_REPLAY_MISMATCH' },
+    })
+    await fixture.store.close()
+  })
+
+  test('journals doctor responses in the same global raw-bytes replay ledger', async () => {
+    const fixture = await hostFixture()
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'REQUEST-DOCTOR-GLOBAL',
+      client: { name: 'test-client', version: '1.0.0' }, command: 'doctor', payload: {},
+    })
+    const bytes = JSON.stringify(request)
+    const first = await fixture.host.handle(request, bytes)
+    const replay = await fixture.host.handle(request, bytes)
+    expect(replay).toEqual(first)
+    await expect(fixture.host.handle(request, `${bytes} `)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'E2E_RUNTIME_REQUEST_REPLAY_MISMATCH' },
+    })
+    await fixture.store.close()
+  })
+
+  test.each(['inputs/prd.md', 'inputs/policy.json'])(
+    'does not read an outside canary when %s parent is swapped before open',
+    async (targetPath) => {
+      const roots = await createRuntimeTestRoots()
+      const outsideInputs = join(roots.root, 'outside-inputs')
+      await mkdir(outsideInputs)
+      await writeFile(join(outsideInputs, 'prd.md'), 'OUTSIDE-PRD-CANARY')
+      await writeFile(join(outsideInputs, 'policy.json'), 'OUTSIDE-POLICY-CANARY')
+      let targetRead = false
+      let swapped = false
+      const reader = new SecureProjectFileReader({
+        beforeOpenFile: async ({ relativePath }) => {
+          if (relativePath !== targetPath || swapped) return
+          swapped = true
+          await rename(join(roots.project, 'inputs'), join(roots.project, 'inputs-original'))
+          await symlink(outsideInputs, join(roots.project, 'inputs'))
+        },
+        beforeRead: async ({ relativePath }) => {
+          if (relativePath === targetPath) targetRead = true
+        },
+      })
+      const fixture = await hostFixture({ roots, reader })
+
+      const response = await handleRequest(
+        fixture.host,
+        createRunRequest(`REQUEST-SWAP-${targetPath.endsWith('prd.md') ? 'PRD' : 'POLICY'}`, roots.project),
+      )
+      expect(response).toMatchObject({ ok: false, error: { code: 'E2E_RUNTIME_PROJECT_FILE_UNSAFE' } })
+      expect(targetRead).toBe(false)
+      await fixture.store.close()
+    },
+  )
 })
 
-async function hostFixture() {
-  const roots = await createRuntimeTestRoots()
+async function hostFixture(options: {
+  roots?: Awaited<ReturnType<typeof createRuntimeTestRoots>>
+  reader?: SecureProjectFileReader
+  storeHooks?: RuntimeRunStoreTestHooks
+} = {}) {
+  const roots = options.roots ?? await createRuntimeTestRoots()
   await mkdir(join(roots.project, '.biztest'), { recursive: true })
   await writeFile(join(roots.project, '.biztest', 'project.json'), JSON.stringify({
     schemaVersion: '1.0.0', projectId: 'PROJECT-1',
   }))
-  await writeFile(join(roots.project, 'prd.md'), '# Product\nA stable PRD.')
-  await writeFile(join(roots.project, 'policy.json'), '{}')
+  await mkdir(join(roots.project, 'inputs'), { recursive: true })
+  await writeFile(join(roots.project, 'inputs', 'prd.md'), '# Product\nA stable PRD.')
+  await writeFile(join(roots.project, 'inputs', 'policy.json'), '{}')
   const store = await RuntimeRunStore.open({
-    stateRoot: join(roots.home, '.mutil-skills/e2e/state'), forbiddenRoots: [roots.project],
+    homeDir: roots.home,
+    projectRoot: roots.project,
+    ...(options.storeHooks === undefined ? {} : { testHooks: options.storeHooks }),
   })
   const host = new E2ERuntimeHost({
     installation,
@@ -207,6 +281,7 @@ async function hostFixture() {
     }),
     runStore: store,
     now: () => new Date('2026-07-17T00:00:00.000Z'),
+    ...(options.reader === undefined ? {} : { projectFileReader: options.reader }),
   })
   return { roots, store, host }
 }
@@ -224,8 +299,8 @@ function createRunRequest(requestId: string, projectRoot: string) {
     ...requestHeader(requestId), command: 'create-run', projectRoot,
     payload: {
       assetId: 'ASSET-1',
-      prdSource: { kind: 'file', path: 'prd.md' },
-      projectPolicyPath: 'policy.json',
+      prdSource: { kind: 'file', path: 'inputs/prd.md' },
+      projectPolicyPath: 'inputs/policy.json',
     },
   }) as Extract<RuntimeRequestEnvelope, { command: 'create-run' }>
 }
@@ -265,7 +340,7 @@ function prdRequestCandidate(binding: {
     contentDigest: '', signatures: [], dependencies: [], graph: { defines: [], references: [] },
     content: {
       productSpace: 'PRODUCT', title: 'Product PRD',
-      sourceDescriptors: [{ sourceId: 'PRD-BODY', kind: 'file', ref: 'prd.md' }],
+      sourceDescriptors: [{ sourceId: 'PRD-BODY', kind: 'file', ref: 'inputs/prd.md' }],
       userRequest: 'Test the product', testWorkspaceId: 'WORKSPACE-1', secretRefs: [],
     },
   }
@@ -283,4 +358,12 @@ function successResult(response: RuntimeResponseEnvelope): Record<string, unknow
   expect(parsed.ok).toBe(true)
   expect(parsed.result).toBeTypeOf('object')
   return parsed.result as Record<string, unknown>
+}
+
+async function handleRequest(
+  host: E2ERuntimeHost,
+  request: RuntimeRequestEnvelope,
+  bytes = JSON.stringify(request),
+): Promise<RuntimeResponseEnvelope> {
+  return await host.handle(request, bytes)
 }

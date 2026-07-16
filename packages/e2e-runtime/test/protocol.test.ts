@@ -115,11 +115,12 @@ describe('repo-e2e CLI protocol slice', () => {
   test('routes a parsed rpc request through the installed Runtime Host', async () => {
     const stdout = captureWritable()
     const stderr = captureWritable()
-    const calls: unknown[] = []
+    const calls: Array<{ request: unknown; requestBytes: unknown }> = []
+    const rawRequest = JSON.stringify(doctorRequest)
 
     const exitCode = await runCli(
       ['rpc'],
-      Readable.from([JSON.stringify(doctorRequest)]),
+      Readable.from([rawRequest]),
       stdout.stream,
       stderr.stream,
       {
@@ -129,8 +130,8 @@ describe('repo-e2e CLI protocol slice', () => {
         }),
         uninstallRuntime: async () => ({ version: '0.0.0' }),
         runtimeHost: {
-          handle: async (request) => {
-            calls.push(request)
+          handle: async (request, requestBytes) => {
+            calls.push({ request, requestBytes })
             return successResponse()
           },
         },
@@ -138,7 +139,7 @@ describe('repo-e2e CLI protocol slice', () => {
     )
 
     expect(exitCode).toBe(0)
-    expect(calls).toEqual([doctorRequest])
+    expect(calls).toEqual([{ request: doctorRequest, requestBytes: Buffer.from(rawRequest) }])
     expect(stdout.text()).toBe(`${canonicalizeJson(successResponse())}\n`)
     expect(stderr.text()).toBe('')
   })
