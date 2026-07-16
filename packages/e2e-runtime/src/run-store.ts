@@ -334,6 +334,7 @@ export class RuntimeRunStore {
             existing.expiresAt = this.#now().toISOString()
           }
         })
+        this.#lockClaims.delete(lock)
         closed = true
       },
     }
@@ -344,8 +345,13 @@ export class RuntimeRunStore {
   #requireCurrentLease(snapshot: RunStoreSnapshot, key: string, lock: RuntimeRunLock): void {
     const claim = this.#lockClaims.get(lock)
     const persisted = snapshot.leases[key]
-    if (claim?.key !== key
-      || persisted?.ownerNonce !== claim.ownerNonce
+    if (claim?.key !== key) {
+      throw runtimeStoreError(
+        'E2E_RUNTIME_RUN_LOCKED',
+        'Run mutation lock 已释放、无效或不属于当前 Store',
+      )
+    }
+    if (persisted?.ownerNonce !== claim.ownerNonce
       || persisted.fencingToken !== claim.fencingToken
       || Date.parse(persisted.expiresAt) <= this.#now().getTime()) {
       throw runtimeStoreError(

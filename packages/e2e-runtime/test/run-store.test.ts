@@ -199,6 +199,57 @@ describe('runtime run store', () => {
     await store.close()
   })
 
+  test('permanently invalidates a released lock even when the clock rolls back', async () => {
+    const roots = await createRuntimeTestRoots()
+    let now = new Date('2026-07-17T00:00:00.000Z')
+    const store = await RuntimeRunStore.open({
+      homeDir: roots.home,
+      projectRoot: roots.project,
+      now: () => now,
+      leaseMilliseconds: 10_000,
+    })
+    await store.beginRequest('REQUEST-SETUP', digest('a'))
+    const setupLock = await store.acquireRunLock(digest('1'), 'RUN-1')
+    await store.createRunOutcome(
+      runSnapshot(), 'REQUEST-SETUP', digest('a'), { ok: true }, setupLock,
+    )
+    await setupLock.close()
+
+    now = new Date('2026-07-17T00:01:00.000Z')
+    await store.beginRequest('REQUEST-CREATE-CLOSED', digest('b'))
+    const createLock = await store.acquireRunLock(digest('1'), 'RUN-CLOSED')
+    await createLock.close()
+    await createLock.close()
+    now = new Date('2026-07-17T00:00:59.000Z')
+    await expect(store.createRunOutcome(
+      { ...runSnapshot(), runId: 'RUN-CLOSED' },
+      'REQUEST-CREATE-CLOSED', digest('b'), { ok: true }, createLock,
+    )).rejects.toThrow(/E2E_RUNTIME_RUN_LOCKED/)
+
+    now = new Date('2026-07-17T00:02:00.000Z')
+    await store.beginRequest('REQUEST-UPDATE-CLOSED', digest('c'))
+    const updateLock = await store.acquireRunLock(digest('1'), 'RUN-1')
+    await updateLock.close()
+    await updateLock.close()
+    now = new Date('2026-07-17T00:01:59.000Z')
+    await expect(store.updateRunOutcome(
+      digest('1'), 'RUN-1', 'REQUEST-UPDATE-CLOSED', digest('c'), unchangedOutcome,
+      'closed-update', updateLock,
+    )).rejects.toThrow(/E2E_RUNTIME_RUN_LOCKED/)
+
+    now = new Date('2026-07-17T00:03:00.000Z')
+    await store.beginRequest('REQUEST-READ-CLOSED', digest('d'))
+    const readLock = await store.acquireRunLock(digest('1'), 'RUN-1')
+    await readLock.close()
+    await readLock.close()
+    now = new Date('2026-07-17T00:02:59.000Z')
+    await expect(store.readRunOutcome(
+      digest('1'), 'RUN-1', 'REQUEST-READ-CLOSED', digest('d'),
+      (snapshot) => ({ runId: snapshot.runId }), readLock,
+    )).rejects.toThrow(/E2E_RUNTIME_RUN_LOCKED/)
+    await store.close()
+  })
+
   test('only the current persisted lease owner may mutate across store instances', async () => {
     const roots = await createRuntimeTestRoots()
     let now = new Date('2026-07-17T00:00:00.000Z')
@@ -215,7 +266,7 @@ describe('runtime run store', () => {
     const createLock = await first.acquireRunLock(digest('1'), 'RUN-1')
     await expect(second.createRunOutcome(
       runSnapshot(), 'REQUEST-CREATE', digest('a'), { ok: true }, createLock,
-    )).rejects.toThrow(/E2E_RUNTIME_RUN_LEASE_FENCED/)
+    )).rejects.toThrow(/E2E_RUNTIME_RUN_LOCKED/)
     await first.createRunOutcome(
       runSnapshot(), 'REQUEST-CREATE', digest('a'), { ok: true }, createLock,
     )
@@ -226,12 +277,12 @@ describe('runtime run store', () => {
     await expect(second.readRunOutcome(
       digest('1'), 'RUN-1', 'REQUEST-READ-FOREIGN', digest('d'),
       (snapshot) => ({ runId: snapshot.runId }), firstOwner,
-    )).rejects.toThrow(/E2E_RUNTIME_RUN_LEASE_FENCED/)
+    )).rejects.toThrow(/E2E_RUNTIME_RUN_LOCKED/)
     await second.beginRequest('REQUEST-FOREIGN', digest('b'))
     await expect(second.updateRunOutcome(
       digest('1'), 'RUN-1', 'REQUEST-FOREIGN', digest('b'), unchangedOutcome,
       'foreign-update', firstOwner,
-    )).rejects.toThrow(/E2E_RUNTIME_RUN_LEASE_FENCED/)
+    )).rejects.toThrow(/E2E_RUNTIME_RUN_LOCKED/)
     await expect(second.acquireRunLock(digest('1'), 'RUN-1'))
       .rejects.toThrow(/E2E_RUNTIME_RUN_LOCKED/)
 
