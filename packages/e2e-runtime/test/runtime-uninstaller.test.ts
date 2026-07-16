@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { runtimeLayout } from '../src/runtime-layout.js'
@@ -53,6 +53,24 @@ describe('runtime uninstaller', () => {
     await expect(uninstallRuntime({ homeDir: roots.home, version: '0.0.0' }))
       .rejects.toThrow(/E2E_RUNTIME_MANIFEST_MISMATCH/)
     expect((await stat(target)).isDirectory()).toBe(true)
+  })
+
+  test('refuses every deletion when current metadata is schema-valid but not bound to its installation', async () => {
+    const roots = await createRuntimeTestRoots()
+    await installFixture(roots.source, roots.home, '0.0.0', 'zero')
+    await installFixture(roots.source, roots.home, '0.0.1', 'one')
+    const layout = runtimeLayout(roots.home)
+    const current = JSON.parse(await readFile(layout.current, 'utf8')) as Record<string, unknown>
+    await writeFile(layout.current, JSON.stringify({
+      ...current,
+      versionRoot: await realpath(join(layout.versions, '0.0.0')),
+    }), { mode: 0o600 })
+
+    await expect(uninstallRuntime({ homeDir: roots.home, version: '0.0.0' }))
+      .rejects.toThrow(/E2E_RUNTIME_CURRENT_MISMATCH/)
+
+    expect((await stat(join(layout.versions, '0.0.0'))).isDirectory()).toBe(true)
+    expect((await stat(join(layout.versions, '0.0.1'))).isDirectory()).toBe(true)
   })
 
   test('accepts only exact versions and rejects unverified replacements', async () => {

@@ -93,3 +93,63 @@ Commit title: `feat(e2e): install isolated runtime versions`
 
 - 无阻塞 concern。
 - 首期严格遵循设计范围，仅支持 POSIX owner/mode 模型与稳定三段式精确 SemVer；Doctor、Host 生命周期、Browser 安装和独立 state/identity 销毁命令留给后续任务。
+
+## Review Fix Follow-up
+
+Commit title: `fix(e2e): harden runtime installation transactions`
+
+### 修复内容
+
+- 将激活事务改为先快照旧 launcher/current，再原子准备并验证与版本无关的固定 launcher，最后原子切换 current；launcher 或 current 即使在实际写入后报错，也分别恢复旧 bytes/mode。
+- 安装事务显式跟踪本次 rename 的 version target；versions 父目录 fsync、post-rename 完整验证、launcher 准备或 current 激活失败时，仅在 inode 与本事务 staging identity 一致时删除 target，并 fsync 父目录，因此同版重试不会被残留阻塞。
+- 新增内部生产依赖 seam `installRuntimeWithOperations()` / `RuntimeInstallerOperations`，只从非 package-root source 测试入口使用；测试在真实临时 HOME 和真实文件 bytes 上注入 I/O 边界故障，不断言 mock 调用。
+- uninstall 在验证或删除任何目标前先调用 `verifyCurrentRuntimeInstallation()`，完整复验 current 的严格 schema/protocol major、version root realpath、manifest digest 与实际 installation；schema 合法但绑定不一致时 fail closed。
+- discovery 与 uninstall 共用相同 current binding verifier，消除两条路径的验证漂移。
+- 固定 launcher 在 realpath 前对 versions root 与目标 version 分别 lstat，拒绝 symlink，验证当前 UID 与目录 `0700`，并要求 canonical version root 是 versions root 的严格子目录。
+- 新增显式 platform gate，仅允许 `darwin`/`linux`；`freebsd`、`aix`、`win32` 即使具有 `getuid` 也返回 `E2E_RUNTIME_PLATFORM_UNSUPPORTED`。launcher 内嵌相同允许集合。
+- CLI 与 manifest 现在共用 `isExactRuntimeVersion()`，关闭 exact-version 双来源 minor；自包含 launcher 仍内嵌同一固定 regex，避免从项目或 package resolution 加载代码。
+- 未实现或修改 Doctor、Host、Browser、Authority 或 Gateway 业务。
+
+### RED
+
+1. 安装激活 rollback 与 rename 后清理：
+   - Command: `npx vitest run packages/e2e-runtime/test/runtime-installer.test.ts`
+   - Exit: 1；3 failed / 9 passed。
+   - Expected failures: `installRuntimeWithOperations` 尚不存在；launcher 写后失败、current 写后失败、versions fsync 失败无法进入所需事务 seam。
+2. uninstall current binding：
+   - Command: `npx vitest run packages/e2e-runtime/test/runtime-uninstaller.test.ts`
+   - Exit: 1；1 failed / 4 passed。
+   - Expected failure: schema-valid current 的 `versionRoot` 指向另一 installation 时，旧实现仍删除 inactive target。
+3. launcher 目录边界：
+   - Command: `npx vitest run packages/e2e-runtime/test/runtime-discovery.test.ts`
+   - Exit: 1；4 failed / 3 passed。
+   - Expected failures: symlinked versions、symlinked version、`0755` versions/version 和 resolved versionRoot 等于 versions root 时，旧 launcher 均错误启动 trusted entrypoint。
+4. 显式平台 gate：
+   - Command: `npx vitest run packages/e2e-runtime/test/runtime-layout.test.ts`
+   - Exit: 1；1 failed / 5 passed。
+   - Expected failure: `assertSupportedRuntimePlatform` 尚不存在。
+
+### GREEN
+
+- 安装事务聚焦：`npx vitest run packages/e2e-runtime/test/runtime-installer.test.ts`
+  - PASS；13/13 tests。
+  - 覆盖 launcher/current 写后故障 rollback、versions fsync 故障清理与重试、post-rename verification 故障清理与重试。
+- 最终必需聚焦门禁：
+  - Command: `npx vitest run packages/e2e-runtime/test/runtime-layout.test.ts packages/e2e-runtime/test/runtime-installer.test.ts packages/e2e-runtime/test/runtime-uninstaller.test.ts packages/e2e-runtime/test/runtime-discovery.test.ts packages/e2e-runtime/test/protocol.test.ts`
+  - PASS；5 files / 43 tests。
+
+### Typecheck / Architecture Lint
+
+- 首次 typecheck 捕获测试 helper 的隐式 `any`（TS7031），补充 `InstallRuntimeOptions` 显式类型后重跑。
+- Command: `npm run typecheck && npm run lint:architecture`
+- Final result: PASS。
+
+### Self-review / Concerns
+
+- current 是激活事务的最后一项持久状态切换；其后的读取仅验证刚写入的 canonical pointer，失败会回滚 current 与 launcher。
+- rollback 对 current 与 launcher 分别 best-effort 执行；任一 rollback 自身失败会以 `E2E_RUNTIME_ACTIVATION_ROLLBACK_FAILED` 保留原始错误与 rollback errors，避免静默成功。
+- 新 target 清理核对 rename 前 staging directory 的 dev/ino，不会删除同路径上的未知 replacement。
+- current binding mismatch 在 target manifest 验证和删除之前拒绝；两个 version 目录在测试中均保持存在。
+- launcher 集成测试通过真实 executable 构造 symlink-resolved 且 current 绑定匹配的攻击布局，证明拒绝来自 lstat/mode/strict-child gate，而不是偶然的 current mismatch。
+- `git diff --check` PASS；未修改 plan/progress，未运行全量 `npm test`，符合 review 指令。
+- 无阻塞 concern。

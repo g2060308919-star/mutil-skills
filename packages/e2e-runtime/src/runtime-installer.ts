@@ -6,6 +6,7 @@ import {
   lstat,
   mkdir,
   open,
+  readFile,
   readdir,
   realpath,
   rename,
@@ -25,6 +26,7 @@ import {
   createRuntimeCurrent,
   createRuntimeManifest,
   currentUid,
+  readRuntimeCurrent,
   runtimeError,
   validatePreparedRuntimeClosure,
   verifyInstalledRuntimeVersion,
@@ -54,6 +56,13 @@ export interface ProductionClosureInstallInput {
   prefix: string
   packageSpec: string
   env: NodeJS.ProcessEnv
+}
+
+export interface RuntimeInstallerOperations {
+  fsyncVersions(path: string): Promise<void>
+  verifyVersion(layout: RuntimeLayout, version: string): Promise<VerifiedRuntimeVersion>
+  writeLauncher(layout: RuntimeLayout): Promise<void>
+  writeCurrent(layout: RuntimeLayout, current: RuntimeCurrentPointer): Promise<void>
 }
 
 const INSTALLER_ENVIRONMENT_KEYS = [
@@ -96,6 +105,13 @@ export class ProductionClosureInstaller {
 }
 
 export async function installRuntime(options: InstallRuntimeOptions): Promise<RuntimeInstallResult> {
+  return installRuntimeWithOperations(options, runtimeInstallerOperations)
+}
+
+export async function installRuntimeWithOperations(
+  options: InstallRuntimeOptions,
+  operations: RuntimeInstallerOperations,
+): Promise<RuntimeInstallResult> {
   assertExactRuntimeVersion(options.version)
   const layout = runtimeLayout(options.homeDir)
   await prepareOwnedRuntimeRoot(layout)
@@ -108,6 +124,9 @@ export async function installRuntime(options: InstallRuntimeOptions): Promise<Ru
     await chmod(stagingPrefix, 0o700)
     const stagingRealpath = await realpath(stagingPrefix)
     const stagingIdentity = await lstat(stagingPrefix)
+    const target = join(layout.versions, options.version)
+    let createdTarget = false
+    let activated = false
     try {
       const installClosure = options.installClosure ?? productionInstallClosure
       await installClosure({ stagingPrefix, version: options.version })
@@ -134,19 +153,36 @@ export async function installRuntime(options: InstallRuntimeOptions): Promise<Ru
       await chmod(manifestPath, 0o600)
       await fsyncTree(stagingPrefix)
 
-      const target = join(layout.versions, options.version)
-      const verified = await commitVersionDirectory(layout, stagingPrefix, target, options.version, manifest.installationDigest)
-      await writeActiveRuntimeFiles(layout, verified)
+      createdTarget = await placeVersionDirectory(stagingPrefix, target)
+      if (createdTarget) await operations.fsyncVersions(layout.versions)
+      const verified = await operations.verifyVersion(layout, options.version)
+      if (verified.manifest.installationDigest !== manifest.installationDigest) {
+        runtimeError('E2E_RUNTIME_VERSION_CONFLICT', '相同版本已存在但 installation digest 不同')
+      }
+      await activateRuntimeFiles(layout, verified, operations)
+      activated = true
       return {
         version: verified.version,
         installationDigest: verified.manifest.installationDigest,
         launcher: layout.bin,
       }
+    } catch (error) {
+      if (createdTarget && !activated) {
+        await removeNewVersionTarget(target, stagingIdentity)
+      }
+      throw error
     } finally {
       await rm(stagingPrefix, { recursive: true, force: true })
     }
   })
 }
+
+export const runtimeInstallerOperations: RuntimeInstallerOperations = Object.freeze({
+  fsyncVersions: fsyncDirectory,
+  verifyVersion: verifyInstalledRuntimeVersion,
+  writeLauncher: writeFixedLauncher,
+  writeCurrent: writeCurrentPointer,
+})
 
 export async function withRuntimeInstallLock<T>(layout: RuntimeLayout, operation: () => Promise<T>): Promise<T> {
   let handle
@@ -180,12 +216,7 @@ export async function writeActiveRuntimeFiles(
   layout: RuntimeLayout,
   verified: VerifiedRuntimeVersion,
 ): Promise<RuntimeCurrentPointer> {
-  const current = createRuntimeCurrent(verified)
-  await atomicWriteFile(layout.current, `${canonicalizeJson(current)}\n`, 0o600)
-  const binDirectory = dirname(layout.bin)
-  await ensurePrivateDirectory(binDirectory)
-  await atomicWriteFile(layout.bin, fixedLauncherSource(layout), 0o700)
-  return current
+  return activateRuntimeFiles(layout, verified, runtimeInstallerOperations)
 }
 
 async function productionInstallClosure(input: RuntimeClosureInstallInput): Promise<void> {
@@ -262,39 +293,132 @@ async function normalizeClosurePermissions(directory: string): Promise<void> {
   }
 }
 
-async function commitVersionDirectory(
-  layout: RuntimeLayout,
+async function placeVersionDirectory(
   stagingPrefix: string,
   target: string,
-  version: string,
-  stagingDigest: string,
-): Promise<VerifiedRuntimeVersion> {
-  if (await pathExists(target)) {
-    const metadata = await lstat(target)
-    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-      runtimeError('E2E_RUNTIME_VERSION_PATH_UNSAFE', '目标 version 路径不是固定真实目录')
-    }
-    const existing = await verifyInstalledRuntimeVersion(layout, version)
-    if (existing.manifest.installationDigest !== stagingDigest) {
-      runtimeError('E2E_RUNTIME_VERSION_CONFLICT', '相同版本已存在但 installation digest 不同')
-    }
-    return existing
-  }
+): Promise<boolean> {
+  if (await pathExists(target)) return false
   try {
     await rename(stagingPrefix, target)
+    return true
   } catch (error) {
     if (!isNodeError(error, 'EEXIST') && !isNodeError(error, 'ENOTEMPTY')) throw error
-    const existing = await verifyInstalledRuntimeVersion(layout, version)
-    if (existing.manifest.installationDigest !== stagingDigest) {
-      runtimeError('E2E_RUNTIME_VERSION_CONFLICT', '并发安装产生了不同 installation digest')
-    }
-    return existing
+    return false
   }
-  await fsyncDirectory(layout.versions)
-  return verifyInstalledRuntimeVersion(layout, version)
 }
 
-async function atomicWriteFile(path: string, contents: string, mode: number): Promise<void> {
+async function activateRuntimeFiles(
+  layout: RuntimeLayout,
+  verified: VerifiedRuntimeVersion,
+  operations: RuntimeInstallerOperations,
+): Promise<RuntimeCurrentPointer> {
+  const current = createRuntimeCurrent(verified)
+  const launcherBefore = await snapshotFile(layout.bin)
+  const currentBefore = await snapshotFile(layout.current)
+  let launcherWriteAttempted = false
+  let currentWriteAttempted = false
+  try {
+    launcherWriteAttempted = true
+    await operations.writeLauncher(layout)
+    await verifyFixedLauncher(layout)
+    currentWriteAttempted = true
+    await operations.writeCurrent(layout, current)
+    const writtenCurrent = await readRuntimeCurrent(layout)
+    if (canonicalizeJson(writtenCurrent) !== canonicalizeJson(current)) {
+      runtimeError('E2E_RUNTIME_CURRENT_MISMATCH', '激活后的 current pointer 与目标 installation 不一致')
+    }
+    return current
+  } catch (error) {
+    const rollbackErrors: unknown[] = []
+    if (currentWriteAttempted) {
+      try {
+        await restoreFile(layout.current, currentBefore)
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError)
+      }
+    }
+    if (launcherWriteAttempted) {
+      try {
+        await restoreFile(layout.bin, launcherBefore)
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError)
+      }
+    }
+    if (rollbackErrors.length > 0) {
+      throw new AggregateError([error, ...rollbackErrors], 'E2E_RUNTIME_ACTIVATION_ROLLBACK_FAILED')
+    }
+    throw error
+  }
+}
+
+async function writeFixedLauncher(layout: RuntimeLayout): Promise<void> {
+  const binDirectory = dirname(layout.bin)
+  await ensurePrivateDirectory(binDirectory)
+  await atomicWriteFile(layout.bin, fixedLauncherSource(layout), 0o700)
+}
+
+async function writeCurrentPointer(layout: RuntimeLayout, current: RuntimeCurrentPointer): Promise<void> {
+  await atomicWriteFile(layout.current, `${canonicalizeJson(current)}\n`, 0o600)
+}
+
+async function verifyFixedLauncher(layout: RuntimeLayout): Promise<void> {
+  const metadata = await lstat(layout.bin)
+  if (!metadata.isFile()
+    || metadata.isSymbolicLink()
+    || metadata.nlink !== 1
+    || metadata.uid !== currentUid()
+    || (metadata.mode & 0o777) !== 0o700
+    || await readFile(layout.bin, 'utf8') !== fixedLauncherSource(layout)) {
+    runtimeError('E2E_RUNTIME_LAUNCHER_INVALID', '固定 launcher 写入后验证失败')
+  }
+}
+
+interface FileSnapshot {
+  contents: Buffer
+  mode: number
+}
+
+async function snapshotFile(path: string): Promise<FileSnapshot | undefined> {
+  try {
+    const metadata = await lstat(path)
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.uid !== currentUid()) {
+      runtimeError('E2E_RUNTIME_FILE_UNSAFE', '事务快照只接受当前用户拥有的单链接普通文件')
+    }
+    return { contents: await readFile(path), mode: metadata.mode & 0o777 }
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return undefined
+    throw error
+  }
+}
+
+async function restoreFile(path: string, snapshot: FileSnapshot | undefined): Promise<void> {
+  if (snapshot === undefined) {
+    await unlink(path).catch((error: unknown) => {
+      if (!isNodeError(error, 'ENOENT')) throw error
+    })
+    if (await pathExists(dirname(path))) await fsyncDirectory(dirname(path))
+    return
+  }
+  await atomicWriteFile(path, snapshot.contents, snapshot.mode)
+}
+
+async function removeNewVersionTarget(target: string, identity: { dev: number; ino: number }): Promise<void> {
+  const targetIdentity = await lstat(target).catch((error: unknown) => {
+    if (isNodeError(error, 'ENOENT')) return undefined
+    throw error
+  })
+  if (targetIdentity === undefined) {
+    await fsyncDirectory(dirname(target))
+    return
+  }
+  if (targetIdentity.dev !== identity.dev || targetIdentity.ino !== identity.ino) {
+    runtimeError('E2E_RUNTIME_VERSION_PATH_UNSAFE', '失败清理只允许删除本事务 rename 的 version root')
+  }
+  await rm(target, { recursive: true, force: true })
+  await fsyncDirectory(dirname(target))
+}
+
+async function atomicWriteFile(path: string, contents: string | Uint8Array, mode: number): Promise<void> {
   const directory = dirname(path)
   const temporary = join(directory, `.${randomUUID()}.tmp`)
   const handle = await open(

@@ -1,10 +1,6 @@
-import { join } from 'node:path'
 import { runtimeLayout } from './runtime-layout.js'
 import {
-  RUNTIME_ENTRYPOINT,
-  readRuntimeCurrent,
-  runtimeError,
-  verifyInstalledRuntimeVersion,
+  verifyCurrentRuntimeInstallation,
   verifyRuntimeRoot,
 } from './runtime-manifest.js'
 
@@ -26,13 +22,7 @@ export async function inspectRuntimeInstallation(
 ): Promise<RuntimeInstallation> {
   const layout = runtimeLayout(options.homeDir)
   await verifyRuntimeRoot(layout)
-  const current = await readRuntimeCurrent(layout)
-  const verified = await verifyInstalledRuntimeVersion(layout, current.runtimeVersion)
-  if (verified.versionRoot !== current.versionRoot
-    || verified.manifest.installationDigest !== current.runtimeManifestDigest
-    || verified.entrypoint !== join(verified.versionRoot, ...RUNTIME_ENTRYPOINT.split('/'))) {
-    runtimeError('E2E_RUNTIME_CURRENT_MISMATCH', 'current pointer 未绑定已验证 installation')
-  }
+  const { installation: verified } = await verifyCurrentRuntimeInstallation(layout)
   return {
     version: verified.version,
     protocolMajor: 1,

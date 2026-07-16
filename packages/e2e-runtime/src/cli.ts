@@ -11,6 +11,7 @@ import {
   type RuntimeUninstallResult,
   type UninstallRuntimeOptions,
 } from './runtime-uninstaller.js'
+import { isExactRuntimeVersion } from './runtime-manifest.js'
 import {
   RUNTIME_PACKAGE_VERSION,
   exitCodeForResponse,
@@ -19,7 +20,6 @@ import {
 } from './protocol.js'
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
-const EXACT_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/
 
 export interface RuntimeCliDependencies {
   homeDir: string
@@ -92,7 +92,7 @@ async function runInstallManagementCommand(
     }
 
     if (arguments_[0] === 'install-runtime') {
-      if (arguments_.length !== 3 || arguments_[1] !== '--version' || !isExactVersion(arguments_[2])) {
+      if (arguments_.length !== 3 || arguments_[1] !== '--version' || !isExactRuntimeVersion(arguments_[2])) {
         throw installArgumentError('install-runtime 需要 --version <exact>')
       }
       const result = await dependencies.installRuntime({
@@ -109,12 +109,12 @@ async function runInstallManagementCommand(
 
     const withoutReplacement = arguments_.length === 3
       && arguments_[1] === '--version'
-      && isExactVersion(arguments_[2])
+      && isExactRuntimeVersion(arguments_[2])
     const withReplacement = arguments_.length === 5
       && arguments_[1] === '--version'
-      && isExactVersion(arguments_[2])
+      && isExactRuntimeVersion(arguments_[2])
       && arguments_[3] === '--activate'
-      && isExactVersion(arguments_[4])
+      && isExactRuntimeVersion(arguments_[4])
     if (!withoutReplacement && !withReplacement) {
       throw installArgumentError('uninstall-runtime 需要 --version <exact> [--activate <exact>]')
     }
@@ -171,10 +171,6 @@ function requestIdFromUntrustedJson(json: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function isExactVersion(value: string | undefined): value is string {
-  return value !== undefined && EXACT_VERSION.test(value)
 }
 
 function installArgumentError(message: string): E2EError {

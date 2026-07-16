@@ -45,10 +45,19 @@ export interface VerifiedRuntimeVersion {
   manifest: RuntimeManifest
 }
 
+export interface VerifiedCurrentRuntime {
+  current: RuntimeCurrentPointer
+  installation: VerifiedRuntimeVersion
+}
+
 export function assertExactRuntimeVersion(version: string): void {
-  if (!EXACT_VERSION_PATTERN.test(version)) {
+  if (!isExactRuntimeVersion(version)) {
     runtimeError('E2E_RUNTIME_VERSION_INVALID', 'Runtime 版本必须是精确稳定 SemVer', 'input')
   }
+}
+
+export function isExactRuntimeVersion(version: string | undefined): version is string {
+  return version !== undefined && EXACT_VERSION_PATTERN.test(version)
 }
 
 export async function createRuntimeManifest(
@@ -98,6 +107,18 @@ export async function verifyRuntimeRoot(layout: RuntimeLayout): Promise<RuntimeO
 
 export async function readRuntimeCurrent(layout: RuntimeLayout): Promise<RuntimeCurrentPointer> {
   return parseCurrentPointer(await readSafeRegularFile(layout.current, layout.root, true))
+}
+
+export async function verifyCurrentRuntimeInstallation(
+  layout: RuntimeLayout,
+): Promise<VerifiedCurrentRuntime> {
+  const current = await readRuntimeCurrent(layout)
+  const installation = await verifyInstalledRuntimeVersion(layout, current.runtimeVersion)
+  if (installation.versionRoot !== current.versionRoot
+    || installation.manifest.installationDigest !== current.runtimeManifestDigest) {
+    runtimeError('E2E_RUNTIME_CURRENT_MISMATCH', 'current pointer 未绑定已验证 installation')
+  }
+  return { current, installation }
 }
 
 export function createRuntimeCurrent(
@@ -197,10 +218,17 @@ export async function assertDirectory(
 }
 
 export function currentUid(): number {
+  assertSupportedRuntimePlatform(process.platform)
   if (typeof process.getuid !== 'function') {
     runtimeError('E2E_RUNTIME_PLATFORM_UNSUPPORTED', '首期 Runtime 只支持 POSIX 用户权限模型', 'environment')
   }
   return process.getuid()
+}
+
+export function assertSupportedRuntimePlatform(platform: NodeJS.Platform): void {
+  if (platform !== 'darwin' && platform !== 'linux') {
+    runtimeError('E2E_RUNTIME_PLATFORM_UNSUPPORTED', '首期 Runtime 只支持 macOS 与 Linux', 'environment')
+  }
 }
 
 export function runtimeError(

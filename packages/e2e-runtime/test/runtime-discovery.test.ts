@@ -1,5 +1,15 @@
 import { execFile } from 'node:child_process'
-import { chmod, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import {
+  chmod,
+  mkdir,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, test } from 'vitest'
@@ -97,7 +107,73 @@ describe('runtime discovery', () => {
       env: { HOME: roots.home, PATH: process.env.PATH ?? '' },
     })).rejects.toMatchObject({ code: 70 })
   })
+
+  test('the fixed launcher rejects a symlinked versions root even when current binds its resolved path', async () => {
+    const roots = await createRuntimeTestRoots()
+    await installFixture(roots.source, roots.home, '0.0.0')
+    const layout = runtimeLayout(roots.home)
+    const realVersions = join(layout.root, 'versions-real')
+    await rename(layout.versions, realVersions)
+    await symlink(realVersions, layout.versions)
+    await rewriteCurrentVersionRoot(layout.current, await realpath(join(layout.versions, '0.0.0')))
+
+    await expect(runLauncher(layout.bin, roots.home, roots.project)).rejects.toMatchObject({ code: 70 })
+  })
+
+  test('the fixed launcher rejects a symlinked target version even when current binds its resolved path', async () => {
+    const roots = await createRuntimeTestRoots()
+    await installFixture(roots.source, roots.home, '0.0.0')
+    const layout = runtimeLayout(roots.home)
+    const target = join(layout.versions, '0.0.0')
+    const realTarget = join(layout.versions, '0.0.0-real')
+    await rename(target, realTarget)
+    await symlink(realTarget, target)
+    await rewriteCurrentVersionRoot(layout.current, await realpath(target))
+
+    await expect(runLauncher(layout.bin, roots.home, roots.project)).rejects.toMatchObject({ code: 70 })
+  })
+
+  test('the fixed launcher rejects group or other permissions on versions and version roots', async () => {
+    const roots = await createRuntimeTestRoots()
+    await installFixture(roots.source, roots.home, '0.0.0')
+    const layout = runtimeLayout(roots.home)
+    await chmod(layout.versions, 0o755)
+    await expect(runLauncher(layout.bin, roots.home, roots.project)).rejects.toMatchObject({ code: 70 })
+
+    await chmod(layout.versions, 0o700)
+    await chmod(join(layout.versions, '0.0.0'), 0o755)
+    await expect(runLauncher(layout.bin, roots.home, roots.project)).rejects.toMatchObject({ code: 70 })
+  })
+
+  test('the fixed launcher rejects a resolved version root equal to the versions root', async () => {
+    const roots = await createRuntimeTestRoots()
+    await installFixture(roots.source, roots.home, '0.0.0')
+    const layout = runtimeLayout(roots.home)
+    const original = join(layout.versions, '0.0.0')
+    const holding = join(roots.source, 'holding-version')
+    await rename(original, holding)
+    for (const entry of await readdir(holding)) {
+      await rename(join(holding, entry), join(layout.versions, entry))
+    }
+    await rm(holding, { recursive: true })
+    await symlink('.', original)
+    await rewriteCurrentVersionRoot(layout.current, await realpath(layout.versions))
+
+    await expect(runLauncher(layout.bin, roots.home, roots.project)).rejects.toMatchObject({ code: 70 })
+  })
 })
+
+async function rewriteCurrentVersionRoot(currentPath: string, versionRoot: string): Promise<void> {
+  const current = JSON.parse(await readFile(currentPath, 'utf8')) as Record<string, unknown>
+  await writeFile(currentPath, JSON.stringify({ ...current, versionRoot }), { mode: 0o600 })
+}
+
+async function runLauncher(launcher: string, homeDir: string, cwd: string) {
+  return execFileAsync(launcher, [], {
+    cwd,
+    env: { HOME: homeDir, PATH: process.env.PATH ?? '' },
+  })
+}
 
 async function installFixture(sourceRoot: string, homeDir: string, version: string): Promise<void> {
   const source = join(sourceRoot, version)

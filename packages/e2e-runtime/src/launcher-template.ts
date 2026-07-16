@@ -17,7 +17,8 @@ const { isAbsolute, join, relative, sep } = require('node:path')
 const configuration = ${configuration}
 
 try {
-  if (process.env.NODE_OPTIONS || process.env.NODE_PATH
+  if ((process.platform !== 'darwin' && process.platform !== 'linux')
+    || process.env.NODE_OPTIONS || process.env.NODE_PATH
     || process.execArgv.some((argument) => argument === '--loader'
       || argument.startsWith('--loader=')
       || argument === '--require'
@@ -33,10 +34,12 @@ try {
     || !isAbsolute(current.versionRoot)) fail()
 
   const expectedRoot = join(configuration.versions, current.runtimeVersion)
+  privateDirectory(configuration.versions)
+  privateDirectory(expectedRoot)
   const versionsRoot = realpathSync(configuration.versions)
   const versionRoot = realpathSync(expectedRoot)
   within(versionsRoot, versionRoot)
-  if (current.versionRoot !== versionRoot) fail()
+  if (versionRoot === versionsRoot || current.versionRoot !== versionRoot) fail()
 
   const manifest = readPrivateJson(join(versionRoot, configuration.manifest))
   exactKeys(manifest, ['files', 'installationDigest', 'schemaVersion'])
@@ -102,6 +105,13 @@ function readPrivateJson(path) {
   const value = JSON.parse(readFileSync(path, 'utf8'))
   if (typeof value !== 'object' || value === null || Array.isArray(value)) fail()
   return value
+}
+
+function privateDirectory(path) {
+  const metadata = lstatSync(path)
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()
+    || (metadata.mode & 0o777) !== 0o700
+    || (typeof process.getuid === 'function' && metadata.uid !== process.getuid())) fail()
 }
 
 function exactKeys(value, expected) {

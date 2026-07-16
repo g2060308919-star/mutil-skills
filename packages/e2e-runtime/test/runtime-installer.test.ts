@@ -2,7 +2,14 @@ import { chmod, mkdir, readFile, realpath, stat, symlink, writeFile } from 'node
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { createRuntimeTestRoots } from './fixtures.js'
-import { ProductionClosureInstaller, installRuntime } from '../src/runtime-installer.js'
+import {
+  ProductionClosureInstaller,
+  installRuntime,
+  installRuntimeWithOperations,
+  runtimeInstallerOperations,
+  type InstallRuntimeOptions,
+  type RuntimeInstallerOperations,
+} from '../src/runtime-installer.js'
 import { uninstallRuntime } from '../src/runtime-uninstaller.js'
 import { runtimeLayout } from '../src/runtime-layout.js'
 
@@ -109,6 +116,130 @@ describe('versioned runtime installer', () => {
     })).rejects.toThrow('closure failed')
 
     expect(await readFile(currentPath, 'utf8')).toBe(currentBefore)
+  })
+
+  test('rolls back launcher and a newly placed version when launcher preparation fails', async () => {
+    const roots = await createRuntimeTestRoots()
+    await installFixture(roots.source, roots.home, '0.0.0', 'active')
+    const layout = runtimeLayout(roots.home)
+    await writeFile(layout.bin, Buffer.concat([
+      await readFile(layout.bin),
+      Buffer.from('// prior launcher generation\n'),
+    ]), { mode: 0o700 })
+    const currentBefore = await readFile(layout.current)
+    const launcherBefore = await readFile(layout.bin)
+    const operations: RuntimeInstallerOperations = {
+      ...runtimeInstallerOperations,
+      writeLauncher: async (runtimeLayout_) => {
+        await runtimeInstallerOperations.writeLauncher(runtimeLayout_)
+        throw new Error('injected launcher failure')
+      },
+    }
+
+    await expect(installFixture(
+      roots.source,
+      roots.home,
+      '0.0.1',
+      'launcher-failure',
+      '0.0.1',
+      undefined,
+      operations,
+    )).rejects.toThrow('injected launcher failure')
+
+    expect(await readFile(layout.current)).toEqual(currentBefore)
+    expect(await readFile(layout.bin)).toEqual(launcherBefore)
+    await expect(stat(join(layout.versions, '0.0.1'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('rolls back current, launcher, and a newly placed version when current activation fails', async () => {
+    const roots = await createRuntimeTestRoots()
+    await installFixture(roots.source, roots.home, '0.0.0', 'active')
+    const layout = runtimeLayout(roots.home)
+    await writeFile(layout.bin, Buffer.concat([
+      await readFile(layout.bin),
+      Buffer.from('// prior launcher generation\n'),
+    ]), { mode: 0o700 })
+    const currentBefore = await readFile(layout.current)
+    const launcherBefore = await readFile(layout.bin)
+    const operations: RuntimeInstallerOperations = {
+      ...runtimeInstallerOperations,
+      writeCurrent: async (runtimeLayout_, current) => {
+        await runtimeInstallerOperations.writeCurrent(runtimeLayout_, current)
+        throw new Error('injected current failure')
+      },
+    }
+
+    await expect(installFixture(
+      roots.source,
+      roots.home,
+      '0.0.1',
+      'current-failure',
+      '0.0.1',
+      undefined,
+      operations,
+    )).rejects.toThrow('injected current failure')
+
+    expect(await readFile(layout.current)).toEqual(currentBefore)
+    expect(await readFile(layout.bin)).toEqual(launcherBefore)
+    await expect(stat(join(layout.versions, '0.0.1'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('removes a newly renamed version after fsync failure so an exact retry succeeds', async () => {
+    const roots = await createRuntimeTestRoots()
+    await installFixture(roots.source, roots.home, '0.0.0', 'active')
+    const layout = runtimeLayout(roots.home)
+    const currentBefore = await readFile(layout.current)
+    const launcherBefore = await readFile(layout.bin)
+    const operations: RuntimeInstallerOperations = {
+      ...runtimeInstallerOperations,
+      fsyncVersions: async () => { throw new Error('injected versions fsync failure') },
+    }
+
+    await expect(installFixture(
+      roots.source,
+      roots.home,
+      '0.0.1',
+      'fsync-failure',
+      '0.0.1',
+      undefined,
+      operations,
+    )).rejects.toThrow('injected versions fsync failure')
+
+    expect(await readFile(layout.current)).toEqual(currentBefore)
+    expect(await readFile(layout.bin)).toEqual(launcherBefore)
+    await expect(stat(join(layout.versions, '0.0.1'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const retried = await installFixture(roots.source, roots.home, '0.0.1', 'fsync-failure')
+    expect(retried.version).toBe('0.0.1')
+  })
+
+  test('removes a newly renamed version after post-rename verification failure so retry succeeds', async () => {
+    const roots = await createRuntimeTestRoots()
+    await installFixture(roots.source, roots.home, '0.0.0', 'active')
+    const layout = runtimeLayout(roots.home)
+    const currentBefore = await readFile(layout.current)
+    const launcherBefore = await readFile(layout.bin)
+    const operations: RuntimeInstallerOperations = {
+      ...runtimeInstallerOperations,
+      verifyVersion: async () => { throw new Error('injected post-rename verification failure') },
+    }
+
+    await expect(installFixture(
+      roots.source,
+      roots.home,
+      '0.0.1',
+      'verification-failure',
+      '0.0.1',
+      undefined,
+      operations,
+    )).rejects.toThrow('injected post-rename verification failure')
+
+    expect(await readFile(layout.current)).toEqual(currentBefore)
+    expect(await readFile(layout.bin)).toEqual(launcherBefore)
+    await expect(stat(join(layout.versions, '0.0.1'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const retried = await installFixture(roots.source, roots.home, '0.0.1', 'verification-failure')
+    expect(retried.version).toBe('0.0.1')
   })
 
   test('revalidates the existing user-level ancestor permissions before installation', async () => {
@@ -222,6 +353,7 @@ async function installFixture(
   body: string,
   packageVersion = version,
   dependencies?: Record<string, string>,
+  operations?: RuntimeInstallerOperations,
 ): Promise<Awaited<ReturnType<typeof installRuntime>>> {
   const source = join(sourceRoot, `${version}-${body}`)
   const packageRoot = join(source, 'node_modules', '@mutil-skills', 'e2e-runtime')
@@ -232,12 +364,15 @@ async function installFixture(
     ...(dependencies === undefined ? {} : { dependencies }),
   }))
   await writeFile(join(packageRoot, 'dist', 'src', 'bin', 'repo-e2e.js'), `#!/usr/bin/env node\n// ${body}\n`)
-  return installRuntime({
+  const options: InstallRuntimeOptions = {
     homeDir,
     version,
     installClosure: async ({ stagingPrefix }) => {
       const { cp } = await import('node:fs/promises')
       await cp(source, stagingPrefix, { recursive: true })
     },
-  })
+  }
+  return operations === undefined
+    ? installRuntime(options)
+    : installRuntimeWithOperations(options, operations)
 }

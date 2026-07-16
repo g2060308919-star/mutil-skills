@@ -2,7 +2,11 @@ import { chmod, link, mkdir, readFile, symlink, writeFile } from 'node:fs/promis
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { runtimeLayout } from '../src/runtime-layout.js'
-import { createRuntimeManifest, verifyRuntimeManifest } from '../src/runtime-manifest.js'
+import {
+  assertSupportedRuntimePlatform,
+  createRuntimeManifest,
+  verifyRuntimeManifest,
+} from '../src/runtime-manifest.js'
 import { createRuntimeTestRoots } from './fixtures.js'
 
 describe('runtime layout', () => {
@@ -21,6 +25,15 @@ describe('runtime layout', () => {
       logs: join(roots.home, '.mutil-skills', 'e2e', 'logs'),
       browsers: join(roots.home, '.mutil-skills', 'runtime', 'e2e', 'browsers'),
     })
+  })
+
+  test('supports only the explicitly approved POSIX platforms', () => {
+    expect(() => assertSupportedRuntimePlatform('darwin')).not.toThrow()
+    expect(() => assertSupportedRuntimePlatform('linux')).not.toThrow()
+    for (const platform of ['freebsd', 'aix', 'win32'] as const) {
+      expect(() => assertSupportedRuntimePlatform(platform))
+        .toThrow(/E2E_RUNTIME_PLATFORM_UNSUPPORTED/)
+    }
   })
 })
 

@@ -4,8 +4,8 @@ import { runtimeLayout } from './runtime-layout.js'
 import { withRuntimeInstallLock, writeActiveRuntimeFiles } from './runtime-installer.js'
 import {
   assertExactRuntimeVersion,
-  readRuntimeCurrent,
   runtimeError,
+  verifyCurrentRuntimeInstallation,
   verifyInstalledRuntimeVersion,
   verifyRuntimeRoot,
 } from './runtime-manifest.js'
@@ -31,10 +31,12 @@ export async function uninstallRuntime(options: UninstallRuntimeOptions): Promis
   await verifyRuntimeRoot(layout)
   return withRuntimeInstallLock(layout, async () => {
     await verifyRuntimeRoot(layout)
-    const target = await verifyInstalledRuntimeVersion(layout, options.version)
-    const current = await readRuntimeCurrent(layout)
+    const active = await verifyCurrentRuntimeInstallation(layout)
+    const target = active.installation.version === options.version
+      ? active.installation
+      : await verifyInstalledRuntimeVersion(layout, options.version)
     let activeVersion: string | undefined
-    if (current.runtimeVersion === options.version) {
+    if (active.installation.version === options.version) {
       if (options.activateVersion === undefined) {
         runtimeError('E2E_RUNTIME_ACTIVE_VERSION_REMOVAL_BLOCKED', 'active Runtime 必须先显式验证 replacement')
       }
