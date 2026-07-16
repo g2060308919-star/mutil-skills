@@ -52,7 +52,12 @@ async function trustedContext(input: { authorizationAllowed: boolean; leaseAllow
   const authority = LocalApprovalAuthority.create({
     issuer: 'AUTHORITY', keyId: 'KEY-1', now,
     approvalIdentities: [{ subject: 'os-user:test', roles: ['e2e-approver'] }],
-    authenticateApproverSession: (sessionRef) => sessionRef === 'test-session' ? 'os-user:test' : undefined,
+    authenticateApproverSession: (sessionRef, expected) => sessionRef === 'test-session' ? {
+      subject: 'os-user:test', runId: 'RUN-1', approvalType: expected.approvalType,
+      subjectDigest: expected.subjectDigest, installationDigest: `sha256:${'a'.repeat(64)}`,
+      origin: 'http://127.0.0.1:43210', issuedAt: '2026-01-01T00:00:00.000Z',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    } : undefined,
   })
   const prdRevision = digestText('write-runner-test/v1', 'prd')
   const scopeDigest = digestText('write-runner-test/v1', 'scope')

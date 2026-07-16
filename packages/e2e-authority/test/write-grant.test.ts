@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
-import { LocalApprovalAuthority } from './approval-authority.fixture.js'
+import { LocalApprovalAuthority, testApprovalReceipt } from './approval-authority.fixture.js'
 import { LocalApprovalAuthority as RuntimeApprovalAuthority } from '../src/index.js'
 
 const digest = digestText('test/v1', 'value')
@@ -82,14 +82,16 @@ describe('LocalApprovalAuthority write grants', () => {
         { subject: 'os-user:victim', roles: ['e2e-approver'] },
         { subject: 'os-user:attacker', roles: ['e2e-approver'] },
       ],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'attacker-session' ? 'os-user:attacker' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'attacker-session'
+        ? testApprovalReceipt('os-user:attacker', expected)
+        : undefined,
     })
 
     await expect(authority.issueWriteGrant({
       subject: await subject(authority, { approver: { subject: 'os-user:attacker', roles: ['e2e-approver'] },
         approvalSessionRef: 'attacker-session' }), approver: { subject: 'os-user:victim', roles: ['e2e-approver'] },
       approvalSessionRef: 'attacker-session', ttlMs: 60_000,
-    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_APPROVER_UNTRUSTED' })
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' })
   })
 
   test('拒绝调用方自报 e2e-approver，只有可信身份登记中的角色可以签发 Grant', async () => {

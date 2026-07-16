@@ -1,5 +1,10 @@
 import { z } from 'zod'
-import { AssetIdSchema, canonicalizeJson, digestText } from './common.js'
+import {
+  AssetIdSchema,
+  canonicalizeJson,
+  digestCanonicalGrantApprovalSubject,
+  digestText,
+} from './common.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -129,7 +134,7 @@ export const ApprovalFreshnessReceiptSchema = z.discriminatedUnion('grantType', 
     authorityProof: ApprovalFreshnessAuthorityProofSchema }).strict(),
 ]).superRefine((receipt, context) => {
   const { authorityProof, ...body } = receipt
-  const subjectDigest = digestText('approval-subject/v1', canonicalizeJson(receipt.executionSubjectSnapshot))
+  const subjectDigest = digestCanonicalGrantApprovalSubject('execution', receipt.executionSubjectSnapshot)
   const capabilitySetDigest = digestText('approval-capability-set/v1', canonicalizeJson(receipt.capabilities))
   const signedDigest = digestText('approval-freshness-receipt/v1', canonicalizeJson(body))
   if (receipt.subjectDigest !== subjectDigest) {
@@ -152,6 +157,7 @@ export const ApprovalFreshnessReceiptSchema = z.discriminatedUnion('grantType', 
 })
 
 export type ApprovalCapabilityRecord = z.infer<typeof ApprovalCapabilityRecordSchema>
+export type WriteApprovalSubjectV2 = z.infer<typeof WriteApprovalSubjectV2Schema>
 export type ApprovalFreshnessReceipt = z.infer<typeof ApprovalFreshnessReceiptSchema>
 export type ApprovalFreshnessVerifierMaterial = z.infer<typeof ApprovalFreshnessVerifierMaterialSchema>
 export type ApprovalFreshnessReceiptBody = z.infer<typeof ApprovalFreshnessReceiptBodySchema>

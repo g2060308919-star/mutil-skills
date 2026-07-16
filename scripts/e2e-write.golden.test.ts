@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
 import { afterEach, describe, expect, test } from 'vitest'
 import { chromium } from 'playwright'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 import {
   E2EError, canonicalizeJson, digestCleanupPlanDefinition, digestText,
   type ExecutionOutcomeReceipt, type VerificationObservation,
@@ -118,8 +119,8 @@ describe('PRD-driven reversible-write golden path', () => {
         { subject: 'scope-golden', roles: ['scope-approver'] },
         { subject: 'lineage-golden', roles: ['lineage-approver'] },
       ],
-      authenticateApproverSession: (sessionRef: string) =>
-        sessionRef === 'golden-session' ? 'os-user:golden' : undefined,
+      authenticateApproverSession: (sessionRef: string, expected) => sessionRef === 'golden-session'
+        ? createGoldenApprovalReceipt('os-user:golden', 'RUN-WRITE-1', expected) : undefined,
       statePath: approvalStatePath, stateEncryptionKey: randomBytes(32), testWorkspaceRoots: [process.cwd()],
     }
     let approvalAuthority = await LocalApprovalAuthority.open(authorityOptions)
@@ -549,7 +550,8 @@ describe('PRD-driven reversible-write golden path', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'unknown-authority', keyId: 'unknown-key', now,
       approvalIdentities: [{ subject: 'os-user:unknown', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'unknown-session' ? 'os-user:unknown' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'unknown-session'
+        ? createGoldenApprovalReceipt('os-user:unknown', 'RUN-WRITE-UNKNOWN', expected) : undefined,
     })
     const leaseAuthority = new LocalLeaseAuthority({ now })
     const targetFingerprint = digestText('fixture-resource/v1', 'order:200')

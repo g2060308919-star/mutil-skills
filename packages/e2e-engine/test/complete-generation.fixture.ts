@@ -1,5 +1,6 @@
 import { canonicalizeJson, digestApprovalProjection, digestArtifactContent, digestBytes, digestText,
   digestCleanupPlanDefinition,
+  digestCanonicalGrantApprovalSubject,
   digestDecisionSubject, projectLineageDecisionSubject, projectScopeDecisionSubject,
   computeRegressionSourceSetDigest, type DecisionReceipt, type DecisionReceiptVerificationBinding,
   type RegressionDiscoveryAttestation, type RegressionDiscoverySubject,
@@ -358,7 +359,7 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
   const capabilities = drafts['run-bundle'].content.signedCapabilities
   const receiptBody = {
     schemaVersion: '1.0.0', grantType: 'read', grantId: 'GRANT-1',
-    subjectDigest: digestText('approval-subject/v1', canonicalizeJson(subject)),
+    subjectDigest: digestCanonicalGrantApprovalSubject('execution', subject),
     runBundleDigest,
     executionSubjectSnapshot: subject,
     browserPreflightArtifactDigest: predictedContentDigest('browser-preflight', drafts['browser-preflight']),
@@ -433,7 +434,7 @@ export function refreshFixtureApproval(input: BuildCompleteGenerationInput): voi
   const capabilities = drafts['run-bundle'].content.signedCapabilities
   const body = {
     ...previous, authorityProof: undefined,
-    subjectDigest: digestText('approval-subject/v1', canonicalizeJson(subject)),
+    subjectDigest: digestCanonicalGrantApprovalSubject('execution', subject),
     runBundleDigest: predictedContentDigestFor(input.context, 'run-bundle', drafts['run-bundle']),
     executionSubjectSnapshot: subject,
     browserPreflightArtifactDigest: predictedContentDigestFor(input.context, 'browser-preflight', drafts['browser-preflight']),

@@ -1,4 +1,15 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs'
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  statSync,
+} from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
@@ -20,6 +31,7 @@ export class SqliteSnapshotStore {
   readonly #database: DatabaseSync
   readonly #namespace: string
   readonly #processLockKey: string
+  readonly #stateLeafDescriptor: number
   #closed = false
 
   constructor(statePath: string, namespace: string, options: SqliteSnapshotStoreOptions) {
@@ -40,38 +52,49 @@ export class SqliteSnapshotStore {
         throw new Error('E2E_AUTHORITY_STATE_INSIDE_TEST_WORKSPACE')
       }
     }
-    this.#database = new DatabaseSync(statePath)
+    const pinnedLeaf = openPinnedSqliteLeaf(statePath)
+    this.#stateLeafDescriptor = pinnedLeaf.descriptor
     try {
-      assertExpectedStateDirectory(dirname(statePath), options.expectedStateDirectory)
+      this.#database = new DatabaseSync(statePath)
     } catch (error) {
-      this.#database.close()
+      const cleanupErrors = closeDescriptor(this.#stateLeafDescriptor)
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError([error, ...cleanupErrors], 'E2E_AUTHORITY_STATE_OPEN_CLEANUP_FAILED')
+      }
       throw error
     }
-    if (lstatSync(statePath).isSymbolicLink()) {
-      this.#database.close()
-      throw new Error('E2E_AUTHORITY_STATE_SYMLINK_FORBIDDEN')
-    }
-    const realStatePath = realpathSync(statePath)
-    for (const root of options.forbiddenRoots) {
-      const realRoot = realpathSync(root)
-      const pathFromRoot = relative(realRoot, realStatePath)
-      if (pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))) {
-        this.#database.close()
-        throw new Error('E2E_AUTHORITY_STATE_INSIDE_TEST_WORKSPACE')
+    try {
+      assertExpectedStateDirectory(dirname(statePath), options.expectedStateDirectory)
+      assertPinnedSqliteLeaf(statePath, pinnedLeaf)
+      if (lstatSync(statePath).isSymbolicLink()) {
+        throw new Error('E2E_AUTHORITY_STATE_SYMLINK_FORBIDDEN')
       }
+      const realStatePath = realpathSync(statePath)
+      for (const root of options.forbiddenRoots) {
+        const realRoot = realpathSync(root)
+        const pathFromRoot = relative(realRoot, realStatePath)
+        if (pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))) {
+          throw new Error('E2E_AUTHORITY_STATE_INSIDE_TEST_WORKSPACE')
+        }
+      }
+      this.#namespace = namespace
+      this.#processLockKey = `${resolve(statePath)}\u0000${namespace}`
+      this.#database.exec(`
+        PRAGMA busy_timeout = 10000;
+        PRAGMA synchronous = FULL;
+        CREATE TABLE IF NOT EXISTS authority_snapshots (
+          namespace TEXT PRIMARY KEY,
+          revision INTEGER NOT NULL,
+          snapshot TEXT NOT NULL
+        ) STRICT;
+      `)
+    } catch (error) {
+      const cleanupErrors = closeDatabaseAndDescriptor(this.#database, this.#stateLeafDescriptor)
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError([error, ...cleanupErrors], 'E2E_AUTHORITY_STATE_OPEN_CLEANUP_FAILED')
+      }
+      throw error
     }
-    this.#namespace = namespace
-    this.#processLockKey = `${resolve(statePath)}\u0000${namespace}`
-    this.#database.exec(`
-      PRAGMA busy_timeout = 10000;
-      PRAGMA synchronous = FULL;
-      CREATE TABLE IF NOT EXISTS authority_snapshots (
-        namespace TEXT PRIMARY KEY,
-        revision INTEGER NOT NULL,
-        snapshot TEXT NOT NULL
-      ) STRICT;
-    `)
-    chmodSync(statePath, 0o600)
   }
 
   /**
@@ -155,7 +178,9 @@ export class SqliteSnapshotStore {
   close(): void {
     if (this.#closed) return
     this.#closed = true
-    this.#database.close()
+    const errors = closeDatabaseAndDescriptor(this.#database, this.#stateLeafDescriptor)
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors, 'E2E_AUTHORITY_STATE_CLOSE_FAILED')
   }
 
   #read(): string | undefined {
@@ -163,6 +188,77 @@ export class SqliteSnapshotStore {
       'SELECT snapshot FROM authority_snapshots WHERE namespace = ?',
     ).get(this.#namespace) as { snapshot?: unknown } | undefined
     return typeof row?.snapshot === 'string' ? row.snapshot : undefined
+  }
+}
+
+interface PinnedSqliteLeaf {
+  descriptor: number
+  device: string
+  inode: string
+}
+
+function closeDescriptor(descriptor: number): unknown[] {
+  try { closeSync(descriptor); return [] }
+  catch (error) { return [error] }
+}
+
+function closeDatabaseAndDescriptor(database: DatabaseSync, descriptor: number): unknown[] {
+  const errors: unknown[] = []
+  try { database.close() } catch (error) { errors.push(error) }
+  errors.push(...closeDescriptor(descriptor))
+  return errors
+}
+
+function openPinnedSqliteLeaf(statePath: string): PinnedSqliteLeaf {
+  let descriptor: number
+  try {
+    descriptor = openSync(
+      statePath,
+      constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+      0o600,
+    )
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    descriptor = openSync(statePath, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0))
+  }
+  try {
+    const metadata = fstatSync(descriptor)
+    const pathMetadata = lstatSync(statePath)
+    if (!metadata.isFile() || pathMetadata.isSymbolicLink() || !pathMetadata.isFile()
+      || metadata.nlink !== 1 || pathMetadata.nlink !== 1
+      || metadata.uid !== process.getuid?.() || pathMetadata.uid !== process.getuid?.()
+      || String(metadata.dev) !== String(pathMetadata.dev)
+      || String(metadata.ino) !== String(pathMetadata.ino)) {
+      throw new Error('E2E_AUTHORITY_STATE_LEAF_INVALID')
+    }
+    fchmodSync(descriptor, 0o600)
+    if ((fstatSync(descriptor).mode & 0o777) !== 0o600) {
+      throw new Error('E2E_AUTHORITY_STATE_LEAF_INVALID')
+    }
+    return { descriptor, device: String(metadata.dev), inode: String(metadata.ino) }
+  } catch (error) {
+    closeSync(descriptor)
+    throw error
+  }
+}
+
+function assertPinnedSqliteLeaf(statePath: string, expected: PinnedSqliteLeaf): void {
+  let descriptor: number | undefined
+  try {
+    descriptor = openSync(statePath, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0))
+    const metadata = fstatSync(descriptor)
+    const pathMetadata = lstatSync(statePath)
+    if (!metadata.isFile() || pathMetadata.isSymbolicLink() || !pathMetadata.isFile()
+      || metadata.nlink !== 1 || pathMetadata.nlink !== 1
+      || metadata.uid !== process.getuid?.() || pathMetadata.uid !== process.getuid?.()
+      || String(metadata.dev) !== expected.device || String(metadata.ino) !== expected.inode
+      || String(metadata.dev) !== String(pathMetadata.dev)
+      || String(metadata.ino) !== String(pathMetadata.ino)
+      || (metadata.mode & 0o777) !== 0o600) {
+      throw new Error('E2E_AUTHORITY_STATE_LEAF_REBOUND')
+    }
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor)
   }
 }
 

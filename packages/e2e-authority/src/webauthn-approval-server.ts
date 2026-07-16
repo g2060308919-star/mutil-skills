@@ -237,48 +237,50 @@ async function handleRequest(
     respond(response, 413, 'body too large')
     return
   }
-  let payload: Record<string, unknown>
   try {
-    const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)) as unknown
-    if (!isPlainObject(parsed)) throw new Error('body is not an object')
-    payload = parsed
-  } catch {
-    respond(response, 400, 'invalid json')
-    return
-  }
-  if (payload.sessionId !== context.sessionId || typeof payload.challenge !== 'string') {
-    respond(response, 400, 'session binding rejected')
-    return
-  }
-  context.markSubmitted()
-  try {
-    if (Object.hasOwn(payload, 'credentialId')) {
-      if (!hasExactKeys(payload, ['challenge', 'credentialId', 'response', 'sessionId'])
-        || typeof payload.credentialId !== 'string') {
-        throw approvalServerError('E2E_APPROVAL_SUBMISSION_INVALID')
-      }
-      await context.authority.completeApproval({
-        sessionId: context.sessionId,
-        challenge: payload.challenge,
-        credentialId: payload.credentialId,
-        response: payload.response,
-      })
-    } else {
-      if (!hasExactKeys(payload, ['challenge', 'response', 'sessionId'])) {
-        throw approvalServerError('E2E_APPROVAL_SUBMISSION_INVALID')
-      }
-      await context.authority.completeEnrollment({
-        sessionId: context.sessionId,
-        challenge: payload.challenge,
-        response: payload.response,
-      })
+    let payload: Record<string, unknown>
+    try {
+      const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body)) as unknown
+      if (!isPlainObject(parsed)) throw new Error('body is not an object')
+      payload = parsed
+    } catch {
+      respond(response, 400, 'invalid json')
+      return
     }
-    context.settle({ completed: true })
-    respondBytes(response, 204, 'text/plain; charset=utf-8', Buffer.alloc(0))
-  } catch (error) {
-    const code = safeErrorCode(error)
-    context.settle({ completed: false, code })
-    respond(response, code === 'E2E_APPROVAL_SESSION_EXPIRED' ? 410 : 403, code)
+    if (payload.sessionId !== context.sessionId || typeof payload.challenge !== 'string') {
+      respond(response, 400, 'session binding rejected')
+      return
+    }
+    context.markSubmitted()
+    try {
+      if (Object.hasOwn(payload, 'credentialId')) {
+        if (!hasExactKeys(payload, ['challenge', 'credentialId', 'response', 'sessionId'])
+          || typeof payload.credentialId !== 'string') {
+          throw approvalServerError('E2E_APPROVAL_SUBMISSION_INVALID')
+        }
+        await context.authority.completeApproval({
+          sessionId: context.sessionId,
+          challenge: payload.challenge,
+          credentialId: payload.credentialId,
+          response: payload.response,
+        })
+      } else {
+        if (!hasExactKeys(payload, ['challenge', 'response', 'sessionId'])) {
+          throw approvalServerError('E2E_APPROVAL_SUBMISSION_INVALID')
+        }
+        await context.authority.completeEnrollment({
+          sessionId: context.sessionId,
+          challenge: payload.challenge,
+          response: payload.response,
+        })
+      }
+      context.settle({ completed: true })
+      respondBytes(response, 204, 'text/plain; charset=utf-8', Buffer.alloc(0))
+    } catch (error) {
+      const code = safeErrorCode(error)
+      context.settle({ completed: false, code })
+      respond(response, code === 'E2E_APPROVAL_SESSION_EXPIRED' ? 410 : 403, code)
+    }
   } finally {
     body.fill(0)
   }
@@ -287,13 +289,20 @@ async function handleRequest(
 async function readBoundedBody(request: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = []
   let size = 0
-  for await (const chunk of request) {
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-    size += bytes.byteLength
-    if (size > MAX_BODY_BYTES) throw approvalServerError('E2E_APPROVAL_BODY_TOO_LARGE')
-    chunks.push(bytes)
+  try {
+    for await (const chunk of request) {
+      const bytes = Buffer.from(chunk)
+      size += bytes.byteLength
+      if (size > MAX_BODY_BYTES) {
+        bytes.fill(0)
+        throw approvalServerError('E2E_APPROVAL_BODY_TOO_LARGE')
+      }
+      chunks.push(bytes)
+    }
+    return Buffer.concat(chunks)
+  } finally {
+    for (const chunk of chunks) chunk.fill(0)
   }
-  return Buffer.concat(chunks)
 }
 
 function setSecurityHeaders(response: ServerResponse): void {

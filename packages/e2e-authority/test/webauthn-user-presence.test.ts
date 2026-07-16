@@ -2,9 +2,10 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { canonicalizeJson, digestText } from '@mutil-skills/e2e-contracts'
+import { canonicalGrantApprovalSubjectDigest } from '@mutil-skills/e2e-contracts'
 import { describe, expect, test, vi } from 'vitest'
 import { LocalApprovalAuthority } from '../src/local-approval-authority.js'
+import { createWebAuthnUserPresenceAuthority } from '../src/webauthn-user-presence.js'
 import * as publicAuthorityApi from '../src/index.js'
 import { createForTest } from './webauthn-user-presence.fixture.js'
 
@@ -71,11 +72,11 @@ describe('WebAuthn user presence authority', () => {
       sessionId: session.sessionId, challenge: session.challenge,
       credentialId: 'CRED-1', response: 'valid-assertion',
     })
-    const binding = {
-      subject: 'local:user', approvalType: 'execution' as const, subjectDigest,
-    }
-    expect(fixture.authority.authenticateSession(session.sessionId, binding)).toBe('local:user')
-    expect(fixture.authority.authenticateSession(session.sessionId, binding)).toBeUndefined()
+    await expect(fixture.authority.authenticateSession(session.sessionId)).resolves.toMatchObject({
+      subject: 'local:user', runId: 'RUN-1', approvalType: 'execution', subjectDigest,
+      installationDigest, origin: 'http://localhost:43210',
+    })
+    await expect(fixture.authority.authenticateSession(session.sessionId)).resolves.toBeUndefined()
     expect(fixture.readCredential('CRED-1')?.counter).toBe(2)
     await expect(fixture.authority.completeApproval({
       sessionId: session.sessionId, challenge: session.challenge,
@@ -130,8 +131,7 @@ describe('WebAuthn user presence authority', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'authority', keyId: 'key-1', now: () => fixedNow,
       approvalIdentities: [approver],
-      authenticateApproverSession: (sessionId, expected) =>
-        fixture.authority.authenticateSession(sessionId, expected),
+      authenticateApproverSession: (sessionId) => fixture.authority.authenticateSession(sessionId),
     })
     const approvalSubject = {
       schemaVersion: '1.0.0' as const,
@@ -143,7 +143,7 @@ describe('WebAuthn user presence authority', () => {
       bootstrapIntentsDigest: subjectDigest,
       actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 }],
     }
-    const approvalSubjectDigest = digestText('approval-subject/v1', canonicalizeJson(approvalSubject))
+    const approvalSubjectDigest = canonicalGrantApprovalSubjectDigest(approvalSubject)
     const openAndComplete = async (runId: string) => {
       const session = await fixture.authority.beginApproval({
         runId, approvalType: 'discovery', subjectDigest: approvalSubjectDigest,
@@ -200,13 +200,10 @@ describe('WebAuthn user presence authority', () => {
       sessionId: session.sessionId, challenge: session.challenge,
       credentialId: 'CRED-1', response: 'valid',
     })
-    const binding = {
-      subject: 'local:user', approvalType: 'scope' as const, subjectDigest,
-    }
     now = new Date(fixedNow.getTime() + 11)
-    expect(() => fixture.authority.authenticateSession(session.sessionId, binding))
-      .toThrow(/E2E_APPROVAL_SESSION_EXPIRED/)
-    expect(fixture.authority.authenticateSession(session.sessionId, binding)).toBeUndefined()
+    await expect(fixture.authority.authenticateSession(session.sessionId))
+      .rejects.toThrow(/E2E_APPROVAL_SESSION_EXPIRED/)
+    await expect(fixture.authority.authenticateSession(session.sessionId)).resolves.toBeUndefined()
   })
 
   test('rejects a response without verified user presence and consumes the challenge', async () => {
@@ -363,6 +360,89 @@ describe('WebAuthn user presence authority', () => {
         counter: 7, transports: ['internal'], subject: 'local:user',
       })
       reopened.close()
+    } finally {
+      stateEncryptionKey.fill(0)
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('已完成人机审批的完整回执跨 Authority 重启持久化，并在 Grant 提交中仅消费一次', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-webauthn-receipt-state-'))
+    const statePath = join(directory, 'authority.sqlite')
+    const stateEncryptionKey = randomBytes(32)
+    const approver = { subject: 'local:user', roles: ['e2e-approver'] }
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now: () => fixedNow, statePath, stateEncryptionKey,
+      testWorkspaceRoots: [process.cwd()], approvalIdentities: [approver],
+    }
+    const grantSubject = {
+      schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision: subjectDigest,
+      scopeDigest: installationDigest, environment: 'test' as const,
+      baseOrigin: 'https://test.example.com', actor: 'qa',
+      expectedPageIdentity: {
+        url: 'https://test.example.com/orders', title: 'Orders', heading: 'Orders', ariaSignals: [],
+      },
+      bootstrapIntentsDigest: subjectDigest,
+      actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 }],
+    }
+    const grantSubjectDigest = canonicalGrantApprovalSubjectDigest(grantSubject)
+    try {
+      verificationMocks.authentication.mockImplementation(async (input: Record<string, any>) => ({
+        verified: true,
+        authenticationInfo: { newCounter: Number(input.credential.counter) + 1 },
+      }))
+      const first = await LocalApprovalAuthority.open(options)
+      const firstRepository = first.createWebAuthnCredentialRepository()
+      await firstRepository.insert({
+        id: 'CRED-PERSISTED', publicKey: Buffer.from('PUBLIC-KEY').toString('base64url'),
+        counter: 0, transports: ['internal'], subject: approver.subject,
+      })
+      const firstPresence = createWebAuthnUserPresenceAuthority({
+        now: () => fixedNow, credentialRepository: firstRepository,
+      })
+      const session = await firstPresence.beginApproval({
+        runId: 'RUN-PERSISTED', approvalType: 'discovery', subjectDigest: grantSubjectDigest,
+        installationDigest, origin: 'http://localhost:43210', ttlMs: 300_000,
+      })
+      await firstPresence.completeApproval({
+        sessionId: session.sessionId, challenge: session.challenge,
+        credentialId: 'CRED-PERSISTED', response: {},
+      })
+      first.close()
+
+      const rawState = await readFile(statePath)
+      expect(rawState.includes(Buffer.from('RUN-PERSISTED'))).toBe(false)
+      expect(rawState.includes(Buffer.from(grantSubjectDigest))).toBe(false)
+
+      let secondPresence: ReturnType<typeof createWebAuthnUserPresenceAuthority>
+      const second = await LocalApprovalAuthority.open({
+        ...options,
+        authenticateApproverSession: (sessionId) => secondPresence.authenticateSession(sessionId),
+      })
+      secondPresence = createWebAuthnUserPresenceAuthority({
+        now: () => fixedNow, credentialRepository: second.createWebAuthnCredentialRepository(),
+      })
+      const grant = await second.issueDiscoveryGrant({
+        subject: grantSubject, approver, approvalSessionRef: session.sessionId, ttlMs: 60_000,
+      })
+      expect(grant.approvalContext).toMatchObject({
+        subject: approver.subject, runId: 'RUN-PERSISTED', approvalType: 'discovery',
+        subjectDigest: grantSubjectDigest, installationDigest, origin: 'http://localhost:43210',
+      })
+      second.close()
+
+      let thirdPresence: ReturnType<typeof createWebAuthnUserPresenceAuthority>
+      const third = await LocalApprovalAuthority.open({
+        ...options,
+        authenticateApproverSession: (sessionId) => thirdPresence.authenticateSession(sessionId),
+      })
+      thirdPresence = createWebAuthnUserPresenceAuthority({
+        now: () => fixedNow, credentialRepository: third.createWebAuthnCredentialRepository(),
+      })
+      await expect(third.issueDiscoveryGrant({
+        subject: grantSubject, approver, approvalSessionRef: session.sessionId, ttlMs: 60_000,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_APPROVER_UNTRUSTED' })
+      third.close()
     } finally {
       stateEncryptionKey.fill(0)
       await rm(directory, { recursive: true, force: true })

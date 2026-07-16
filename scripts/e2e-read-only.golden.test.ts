@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { once } from 'node:events'
 import { afterEach, describe, expect, test } from 'vitest'
 import { chromium } from 'playwright'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 import {
   E2EError, canonicalizeJson, digestText, projectCoverageDispositionDecisionSubject,
 } from '@mutil-skills/e2e-contracts'
@@ -145,7 +146,8 @@ describe('PRD-driven read-only golden path', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'local-authority', keyId: 'local-key-1', now: () => new Date('2026-07-11T10:00:00.000Z'),
       approvalIdentities: [{ subject: 'os-user:golden', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'golden-session' ? 'os-user:golden' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'golden-session'
+        ? createGoldenApprovalReceipt('os-user:golden', 'RUN-READ-1', expected) : undefined,
       manualIdentities: [
         { subject: 'os-user:privacy-golden', roles: ['privacy-approver'] },
         { subject: 'os-user:scope-golden', roles: ['scope-approver'] },

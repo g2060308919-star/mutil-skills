@@ -2,7 +2,8 @@ import { describe, expect, test } from 'vitest'
 import {
   runBrowserPreflight, runReadOnlyCase, type BrowserPageAdapter, type DiscoveryAuthorityClient,
 } from '../src/index.js'
-import { canonicalizeJson, digestBytes, digestText, E2EError } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, digestBytes, digestCanonicalGrantApprovalSubject, digestText,
+  E2EError } from '@mutil-skills/e2e-contracts'
 import type {
   DiscoveryApprovalSubject, ReadApprovalSubject, SignedDiscoveryGrant, SignedReadGrant,
 } from '@mutil-skills/e2e-contracts'
@@ -233,7 +234,11 @@ function readAuthorizationInput(actionId = 'ACTION-READ-1'): {
   const grant: SignedReadGrant = {
     grantId: 'GRANT-READ-1', issuer: 'test-authority', keyId: 'test-key', proofScope: 'local-os-user',
     approver: { subject: 'os-user:test', roles: ['e2e-approver'] }, subject: currentSubject,
-    subjectDigest: digestText('approval-subject/v1', canonicalizeJson(currentSubject)),
+    subjectDigest: digestCanonicalGrantApprovalSubject('execution', currentSubject),
+    approvalContext: { schemaVersion: '1.0.0', subject: 'os-user:test', runId: 'RUN-1',
+      approvalType: 'execution', subjectDigest: digestCanonicalGrantApprovalSubject('execution', currentSubject),
+      installationDigest: digest, origin: 'http://127.0.0.1:43210',
+      issuedAt: '2026-07-12T00:00:00.000Z', expiresAt: '2026-07-12T01:00:00.000Z' },
     issuedAt: '2026-07-12T00:00:00.000Z', expiresAt: '2026-07-12T01:00:00.000Z',
     capabilities: currentSubject.actions.map((action, index) => ({
       capabilityId: `CAP-READ-${index + 1}`, nonce: `${index}`.repeat(64), transport: 'browser-local',
@@ -280,6 +285,10 @@ function discoveryAuthorization(): {
     grantId: 'GRANT-DISCOVERY-1', issuer: 'test-authority', keyId: 'test-key', proofScope: 'local-os-user',
     approver: { subject: 'os-user:test', roles: ['e2e-approver'] }, subject: currentSubject,
     subjectDigest: digest, issuedAt: '2026-07-12T00:00:00.000Z', expiresAt: '2026-07-12T01:00:00.000Z',
+    approvalContext: { schemaVersion: '1.0.0', subject: 'os-user:test', runId: 'RUN-1',
+      approvalType: 'discovery', subjectDigest: digest, installationDigest: digest,
+      origin: 'http://127.0.0.1:43210', issuedAt: '2026-07-12T00:00:00.000Z',
+      expiresAt: '2026-07-12T01:00:00.000Z' },
     capabilities: [{
       capabilityId: 'CAPABILITY-PREFLIGHT-1', nonce: '0'.repeat(64), transport: 'browser-local', effect: 'read',
       actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation',

@@ -7,8 +7,11 @@ import {
   digestBytes,
   digestText,
   E2EError,
+  canonicalGrantApprovalSubjectDigest,
+  canonicalGrantApprovalType,
   type ArtifactDocument,
   type ArtifactType,
+  type ApprovalGrantSubject,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
   type WorkflowNode,
@@ -265,7 +268,12 @@ export class E2ERuntimeHost {
     const initial = await this.readLockedRun(identity.digest, request.payload.runId)
     this.requireInstallation(initial)
     requireApprovalType(initial, request.payload.approvalType)
-    const subjectDigest = computeRuntimeApprovalSubjectDigest(initial, request.payload.approvalType)
+    assertRuntimeGrantSubject(initial, request.payload.approvalType, request.payload.grantSubject)
+    const subjectDigest = computeRuntimeApprovalSubjectDigest(
+      initial,
+      request.payload.approvalType,
+      request.payload.grantSubject,
+    )
     const session = await authorityHost.requestApproval({
       runId: initial.runId,
       approvalType: request.payload.approvalType,
@@ -295,7 +303,12 @@ export class E2ERuntimeHost {
       )
       this.requireInstallation(current)
       requireApprovalType(current, request.payload.approvalType)
-      if (computeRuntimeApprovalSubjectDigest(current, request.payload.approvalType) !== subjectDigest) {
+      assertRuntimeGrantSubject(current, request.payload.approvalType, request.payload.grantSubject)
+      if (computeRuntimeApprovalSubjectDigest(
+        current,
+        request.payload.approvalType,
+        request.payload.grantSubject,
+      ) !== subjectDigest) {
         throw runtimeHostError(
           'E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED',
           'safety',
@@ -453,6 +466,32 @@ function requireApprovalType(snapshot: RuntimeRunSnapshot, approvalType: string)
       'E2E_RUNTIME_APPROVAL_TYPE_MISMATCH',
       'safety',
       `approvalType ${approvalType} 不适用于当前 workflow ${snapshot.workflow.current}`,
+    )
+  }
+}
+
+function assertRuntimeGrantSubject(
+  snapshot: RuntimeRunSnapshot,
+  approvalType: string,
+  subject: ApprovalGrantSubject | undefined,
+): void {
+  const grantsCapability = approvalType === 'discovery' || approvalType === 'execution'
+  if (!grantsCapability) {
+    if (subject !== undefined) throw runtimeHostError(
+      'E2E_RUNTIME_APPROVAL_SUBJECT_INVALID', 'input', '非 Grant 审批不得携带 grantSubject',
+    )
+    return
+  }
+  if (subject === undefined || canonicalGrantApprovalType(subject) !== approvalType
+    || subject.assetId !== snapshot.assetId
+    || subject.prdRevision !== snapshot.artifactDigests['prd-source']
+    || ('actions' in subject && Array.isArray(subject.actions)
+      && subject.actions.some((action: Record<string, unknown>) =>
+        'runId' in action && action.runId !== snapshot.runId))) {
+    throw runtimeHostError(
+      'E2E_RUNTIME_APPROVAL_SUBJECT_INVALID',
+      'safety',
+      'grantSubject 必须严格绑定当前 Run、PRD revision 与 approvalType',
     )
   }
 }

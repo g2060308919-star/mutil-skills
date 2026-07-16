@@ -3,6 +3,7 @@ import {
   RuntimeDoctorReportSchema,
 } from '@mutil-skills/e2e-contracts'
 import type { RuntimeInstallation } from './runtime-discovery.js'
+import { discoverTrustedPython } from './trusted-python.js'
 
 export const RUNTIME_DOCTOR_PROBE_NAMES = [
   'installation',
@@ -98,7 +99,7 @@ const DEFAULT_RUNTIME_PROBES: Record<RuntimeDoctorProbeName, RuntimeProbe> = {
   installation: verifiedInstallationProbe('E2E_RUNTIME_INSTALLATION_OK'),
   'version-closure': verifiedInstallationProbe('E2E_RUNTIME_VERSION_CLOSURE_OK'),
   'source-independence': verifiedInstallationProbe('E2E_RUNTIME_SOURCE_INDEPENDENCE_OK'),
-  authority: notInstalledProbe('E2E_AUTHORITY_NOT_INSTALLED', '安装并初始化 Authority Runtime'),
+  authority: trustedPythonProbe('E2E_AUTHORITY_TRUSTED_PYTHON_OK'),
   'approval-presence': notInstalledProbe(
     'E2E_APPROVAL_PRESENCE_NOT_INSTALLED',
     '初始化需要用户在场的审批能力',
@@ -106,7 +107,7 @@ const DEFAULT_RUNTIME_PROBES: Record<RuntimeDoctorProbeName, RuntimeProbe> = {
   gateway: notInstalledProbe('E2E_GATEWAY_NOT_INSTALLED', '安装 Gateway Runtime'),
   chromium: notInstalledProbe('E2E_CHROMIUM_NOT_INSTALLED', '使用 repo-e2e install-browser 安装固定 Chromium'),
   isolation: notInstalledProbe('E2E_RUNTIME_ISOLATION_NOT_INSTALLED', '安装 Runtime 隔离后端'),
-  'artifact-fs': notInstalledProbe('E2E_ARTIFACT_FS_NOT_INSTALLED', '安装 Artifact FS helper'),
+  'artifact-fs': trustedPythonProbe('E2E_ARTIFACT_FS_TRUSTED_PYTHON_OK'),
   quarantine: notInstalledProbe('E2E_QUARANTINE_NOT_INSTALLED', '初始化加密 quarantine 存储'),
   report: notInstalledProbe('E2E_REPORT_NOT_INSTALLED', '安装 Report Runtime'),
 }
@@ -122,4 +123,23 @@ function verifiedInstallationProbe(reasonCode: string): RuntimeProbe {
 
 function notInstalledProbe(reasonCode: string, remediation: string): RuntimeProbe {
   return async () => ({ status: 'not-installed', reasonCode, remediation })
+}
+
+function trustedPythonProbe(reasonCode: string): RuntimeProbe {
+  return async () => {
+    try {
+      const runtime = await discoverTrustedPython()
+      return {
+        status: 'passed', reasonCode, proofDigest: runtime.proofDigest,
+        remediation: '无需处理',
+      }
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        && typeof error.code === 'string' ? error.code : 'E2E_RUNTIME_TRUSTED_PYTHON_UNAVAILABLE'
+      return {
+        status: 'blocked', reasonCode: code,
+        remediation: '安装由 root 管理、不可被普通用户修改且支持 dir_fd 的 Python 3.9+',
+      }
+    }
+  }
 }

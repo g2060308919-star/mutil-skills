@@ -1,10 +1,11 @@
-import { mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { link, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
-import { digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, LocalLeaseAuthority, SqliteSnapshotStore } from '../src/index.js'
+import { testApprovalReceipt } from './approval-authority.fixture.js'
 
 const directories: string[] = []
 const now = () => new Date('2026-07-13T00:00:00.000Z')
@@ -12,6 +13,10 @@ const approver = { subject: 'os-user:persistent', roles: ['e2e-approver'] }
 const digest = (value: string) => digestText('persistent-authority-test/v1', value)
 const stateEncryptionKey = Buffer.alloc(32, 7)
 const testWorkspaceRoots = [process.cwd()]
+const authenticatePersistentApprover = (
+  sessionRef: string,
+  expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string },
+) => sessionRef === 'persistent-session' ? testApprovalReceipt(approver.subject, expected) : undefined
 
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
@@ -60,12 +65,12 @@ const attemptContext = {
 }
 
 describe('SQLite 持久 Authority 状态', () => {
-  test('将真实 2.0.0 snapshot 幂等迁移到 2.1.0，并对未知版本 fail closed', async () => {
+  test('将真实 2.0.0 snapshot 幂等迁移到 2.2.0，并对未知版本 fail closed', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-migration-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')
     const options = {
       issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
-      approvalIdentities: [approver], authenticateApproverSession: () => approver.subject,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
     }
     const first = await LocalApprovalAuthority.open(options)
     const subject = await writeSubject(first, 'LEASE-MIGRATION', 1)
@@ -80,6 +85,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const legacy = JSON.parse(row.snapshot) as Record<string, unknown>
     legacy.schemaVersion = '2.0.0'
     delete legacy.webAuthnCredentials
+    delete legacy.webAuthnReceipts
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
     database.close()
 
@@ -92,7 +98,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const migratedDatabase = new DatabaseSync(statePath)
     const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
     const persisted = JSON.parse(migratedRow.snapshot) as Record<string, unknown>
-    expect(persisted.schemaVersion).toBe('2.1.0')
+    expect(persisted.schemaVersion).toBe('2.2.0')
     expect(persisted.webAuthnCredentials).toMatchObject({ algorithm: 'aes-256-gcm' })
     persisted.schemaVersion = '9.9.9'
     migratedDatabase.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(persisted))
@@ -109,7 +115,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const statePath = join(directory, 'authority.sqlite')
     const options = {
       issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
-      approvalIdentities: [approver], authenticateApproverSession: () => approver.subject,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
     }
     const authority = await LocalApprovalAuthority.open(options)
     authority.close()
@@ -120,6 +126,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const legacy = JSON.parse(row.snapshot) as Record<string, unknown>
     legacy.schemaVersion = '2.0.0'
     delete legacy.webAuthnCredentials
+    delete legacy.webAuthnReceipts
     const legacyBytes = JSON.stringify(legacy)
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(legacyBytes)
     const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
@@ -139,7 +146,7 @@ describe('SQLite 持久 Authority 状态', () => {
       revision: number; snapshot: string
     }
     expect(migratedRow.revision).toBe(row.revision + 1)
-    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({ schemaVersion: '2.1.0' })
+    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({ schemaVersion: '2.2.0' })
     migratedDatabase.close()
   })
 
@@ -160,7 +167,7 @@ describe('SQLite 持久 Authority 状态', () => {
       const statePath = join(directory, 'authority.sqlite')
       const options = {
         issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
-        approvalIdentities: [approver], authenticateApproverSession: () => approver.subject,
+        approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
       }
       const authority = await LocalApprovalAuthority.open(options)
       authority.close()
@@ -171,6 +178,7 @@ describe('SQLite 持久 Authority 状态', () => {
       const legacy = JSON.parse(current.snapshot) as Record<string, any>
       legacy.schemaVersion = '2.0.0'
       delete legacy.webAuthnCredentials
+      delete legacy.webAuthnReceipts
       corrupt(legacy)
       database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
       const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
@@ -184,6 +192,57 @@ describe('SQLite 持久 Authority 状态', () => {
       afterDatabase.close()
     }
   })
+
+  test.each(['delete', 'reorder'] as const)(
+    '2.0.0 migration replays attempt logs and rejects %s tampering without commit',
+    async (mutation) => {
+      const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-attempt-replay-'))
+      directories.push(directory)
+      const statePath = join(directory, 'authority.sqlite')
+      const options = {
+        issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+        approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+      }
+      const authority = await LocalApprovalAuthority.open(options)
+      const initial = digestText('attempt-chain-initial/v2', canonicalizeJson(attemptContext))
+      const started = authority.appendAttemptEvent({ context: attemptContext, event: {
+        kind: 'started', sequence: 1, caseId: attemptContext.caseId, slot: 0,
+        attemptId: 'ATTEMPT-MIGRATION', mode: 'real-environment',
+        timestamp: '2026-07-13T00:00:00.000Z', previousChainDigest: initial,
+      } })
+      authority.appendAttemptEvent({ context: attemptContext, event: {
+        kind: 'terminal', sequence: 2, caseId: attemptContext.caseId, slot: 0,
+        attemptId: 'ATTEMPT-MIGRATION', timestamp: '2026-07-13T00:00:01.000Z',
+        previousChainDigest: started.eventChainDigest,
+        result: { status: 'automation-blocked', mode: 'real-environment', effect: 'read',
+          effectObservation: 'not-applicable', reservationSafeToVoid: true },
+      } })
+      authority.close()
+
+      const database = new DatabaseSync(statePath)
+      const row = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+        revision: number; snapshot: string
+      }
+      const legacy = JSON.parse(row.snapshot) as Record<string, any>
+      legacy.schemaVersion = '2.0.0'
+      delete legacy.webAuthnCredentials
+      delete legacy.webAuthnReceipts
+      const events = legacy.attemptLogs[0][1].events as unknown[]
+      if (mutation === 'delete') events.splice(0, 1)
+      else events.reverse()
+      const tampered = JSON.stringify(legacy)
+      database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(tampered)
+      const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
+      database.close()
+
+      await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+        code: 'E2E_AUTHORITY_STATE_CORRUPT',
+      })
+      const after = new DatabaseSync(statePath)
+      expect(after.prepare('SELECT revision, snapshot FROM authority_snapshots').get()).toEqual(before)
+      after.close()
+    },
+  )
 
   test('拒绝 expected state directory 被同 pathname 的真实目录替换', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-state-parent-binding-'))
@@ -212,7 +271,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const first = await LocalApprovalAuthority.open({
       issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
       approvalIdentities: [approver],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'persistent-session' ? approver.subject : undefined,
+      authenticateApproverSession: authenticatePersistentApprover,
     })
     const grant = await first.issueWriteGrant({
       subject: await writeSubject(first, 'LEASE-1', 1), approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
@@ -229,7 +288,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const second = await LocalApprovalAuthority.open({
       issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
       approvalIdentities: [approver],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'persistent-session' ? approver.subject : undefined,
+      authenticateApproverSession: authenticatePersistentApprover,
     })
     expect(second.attemptEventVerifierMaterial).toEqual(material)
     expect(await second.verify(grant)).toEqual({ allowed: true })
@@ -270,8 +329,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const options = {
       issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
       approvalIdentities: [approver],
-      authenticateApproverSession: (sessionRef: string) =>
-        sessionRef === 'persistent-session' ? approver.subject : undefined,
+      authenticateApproverSession: authenticatePersistentApprover,
     }
     const first = await LocalApprovalAuthority.open(options)
     const second = await LocalApprovalAuthority.open(options)
@@ -325,7 +383,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const statePath = join(directory, 'authority.sqlite')
     const options = {
       issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
-      approvalIdentities: [approver], authenticateApproverSession: () => approver.subject,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
     }
     const authority = await LocalApprovalAuthority.open(options)
     authority.close()
@@ -357,5 +415,17 @@ describe('SQLite 持久 Authority 状态', () => {
     await expect(LocalApprovalAuthority.open({
       ...options, statePath: linkedStatePath,
     })).rejects.toThrow('E2E_AUTHORITY_STATE_SYMLINK_FORBIDDEN')
+
+    const hardlinkDirectory = await mkdtemp(join(tmpdir(), 'e2e-authority-hardlink-'))
+    directories.push(hardlinkDirectory)
+    const hardlinkCanary = join(hardlinkDirectory, 'canary.sqlite')
+    const hardlinkedStatePath = join(hardlinkDirectory, 'authority.sqlite')
+    await writeFile(hardlinkCanary, 'CANARY', { mode: 0o600 })
+    await link(hardlinkCanary, hardlinkedStatePath)
+    await expect(LocalApprovalAuthority.open({
+      ...options, statePath: hardlinkedStatePath,
+    })).rejects.toThrow('E2E_AUTHORITY_STATE_LEAF_INVALID')
+    expect(await readFile(hardlinkCanary, 'utf8')).toBe('CANARY')
+    expect((await stat(hardlinkCanary)).mode & 0o777).toBe(0o600)
   })
 })

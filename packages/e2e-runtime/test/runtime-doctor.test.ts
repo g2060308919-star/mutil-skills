@@ -52,8 +52,15 @@ describe('Runtime doctor', () => {
     expect(report.probes.installation?.status).toBe('passed')
     expect(report.probes['version-closure']?.status).toBe('passed')
     expect(report.probes['source-independence']?.status).toBe('passed')
-    for (const name of RUNTIME_DOCTOR_PROBE_NAMES.slice(3)) {
+    for (const name of RUNTIME_DOCTOR_PROBE_NAMES.slice(3)
+      .filter((name) => name !== 'authority' && name !== 'artifact-fs')) {
       expect(report.probes[name]).toMatchObject({ status: 'not-installed' })
+    }
+    for (const name of ['authority', 'artifact-fs'] as const) {
+      expect(['passed', 'blocked']).toContain(report.probes[name]?.status)
+      if (report.probes[name]?.status === 'passed') {
+        expect(report.probes[name]?.proofDigest).toMatch(/^sha256:[a-f0-9]{64}$/)
+      }
     }
     expect(report.ready).toBe(false)
   })
@@ -189,7 +196,9 @@ describe('Runtime doctor', () => {
     expect(stdout.text()).toBe('')
     expect(stderr.text()).toContain('探针\t状态\t原因代码\t修复建议')
     expect(stderr.text()).toContain('installation\t通过\tE2E_RUNTIME_INSTALLATION_OK')
-    expect(stderr.text()).toContain('authority\t未安装\tE2E_AUTHORITY_NOT_INSTALLED')
+    const authority = report.probes.authority!
+    const authorityStatus = authority.status === 'passed' ? '通过' : '阻塞'
+    expect(stderr.text()).toContain(`authority\t${authorityStatus}\t${authority.reasonCode}`)
     expect(stderr.text()).toContain('就绪：否')
   })
 

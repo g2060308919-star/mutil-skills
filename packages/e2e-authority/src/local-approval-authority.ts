@@ -5,6 +5,7 @@ import {
   digestText,
   type ApproverIdentity,
   ApprovalCapabilityRecordSchema,
+  ApprovalGrantSubjectSchema,
   ApprovalFreshnessReceiptSchema,
   ApprovalFreshnessVerifierMaterialSchema,
   WriteApprovalSubjectV2Schema,
@@ -26,6 +27,15 @@ import {
   AttemptEventVerifierMaterialSchema,
   type AttemptEventVerifierMaterial,
   type CapabilityReservation,
+  type CanonicalApprovalContext,
+  DiscoveryApprovalSubjectSchema,
+  InjectionApprovalSubjectSchema,
+  WebSocketReadApprovalSubjectSchema,
+  SseReadApprovalSubjectSchema,
+  type ApprovalGrantSubject,
+  CanonicalApprovalContextSchema,
+  canonicalGrantApprovalSubjectDigest,
+  canonicalGrantApprovalType,
   type CanonicalInjectionResponse,
   type DiscoveryApprovalSubject,
   type DiscoveryCapability,
@@ -88,8 +98,8 @@ import {
 } from './sqlite-state-store.js'
 import { trustWriteApprovalClient, type TrustedWriteApprovalClient } from './trusted-execution-clients.js'
 import type {
+  StoredWebAuthnApprovalReceipt,
   StoredWebAuthnCredential,
-  WebAuthnGrantApprovalBinding,
   WebAuthnCredentialRepository,
 } from './webauthn-user-presence.js'
 
@@ -111,8 +121,8 @@ export interface LocalApprovalAuthorityOptions {
   /** 由 Authority Host 注入的 OS/SSO 会话认证器；普通调用方不能控制其返回值。 */
   authenticateApproverSession?: (
     sessionRef: string,
-    expected: WebAuthnGrantApprovalBinding,
-  ) => string | undefined
+    expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string },
+  ) => StoredWebAuthnApprovalReceipt | undefined | Promise<StoredWebAuthnApprovalReceipt | undefined>
 }
 
 interface EncryptedPrivateKey {
@@ -131,7 +141,7 @@ interface DecryptedAuthorityPrivateKeys {
 }
 
 interface AuthorityPersistentSnapshot {
-  schemaVersion: '2.1.0'
+  schemaVersion: '2.2.0'
   issuer: string
   keyId: string
   identityDigest: string
@@ -140,6 +150,7 @@ interface AuthorityPersistentSnapshot {
     decision: EncryptedPrivateKey; attempt: EncryptedPrivateKey
   }
   webAuthnCredentials: EncryptedPrivateKey
+  webAuthnReceipts: EncryptedPrivateKey
   grants: Array<[string, SignedGrant]>
   revoked: Array<[string, string]>
   uses: Array<[string, number]>
@@ -172,8 +183,8 @@ export class LocalApprovalAuthority {
   readonly #identityDigest: string
   readonly #authenticateApproverSession: (
     sessionRef: string,
-    expected: WebAuthnGrantApprovalBinding,
-  ) => string | undefined
+    expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string },
+  ) => StoredWebAuthnApprovalReceipt | undefined | Promise<StoredWebAuthnApprovalReceipt | undefined>
   readonly #stateContext = new AsyncLocalStorage<boolean>()
   #activeStateTransactions = 0
   readonly #grants = new Map<string, SignedGrant>()
@@ -188,6 +199,7 @@ export class LocalApprovalAuthority {
   readonly #approvalIdentities = new Map<string, ApproverIdentity>()
   readonly #manualIdentities = new Map<string, ApproverIdentity>()
   readonly #webAuthnCredentials = new Map<string, StoredWebAuthnCredential>()
+  readonly #webAuthnReceipts = new Map<string, StoredWebAuthnApprovalReceipt>()
 
   private constructor(options: LocalApprovalAuthorityOptions, privateKey: KeyObject, publicKey: KeyObject,
     freshnessPrivateKey: KeyObject, freshnessPublicKey: KeyObject,
@@ -252,7 +264,7 @@ export class LocalApprovalAuthority {
     const decision = generateKeyPairSync('ed25519')
     const attempt = generateKeyPairSync('ed25519')
     const initial: AuthorityPersistentSnapshot = {
-      schemaVersion: '2.1.0', issuer: options.issuer, keyId: options.keyId,
+      schemaVersion: '2.2.0', issuer: options.issuer, keyId: options.keyId,
       identityDigest: authorityIdentityDigest(options),
       privateKeys: {
         primary: encryptPrivateKey(primary.privateKey, stateEncryptionKey, 'primary'),
@@ -262,6 +274,7 @@ export class LocalApprovalAuthority {
         attempt: encryptPrivateKey(attempt.privateKey, stateEncryptionKey, 'attempt'),
       },
       webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey),
+      webAuthnReceipts: encryptWebAuthnReceipts([], stateEncryptionKey),
       grants: [], revoked: [], uses: [], reservations: [], completedPreflights: [], manualResultIds: [], attemptLogs: [],
     }
     store.initialize(canonicalizeJson(initial))
@@ -339,20 +352,46 @@ export class LocalApprovalAuthority {
       ) => await this.#withStateMutation(async () => {
         const expected = parseStoredWebAuthnCredential(expectedCandidate)
         const next = parseStoredWebAuthnCredential(nextCandidate)
-        const current = this.#webAuthnCredentials.get(expected.id)
-        if (current === undefined || canonicalizeJson(current) !== canonicalizeJson(expected)
-          || next.id !== expected.id || next.subject !== expected.subject
-          || next.publicKey !== expected.publicKey
-          || canonicalizeJson(next.transports) !== canonicalizeJson(expected.transports)
-          || next.counter <= expected.counter) {
-          throw authorityError(
-            'E2E_APPROVAL_CREDENTIAL_STATE_CONFLICT',
-            'WebAuthn credential CAS 失败或 counter 未严格递增',
-          )
-        }
+        this.#assertCredentialCas(expected, next)
         this.#webAuthnCredentials.set(next.id, next)
       }),
+      completeAuthentication: async (
+        expectedCandidate: StoredWebAuthnCredential,
+        nextCandidate: StoredWebAuthnCredential,
+        sessionId: string,
+        receiptCandidate: StoredWebAuthnApprovalReceipt,
+      ) => await this.#withStateMutation(async () => {
+        const expected = parseStoredWebAuthnCredential(expectedCandidate)
+        const next = parseStoredWebAuthnCredential(nextCandidate)
+        const receipt = parseStoredWebAuthnApprovalReceipt(receiptCandidate)
+        this.#assertCredentialCas(expected, next)
+        if (!/^[A-Za-z0-9._:-]{1,256}$/.test(sessionId) || this.#webAuthnReceipts.has(sessionId)) {
+          throw authorityError('E2E_APPROVAL_SESSION_CONSUMED', 'WebAuthn receipt session 已存在或无效')
+        }
+        this.#webAuthnCredentials.set(next.id, next)
+        this.#webAuthnReceipts.set(sessionId, receipt)
+      }),
+      takeApprovalReceipt: async (sessionId: string) => await this.#withStateMutation(async () => {
+        const receipt = this.#webAuthnReceipts.get(sessionId)
+        if (receipt === undefined) return undefined
+        this.#webAuthnReceipts.delete(sessionId)
+        return structuredClone(receipt)
+      }),
     })
+  }
+
+  #assertCredentialCas(expected: StoredWebAuthnCredential, next: StoredWebAuthnCredential): void {
+    const current = this.#webAuthnCredentials.get(expected.id)
+    if (current === undefined || canonicalizeJson(current) !== canonicalizeJson(expected)
+      || next.id !== expected.id || next.subject !== expected.subject
+      || next.publicKey !== expected.publicKey
+      || canonicalizeJson(next.transports) !== canonicalizeJson(expected.transports)
+      || next.counter <= expected.counter) {
+      throw authorityError(
+        'E2E_APPROVAL_CREDENTIAL_STATE_CONFLICT',
+        'WebAuthn credential CAS 失败或 counter 未严格递增',
+      )
+    }
   }
 
   async issueDiscoveryGrant(input: {
@@ -365,27 +404,33 @@ export class LocalApprovalAuthority {
       return await this.#withStateMutation(() => this.issueDiscoveryGrant(input))
     }
     const request = immutableSnapshot(input)
-    validateDiscoverySubject(request.subject)
-    const subjectDigest = digestText('approval-subject/v1', canonicalizeJson(request.subject))
-    this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
-      { subject: request.approver.subject, approvalType: 'discovery', subjectDigest },
+    const parsedSubject = DiscoveryApprovalSubjectSchema.safeParse(request.subject)
+    if (!parsedSubject.success) {
+      throw authorityError('E2E_APPROVAL_DISCOVERY_SCOPE_INVALID', 'Discovery subject 必须满足严格 canonical contract')
+    }
+    const subject = parsedSubject.data
+    validateDiscoverySubject(subject)
+    const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+      { approvalType: 'discovery', subjectDigest },
       request.ttlMs, MAX_DISCOVERY_TTL_MS)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedDiscoveryGrant, 'signature'> = {
       grantId: randomUUID(), issuer: this.#issuer, keyId: this.#keyId, proofScope: 'local-os-user',
       approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
-      subject: request.subject,
+      approvalContext,
+      subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
       expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
-      capabilities: request.subject.actions.map((action): DiscoveryCapability => ({
+      capabilities: subject.actions.map((action): DiscoveryCapability => ({
         capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'), transport: 'browser-local',
         effect: 'read', actionId: action.actionId, operation: action.operation,
-        targetUrl: request.subject.expectedPageIdentity.url, actor: request.subject.actor,
+        targetUrl: subject.expectedPageIdentity.url, actor: subject.actor,
         expectedPageIdentityDigest: digestText(
-          'expected-page-identity/v1', canonicalizeJson(request.subject.expectedPageIdentity),
+          'expected-page-identity/v1', canonicalizeJson(subject.expectedPageIdentity),
         ),
-        bootstrapIntentsDigest: request.subject.bootstrapIntentsDigest,
+        bootstrapIntentsDigest: subject.bootstrapIntentsDigest,
         maxUses: action.maxUses,
       })),
       revocationSequence: 0,
@@ -424,9 +469,9 @@ export class LocalApprovalAuthority {
         'Read Grant 必须引用同一 Asset、Revision、Scope、环境和 actor 的 ready Discovery preflight',
       )
     }
-    const subjectDigest = digestText('approval-subject/v1', canonicalizeJson(subject))
-    this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
-      { subject: request.approver.subject, approvalType: 'execution', subjectDigest },
+    const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+      { approvalType: 'execution', subjectDigest },
       request.ttlMs, MAX_READ_TTL_MS)
 
     const issuedAt = this.#now()
@@ -436,6 +481,7 @@ export class LocalApprovalAuthority {
       keyId: this.#keyId,
       proofScope: 'local-os-user',
       approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
+      approvalContext,
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
@@ -484,9 +530,9 @@ export class LocalApprovalAuthority {
         'Write Grant 必须引用同一 Asset、Revision、Scope、环境和 actor 的 ready Discovery preflight',
       )
     }
-    const subjectDigest = digestText('approval-subject/v1', canonicalizeJson(subject))
-    this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
-      { subject: request.approver.subject, approvalType: 'execution', subjectDigest },
+    const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+      { approvalType: 'execution', subjectDigest },
       request.ttlMs, MAX_WRITE_TTL_MS)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedWriteGrant, 'signature'> = {
@@ -495,6 +541,7 @@ export class LocalApprovalAuthority {
       keyId: this.#keyId,
       proofScope: 'local-os-user',
       approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
+      approvalContext,
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
@@ -530,10 +577,15 @@ export class LocalApprovalAuthority {
       return await this.#withStateMutation(() => this.issueInjectionGrant(input))
     }
     const request = immutableSnapshot(input)
-    validateInjectionSubject(request.subject)
-    const subjectDigest = digestText('approval-subject/v1', canonicalizeJson(request.subject))
-    this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
-      { subject: request.approver.subject, approvalType: 'execution', subjectDigest },
+    const parsedSubject = InjectionApprovalSubjectSchema.safeParse(request.subject)
+    if (!parsedSubject.success) {
+      throw authorityError('E2E_APPROVAL_INJECTION_SCOPE_INVALID', 'Injection subject 必须满足严格 canonical contract')
+    }
+    const subject = parsedSubject.data
+    validateInjectionSubject(subject)
+    const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+      { approvalType: 'execution', subjectDigest },
       request.ttlMs, MAX_INJECTION_TTL_MS)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedInjectionGrant, 'signature'> = {
@@ -542,11 +594,12 @@ export class LocalApprovalAuthority {
       keyId: this.#keyId,
       proofScope: 'local-os-user',
       approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
-      subject: request.subject,
+      approvalContext,
+      subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
-      expiresAt: new Date(issuedAt.getTime() + input.ttlMs).toISOString(),
-      capabilities: request.subject.actions.map((action): InjectionCapability => ({
+      expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
+      capabilities: subject.actions.map((action): InjectionCapability => ({
         capabilityId: randomUUID(),
         nonce: randomBytes(32).toString('hex'),
         transport: 'gateway-injection',
@@ -579,10 +632,15 @@ export class LocalApprovalAuthority {
       return await this.#withStateMutation(() => this.issueWebSocketReadGrant(input))
     }
     const request = immutableSnapshot(input)
-    validateWebSocketReadSubject(request.subject)
-    const subjectDigest = digestText('approval-subject/v1', canonicalizeJson(request.subject))
-    this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
-      { subject: request.approver.subject, approvalType: 'execution', subjectDigest },
+    const parsedSubject = WebSocketReadApprovalSubjectSchema.safeParse(request.subject)
+    if (!parsedSubject.success) {
+      throw authorityError('E2E_APPROVAL_WEBSOCKET_SCOPE_INVALID', 'WebSocket subject 必须满足严格 canonical contract')
+    }
+    const subject = parsedSubject.data
+    validateWebSocketReadSubject(subject)
+    const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+      { approvalType: 'execution', subjectDigest },
       request.ttlMs, MAX_READ_TTL_MS)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedWebSocketReadGrant, 'signature'> = {
@@ -591,11 +649,12 @@ export class LocalApprovalAuthority {
       keyId: this.#keyId,
       proofScope: 'local-os-user',
       approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
-      subject: request.subject,
+      approvalContext,
+      subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
-      expiresAt: new Date(issuedAt.getTime() + input.ttlMs).toISOString(),
-      capabilities: request.subject.actions.map((action): WebSocketReadCapability => ({
+      expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
+      capabilities: subject.actions.map((action): WebSocketReadCapability => ({
         capabilityId: randomUUID(),
         nonce: randomBytes(32).toString('hex'),
         transport: 'websocket',
@@ -625,20 +684,26 @@ export class LocalApprovalAuthority {
       return await this.#withStateMutation(() => this.issueSseReadGrant(input))
     }
     const request = immutableSnapshot(input)
-    validateSseReadSubject(request.subject)
-    const subjectDigest = digestText('approval-subject/v1', canonicalizeJson(request.subject))
-    this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
-      { subject: request.approver.subject, approvalType: 'execution', subjectDigest },
+    const parsedSubject = SseReadApprovalSubjectSchema.safeParse(request.subject)
+    if (!parsedSubject.success) {
+      throw authorityError('E2E_APPROVAL_SSE_SCOPE_INVALID', 'SSE subject 必须满足严格 canonical contract')
+    }
+    const subject = parsedSubject.data
+    validateSseReadSubject(subject)
+    const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+      { approvalType: 'execution', subjectDigest },
       request.ttlMs, MAX_READ_TTL_MS)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedSseReadGrant, 'signature'> = {
       grantId: randomUUID(), issuer: this.#issuer, keyId: this.#keyId, proofScope: 'local-os-user',
       approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
-      subject: request.subject,
+      approvalContext,
+      subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
-      expiresAt: new Date(issuedAt.getTime() + input.ttlMs).toISOString(),
-      capabilities: request.subject.actions.map((action): SseReadCapability => ({
+      expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
+      capabilities: subject.actions.map((action): SseReadCapability => ({
         capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'), transport: 'sse', effect: 'read',
         actionId: action.actionId, origin: action.origin, exactPath: action.exactPath,
         query: [...action.query], maxReconnects: action.maxReconnects, maxUses: action.maxReconnects,
@@ -685,7 +750,9 @@ export class LocalApprovalAuthority {
     if (!grantDecision.allowed) return grantDecision
     let currentDigest: string
     try {
-      currentDigest = digestText('approval-subject/v1', canonicalizeJson(currentSubject))
+      const parsed = ApprovalGrantSubjectSchema.parse(currentSubject)
+      if (canonicalGrantApprovalType(parsed) !== canonicalGrantApprovalType(grant.subject)) throw new Error('type mismatch')
+      currentDigest = canonicalGrantApprovalSubjectDigest(parsed)
     } catch {
       return denied('E2E_APPROVAL_SUBJECT_INVALID', '当前审批主题不是可确定序列化的合法输入')
     }
@@ -724,7 +791,7 @@ export class LocalApprovalAuthority {
     }
     const signatureDecision = this.#verifyGrantSignature(stored)
     if (!signatureDecision.allowed) throw authorityError(signatureDecision.code, signatureDecision.reason)
-    if (digestText('approval-subject/v1', canonicalizeJson(subjectResult.data)) !== stored.subjectDigest) {
+    if (canonicalGrantApprovalSubjectDigest(subjectResult.data) !== stored.subjectDigest) {
       throw authorityError('E2E_APPROVAL_SUBJECT_MISMATCH', '当前审批主题与 Grant 不一致')
     }
     const preflight = this.#completedPreflights.get(request.browserPreflight.authorityPreflightDigest)
@@ -1026,31 +1093,7 @@ export class LocalApprovalAuthority {
         throw authorityError('E2E_ATTEMPT_AUTHORITY_LOG_TRANSITION_INVALID', 'terminal 必须紧随同一 started')
       }
       if (['passed', 'failed'].includes(eventCore.result.status)
-        && ![...this.#reservations.values()].some((reservation) => {
-          if (reservation.reservationId !== eventCore.result.reservationId
-            || reservation.outcomeDigest !== eventCore.result.outcomeDigest) return false
-          if (reservation.status !== 'completed' || !reservation.outcomeDigest) return false
-          const grant = this.#grants.get(reservation.grantId)
-          const capability = grant?.capabilities.find((candidate) =>
-            candidate.capabilityId === reservation.capabilityId
-            && candidate.actionId === reservation.actionId)
-          if (!grant || !capability || grant.subject.assetId !== context.assetId
-            || grant.subject.prdRevision !== context.prdRevision) return false
-          if (eventCore.result.effect !== 'read') {
-            return reservation.attemptId === eventCore.attemptId && reservation.attemptContext !== undefined
-              && canonicalizeJson(reservation.attemptContext) === canonicalizeJson(context)
-              && 'effect' in capability && capability.effect === eventCore.result.effect
-          }
-          if (eventCore.result.mode === 'gateway-injection') {
-            return reservation.attemptId.startsWith(`${eventCore.attemptId}:`)
-              && capability.transport === 'gateway-injection'
-              && capability.runId === context.runId
-              && capability.caseId === context.caseId
-          }
-          return reservation.attemptId === eventCore.attemptId
-            && 'effect' in capability && capability.effect === 'read'
-            && 'requirementModelDigest' in grant.subject
-        })) {
+        && !reservationAttestsTerminal(context, eventCore, this.#reservations, this.#grants)) {
         throw authorityError('E2E_ATTEMPT_OUTCOME_UNATTESTED', '执行结果必须绑定同上下文的 Authority completed reservation')
       }
     } else if (previous.kind !== 'terminal' || eventCore.slot !== previous.slot + 1
@@ -1483,7 +1526,7 @@ export class LocalApprovalAuthority {
 
   #persistentSnapshot(): AuthorityPersistentSnapshot {
     return {
-      schemaVersion: '2.1.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
+      schemaVersion: '2.2.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
       privateKeys: {
         primary: encryptPrivateKey(this.#privateKey, this.#stateEncryptionKey!, 'primary'),
         freshness: encryptPrivateKey(this.#freshnessPrivateKey, this.#stateEncryptionKey!, 'freshness'),
@@ -1493,6 +1536,10 @@ export class LocalApprovalAuthority {
       },
       webAuthnCredentials: encryptWebAuthnCredentials(
         [...this.#webAuthnCredentials.values()],
+        this.#stateEncryptionKey!,
+      ),
+      webAuthnReceipts: encryptWebAuthnReceipts(
+        [...this.#webAuthnReceipts.entries()],
         this.#stateEncryptionKey!,
       ),
       grants: [...this.#grants.entries()], revoked: [...this.#revoked.entries()], uses: [...this.#uses.entries()],
@@ -1519,15 +1566,19 @@ export class LocalApprovalAuthority {
       decryptWebAuthnCredentials(snapshot.webAuthnCredentials, this.#stateEncryptionKey!)
         .map((credential) => [credential.id, credential]),
     )
+    replaceMap(
+      this.#webAuthnReceipts,
+      decryptWebAuthnReceipts(snapshot.webAuthnReceipts, this.#stateEncryptionKey!),
+    )
   }
 
-  private validateApproverAndTtl(
+  private async validateApproverAndTtl(
     approver: ApproverIdentity,
     approvalSessionRef: string | undefined,
-    expected: WebAuthnGrantApprovalBinding,
+    expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string },
     ttlMs: number,
     maximum: number,
-  ): void {
+  ): Promise<CanonicalApprovalContext> {
     if (!matchesRegisteredIdentity(approver, this.#approvalIdentities.get(approver.subject))
       || !approver.roles.includes('e2e-approver')) {
       throw authorityError('E2E_APPROVAL_APPROVER_UNTRUSTED', '审批人必须通过 Authority 会话认证且是登记的 e2e-approver')
@@ -1535,12 +1586,20 @@ export class LocalApprovalAuthority {
     if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > maximum) {
       throw authorityError('E2E_APPROVAL_TTL_INVALID', `Grant TTL 必须在 1ms 到 ${maximum}ms 之间`)
     }
-    const authenticatedSubject = approvalSessionRef
-      ? this.#authenticateApproverSession(approvalSessionRef, expected)
+    const receipt = approvalSessionRef
+      ? await this.#authenticateApproverSession(approvalSessionRef, expected)
       : undefined
-    if (authenticatedSubject !== approver.subject) {
+    if (receipt === undefined) {
       throw authorityError('E2E_APPROVAL_APPROVER_UNTRUSTED', '审批人必须通过 Authority 会话认证且是登记的 e2e-approver')
     }
+    const context = CanonicalApprovalContextSchema.safeParse({ schemaVersion: '1.0.0', ...receipt })
+    if (!context.success || context.data.subject !== approver.subject
+      || context.data.approvalType !== expected.approvalType
+      || context.data.subjectDigest !== expected.subjectDigest
+      || this.#now().getTime() > Date.parse(context.data.expiresAt)) {
+      throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'WebAuthn approval receipt 与实际 Grant/可信 Run 上下文不一致')
+    }
+    return context.data
   }
 }
 
@@ -1605,11 +1664,12 @@ function loadAuthoritySnapshot(
   if (!isPlainSnapshot(parsed)) {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
-  const migrated = parsed.schemaVersion === '2.0.0'
-  if (!migrated && parsed.schemaVersion !== '2.1.0') {
+  const version = parsed.schemaVersion
+  const migrated = version === '2.0.0' || version === '2.1.0'
+  if (!migrated && version !== '2.2.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 版本未知或旧结构无效')
   }
-  parseAuthoritySnapshotStructure(parsed, !migrated)
+  parseAuthoritySnapshotStructure(parsed, version !== '2.0.0', version === '2.2.0')
   const encryptedKeys = parsed.privateKeys as AuthorityPersistentSnapshot['privateKeys']
   let privateKeys: DecryptedAuthorityPrivateKeys
   try {
@@ -1624,29 +1684,39 @@ function loadAuthoritySnapshot(
     throw authorityError('E2E_AUTHORITY_STATE_DECRYPTION_FAILED', 'Authority 状态密钥错误或私钥密文已损坏')
   }
   validateSnapshotCryptography(parsed, privateKeys)
-  if (!migrated) {
+  if (version !== '2.0.0') {
     decryptWebAuthnCredentials(parsed.webAuthnCredentials as EncryptedPrivateKey, stateEncryptionKey)
+  }
+  if (version === '2.2.0') {
+    decryptWebAuthnReceipts(parsed.webAuthnReceipts as EncryptedPrivateKey, stateEncryptionKey)
     return { snapshot: parsed as unknown as AuthorityPersistentSnapshot, migrated: false, privateKeys }
   }
   const snapshot = parseCurrentAuthoritySnapshot({
     ...parsed,
-    schemaVersion: '2.1.0',
-    webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey),
+    schemaVersion: '2.2.0',
+    ...(version === '2.0.0'
+      ? { webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey) }
+      : {}),
+    webAuthnReceipts: encryptWebAuthnReceipts([], stateEncryptionKey),
   })
   return { snapshot, migrated: true, privateKeys }
 }
 
 function parseCurrentAuthoritySnapshot(parsed: unknown): AuthorityPersistentSnapshot {
-  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.1.0') {
+  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.2.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
-  parseAuthoritySnapshotStructure(parsed, true)
+  parseAuthoritySnapshotStructure(parsed, true, true)
   return parsed as unknown as AuthorityPersistentSnapshot
 }
 
-function parseAuthoritySnapshotStructure(candidate: Record<string, unknown>, withCredentials: boolean): void {
+function parseAuthoritySnapshotStructure(
+  candidate: Record<string, unknown>,
+  withCredentials: boolean,
+  withReceipts: boolean,
+): void {
   const privateKeys = candidate.privateKeys as Record<string, unknown> | undefined
-  if (!hasExactSnapshotKeys(candidate, withCredentials)
+  if (!hasExactSnapshotKeys(candidate, withCredentials, withReceipts)
     || typeof candidate.issuer !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.issuer)
     || typeof candidate.keyId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.keyId)
     || typeof candidate.identityDigest !== 'string' || !isDigest(candidate.identityDigest)
@@ -1654,6 +1724,7 @@ function parseAuthoritySnapshotStructure(candidate: Record<string, unknown>, wit
       !== ['attempt', 'decision', 'freshness', 'primary', 'privacyReview'].join('\0')
     || Object.values(privateKeys).some((key) => !isEncryptedBlob(key))
     || (withCredentials && !isEncryptedBlob(candidate.webAuthnCredentials))
+    || (withReceipts && !isEncryptedBlob(candidate.webAuthnReceipts))
     || !Array.isArray(candidate.grants) || !Array.isArray(candidate.revoked) || !Array.isArray(candidate.uses)
     || !Array.isArray(candidate.reservations) || !Array.isArray(candidate.completedPreflights)
     || !Array.isArray(candidate.manualResultIds) || !Array.isArray(candidate.attemptLogs)) {
@@ -1674,22 +1745,30 @@ function parseAuthoritySnapshotStructure(candidate: Record<string, unknown>, wit
       || ![...grantMap.values()].some((grant) => grant.capabilities.some((capability) =>
         `${grant.grantId}:${capability.capabilityId}` === key))) corruptSnapshot()
   })
-  parseUniqueTuples(candidate.reservations, 'reservation', (key, value) => {
+  const reservations = parseUniqueTuples(candidate.reservations, 'reservation', (key, value) => {
     validateStoredReservation(key, value, grantMap)
   })
+  const reservationMap = new Map(reservations.map(([key, value]) =>
+    [key, value as unknown as CapabilityReservation]))
   parseUniqueTuples(candidate.completedPreflights, 'preflight', (key, value) => {
     validateStoredPreflight(key, value, grantMap)
   })
   if (candidate.manualResultIds.some((id) => typeof id !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(id))
     || new Set(candidate.manualResultIds).size !== candidate.manualResultIds.length) corruptSnapshot()
-  parseUniqueTuples(candidate.attemptLogs, 'attempt log', (key, value) => validateStoredAttemptLog(key, value))
+  parseUniqueTuples(candidate.attemptLogs, 'attempt log', (key, value) =>
+    validateStoredAttemptLog(key, value, grantMap, reservationMap))
 }
 
-function hasExactSnapshotKeys(candidate: Record<string, unknown>, withCredentials: boolean): boolean {
+function hasExactSnapshotKeys(
+  candidate: Record<string, unknown>,
+  withCredentials: boolean,
+  withReceipts: boolean,
+): boolean {
   const keys = [
     'attemptLogs', 'completedPreflights', 'grants', 'identityDigest', 'issuer', 'keyId', 'manualResultIds',
     'privateKeys', 'reservations', 'revoked', 'schemaVersion', 'uses',
     ...(withCredentials ? ['webAuthnCredentials'] : []),
+    ...(withReceipts ? ['webAuthnReceipts'] : []),
   ].sort()
   return Object.keys(candidate).sort().join('\0') === keys.join('\0')
 }
@@ -1720,7 +1799,7 @@ type StoredGrantKind = 'discovery' | 'read' | 'write' | 'injection' | 'websocket
 
 function validateStoredGrantStructure(grant: Record<string, unknown>): void {
   requireExactKeys(grant, [
-    'approver', 'capabilities', 'expiresAt', 'grantId', 'issuedAt', 'issuer', 'keyId', 'proofScope',
+    'approvalContext', 'approver', 'capabilities', 'expiresAt', 'grantId', 'issuedAt', 'issuer', 'keyId', 'proofScope',
     'revocationSequence', 'signature', 'subject', 'subjectDigest',
   ])
   if (typeof grant.grantId !== 'string' || typeof grant.issuer !== 'string' || typeof grant.keyId !== 'string'
@@ -1736,7 +1815,11 @@ function validateStoredGrantStructure(grant: Record<string, unknown>): void {
     || grant.approver.roles.some((role) => typeof role !== 'string')
     || new Set(grant.approver.roles).size !== grant.approver.roles.length) corruptSnapshot()
   const kind = validateStoredGrantSubject(grant.subject)
-  if (digestText('approval-subject/v1', canonicalizeJson(grant.subject)) !== grant.subjectDigest
+  const context = CanonicalApprovalContextSchema.safeParse(grant.approvalContext)
+  if (!context.success || context.data.subject !== grant.approver.subject
+    || context.data.approvalType !== (kind === 'discovery' ? 'discovery' : 'execution')
+    || context.data.subjectDigest !== grant.subjectDigest
+    || canonicalGrantApprovalSubjectDigest(grant.subject as ApprovalGrantSubject) !== grant.subjectDigest
     || !Array.isArray(grant.capabilities) || grant.capabilities.length === 0) corruptSnapshot()
   const keySets: Record<StoredGrantKind, string[]> = {
     discovery: ['actionId', 'actor', 'bootstrapIntentsDigest', 'capabilityId', 'effect', 'expectedPageIdentityDigest',
@@ -1834,7 +1917,12 @@ function validateStoredPreflight(key: string, value: unknown, grants: Map<string
   if (validateStoredGrantSubject(value.subject) !== 'discovery') corruptSnapshot()
 }
 
-function validateStoredAttemptLog(key: string, value: unknown): void {
+function validateStoredAttemptLog(
+  key: string,
+  value: unknown,
+  grants: Map<string, SignedGrant>,
+  reservations: Map<string, CapabilityReservation>,
+): void {
   let context: unknown
   try { context = JSON.parse(key) } catch { corruptSnapshot() }
   if (!isPlainSnapshot(context)) corruptSnapshot()
@@ -1851,7 +1939,64 @@ function validateStoredAttemptLog(key: string, value: unknown): void {
     if (!parsed.success) corruptSnapshot()
     return parsed.data
   })
-  if (Date.parse(events.at(-1)!.timestamp) !== value.lastTimestamp) corruptSnapshot()
+  const typedContext = context as unknown as AttemptExecutionContext
+  let expectedPrevious = digestText('attempt-chain-initial/v2', canonicalizeJson(typedContext))
+  let lastTimestamp = -Infinity
+  const startedAttemptIds = new Set<string>()
+  for (const [index, event] of events.entries()) {
+    const timestamp = Date.parse(event.timestamp)
+    if (event.sequence !== index + 1 || event.caseId !== typedContext.caseId
+      || event.previousChainDigest !== expectedPrevious || !Number.isFinite(timestamp)
+      || timestamp < lastTimestamp) corruptSnapshot()
+    const previous = events[index - 1]
+    if (index === 0) {
+      if (event.kind !== 'started' || event.slot !== 0) corruptSnapshot()
+    } else if (event.kind === 'terminal') {
+      if (previous?.kind !== 'started' || previous.slot !== event.slot
+        || previous.attemptId !== event.attemptId || previous.mode !== event.result.mode
+        || (['passed', 'failed'].includes(event.result.status)
+          && !reservationAttestsTerminal(typedContext, event, reservations, grants))) corruptSnapshot()
+    } else if (previous?.kind !== 'terminal' || event.slot !== previous.slot + 1
+      || startedAttemptIds.has(event.attemptId)) corruptSnapshot()
+    if (event.kind === 'started') startedAttemptIds.add(event.attemptId)
+    expectedPrevious = digestText('attempt-event-chain/v1', canonicalizeJson({
+      previous: event.previousChainDigest,
+      event: event.eventDigest,
+    }))
+    lastTimestamp = timestamp
+  }
+  if (expectedPrevious !== value.chainDigest || lastTimestamp !== value.lastTimestamp) corruptSnapshot()
+}
+
+function reservationAttestsTerminal(
+  context: AttemptExecutionContext,
+  event: Extract<AppendAttemptEventInput | AttemptEvent, { kind: 'terminal' }>,
+  reservations: Map<string, CapabilityReservation>,
+  grants: Map<string, SignedGrant>,
+): boolean {
+  return [...reservations.values()].some((reservation) => {
+    if (reservation.reservationId !== event.result.reservationId
+      || reservation.outcomeDigest !== event.result.outcomeDigest
+      || reservation.status !== 'completed' || !reservation.outcomeDigest) return false
+    const grant = grants.get(reservation.grantId)
+    const capability = grant?.capabilities.find((candidate) =>
+      candidate.capabilityId === reservation.capabilityId && candidate.actionId === reservation.actionId)
+    if (!grant || !capability || grant.subject.assetId !== context.assetId
+      || grant.subject.prdRevision !== context.prdRevision) return false
+    if (event.result.effect !== 'read') {
+      return reservation.attemptId === event.attemptId && reservation.attemptContext !== undefined
+        && canonicalizeJson(reservation.attemptContext) === canonicalizeJson(context)
+        && 'effect' in capability && capability.effect === event.result.effect
+    }
+    if (event.result.mode === 'gateway-injection') {
+      return reservation.attemptId.startsWith(`${event.attemptId}:`)
+        && capability.transport === 'gateway-injection'
+        && capability.runId === context.runId && capability.caseId === context.caseId
+    }
+    return reservation.attemptId === event.attemptId
+      && 'effect' in capability && capability.effect === 'read'
+      && 'requirementModelDigest' in grant.subject
+  })
 }
 
 function validateSnapshotCryptography(
@@ -1917,6 +2062,10 @@ function isCanonicalInstant(value: string): boolean {
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value
 }
 
+function isCanonicalOrigin(value: string): boolean {
+  try { return new URL(value).origin === value } catch { return false }
+}
+
 function corruptSnapshot(): never {
   throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构或认证内容无效')
 }
@@ -1970,6 +2119,69 @@ function decryptWebAuthnCredentials(
       `Authority WebAuthn credential 密文损坏: ${cause instanceof Error ? cause.message : 'unknown'}`,
     )
   }
+}
+
+function encryptWebAuthnReceipts(
+  entries: Array<[string, StoredWebAuthnApprovalReceipt]>,
+  encryptionKey: Buffer,
+): EncryptedPrivateKey {
+  const iv = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', encryptionKey, iv)
+  cipher.setAAD(Buffer.from('e2e-authority-webauthn-receipts/v1'))
+  const normalized = entries
+    .map(([sessionId, receipt]) => [sessionId, parseStoredWebAuthnApprovalReceipt(receipt)] as const)
+    .sort(([left], [right]) => left.localeCompare(right))
+  if (new Set(normalized.map(([sessionId]) => sessionId)).size !== normalized.length) corruptSnapshot()
+  const plaintext = Buffer.from(canonicalizeJson(normalized))
+  try {
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
+    return {
+      algorithm: 'aes-256-gcm', iv: iv.toString('base64'),
+      ciphertext: ciphertext.toString('base64'), authTag: cipher.getAuthTag().toString('base64'),
+    }
+  } finally { plaintext.fill(0) }
+}
+
+function decryptWebAuthnReceipts(
+  encrypted: EncryptedPrivateKey,
+  encryptionKey: Buffer,
+): Array<[string, StoredWebAuthnApprovalReceipt]> {
+  let plaintext: Buffer | undefined
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(encrypted.iv, 'base64'))
+    decipher.setAAD(Buffer.from('e2e-authority-webauthn-receipts/v1'))
+    decipher.setAuthTag(Buffer.from(encrypted.authTag, 'base64'))
+    plaintext = Buffer.concat([
+      decipher.update(Buffer.from(encrypted.ciphertext, 'base64')),
+      decipher.final(),
+    ])
+    const parsed = JSON.parse(plaintext.toString('utf8')) as unknown
+    if (!Array.isArray(parsed)) corruptSnapshot()
+    return parseUniqueTuples(parsed, 'WebAuthn receipt', (sessionId, receipt) => {
+      if (!/^[A-Za-z0-9._:-]{1,256}$/.test(sessionId)) corruptSnapshot()
+      parseStoredWebAuthnApprovalReceipt(receipt)
+    }).map(([sessionId, receipt]) => [sessionId, parseStoredWebAuthnApprovalReceipt(receipt)])
+  } catch (error) {
+    if (error instanceof E2EError) throw error
+    throw authorityError('E2E_AUTHORITY_STATE_DECRYPTION_FAILED', 'Authority WebAuthn receipt 密文损坏')
+  } finally { plaintext?.fill(0) }
+}
+
+function parseStoredWebAuthnApprovalReceipt(value: unknown): StoredWebAuthnApprovalReceipt {
+  if (!isPlainSnapshot(value)) corruptSnapshot()
+  requireExactKeys(value, [
+    'approvalType', 'expiresAt', 'installationDigest', 'issuedAt', 'origin', 'runId', 'subject', 'subjectDigest',
+  ])
+  if (typeof value.subject !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.subject)
+    || typeof value.runId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.runId)
+    || !['scope', 'lineage', 'discovery', 'execution', 'privacy'].includes(String(value.approvalType))
+    || typeof value.subjectDigest !== 'string' || !isDigest(value.subjectDigest)
+    || typeof value.installationDigest !== 'string' || !isDigest(value.installationDigest)
+    || typeof value.origin !== 'string' || !isCanonicalOrigin(value.origin)
+    || typeof value.issuedAt !== 'string' || !isCanonicalInstant(value.issuedAt)
+    || typeof value.expiresAt !== 'string' || !isCanonicalInstant(value.expiresAt)
+    || Date.parse(value.expiresAt) <= Date.parse(value.issuedAt)) corruptSnapshot()
+  return structuredClone(value) as unknown as StoredWebAuthnApprovalReceipt
 }
 
 function isEncryptedBlob(value: unknown): value is EncryptedPrivateKey {

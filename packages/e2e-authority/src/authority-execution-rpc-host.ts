@@ -15,6 +15,8 @@ import type {
 
 const HOST_START_TIMEOUT_MS = 10_000
 const HOST_STOP_TIMEOUT_MS = 5_000
+const HOST_TERM_TIMEOUT_MS = 1_000
+const HOST_KILL_TIMEOUT_MS = 1_000
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 
 export interface AuthorityExecutionRpcHostOptions {
@@ -211,7 +213,7 @@ export async function startAuthorityExecutionRpcHostProcess(
         if (closed) return
         closed = true
         try {
-          if (terminalError === undefined) await stopChild(child)
+          await stopChild(child)
         }
         finally {
           child.off('message', onSessionMessage)
@@ -225,7 +227,7 @@ export async function startAuthorityExecutionRpcHostProcess(
       },
     }
   } catch (error) {
-    if (child.exitCode === null) child.kill('SIGTERM')
+    await stopChild(child).catch(() => undefined)
     sessionKey.fill(0)
     throw error
   }
@@ -247,7 +249,11 @@ function waitForReady(child: ChildProcess, startMessage: Record<string, any>): P
       child.off('exit', onExit)
       child.off('disconnect', onDisconnect)
     }
-    const finishReject = (error: unknown) => { cleanup(); reject(error) }
+    const finishReject = (error: unknown) => {
+      scrubStartMessageSecrets(startMessage)
+      cleanup()
+      reject(error)
+    }
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       finishReject(hostError('E2E_RPC_HOST_EXITED', { code, signal }))
     }
@@ -259,6 +265,7 @@ function waitForReady(child: ChildProcess, startMessage: Record<string, any>): P
         return
       }
       if (message.type !== 'ready' || typeof message.endpoint !== 'string' || !isObject(message.verifierMaterial)) return
+      scrubStartMessageSecrets(startMessage)
       cleanup()
       resolve(message as unknown as HostReadyMessage)
     }
@@ -266,22 +273,49 @@ function waitForReady(child: ChildProcess, startMessage: Record<string, any>): P
     child.once('error', finishReject)
     child.once('exit', onExit)
     child.once('disconnect', onDisconnect)
-    child.send(startMessage, (error) => { if (error) finishReject(error) })
+    child.send(startMessage, (error) => {
+      scrubStartMessageSecrets(startMessage)
+      if (error) finishReject(error)
+    })
   })
 }
 
-function stopChild(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null) return Promise.resolve()
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill('SIGTERM')
-      reject(hostError('E2E_RPC_HOST_STOP_TIMEOUT'))
-    }, HOST_STOP_TIMEOUT_MS)
-    child.once('exit', () => { clearTimeout(timeout); resolve() })
-    child.once('error', (error) => { clearTimeout(timeout); reject(error) })
-    child.send({ type: 'shutdown' }, (error) => {
-      if (error) { clearTimeout(timeout); reject(error) }
-    })
+function scrubStartMessageSecrets(startMessage: Record<string, any>): void {
+  if (!isObject(startMessage.config)) return
+  if (isObject(startMessage.config.approval)) {
+    startMessage.config.approval.stateEncryptionKeyBase64Url = ''
+  }
+  startMessage.config.sessionKeyBase64Url = ''
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (hasChildExited(child)) return
+  if (child.connected) {
+    try { child.send({ type: 'shutdown' }, () => undefined) } catch { /* 继续 TERM/KILL 回收 */ }
+  }
+  if (await waitForChildExit(child, HOST_STOP_TIMEOUT_MS)) return
+  try { child.kill('SIGTERM') } catch { /* 继续等待或 KILL */ }
+  if (await waitForChildExit(child, HOST_TERM_TIMEOUT_MS)) return
+  try { child.kill('SIGKILL') } catch { /* 最后一次等待会给出稳定错误 */ }
+  if (await waitForChildExit(child, HOST_KILL_TIMEOUT_MS)) return
+  throw hostError('E2E_RPC_HOST_STOP_TIMEOUT')
+}
+
+function hasChildExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (hasChildExited(child)) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    const finish = (exited: boolean) => {
+      clearTimeout(timeout)
+      child.off('exit', onExit)
+      resolve(exited)
+    }
+    const onExit = () => finish(true)
+    const timeout = setTimeout(() => finish(hasChildExited(child)), timeoutMs)
+    child.once('exit', onExit)
   })
 }
 

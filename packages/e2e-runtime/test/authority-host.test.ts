@@ -165,7 +165,13 @@ test('approval subject digest is recomputed from every security-relevant Run bin
   ]) {
     expect(computeRuntimeApprovalSubjectDigest(changed, 'scope')).not.toBe(digest)
   }
-  expect(computeRuntimeApprovalSubjectDigest(snapshot, 'execution')).not.toBe(digest)
+  const grantSubject = executionGrantSubject(snapshot)
+  const executionDigest = computeRuntimeApprovalSubjectDigest(snapshot, 'execution', grantSubject)
+  expect(executionDigest).not.toBe(digest)
+  expect(computeRuntimeApprovalSubjectDigest(snapshot, 'execution', {
+    ...grantSubject,
+    actions: [{ ...grantSubject.actions[0]!, maxInboundMessages: 2 }],
+  })).not.toBe(executionDigest)
 })
 
 test('Runtime Host recomputes the approval subject from the locked Run before opening WebAuthn', async () => {
@@ -221,7 +227,7 @@ test('Runtime Host recomputes the approval subject from the locked Run before op
     const wrongType = RuntimeRequestEnvelopeSchema.parse({
       schemaVersion: '1.0.0', requestId: 'APPROVE-2', client: { name: 'test', version: '1.0.0' },
       command: 'open-approval', projectRoot: roots.project,
-      payload: { runId: 'RUN-1', approvalType: 'execution' },
+      payload: { runId: 'RUN-1', approvalType: 'execution', grantSubject: executionGrantSubject(snapshot) },
     })
     expect(await host.handle(wrongType, JSON.stringify(wrongType))).toMatchObject({
       ok: false, error: { code: 'E2E_RUNTIME_APPROVAL_TYPE_MISMATCH' },
@@ -654,6 +660,21 @@ function runSnapshot(): RuntimeRunSnapshot {
     workflow: { current: 'awaiting-scope-approval', sequence: 2, eventChainDigest: `sha256:${'2'.repeat(64)}` },
     artifactDigests: { 'prd-source': `sha256:${'3'.repeat(64)}`, scope: `sha256:${'4'.repeat(64)}` },
     requestResponses: {}, createdAt: '2026-07-16T00:00:00.000Z', updatedAt: '2026-07-16T00:00:00.000Z',
+  }
+}
+
+function executionGrantSubject(snapshot: RuntimeRunSnapshot) {
+  return {
+    schemaVersion: '1.0.0' as const,
+    assetId: snapshot.assetId,
+    prdRevision: snapshot.artifactDigests['prd-source']!,
+    executionDigest: `sha256:${'5'.repeat(64)}`,
+    environment: 'test' as const,
+    baseOrigin: 'https://test.example.com',
+    actions: [{
+      actionId: 'ACTION-WS-1', origin: 'https://test.example.com', path: '/events',
+      maxInboundMessages: 1, maxBytes: 1024,
+    }],
   }
 }
 

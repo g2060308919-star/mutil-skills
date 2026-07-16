@@ -34,12 +34,25 @@ export interface DiscoveryCapability {
   maxUses: number
 }
 
+export interface CanonicalApprovalContext {
+  schemaVersion: '1.0.0'
+  subject: string
+  runId: string
+  approvalType: 'discovery' | 'execution'
+  subjectDigest: string
+  installationDigest: string
+  origin: string
+  issuedAt: string
+  expiresAt: string
+}
+
 export interface SignedDiscoveryGrant {
   grantId: string
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
   approver: ApproverIdentity
+  approvalContext: CanonicalApprovalContext
   subject: DiscoveryApprovalSubject
   subjectDigest: string
   issuedAt: string
@@ -107,6 +120,7 @@ export interface SignedReadGrant {
   keyId: string
   proofScope: 'local-os-user'
   approver: ApproverIdentity
+  approvalContext: CanonicalApprovalContext
   subject: ReadApprovalSubject
   subjectDigest: string
   issuedAt: string
@@ -182,6 +196,7 @@ export interface SignedWriteGrant {
   keyId: string
   proofScope: 'local-os-user'
   approver: ApproverIdentity
+  approvalContext: CanonicalApprovalContext
   subject: WriteApprovalSubject
   subjectDigest: string
   issuedAt: string
@@ -253,6 +268,7 @@ export interface SignedInjectionGrant {
   keyId: string
   proofScope: 'local-os-user'
   approver: ApproverIdentity
+  approvalContext: CanonicalApprovalContext
   subject: InjectionApprovalSubject
   subjectDigest: string
   issuedAt: string
@@ -297,6 +313,7 @@ export interface SignedWebSocketReadGrant {
   keyId: string
   proofScope: 'local-os-user'
   approver: ApproverIdentity
+  approvalContext: CanonicalApprovalContext
   subject: WebSocketReadApprovalSubject
   subjectDigest: string
   issuedAt: string
@@ -341,6 +358,7 @@ export interface SignedSseReadGrant {
   keyId: string
   proofScope: 'local-os-user'
   approver: ApproverIdentity
+  approvalContext: CanonicalApprovalContext
   subject: SseReadApprovalSubject
   subjectDigest: string
   issuedAt: string

@@ -4,7 +4,14 @@ import {
   type WebAuthnApprovalAssets,
   type WebAuthnApprovalType,
 } from '@mutil-skills/e2e-authority'
-import { canonicalizeJson, digestText, E2EError } from '@mutil-skills/e2e-contracts'
+import {
+  canonicalizeJson,
+  canonicalGrantApprovalSubjectDigest,
+  canonicalGrantApprovalType,
+  digestText,
+  E2EError,
+  type ApprovalGrantSubject,
+} from '@mutil-skills/e2e-contracts'
 import { constants } from 'node:fs'
 import { lstat, open, realpath, type FileHandle } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
@@ -16,6 +23,11 @@ import { buildChildEnvironment } from './environment-policy.js'
 import type { RuntimeInstallation } from './runtime-discovery.js'
 import { runtimeLayout } from './runtime-layout.js'
 import type { RuntimeRunSnapshot } from './run-store.js'
+import {
+  discoverTrustedPython,
+  reverifyTrustedPython,
+  type TrustedPythonRuntime,
+} from './trusted-python.js'
 
 const BUNDLE_DIGEST = 'sha256:cf4469953efcb5617a870ae3f022b3ad48aee8c06012ccdafcabc73058f123a0'
 const DIGEST = /^sha256:[a-f0-9]{64}$/
@@ -111,12 +123,14 @@ export async function startRuntimeAuthorityHost(options: {
     homeDir: options.homeDir,
     tempDir: tmpdir(),
   })
-  const prepared = await prepareAuthorityState(options.homeDir, layout.authority, environment)
+  const trustedPython = await discoverTrustedPython()
+  const prepared = await prepareAuthorityState(options.homeDir, layout.authority, environment, trustedPython)
+  let processHandle: AuthorityExecutionRpcProcessHandle | undefined
   try {
     const assets = await loadRuntimeApprovalAssets()
     const childWrapperPath = await secureRuntimeScriptPath('authority-child-fchdir.py')
-    let processHandle: AuthorityExecutionRpcProcessHandle
     try {
+      await reverifyTrustedPython(trustedPython)
       processHandle = await startAuthorityExecutionRpcHostProcess({
         rpc: { issuer: 'e2e-runtime-authority', keyId: 'rpc-v1', clientId: 'runtime-parent' },
         approval: {
@@ -143,7 +157,7 @@ export async function startRuntimeAuthorityHost(options: {
           pinnedStateDirectory: {
             fd: prepared.directoryHandle.fd,
             identity: prepared.identity,
-            pythonExecutable: '/usr/bin/python3',
+            pythonExecutable: trustedPython.executable,
             wrapperPath: childWrapperPath,
           },
         },
@@ -158,7 +172,17 @@ export async function startRuntimeAuthorityHost(options: {
     })
   } finally {
     prepared.stateEncryptionKey.fill(0)
-    await prepared.directoryHandle.close()
+    try {
+      await prepared.directoryHandle.close()
+    } catch (closeError) {
+      if (processHandle === undefined) throw closeError
+      const childCleanup = await Promise.allSettled([processHandle.close()])
+      const childError = childCleanup[0]?.status === 'rejected' ? childCleanup[0].reason : undefined
+      if (childError !== undefined) {
+        throw new AggregateError([closeError, childError], 'E2E_APPROVAL_PARENT_FD_AND_CHILD_CLEANUP_FAILED')
+      }
+      throw closeError
+    }
   }
 }
 
@@ -180,7 +204,18 @@ export async function loadRuntimeApprovalAssets(): Promise<WebAuthnApprovalAsset
 export function computeRuntimeApprovalSubjectDigest(
   snapshot: RuntimeRunSnapshot,
   approvalType: WebAuthnApprovalType,
+  grantSubject?: ApprovalGrantSubject,
 ): string {
+  if (approvalType === 'discovery' || approvalType === 'execution') {
+    if (grantSubject === undefined || canonicalGrantApprovalType(grantSubject) !== approvalType
+      || grantSubject.assetId !== snapshot.assetId
+      || grantSubject.prdRevision !== snapshot.artifactDigests['prd-source']
+      || ('actions' in grantSubject && grantSubject.actions.some((action) =>
+        'runId' in action && action.runId !== snapshot.runId))) {
+      throw authorityHostError('E2E_RUNTIME_APPROVAL_SUBJECT_INVALID')
+    }
+    return canonicalGrantApprovalSubjectDigest(grantSubject)
+  }
   return digestText('e2e-runtime-approval-subject/v1', canonicalizeJson({
     runId: snapshot.runId,
     assetId: snapshot.assetId,
@@ -219,6 +254,7 @@ async function prepareAuthorityState(
   homeDir: string,
   authorityRoot: string,
   environment: Record<string, string>,
+  trustedPython: TrustedPythonRuntime,
 ): Promise<PreparedAuthorityState> {
   let directoryHandle: FileHandle | undefined
   let stateEncryptionKey: Buffer | undefined
@@ -228,8 +264,10 @@ async function prepareAuthorityState(
       throw authorityHostError('E2E_APPROVAL_STATE_DIRECTORY_INVALID')
     }
     const helperPath = await secureRuntimeScriptPath('authority-state-openat.py')
-    const output = await runStateHelper(helperPath, canonicalHome, environment)
-    const parsed = parseStateHelperOutput(output, authorityRoot)
+    const output = await runStateHelper(helperPath, canonicalHome, environment, trustedPython)
+    let parsed: ReturnType<typeof parseStateHelperOutput>
+    try { parsed = parseStateHelperOutput(output, authorityRoot) }
+    finally { output.fill(0) }
     stateEncryptionKey = parsed.stateEncryptionKey
     directoryHandle = await open(
       parsed.identity.realPath,
@@ -276,8 +314,10 @@ async function runStateHelper(
   helperPath: string,
   canonicalHome: string,
   environment: Record<string, string>,
-): Promise<string> {
-  const child = spawn('/usr/bin/python3', [helperPath, canonicalHome], {
+  trustedPython: TrustedPythonRuntime,
+): Promise<Buffer> {
+  await reverifyTrustedPython(trustedPython)
+  const child = spawn(trustedPython.executable, [helperPath, canonicalHome], {
     stdio: ['ignore', 'pipe', 'pipe'], env: environment,
   })
   const stdout: Buffer[] = []
@@ -297,33 +337,40 @@ async function runStateHelper(
     child.once('error', (error) => { clearTimeout(timeout); reject(error) })
     child.once('close', (code) => { clearTimeout(timeout); resolve(code) })
   }).catch(() => null)
-  if (overflow) throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
-  const text = Buffer.concat(stdout).toString('utf8')
-  if (!text.endsWith('\n') || text.slice(0, -1).includes('\n')) {
-    throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
-  }
-  if (exitCode !== 0) {
-    try {
-      const error = JSON.parse(text) as unknown
-      if (isRecord(error) && hasExactKeys(error, ['code', 'ok']) && error.ok === false
-        && (error.code === 'E2E_APPROVAL_STATE_DIRECTORY_INVALID'
-          || error.code === 'E2E_APPROVAL_STATE_KEY_INVALID')) {
-        throw authorityHostError(error.code)
-      }
-    } catch (error) {
-      if (error instanceof E2EError) throw error
+  const output = Buffer.concat(stdout)
+  for (const chunk of stdout) chunk.fill(0)
+  try {
+    if (overflow) throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
+    const text = output.toString('utf8')
+    if (!text.endsWith('\n') || text.slice(0, -1).includes('\n')) {
+      throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
     }
-    throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
+    if (exitCode !== 0) {
+      try {
+        const error = JSON.parse(text) as unknown
+        if (isRecord(error) && hasExactKeys(error, ['code', 'ok']) && error.ok === false
+          && (error.code === 'E2E_APPROVAL_STATE_DIRECTORY_INVALID'
+            || error.code === 'E2E_APPROVAL_STATE_KEY_INVALID')) {
+          throw authorityHostError(error.code)
+        }
+      } catch (error) {
+        if (error instanceof E2EError) throw error
+      }
+      throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
+    }
+    return output
+  } catch (error) {
+    output.fill(0)
+    throw error
   }
-  return text
 }
 
 function parseStateHelperOutput(
-  text: string,
+  output: Buffer,
   expectedAuthorityRoot: string,
 ): { identity: SecureDirectoryIdentity; stateEncryptionKey: Buffer } {
   let value: unknown
-  try { value = JSON.parse(text) } catch {
+  try { value = JSON.parse(output.toString('utf8')) } catch {
     throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
   }
   if (!isRecord(value) || !hasExactKeys(value, ['directory', 'keyBase64Url', 'ok', 'schemaVersion'])
@@ -336,12 +383,15 @@ function parseStateHelperOutput(
     || typeof value.keyBase64Url !== 'string') {
     throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
   }
-  const stateEncryptionKey = Buffer.from(value.keyBase64Url, 'base64url')
+  const encodedKey = value.keyBase64Url
+  const stateEncryptionKey = Buffer.from(encodedKey, 'base64url')
   if (stateEncryptionKey.byteLength !== 32
-    || stateEncryptionKey.toString('base64url') !== value.keyBase64Url) {
+    || stateEncryptionKey.toString('base64url') !== encodedKey) {
+    value.keyBase64Url = ''
     stateEncryptionKey.fill(0)
     throw authorityHostError('E2E_APPROVAL_STATE_KEY_INVALID')
   }
+  value.keyBase64Url = ''
   return {
     identity: {
       realPath: value.directory.realPath,

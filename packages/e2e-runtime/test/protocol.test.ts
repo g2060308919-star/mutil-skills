@@ -312,6 +312,7 @@ describe('repo-e2e CLI protocol slice', () => {
     for (const arguments_ of [
       ['identity', 'enroll'],
       ['approve', '--run-id', 'RUN-1', '--type', 'lineage'],
+      ['approve', '--run-id', 'RUN-1', '--type', 'execution', '--subject-file', 'e2e/execution-subject.json'],
     ]) {
       const stdout = captureWritable()
       const stderr = captureWritable()
@@ -344,6 +345,31 @@ describe('repo-e2e CLI protocol slice', () => {
 
     const exitCode = await runCli(
       ['approve', '--run-id', 'RUN-1'],
+      Readable.from([]), stdout.stream, stderr.stream,
+      {
+        homeDir: '/safe/home',
+        installRuntime: async () => ({
+          version: '0.0.0', installationDigest: digest, launcher: '/safe/repo-e2e',
+        }),
+        uninstallRuntime: async () => ({ version: '0.0.0' }),
+        openHumanAuthoritySession,
+      },
+    )
+
+    expect(exitCode).toBe(2)
+    expect(openHumanAuthoritySession).not.toHaveBeenCalled()
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_REQUEST_INVALID' },
+    })
+  })
+
+  test('Discovery/Execution 人类审批缺少 subject-file 时不进入 Authority', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    const openHumanAuthoritySession = vi.fn()
+
+    const exitCode = await runCli(
+      ['approve', '--run-id', 'RUN-1', '--type', 'execution'],
       Readable.from([]), stdout.stream, stderr.stream,
       {
         homeDir: '/safe/home',

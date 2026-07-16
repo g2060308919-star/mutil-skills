@@ -35,6 +35,13 @@ export interface WebAuthnCredentialRepository {
   get(credentialId: string): Promise<StoredWebAuthnCredential | undefined>
   insert(credential: StoredWebAuthnCredential): Promise<void>
   compareAndSet(expected: StoredWebAuthnCredential, next: StoredWebAuthnCredential): Promise<void>
+  completeAuthentication(
+    expected: StoredWebAuthnCredential,
+    next: StoredWebAuthnCredential,
+    sessionId: string,
+    receipt: StoredWebAuthnApprovalReceipt,
+  ): Promise<void>
+  takeApprovalReceipt(sessionId: string): Promise<StoredWebAuthnApprovalReceipt | undefined>
 }
 
 export interface WebAuthnApprovalBinding {
@@ -44,12 +51,6 @@ export interface WebAuthnApprovalBinding {
   subjectDigest: string
   installationDigest: string
   origin: string
-}
-
-export interface WebAuthnGrantApprovalBinding {
-  subject: string
-  approvalType: WebAuthnApprovalType
-  subjectDigest: string
 }
 
 interface RegistrationVerificationResult {
@@ -115,7 +116,7 @@ interface PendingApproval {
 
 type PendingSession = PendingEnrollment | PendingApproval
 
-interface WebAuthnApprovalReceipt extends WebAuthnApprovalBinding {
+export interface StoredWebAuthnApprovalReceipt extends WebAuthnApprovalBinding {
   issuedAt: string
   expiresAt: string
 }
@@ -149,7 +150,6 @@ export class WebAuthnUserPresenceAuthority {
   readonly #verifyAuthentication: (input: AuthenticationVerificationInput) => Promise<AuthenticationVerificationResult>
   readonly #pending = new Map<string, PendingSession>()
   readonly #consumed = new Set<string>()
-  readonly #authenticatedSessions = new Map<string, WebAuthnApprovalReceipt>()
 
   constructor(constructionKey: object, dependencies: WebAuthnAuthorityDependencies) {
     if (constructionKey !== AUTHORITY_CONSTRUCTION_KEY) {
@@ -304,8 +304,7 @@ export class WebAuthnUserPresenceAuthority {
       || verification.newCounter <= stored.counter) {
       throw approvalError('E2E_APPROVAL_USER_PRESENCE_UNAVAILABLE', 'WebAuthn 认证未证明用户在场')
     }
-    await this.#credentials.compareAndSet(stored, { ...stored, counter: verification.newCounter })
-    this.#authenticatedSessions.set(pending.sessionId, {
+    const receipt: StoredWebAuthnApprovalReceipt = {
       subject: stored.subject,
       runId: pending.runId,
       approvalType: pending.approvalType,
@@ -314,31 +313,27 @@ export class WebAuthnUserPresenceAuthority {
       origin: pending.origin,
       issuedAt: this.#now().toISOString(),
       expiresAt: new Date(pending.expiresAt).toISOString(),
-    })
+    }
+    await this.#credentials.completeAuthentication(
+      stored,
+      { ...stored, counter: verification.newCounter },
+      pending.sessionId,
+      receipt,
+    )
   }
 
-  authenticateSession(sessionId: string, expected: WebAuthnGrantApprovalBinding): string | undefined {
-    const receipt = this.#authenticatedSessions.get(sessionId)
+  async authenticateSession(sessionId: string): Promise<StoredWebAuthnApprovalReceipt | undefined> {
+    const receipt = await this.#credentials.takeApprovalReceipt(sessionId)
     if (receipt === undefined) return undefined
-    this.#authenticatedSessions.delete(sessionId)
     if (this.#now().getTime() > Date.parse(receipt.expiresAt)) {
       throw approvalError('E2E_APPROVAL_SESSION_EXPIRED', 'WebAuthn approval receipt 已过期')
     }
-    const actualBinding: WebAuthnGrantApprovalBinding = {
-      subject: receipt.subject,
-      approvalType: receipt.approvalType,
-      subjectDigest: receipt.subjectDigest,
-    }
-    if (canonicalizeJson(actualBinding) !== canonicalizeJson(expected)) {
-      throw approvalError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'WebAuthn approval receipt 与当前审批绑定不一致')
-    }
-    return receipt.subject
+    return receipt
   }
 
   revokePendingSessions(): void {
     for (const sessionId of this.#pending.keys()) this.#consumed.add(sessionId)
     this.#pending.clear()
-    this.#authenticatedSessions.clear()
   }
 
   revokeSession(sessionId: string): void {

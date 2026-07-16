@@ -1,5 +1,7 @@
 import {
   canonicalizeJson,
+  canonicalGrantApprovalSubjectDigest,
+  CanonicalApprovalContextSchema,
   WriteApprovalSubjectV2Schema,
   type AttemptExecutionContext,
   type CapabilityReservation,
@@ -162,13 +164,18 @@ function parseWriteVerifyInput(value: unknown): {
 }
 
 function parseSignedWriteGrant(value: unknown): SignedWriteGrant | undefined {
-  if (!isPlainObject(value) || !hasExactKeys(value, ['approver', 'capabilities', 'expiresAt', 'grantId', 'issuedAt',
+  if (!isPlainObject(value) || !hasExactKeys(value, ['approvalContext', 'approver', 'capabilities', 'expiresAt', 'grantId', 'issuedAt',
     'issuer', 'keyId', 'proofScope', 'revocationSequence', 'signature', 'subject', 'subjectDigest'])) return undefined
   const subject = WriteApprovalSubjectV2Schema.safeParse(value.subject)
+  const approvalContext = CanonicalApprovalContextSchema.safeParse(value.approvalContext)
   if (!subject.success || typeof value.grantId !== 'string' || !SAFE_ID.test(value.grantId)
     || typeof value.issuer !== 'string' || !SAFE_ID.test(value.issuer)
     || typeof value.keyId !== 'string' || !SAFE_ID.test(value.keyId) || value.proofScope !== 'local-os-user'
     || !isApprover(value.approver) || typeof value.subjectDigest !== 'string' || !DIGEST.test(value.subjectDigest)
+    || !approvalContext.success || approvalContext.data.approvalType !== 'execution'
+    || approvalContext.data.subject !== (value.approver as { subject: string }).subject
+    || approvalContext.data.subjectDigest !== value.subjectDigest
+    || canonicalGrantApprovalSubjectDigest(subject.data) !== value.subjectDigest
     || typeof value.issuedAt !== 'string' || !isCanonicalInstant(value.issuedAt)
     || typeof value.expiresAt !== 'string' || !isCanonicalInstant(value.expiresAt)
     || !Array.isArray(value.capabilities) || value.capabilities.length < 1 || value.capabilities.length > 100_000

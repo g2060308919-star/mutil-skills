@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { afterEach, describe, expect, test } from 'vitest'
 import { chromium } from 'playwright'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 import {
   canonicalizeJson, digestDecisionSubject, digestText,
   projectLineageDecisionSubject, projectScopeDecisionSubject,
@@ -194,7 +195,9 @@ function approvalAuthority(): LocalApprovalAuthority {
     issuer: 'local-authority', keyId: 'local-key-flow', now: () => new Date('2026-07-12T10:00:00.000Z'),
     approvalIdentities: [{ subject: 'os-user:flow', roles: ['e2e-approver'] }],
     manualIdentities: [{ subject: 'os-user:flow-reviewer', roles: ['scope-approver', 'lineage-approver'] }],
-    authenticateApproverSession: (sessionRef) => sessionRef === 'flow-session' ? 'os-user:flow' : undefined,
+    authenticateApproverSession: (sessionRef, expected) => sessionRef === 'flow-session'
+      ? createGoldenApprovalReceipt('os-user:flow', 'RUN-SYSTEM-FLOW', expected,
+        '2026-07-12T09:59:00.000Z') : undefined,
   })
 }
 

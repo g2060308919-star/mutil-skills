@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { chromium } from 'playwright'
 import { resolveChromeExecutablePath } from './e2e-browser-runtime.js'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 import { digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, LocalLeaseAuthority } from '@mutil-skills/e2e-authority'
 import { LocalArtifactStore, computeVerdict } from '@mutil-skills/e2e-engine'
@@ -27,8 +28,9 @@ describe('Spec §29 审批边界系统 E2E', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'local-authority', keyId: 'approval-system-7', now,
       approvalIdentities: [{ subject: 'os-user:approval', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) =>
-        sessionRef === 'approval-session' ? 'os-user:approval' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'approval-session'
+        ? createGoldenApprovalReceipt('os-user:approval', 'RUN-SCENARIO-7', expected,
+          '2026-07-12T09:59:00.000Z') : undefined,
     })
     const leaseAuthority = new LocalLeaseAuthority({ now })
     const lease = await leaseAuthority.acquire({
@@ -112,8 +114,9 @@ describe('Spec §29 审批边界系统 E2E', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'local-authority', keyId: 'approval-system-8', now: () => new Date('2026-07-12T10:00:00.000Z'),
       approvalIdentities: [{ subject: 'os-user:blanket-consent', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) =>
-        sessionRef === 'blanket-session' ? 'os-user:blanket-consent' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'blanket-session'
+        ? createGoldenApprovalReceipt('os-user:blanket-consent', 'RUN-SCENARIO-8', expected,
+          '2026-07-12T09:59:00.000Z') : undefined,
     })
     const blanketApprover = { subject: 'os-user:blanket-consent', roles: ['e2e-approver'] }
     const base = legacyWriteSubject({

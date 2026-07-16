@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'vitest'
-import { digestText, type SignedWriteGrant, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
+import {
+  canonicalGrantApprovalSubjectDigest,
+  digestText,
+  type SignedWriteGrant,
+  type WriteApprovalSubject,
+} from '@mutil-skills/e2e-contracts'
 import {
   AuthenticatedRpcServer,
   createAuthorityExecutionRpcClients,
@@ -24,9 +29,14 @@ function writeGrant(): { grant: SignedWriteGrant; subject: WriteApprovalSubject 
         canonicalOrigin: 'https://test.example.com', exactPath: '/orders/1', query: [],
         payload: { kind: 'no-body' }, targetFingerprint: digest, maxRequests: 1, expectedOrder: 1 }] }],
   }
+  const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
   return { subject, grant: {
     grantId: 'GRANT-1', issuer: 'AUTHORITY', keyId: 'KEY-1', proofScope: 'local-os-user',
-    approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, subject, subjectDigest: digest,
+    approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, subject, subjectDigest,
+    approvalContext: { schemaVersion: '1.0.0', subject: 'os-user:qa', runId: 'RUN-1',
+      approvalType: 'execution', subjectDigest, installationDigest: digest,
+      origin: 'http://127.0.0.1:43210', issuedAt: NOW.toISOString(),
+      expiresAt: new Date(NOW.getTime() + 5_000).toISOString() },
     issuedAt: NOW.toISOString(), expiresAt: new Date(NOW.getTime() + 5_000).toISOString(),
     capabilities: [{ capabilityId: 'CAP-1', nonce: 'nonce', transport: 'http', effect: 'reversible-write',
       operation: 'http-request', actionId: 'ACTION-1', dataLeaseId: 'LEASE-1', fencingToken: 1,

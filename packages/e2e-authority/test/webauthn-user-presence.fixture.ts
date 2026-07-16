@@ -2,6 +2,7 @@ import type { AuthenticatorTransportFuture, WebAuthnCredential } from '@simplewe
 import {
   createWebAuthnUserPresenceAuthority,
   type StoredWebAuthnCredential,
+  type StoredWebAuthnApprovalReceipt,
 } from '../src/webauthn-user-presence.js'
 
 interface TestRegistrationResult {
@@ -32,6 +33,7 @@ export function createForTest(
   verificationMocks: TestVerificationMocks,
 ) {
   const credentials = new Map<string, StoredWebAuthnCredential>()
+  const receipts = new Map<string, StoredWebAuthnApprovalReceipt>()
   verificationMocks.registration.mockImplementation(async (input: Record<string, any>) => {
     const result = await (dependencies.verifyRegistration?.(input) ?? Promise.resolve({ verified: false }))
     if (!result.verified || result.credential === undefined) return { verified: false }
@@ -83,6 +85,22 @@ export function createForTest(
           })
         }
         credentials.set(next.id, cloneCredential(next))
+      },
+      async completeAuthentication(expected, next, sessionId, receipt) {
+        const current = credentials.get(expected.id)
+        if (current === undefined || JSON.stringify(current) !== JSON.stringify(expected)
+          || next.counter <= expected.counter || receipts.has(sessionId)) {
+          throw Object.assign(new Error('E2E_APPROVAL_CREDENTIAL_STATE_CONFLICT'), {
+            code: 'E2E_APPROVAL_CREDENTIAL_STATE_CONFLICT',
+          })
+        }
+        credentials.set(next.id, cloneCredential(next))
+        receipts.set(sessionId, structuredClone(receipt))
+      },
+      async takeApprovalReceipt(sessionId) {
+        const receipt = receipts.get(sessionId)
+        receipts.delete(sessionId)
+        return receipt === undefined ? undefined : structuredClone(receipt)
       },
     },
   })

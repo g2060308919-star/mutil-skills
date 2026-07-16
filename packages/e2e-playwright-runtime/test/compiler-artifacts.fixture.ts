@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto'
 import { canonicalizeJson, digestApprovalProjection, digestArtifactContent,
-  digestBytes, digestDecisionSubject, digestText, projectLineageDecisionSubject,
+  digestBytes, digestCanonicalGrantApprovalSubject, digestDecisionSubject, digestText, projectLineageDecisionSubject,
   projectScopeDecisionSubject, type DecisionReceipt,
   type DecisionReceiptVerificationBinding } from '@mutil-skills/e2e-contracts'
 import { createTestOnlyApprovalFreshnessClient, LocalApprovalAuthority } from '@mutil-skills/e2e-authority'
@@ -97,7 +97,7 @@ export function approvedCompilerArtifacts(options: {
   }
   const receiptBody = {
     schemaVersion: '1.0.0', grantType: effect === 'read' ? 'read' : 'reversible-write', grantId: 'GRANT-1',
-    subjectDigest: digestText('approval-subject/v1', canonicalizeJson(approvalSubject)),
+    subjectDigest: digestCanonicalGrantApprovalSubject('execution', approvalSubject),
     runBundleDigest: digest('run-bundle-artifact'), browserPreflightArtifactDigest: digest('browser-preflight-artifact'),
     capabilities, capabilitySetDigest: digestText('approval-capability-set/v1', canonicalizeJson(capabilities)),
     expiresAt: '2026-07-16T00:00:00.000Z', checkedAt: '2026-07-15T00:00:00.000Z',
@@ -210,12 +210,12 @@ export function approvedCompilerArtifacts(options: {
   receiptBody.runBundleDigest = runBundleArtifact.contentDigest as string
   approvalReceipt.runBundleDigest = receiptBody.runBundleDigest
   ;(contents['approval-grants'] as Record<string, unknown>).runBundleDigest = receiptBody.runBundleDigest
-  receiptBody.subjectDigest = digestText('approval-subject/v1', canonicalizeJson(approvalSubject))
+  receiptBody.subjectDigest = digestCanonicalGrantApprovalSubject('execution', approvalSubject)
   approvalReceipt.subjectDigest = receiptBody.subjectDigest
   approvalReceipt.authorityProof.signedDigest = digestText('approval-freshness-receipt/v1', canonicalizeJson(receiptBody))
   if (options.mismatchedApprovalProjection) {
     approvalSubject.policyDigest = digest('mismatched-policy')
-    receiptBody.subjectDigest = digestText('approval-subject/v1', canonicalizeJson(approvalSubject))
+    receiptBody.subjectDigest = digestCanonicalGrantApprovalSubject('execution', approvalSubject)
     approvalReceipt.subjectDigest = receiptBody.subjectDigest
     approvalReceipt.authorityProof.signedDigest = digestText('approval-freshness-receipt/v1', canonicalizeJson(receiptBody))
   }
@@ -279,7 +279,7 @@ export function approvedCompilerArtifactsWithBlockedCase(): unknown[] {
     actionMapDigest: digestApprovalProjection('browser-action-map', content('browser-action-map')),
     executionContractDigest: digestApprovalProjection('execution-contract', content('execution-contract')),
   })
-  receipt.subjectDigest = digestText('approval-subject/v1', canonicalizeJson(receipt.executionSubjectSnapshot))
+  receipt.subjectDigest = digestCanonicalGrantApprovalSubject('execution', receipt.executionSubjectSnapshot)
   const { authorityProof, ...receiptBody } = receipt
   authorityProof.signedDigest = digestText('approval-freshness-receipt/v1', canonicalizeJson(receiptBody))
   signFixtureFreshnessReceipt(receipt)

@@ -16,6 +16,7 @@ import { LocalArtifactStore, reconcileEntityLineage, type SemanticLineageEntity 
 import { ReadOnlyGateway } from '@mutil-skills/e2e-gateway'
 import { PlaywrightPageAdapter, runBrowserPreflight, runReadOnlyCase } from '@mutil-skills/e2e-playwright-runtime'
 import { resolveChromeExecutablePath } from './e2e-browser-runtime.js'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 
 const servers: Server[] = []
 const tempDirectories: string[] = []
@@ -41,8 +42,8 @@ describe('PRD two-revision stable ID lineage golden path', () => {
       issuer: 'lineage-authority', keyId: 'lineage-key', now: () => new Date('2026-07-11T10:00:00.000Z'),
       approvalIdentities: [{ subject: 'os-user:lineage-golden', roles: ['e2e-approver'] }],
       manualIdentities: [{ subject: 'os-user:lineage-reviewer', roles: ['lineage-approver'] }],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'lineage-session'
-        ? 'os-user:lineage-golden' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'lineage-session'
+        ? createGoldenApprovalReceipt('os-user:lineage-golden', 'RUN-LINEAGE', expected) : undefined,
     })
     const snapshots = new Map<string, SemanticLineageEntity[]>([[revision0, []]])
     const workspace = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-lineage-golden-'))

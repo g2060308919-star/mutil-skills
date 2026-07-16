@@ -31,6 +31,14 @@ const resumeRunRequest = {
   },
 }
 
+const executionSubject = {
+  schemaVersion: '1.0.0', assetId: 'ASSET-1', prdRevision: `sha256:${'1'.repeat(64)}`,
+  executionDigest: `sha256:${'2'.repeat(64)}`, environment: 'test',
+  baseOrigin: 'https://test.example.com',
+  actions: [{ actionId: 'ACTION-1', origin: 'wss://test.example.com', path: '/events',
+    maxInboundMessages: 1, maxBytes: 1024 }],
+}
+
 describe('Runtime Host contracts', () => {
   test('accepts the exact doctor envelope', () => {
     expect(RuntimeRequestEnvelopeSchema.parse(doctorRequest)).toEqual(doctorRequest)
@@ -47,6 +55,27 @@ describe('Runtime Host contracts', () => {
       command: 'open-approval',
       projectRoot: '/tmp/project',
       payload: { runId: 'RUN-1', approvalType: 'execution', approved: true },
+    }).success).toBe(false)
+  })
+
+  test('discovery/execution approval requires one exact strict Grant subject', () => {
+    const request = {
+      ...doctorRequest, command: 'open-approval', projectRoot: '/tmp/project',
+      payload: { runId: 'RUN-1', approvalType: 'execution', grantSubject: executionSubject },
+    }
+    expect(RuntimeRequestEnvelopeSchema.safeParse(request).success).toBe(true)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...request, payload: { runId: 'RUN-1', approvalType: 'execution' },
+    }).success).toBe(false)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...request,
+      payload: { ...request.payload, grantSubject: {
+        ...executionSubject,
+        actions: [{ ...executionSubject.actions[0], unreviewedMatcher: '**' }],
+      } },
+    }).success).toBe(false)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...request, payload: { ...request.payload, approvalType: 'scope' },
     }).success).toBe(false)
   })
 

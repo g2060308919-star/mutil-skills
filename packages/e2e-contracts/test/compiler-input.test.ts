@@ -3,6 +3,7 @@ import {
   canonicalizeJson,
   CompilerInputV1Schema,
   computeCompilerInputDigest,
+  digestCanonicalGrantApprovalSubject,
   digestText,
   type CompilerInputV1,
 } from '../src/index.js'
@@ -23,7 +24,7 @@ function compilerInput(): CompilerInputV1 {
     effect: 'read' as const, maxUses: 1, digest: digest('7') }]
   const receiptBody = {
     schemaVersion: '1.0.0' as const, grantType: 'read' as const, grantId: 'GRANT-1',
-    subjectDigest: digestText('approval-subject/v1', canonicalizeJson(subject)),
+    subjectDigest: digestCanonicalGrantApprovalSubject('execution', subject),
     runBundleDigest: digest('8'), browserPreflightArtifactDigest: digest('9'), capabilities,
     capabilitySetDigest: digestText('approval-capability-set/v1', canonicalizeJson(capabilities)),
     expiresAt: '2026-07-16T00:00:00.000Z', checkedAt: '2026-07-15T00:00:00.000Z',

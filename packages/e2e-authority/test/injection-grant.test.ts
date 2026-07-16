@@ -4,7 +4,8 @@ import {
   digestText,
   type InjectionApprovalSubject,
 } from '@mutil-skills/e2e-contracts'
-import { LocalApprovalAuthority } from './approval-authority.fixture.js'
+import { LocalApprovalAuthority, testApprovalReceipt } from './approval-authority.fixture.js'
+import { LocalApprovalAuthority as RuntimeApprovalAuthority } from '../src/index.js'
 
 const digest = digestText('test/v1', 'injection')
 const responseBody = JSON.stringify({ code: 'UPSTREAM_FAILURE' })
@@ -43,6 +44,24 @@ describe('LocalApprovalAuthority injection grants', () => {
       ...grant,
       capabilities: [{ ...grant.capabilities[0]!, expectedMatches: 2 }],
     })).toMatchObject({ allowed: false, code: 'E2E_APPROVAL_SIGNATURE_INVALID' })
+  })
+
+  test('签发冻结请求后不再从调用方 getter 二次读取 TTL', async () => {
+    const authority = RuntimeApprovalAuthority.create({
+      issuer: 'local-authority', keyId: 'local-key-1', now: () => new Date('2026-07-11T10:00:00.000Z'),
+      approvalIdentities: [{ subject: 'os-user:qa', roles: ['e2e-approver'] }],
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'approval-session'
+        ? testApprovalReceipt('os-user:qa', expected) : undefined,
+    })
+    let ttlReads = 0
+    const grant = await authority.issueInjectionGrant({
+      subject: subject(), approver: { subject: 'os-user:qa', roles: ['e2e-approver'] },
+      approvalSessionRef: 'approval-session',
+      get ttlMs() { ttlReads += 1; return ttlReads === 1 ? 60_000 : 15 * 60_000 + 1 },
+    })
+
+    expect(ttlReads).toBe(1)
+    expect(Date.parse(grant.expiresAt) - Date.parse(grant.issuedAt)).toBe(60_000)
   })
 
   test('rejects production injection and a response body whose digest does not match', async () => {

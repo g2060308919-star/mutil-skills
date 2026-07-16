@@ -42,12 +42,19 @@ def inspect_directory(parent_fd, name, require_owner, require_private):
 
 
 def create_or_open_private_directory(parent_fd, name):
+    created = False
     try:
         os.mkdir(name, 0o700, dir_fd=parent_fd)
+        created = True
     except FileExistsError:
         pass
     except OSError as error:
         raise SafeFailure(DIRECTORY_ERROR) from error
+    if created:
+        try:
+            os.fsync(parent_fd)
+        except OSError as error:
+            raise SafeFailure(DIRECTORY_ERROR) from error
     return inspect_directory(parent_fd, name, True, True)
 
 
@@ -112,6 +119,7 @@ def load_or_create_key(directory_fd):
                     raise SafeFailure(KEY_ERROR)
                 written += count
             os.fsync(descriptor)
+            os.fsync(directory_fd)
         after = os.fstat(descriptor)
         path_after = os.stat("state.key", dir_fd=directory_fd, follow_symlinks=False)
         if not validate_key(after, 32) or not exact_identity(before, after) or not exact_identity(after, path_after):
@@ -124,6 +132,7 @@ def load_or_create_key(directory_fd):
         if created:
             try:
                 os.unlink("state.key", dir_fd=directory_fd)
+                os.fsync(directory_fd)
             except OSError:
                 pass
         raise

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { ArtifactTypeSchema } from './artifacts.js'
 import { WorkflowNodeSchema } from './workflow.js'
+import { ApprovalGrantSubjectSchema, canonicalGrantApprovalType } from './approval-subject.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -62,7 +63,24 @@ const commandSchemas = [
     payload: z.object({
       runId: SafeIdSchema,
       approvalType: z.enum(['scope', 'lineage', 'discovery', 'execution', 'privacy']),
-    }).strict(),
+      grantSubject: ApprovalGrantSubjectSchema.optional(),
+    }).strict().superRefine((value, context) => {
+      const grantsCapability = value.approvalType === 'discovery' || value.approvalType === 'execution'
+      if (grantsCapability !== (value.grantSubject !== undefined)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'discovery/execution approval 必须且只能携带严格 grantSubject',
+          path: ['grantSubject'],
+        })
+      } else if (value.grantSubject !== undefined
+        && canonicalGrantApprovalType(value.grantSubject) !== value.approvalType) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'grantSubject 类型与 approvalType 不一致',
+          path: ['grantSubject'],
+        })
+      }
+    }),
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,

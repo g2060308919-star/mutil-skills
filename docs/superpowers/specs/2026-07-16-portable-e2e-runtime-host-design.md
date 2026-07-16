@@ -250,7 +250,8 @@ repo-e2e project rebind --project <path>
 repo-e2e doctor [--json]
 repo-e2e start --request <path>
 repo-e2e status --run-id <id> [--json]
-repo-e2e approve --run-id <id> --type <scope|lineage|discovery|execution|privacy>
+repo-e2e approve --run-id <id> --type <scope|lineage|privacy>
+repo-e2e approve --run-id <id> --type <discovery|execution> --subject-file <project-relative-json>
 repo-e2e secret provide --run-id <id> --ref <secret-ref>
 repo-e2e resume --run-id <id> --input <path>
 repo-e2e report --run-id <id>
@@ -367,6 +368,12 @@ npm exec --yes --package=@mutil-skills/e2e-runtime@<exact-version> -- repo-e2e i
 这些构造器和 Host facade 不得通过 `@mutil-skills/e2e-runtime` 公共导出。公共入口只导出协议类型、Schema 和版本信息；程序化调用方也必须启动稳定 launcher 并走同一进程边界。测试专用 factory 只能通过未导出的 test entry 使用，且不能进入 npm `exports`。
 
 > **Spec Errata（2026-07-17，Task 5 二次外审）**：Authority `2.0.0 → 2.1.0` 迁移必须在同一 SQLite transaction 内先严格解析全部嵌套状态、解密并验证全部私钥及既有签名，再提交新 snapshot；错误密钥或任一损坏必须原样回滚。Grant 签发接口不得接收调用方提供的 receipt binding，而要先验证真实 canonical subject，再由 Authority 内部派生 `{ subject, approvalType, subjectDigest }` 并一次性消费私有 receipt。RPC 与人类审批 callback 必须共用完整项目身份比较。global request replay 必须早于 Authority factory，重放不得启动 Authority；单请求 cleanup 独立关闭全部已打开资源，cleanup 失败时只输出一个 cleanup error。若业务 success 已持久化但 cleanup 失败，本次返回 cleanup error，后续同 requestId 重放仍返回已持久化 success，这是持久幂等优先于本次传输结果的明确语义。stdout 一旦开始写入，不得再追加第二份 JSON。Authority 状态目录和 `state.key` 必须由 Runtime 自带的 `openat`/`mkdirat` helper 通过 dirfd 与 `O_NOFOLLOW` 创建/读取；父进程只读固定最终目录 fd，Authority 子进程继承该 fd、`fchdir` 后 `exec`，SQLite 只使用相对 basename 并在打开前后核对 realpath/dev/inode。Runtime npm 根入口仅导出协议 Schema、类型和版本。
+
+> **Spec Errata（2026-07-17，Task 5 三次外审，覆盖冲突旧结论）**：二次外审中的“三字段 `{ subject, approvalType, subjectDigest }` 即足够绑定”结论撤销。Discovery/Execution 的 Runtime `open-approval` 与六类 Grant 签发必须共同使用唯一的 `e2e-canonical-approval-subject/v1` 域和严格、拒绝额外字段的 Grant subject union。人类命令必须通过项目内 no-follow 读取的 `--subject-file` 提交该 subject；Runtime 在打开会话前及 callback 后校验 Asset、PRD revision、Run 绑定并重算同一 digest。WebAuthn 完成后持久化完整 `{ subject, runId, approvalType, subjectDigest, installationDigest, origin, issuedAt, expiresAt }` 回执；回执与 credential counter 在同一 Authority transaction 中提交，以独立 AES-256-GCM AAD 加密进入 `2.2.0` snapshot。签发只接收 session ID，Authority 从实际严格 Grant subject 派生 type/digest，原子 take 回执、精确匹配并把完整上下文写入 Grant 签名；消费与 Grant 提交共用 transaction，失败回滚、重启后仍仅可消费一次。Attempt 日志迁移必须重放 context、sequence、previous chain、时间单调性、started/terminal 状态机、最终 chain digest 和已完成 reservation attestation，删除、重排或跨上下文一律原样回滚。
+>
+> Authority/Artifact FS 的 Python helper 不得硬编码单一路径或信任 `PATH`：Runtime 只枚举固定绝对候选，验证 root owner、不可被 group/world 写、普通文件内容摘要和所需 `dir_fd/O_NOFOLLOW/fchdir/pread/pwrite/fsync` 能力，并在每次 spawn 前复验；Doctor 记录该证明 digest。helper 创建目录或 key 后必须 fsync 文件与包含目录。Authority child 的关闭顺序固定为 shutdown→TERM→KILL 并等待退出；启动失败、父 fd 关闭失败和人类审批任一资源失败都必须独立回收全部已打开资源。WebAuthn body/chunk、helper stdout、state/session key Buffer 必须在最早可行的 `finally` 中清零。
+>
+> SQLite basename 使用 `O_NOFOLLOW` 预开、regular/nlink=1/UID/mode/fd-path identity 校验、fd `chmod(0600)` 和打开后复验。**残余边界**：Node `DatabaseSync` 只能按 pathname 打开，不能把已验证 fd 交给 native VFS；因此在 current-UID 0700 目录内，同 UID 恶意进程仍可能在“预检 fd—native open”窗口主动替换 leaf。实现必须检测替换后 fail closed、不得继续初始化/写入替换文件，但在获得可靠 fd-backed VFS 前不得宣称消除了该竞态；此同 UID 主动对手属于明确记录的宿主账户信任残余。
 
 ### 8.2 子进程模型
 

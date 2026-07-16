@@ -69,6 +69,7 @@ process.on('message', async (message: unknown) => {
     const fixedNow = config.clock.kind === 'fixed-test-only' ? config.clock.now : undefined
     const now = fixedNow === undefined ? () => new Date() : () => new Date(fixedNow)
     const stateEncryptionKey = decode32(config.approval.stateEncryptionKeyBase64Url)
+    config.approval.stateEncryptionKeyBase64Url = ''
     try {
       approvalAuthority = await LocalApprovalAuthority.open({
         issuer: config.approval.issuer, keyId: config.approval.keyId, now,
@@ -79,8 +80,8 @@ process.on('message', async (message: unknown) => {
         testWorkspaceRoots: config.approval.testWorkspaceRoots,
         approvalIdentities: config.approval.approvalIdentities,
         manualIdentities: config.approval.manualIdentities,
-        authenticateApproverSession: (sessionId, expected) =>
-          webAuthnAuthority?.authenticateSession(sessionId, expected),
+        authenticateApproverSession: (sessionId, _expected) =>
+          webAuthnAuthority?.authenticateSession(sessionId),
       })
     } finally { stateEncryptionKey.fill(0) }
     leaseAuthority = await LocalLeaseAuthority.open({
@@ -96,6 +97,7 @@ process.on('message', async (message: unknown) => {
     }
     const rpc = AuthenticatedRpcServer.create({ issuer: config.rpc.issuer, keyId: config.rpc.keyId, now })
     const sessionKey = decode32(config.sessionKeyBase64Url)
+    config.sessionKeyBase64Url = ''
     rpc.registerClient(config.rpc.clientId, sessionKey)
     sessionKey.fill(0)
     registerAuthorityExecutionRpcOperations(rpc, {

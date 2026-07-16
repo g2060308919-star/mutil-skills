@@ -143,6 +143,15 @@ export function digestText(domain: string, text: string): string {
   return digestBytes(domain, Buffer.from(normalized, 'utf8'))
 }
 
+export function digestCanonicalGrantApprovalSubject(
+  approvalType: 'discovery' | 'execution',
+  subject: unknown,
+): string {
+  return digestText('e2e-canonical-approval-subject/v1', canonicalizeJson({
+    kind: 'grant-subject', approvalType, subject,
+  }))
+}
+
 export interface DigestRecord {
   domain: string
   digest: string

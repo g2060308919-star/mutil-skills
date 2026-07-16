@@ -15,6 +15,7 @@ import {
   PlaywrightPageAdapter, runBrowserPreflight, runReadOnlyCase,
 } from '@mutil-skills/e2e-playwright-runtime'
 import { resolveChromeExecutablePath } from './e2e-browser-runtime.js'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 
 const tempDirectories: string[] = []
 const servers: Server[] = []
@@ -41,8 +42,8 @@ describe('同一 Asset 双 Run 并发发布', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'concurrent-authority', keyId: 'concurrent-key', now,
       approvalIdentities: [{ subject: 'os-user:concurrent', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'concurrent-session'
-        ? 'os-user:concurrent' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'concurrent-session'
+        ? createGoldenApprovalReceipt('os-user:concurrent', 'RUN-CONCURRENT', expected) : undefined,
     })
 
     const [run1, run2] = await Promise.all([

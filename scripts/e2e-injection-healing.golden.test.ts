@@ -5,6 +5,7 @@ import { once } from 'node:events'
 import { afterEach, describe, expect, test } from 'vitest'
 import { chromium } from 'playwright'
 import { resolveChromeExecutablePath } from './e2e-browser-runtime.js'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 import {
   canonicalizeJson,
   digestInjectionResponseBody,
@@ -87,10 +88,15 @@ describe('PRD-driven injection and healing golden path', () => {
         { subject: 'os-user:injection-golden', roles: ['e2e-approver'] },
         { subject: 'os-user:golden', roles: ['e2e-approver'] },
       ],
-      authenticateApproverSession: (sessionRef) => ({
-        'injection-session': 'os-user:injection-golden',
-        'golden-session': 'os-user:golden',
-      }[sessionRef]),
+      authenticateApproverSession: (sessionRef, expected) => {
+        const subject = {
+          'injection-session': 'os-user:injection-golden',
+          'golden-session': 'os-user:golden',
+        }[sessionRef]
+        return subject === undefined
+          ? undefined
+          : createGoldenApprovalReceipt(subject, 'RUN-INJECTION-HEALING', expected)
+      },
     })
     const realGateway = new ReadOnlyGateway({
       stage: 'bootstrap', intents: [{
@@ -462,8 +468,9 @@ describe('PRD-driven injection and healing golden path', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'local-authority', keyId: 'local-key-1', now: () => new Date('2026-07-11T10:00:00.000Z'),
       approvalIdentities: [{ subject: 'os-user:injection-golden', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'injection-session'
-        ? 'os-user:injection-golden' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'injection-session'
+        ? createGoldenApprovalReceipt('os-user:injection-golden', 'RUN-INJECT-MATCHER-MISS', expected)
+        : undefined,
     })
     const expectedPayload = { query: 'order-100' }
     const responseBody = JSON.stringify({ error: 'UPSTREAM_FAILURE' })

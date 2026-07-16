@@ -1,4 +1,10 @@
-import { E2EError, canonicalizeJson } from '@mutil-skills/e2e-contracts'
+import {
+  ApprovalGrantSubjectSchema,
+  E2EError,
+  canonicalizeJson,
+  canonicalGrantApprovalType,
+  type ApprovalGrantSubject,
+} from '@mutil-skills/e2e-contracts'
 import { homedir } from 'node:os'
 import type { Readable, Writable } from 'node:stream'
 import {
@@ -26,6 +32,7 @@ import { isExactRuntimeVersion } from './runtime-manifest.js'
 import { E2ERuntimeHost } from './runtime-host.js'
 import { RuntimeRunStore } from './run-store.js'
 import { assertSameProjectIdentity, resolveProjectIdentity } from './project-identity.js'
+import { SecureProjectFileReader } from './secure-project-files.js'
 import {
   computeRuntimeApprovalSubjectDigest,
   startRuntimeAuthorityHost,
@@ -373,10 +380,13 @@ function defaultDependencies(): RuntimeCliDependencies {
 }
 
 function isHumanAuthorityCommand(arguments_: string[]): boolean {
-  return (arguments_.length === 2 && arguments_[0] === 'identity' && arguments_[1] === 'enroll')
-    || (arguments_.length === 5 && arguments_[0] === 'approve'
-      && arguments_[1] === '--run-id' && SAFE_ID.test(arguments_[2]!)
-      && arguments_[3] === '--type' && isApprovalType(arguments_[4]))
+  if (arguments_.length === 2 && arguments_[0] === 'identity' && arguments_[1] === 'enroll') return true
+  if (arguments_[0] !== 'approve' || arguments_[1] !== '--run-id' || !SAFE_ID.test(arguments_[2]!)
+    || arguments_[3] !== '--type' || !isApprovalType(arguments_[4])) return false
+  const grantsCapability = arguments_[4] === 'discovery' || arguments_[4] === 'execution'
+  return grantsCapability
+    ? arguments_.length === 7 && arguments_[5] === '--subject-file' && Boolean(arguments_[6])
+    : arguments_.length === 5
 }
 
 async function openDefaultHumanAuthoritySession(
@@ -396,13 +406,17 @@ async function openDefaultHumanAuthoritySession(
     try {
       return closeAuthorityAfterWait(await authority.enroll({ subject: localAuthoritySubject() }), authority)
     } catch (error) {
-      await authority.close()
-      throw error
+      return await closeResourcesAndRethrow(error, [authority])
     }
   }
 
   const projectRoot = (dependencies.currentWorkingDirectory ?? process.cwd)()
-  const store = await RuntimeRunStore.open({ homeDir: dependencies.homeDir, projectRoot })
+  let store: RuntimeRunStore
+  try {
+    store = await RuntimeRunStore.open({ homeDir: dependencies.homeDir, projectRoot })
+  } catch (error) {
+    return await closeResourcesAndRethrow(error, [authority])
+  }
   try {
     const identity = await resolveProjectIdentity(projectRoot)
     const runId = arguments_[2]!
@@ -411,7 +425,8 @@ async function openDefaultHumanAuthoritySession(
       throw cliAuthorityError('E2E_RUNTIME_INSTALLATION_BINDING_MISMATCH')
     }
     const approvalType = approvalTypeForWorkflow(initial.workflow.current, arguments_[4]!)
-    const subjectDigest = computeRuntimeApprovalSubjectDigest(initial, approvalType)
+    const grantSubject = await readHumanGrantSubject(arguments_, approvalType, identity)
+    const subjectDigest = computeRuntimeApprovalSubjectDigest(initial, approvalType, grantSubject)
     const session = await authority.requestApproval({
       runId, approvalType, subjectDigest, installationDigest: installation.installationDigest,
     })
@@ -419,25 +434,49 @@ async function openDefaultHumanAuthoritySession(
       url: session.url,
       sessionId: session.sessionId,
       async wait() {
-        try {
+        await runWithResourceCleanup(async () => {
           await session.wait()
           const currentIdentity = await resolveProjectIdentity(projectRoot)
           assertSameProjectIdentity(identity, currentIdentity)
           const current = await readRunWithLease(store, identity.digest, runId)
-          if (computeRuntimeApprovalSubjectDigest(current, approvalType) !== subjectDigest) {
+          if (computeRuntimeApprovalSubjectDigest(current, approvalType, grantSubject) !== subjectDigest) {
             throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')
           }
-        } finally {
-          await store.close()
-          await authority.close()
-        }
+        }, [store, authority])
       },
     }
   } catch (error) {
-    await store.close()
-    await authority.close()
-    throw error
+    return await closeResourcesAndRethrow(error, [store, authority])
   }
+}
+
+async function readHumanGrantSubject(
+  arguments_: string[],
+  approvalType: 'scope' | 'lineage' | 'discovery' | 'execution' | 'privacy',
+  identity: Awaited<ReturnType<typeof resolveProjectIdentity>>,
+): Promise<ApprovalGrantSubject | undefined> {
+  const grantsCapability = approvalType === 'discovery' || approvalType === 'execution'
+  if (!grantsCapability) {
+    if (arguments_.length !== 5) throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_UNEXPECTED')
+    return undefined
+  }
+  if (arguments_.length !== 7 || arguments_[5] !== '--subject-file') {
+    throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_REQUIRED')
+  }
+  const reader = new SecureProjectFileReader()
+  const bytes = await reader.readFile({
+    realRoot: identity.realRoot, device: identity.device, inode: identity.inode,
+  }, arguments_[6]!, 16 * 1024 * 1024)
+  try {
+    const parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as unknown
+    const subject = ApprovalGrantSubjectSchema.parse(parsed)
+    const actualType = canonicalGrantApprovalType(subject)
+    if (actualType !== approvalType) throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_INVALID')
+    return subject
+  } catch (error) {
+    if (error instanceof E2EError) throw error
+    throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_INVALID')
+  } finally { bytes.fill(0) }
 }
 
 function closeAuthorityAfterWait(
@@ -448,8 +487,54 @@ function closeAuthorityAfterWait(
     url: session.url,
     sessionId: session.sessionId,
     async wait() {
-      try { await session.wait() } finally { await authority.close() }
+      await runWithResourceCleanup(async () => await session.wait(), [authority])
     },
+  }
+}
+
+async function settleResources(resources: Array<{ close(): Promise<void> }>): Promise<unknown[]> {
+  const results = await Promise.allSettled(resources.map(async (resource) => await resource.close()))
+  return results.flatMap((result) => result.status === 'rejected' ? [result.reason] : [])
+}
+
+async function closeResourcesAndRethrow(
+  operationError: unknown,
+  resources: Array<{ close(): Promise<void> }>,
+): Promise<never> {
+  const cleanupErrors = await settleResources(resources)
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(
+      [operationError, ...cleanupErrors],
+      'E2E_RUNTIME_OPERATION_AND_RESOURCE_CLEANUP_FAILED',
+    )
+  }
+  throw operationError
+}
+
+async function runWithResourceCleanup(
+  operation: () => Promise<void>,
+  resources: Array<{ close(): Promise<void> }>,
+): Promise<void> {
+  let outcome: { status: 'fulfilled' } | { status: 'rejected'; reason: unknown }
+  try {
+    await operation()
+    outcome = { status: 'fulfilled' }
+  } catch (reason) {
+    outcome = { status: 'rejected', reason }
+  }
+  const cleanupErrors = await settleResources(resources)
+  if (outcome.status === 'rejected') {
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [outcome.reason, ...cleanupErrors],
+        'E2E_RUNTIME_OPERATION_AND_RESOURCE_CLEANUP_FAILED',
+      )
+    }
+    throw outcome.reason
+  }
+  if (cleanupErrors.length === 1) throw cleanupErrors[0]
+  if (cleanupErrors.length > 1) {
+    throw new AggregateError(cleanupErrors, 'E2E_RUNTIME_RESOURCE_CLEANUP_FAILED')
   }
 }
 

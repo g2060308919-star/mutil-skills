@@ -3,6 +3,7 @@ import {
   ApprovalFreshnessReceiptSchema,
   ArtifactSchemaRegistry,
   canonicalizeJson,
+  digestCanonicalGrantApprovalSubject,
   digestText,
 } from '../src/index.js'
 
@@ -24,7 +25,7 @@ function receipt() {
     effect: 'read' as const, maxUses: 1, digest: d('capability') }]
     const body = {
     schemaVersion: '1.0.0' as const, grantType: 'read' as const, grantId: 'GRANT-1',
-    subjectDigest: digestText('approval-subject/v1', canonicalizeJson(subject)),
+    subjectDigest: digestCanonicalGrantApprovalSubject('execution', subject),
     runBundleDigest: d('run-bundle'),
     executionSubjectSnapshot: subject, browserPreflightArtifactDigest: d('preflight-artifact'),
     capabilities, capabilitySetDigest: digestText('approval-capability-set/v1', canonicalizeJson(capabilities)),
