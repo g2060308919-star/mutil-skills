@@ -61,4 +61,25 @@ describe('child process environment policy', () => {
       rmSync(root, { force: true, recursive: true })
     }
   })
+
+  test('deduplicates runtime bin paths after realpath canonicalization', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mutil-e2e-env-'))
+    try {
+      const runtimeBin = join(root, 'runtime-bin')
+      const runtimeBinLink = join(root, 'runtime-bin-link')
+      mkdirSync(runtimeBin)
+      symlinkSync(runtimeBin, runtimeBinLink, 'dir')
+
+      const environment = buildChildEnvironment({
+        host: {},
+        runtimeBinPaths: [runtimeBin, runtimeBinLink],
+        homeDir: '/home/user',
+        tempDir: '/tmp/e2e-run',
+      })
+
+      expect(environment.PATH).toBe(realpathSync(runtimeBin))
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  })
 })

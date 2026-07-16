@@ -2,6 +2,7 @@ import { RuntimeDoctorReportSchema, canonicalizeJson } from '@mutil-skills/e2e-c
 import { Readable, Writable } from 'node:stream'
 import { describe, expect, test } from 'vitest'
 import { runCli } from '../src/cli.js'
+import { runRuntimeBin } from '../src/runtime-bin.js'
 import { serializeRuntimeDoctorReport } from '../src/protocol.js'
 import {
   RUNTIME_DOCTOR_PROBE_NAMES,
@@ -190,6 +191,146 @@ describe('Runtime doctor', () => {
     expect(stderr.text()).toContain('installation\t通过\tE2E_RUNTIME_INSTALLATION_OK')
     expect(stderr.text()).toContain('authority\t未安装\tE2E_AUTHORITY_NOT_INSTALLED')
     expect(stderr.text()).toContain('就绪：否')
+  })
+
+  test('doctor --json sanitizes discovery failure into a strict blocked report', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+
+    const exitCode = await runCli(
+      ['doctor', '--json'],
+      Readable.from([]),
+      stdout.stream,
+      stderr.stream,
+      {
+        homeDir: '/safe/home',
+        installRuntime: async () => ({
+          version: '0.0.0',
+          installationDigest: digest,
+          launcher: '/safe/home/.mutil-skills/bin/repo-e2e',
+        }),
+        uninstallRuntime: async () => ({ version: '0.0.0' }),
+        inspectRuntimeInstallation: async () => {
+          const error = new Error('secret=canary path=/Users/person/project')
+          error.stack = 'STACK /Users/person/.ssh/id_ed25519'
+          throw error
+        },
+      },
+    )
+
+    const report = RuntimeDoctorReportSchema.parse(JSON.parse(stdout.text()))
+    expect(exitCode).toBe(3)
+    expect(report).toMatchObject({
+      ready: false,
+      runtimeVersion: '0.0.0',
+      installationDigest: `sha256:${'0'.repeat(64)}`,
+      probes: {
+        installation: {
+          status: 'blocked',
+          reasonCode: 'E2E_RUNTIME_INSTALLATION_CHECK_FAILED',
+          remediation: '重新安装 Runtime 后再次运行 doctor',
+        },
+      },
+    })
+    for (const name of RUNTIME_DOCTOR_PROBE_NAMES.slice(1)) {
+      expect(report.probes[name]?.status).not.toBe('passed')
+    }
+    expect(stdout.text()).not.toContain('canary')
+    expect(stdout.text()).not.toContain('/Users/person')
+    expect(stdout.text()).not.toContain('STACK')
+    expect(stderr.text()).toBe('')
+  })
+
+  test('doctor --json falls back to a blocked report when report serialization fails', async () => {
+    const report = await allPassedReport()
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+
+    const exitCode = await runCli(
+      ['doctor', '--json'],
+      Readable.from([]),
+      stdout.stream,
+      stderr.stream,
+      {
+        homeDir: '/safe/home',
+        installRuntime: async () => ({
+          version: '0.0.0',
+          installationDigest: digest,
+          launcher: '/safe/home/.mutil-skills/bin/repo-e2e',
+        }),
+        uninstallRuntime: async () => ({ version: '0.0.0' }),
+        inspectRuntimeInstallation: async () => installation,
+        runRuntimeDoctor: async () => report,
+        serializeRuntimeDoctorReport: () => {
+          throw new Error('secret=canary /Users/person/project STACK')
+        },
+      },
+    )
+
+    const blocked = RuntimeDoctorReportSchema.parse(JSON.parse(stdout.text()))
+    expect(exitCode).toBe(3)
+    expect(blocked.ready).toBe(false)
+    expect(blocked.probes.installation?.reasonCode).toBe('E2E_RUNTIME_INSTALLATION_CHECK_FAILED')
+    expect(stdout.text()).not.toContain('canary')
+    expect(stdout.text()).not.toContain('/Users/person')
+    expect(stdout.text()).not.toContain('STACK')
+    expect(stderr.text()).toBe('')
+  })
+
+  test('human doctor renders a sanitized blocked table when aggregation fails', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+
+    const exitCode = await runCli(
+      ['doctor'],
+      Readable.from([]),
+      stdout.stream,
+      stderr.stream,
+      {
+        homeDir: '/safe/home',
+        installRuntime: async () => ({
+          version: '0.0.0',
+          installationDigest: digest,
+          launcher: '/safe/home/.mutil-skills/bin/repo-e2e',
+        }),
+        uninstallRuntime: async () => ({ version: '0.0.0' }),
+        inspectRuntimeInstallation: async () => installation,
+        runRuntimeDoctor: async () => {
+          throw new Error('secret=canary /Users/person/project STACK')
+        },
+      },
+    )
+
+    expect(exitCode).toBe(3)
+    expect(stdout.text()).toBe('')
+    expect(stderr.text()).toContain('installation\t阻塞\tE2E_RUNTIME_INSTALLATION_CHECK_FAILED')
+    expect(stderr.text()).toContain('就绪：否')
+    expect(stderr.text()).not.toContain('canary')
+    expect(stderr.text()).not.toContain('/Users/person')
+    expect(stderr.text()).not.toContain('STACK')
+  })
+
+  test('runtime bin catches uncaught CLI failures without printing a stack', async () => {
+    const stderr = captureWritable()
+    const failingStdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        callback(new Error('secret=canary /Users/person/project STACK'))
+      },
+    })
+    failingStdout.on('error', () => {})
+
+    const exitCode = await runRuntimeBin(
+      ['--version'],
+      Readable.from([]),
+      failingStdout,
+      stderr.stream,
+    )
+
+    expect(exitCode).toBe(70)
+    expect(stderr.text()).toBe('E2E_RUNTIME_INTERNAL_ERROR\n')
+    expect(stderr.text()).not.toContain('canary')
+    expect(stderr.text()).not.toContain('/Users/person')
+    expect(stderr.text()).not.toContain('STACK')
   })
 })
 

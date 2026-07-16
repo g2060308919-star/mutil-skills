@@ -2,16 +2,23 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
+import { buildChildEnvironment } from '../src/environment-policy.js'
 import { ProcessSupervisor } from '../src/process-supervisor.js'
 import type { RuntimeInstallation } from '../src/runtime-discovery.js'
 
 const digest = `sha256:${'a'.repeat(64)}`
-const safeEnvironment = {
+const plainSafeEnvironment = {
   HOME: '/safe/home',
   LANG: 'C.UTF-8',
   PATH: '/usr/bin',
   TMPDIR: '/safe/tmp',
 }
+const safeEnvironment = buildChildEnvironment({
+  host: {},
+  runtimeBinPaths: ['/usr/bin'],
+  homeDir: '/safe/home',
+  tempDir: '/safe/tmp',
+})
 
 describe('ProcessSupervisor', () => {
   test('rejects an entrypoint whose realpath escapes the installation version root', async () => {
@@ -97,6 +104,7 @@ describe('ProcessSupervisor', () => {
 
   test('returns a stable error and terminates a child that misses its ready deadline', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mutil-e2e-supervisor-'))
+    let pid: number | undefined
     try {
       const versionRoot = join(root, 'versions', '0.0.0')
       const entrypoint = join(versionRoot, 'child.mjs')
@@ -105,6 +113,7 @@ describe('ProcessSupervisor', () => {
       await writeFile(entrypoint, `
         import { writeFileSync } from 'node:fs'
         writeFileSync(process.argv[2], String(process.pid))
+        process.on('SIGTERM', () => {})
         setInterval(() => {}, 1_000)
       `, { mode: 0o600 })
       const canonicalVersionRoot = await realpath(versionRoot)
@@ -117,14 +126,15 @@ describe('ProcessSupervisor', () => {
         cwd: canonicalVersionRoot,
         env: safeEnvironment,
         startTimeoutMs: 100,
-        stopTimeoutMs: 100,
+        stopTimeoutMs: 30,
       })).rejects.toMatchObject({
         code: 'E2E_RUNTIME_CHILD_START_TIMEOUT',
         category: 'environment',
       })
-      const pid = Number(await readFile(marker, 'utf8'))
+      pid = Number(await readFile(marker, 'utf8'))
       await expectProcessExit(pid)
     } finally {
+      if (pid !== undefined) await killProcessIfRunning(pid)
       await rm(root, { force: true, recursive: true })
     }
   })
@@ -198,6 +208,40 @@ describe('ProcessSupervisor', () => {
     }
   })
 
+  test.each([
+    ['ordinary fixed-key object', plainSafeEnvironment],
+    ['relative PATH object', { ...plainSafeEnvironment, PATH: 'project/node_modules/.bin' }],
+    ['project PATH object', { ...plainSafeEnvironment, PATH: '/project/node_modules/.bin' }],
+  ])('rejects an unbranded %s before starting the child', async (_label, environment) => {
+    const root = await mkdtemp(join(tmpdir(), 'mutil-e2e-supervisor-'))
+    try {
+      const versionRoot = join(root, 'versions', '0.0.0')
+      const entrypoint = join(versionRoot, 'child.mjs')
+      await mkdir(versionRoot, { recursive: true })
+      await writeFile(entrypoint, `
+        setTimeout(() => process.exit(0), 300)
+        process.send?.({ type: 'ready' })
+      `, { mode: 0o600 })
+      const canonicalVersionRoot = await realpath(versionRoot)
+      const canonicalEntrypoint = await realpath(entrypoint)
+      const supervisor = new ProcessSupervisor(installation(canonicalVersionRoot, canonicalEntrypoint))
+
+      await expect(supervisor.spawn({
+        entrypoint: canonicalEntrypoint,
+        args: [],
+        cwd: canonicalVersionRoot,
+        env: environment,
+        startTimeoutMs: 2_000,
+        stopTimeoutMs: 100,
+      })).rejects.toMatchObject({
+        code: 'E2E_RUNTIME_CHILD_ENV_INVALID',
+        category: 'safety',
+      })
+    } finally {
+      await rm(root, { force: true, recursive: true })
+    }
+  })
+
   test('maps an early child exit to a stable sanitized start error', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mutil-e2e-supervisor-'))
     try {
@@ -220,6 +264,36 @@ describe('ProcessSupervisor', () => {
         code: 'E2E_RUNTIME_CHILD_START_FAILED',
         category: 'environment',
         message: 'Runtime 子进程未就绪即退出',
+      })
+    } finally {
+      await rm(root, { force: true, recursive: true })
+    }
+  })
+
+  test('rejects a child that reports ready and exits in the startup handshake', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mutil-e2e-supervisor-'))
+    try {
+      const versionRoot = join(root, 'versions', '0.0.0')
+      const entrypoint = join(versionRoot, 'child.mjs')
+      await mkdir(versionRoot, { recursive: true })
+      await writeFile(entrypoint, `
+        process.send?.({ type: 'ready' })
+        setImmediate(() => process.exit(0))
+      `, { mode: 0o600 })
+      const canonicalVersionRoot = await realpath(versionRoot)
+      const canonicalEntrypoint = await realpath(entrypoint)
+      const supervisor = new ProcessSupervisor(installation(canonicalVersionRoot, canonicalEntrypoint))
+
+      await expect(supervisor.spawn({
+        entrypoint: canonicalEntrypoint,
+        args: [],
+        cwd: canonicalVersionRoot,
+        env: safeEnvironment,
+        startTimeoutMs: 2_000,
+        stopTimeoutMs: 100,
+      })).rejects.toMatchObject({
+        code: 'E2E_RUNTIME_CHILD_EXITED_EARLY',
+        category: 'environment',
       })
     } finally {
       await rm(root, { force: true, recursive: true })
@@ -263,6 +337,72 @@ describe('ProcessSupervisor', () => {
       handle = undefined
     } finally {
       await handle?.close().catch(() => undefined)
+      await rm(root, { force: true, recursive: true })
+    }
+  })
+
+  test('treats a real IPC disconnect racing with shutdown as unavailable transport', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mutil-e2e-supervisor-'))
+    let pid: number | undefined
+    try {
+      const versionRoot = join(root, 'versions', '0.0.0')
+      const entrypoint = join(versionRoot, 'child.mjs')
+      await mkdir(versionRoot, { recursive: true })
+      await writeFile(entrypoint, `
+        process.on('SIGTERM', () => {})
+        setInterval(() => {}, 1_000)
+        process.send?.({ type: 'ready' }, () => process.disconnect())
+      `, { mode: 0o600 })
+      const canonicalVersionRoot = await realpath(versionRoot)
+      const canonicalEntrypoint = await realpath(entrypoint)
+      const supervisor = new ProcessSupervisor(installation(canonicalVersionRoot, canonicalEntrypoint))
+      const handle = await supervisor.spawn({
+        entrypoint: canonicalEntrypoint,
+        args: [],
+        cwd: canonicalVersionRoot,
+        env: safeEnvironment,
+        startTimeoutMs: 2_000,
+        stopTimeoutMs: 30,
+      })
+      pid = handle.pid
+
+      await expect(handle.close()).rejects.toMatchObject({
+        code: 'E2E_RUNTIME_CHILD_STOP_TIMEOUT',
+        category: 'environment',
+      })
+    } finally {
+      if (pid !== undefined) await killProcessIfRunning(pid)
+      await rm(root, { force: true, recursive: true })
+    }
+  })
+
+  test('exposes observable running state without exposing the child process', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mutil-e2e-supervisor-'))
+    try {
+      const versionRoot = join(root, 'versions', '0.0.0')
+      const entrypoint = join(versionRoot, 'child.mjs')
+      await mkdir(versionRoot, { recursive: true })
+      await writeFile(entrypoint, `
+        setTimeout(() => process.exit(0), 50)
+        process.send?.({ type: 'ready' })
+      `, { mode: 0o600 })
+      const canonicalVersionRoot = await realpath(versionRoot)
+      const canonicalEntrypoint = await realpath(entrypoint)
+      const supervisor = new ProcessSupervisor(installation(canonicalVersionRoot, canonicalEntrypoint))
+      const handle = await supervisor.spawn({
+        entrypoint: canonicalEntrypoint,
+        args: [],
+        cwd: canonicalVersionRoot,
+        env: safeEnvironment,
+        startTimeoutMs: 2_000,
+        stopTimeoutMs: 100,
+      })
+
+      expect(handle.isRunning()).toBe(true)
+      await handle.waitForExit()
+      expect(handle.isRunning()).toBe(false)
+      await handle.close()
+    } finally {
       await rm(root, { force: true, recursive: true })
     }
   })

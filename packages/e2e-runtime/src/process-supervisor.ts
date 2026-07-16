@@ -3,6 +3,7 @@ import { spawn as spawnChild, type ChildProcess } from 'node:child_process'
 import { realpath } from 'node:fs/promises'
 import { isAbsolute, relative, sep } from 'node:path'
 import type { RuntimeInstallation } from './runtime-discovery.js'
+import { validateSupervisedChildEnvironment } from './environment-policy.js'
 
 export interface SupervisedProcessSpec {
   entrypoint: string
@@ -14,7 +15,9 @@ export interface SupervisedProcessSpec {
 }
 
 export interface SupervisedProcessHandle {
-  pid: number
+  readonly pid: number
+  readonly waitForExit: () => Promise<void>
+  readonly isRunning: () => boolean
   requestShutdown(): Promise<void>
   close(): Promise<void>
 }
@@ -32,7 +35,7 @@ export class ProcessSupervisor {
       || isAbsolute(pathFromRoot)) {
       throw childEntrypointOutsideInstallation()
     }
-    const environment = supervisedEnvironment(spec.env)
+    const environment = validateSupervisedChildEnvironment(spec.env)
 
     const child = spawnChild(process.execPath, [entrypoint, ...spec.args], {
       cwd: spec.cwd,
@@ -41,11 +44,22 @@ export class ProcessSupervisor {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     })
     const exit = observeExit(child)
-    await waitForReady(child, spec.startTimeoutMs)
-    if (child.pid === undefined) throw new Error('Runtime child started without a pid')
+    try {
+      await waitForReady(child, spec.startTimeoutMs)
+    } catch (error) {
+      await terminateFailedStart(child, exit, spec.stopTimeoutMs)
+      throw error instanceof E2EError ? error : childStartFailed()
+    }
+    if (exit.exited()) throw childExitedEarly()
+    await nextEventLoopTurn()
+    if (exit.exited()) throw childExitedEarly()
+    if (await exitsWithin(exit.promise, 10)) throw childExitedEarly()
+    if (child.pid === undefined) throw childStartFailed()
 
     return {
       pid: child.pid,
+      waitForExit: async () => exit.promise,
+      isRunning: () => !exit.exited(),
       requestShutdown: async () => {
         if (exit.exited()) return
         await sendShutdown(child)
@@ -67,26 +81,10 @@ export class ProcessSupervisor {
   }
 }
 
-function supervisedEnvironment(environment: Record<string, string>): Record<string, string> {
-  const allowedKeys = ['HOME', 'LANG', 'PATH', 'TMPDIR'] as const
-  const actualKeys = Object.keys(environment).sort()
-  if (actualKeys.length !== allowedKeys.length
-    || allowedKeys.some((key, index) => actualKeys[index] !== key)
-    || allowedKeys.some((key) => typeof environment[key] !== 'string')
-    || environment.LANG !== 'C.UTF-8') {
-    throw new E2EError({
-      code: 'E2E_RUNTIME_CHILD_ENV_INVALID',
-      category: 'safety',
-      message: 'Runtime 子进程环境只允许固定的无敏感键',
-      retryable: false,
-    })
-  }
-  return {
-    HOME: environment.HOME,
-    LANG: 'C.UTF-8',
-    PATH: environment.PATH,
-    TMPDIR: environment.TMPDIR,
-  }
+async function nextEventLoopTurn(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setImmediate(() => setImmediate(resolve))
+  })
 }
 
 async function exitsWithin(exit: Promise<void>, timeoutMs: number): Promise<boolean> {
@@ -102,19 +100,33 @@ async function exitsWithin(exit: Promise<void>, timeoutMs: number): Promise<bool
 function observeExit(child: ChildProcess): { exited: () => boolean; promise: Promise<void> } {
   let exited = false
   const promise = new Promise<void>((resolve) => {
-    child.once('exit', () => {
+    const markExited = (): void => {
+      if (exited) return
       exited = true
       resolve()
-    })
+    }
+    child.once('error', markExited)
+    child.once('exit', markExited)
   })
   return { exited: () => exited, promise }
+}
+
+async function terminateFailedStart(
+  child: ChildProcess,
+  exit: { exited: () => boolean; promise: Promise<void> },
+  graceMs: number,
+): Promise<void> {
+  if (exit.exited()) return
+  child.kill('SIGTERM')
+  if (await exitsWithin(exit.promise, graceMs)) return
+  child.kill('SIGKILL')
+  await exit.promise
 }
 
 async function waitForReady(child: ChildProcess, timeoutMs: number): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup()
-      child.kill('SIGTERM')
       reject(new E2EError({
         code: 'E2E_RUNTIME_CHILD_START_TIMEOUT',
         category: 'environment',
@@ -156,10 +168,23 @@ function childStartFailed(): E2EError {
   })
 }
 
+function childExitedEarly(): E2EError {
+  return new E2EError({
+    code: 'E2E_RUNTIME_CHILD_EXITED_EARLY',
+    category: 'environment',
+    message: 'Runtime 子进程就绪后立即退出',
+    retryable: false,
+  })
+}
+
 async function sendShutdown(child: ChildProcess): Promise<void> {
   if (!child.connected) return
-  await new Promise<void>((resolve, reject) => {
-    child.send({ type: 'shutdown' }, (error) => error === null ? resolve() : reject(error))
+  await new Promise<void>((resolve) => {
+    try {
+      child.send({ type: 'shutdown' }, () => resolve())
+    } catch {
+      resolve()
+    }
   })
 }
 

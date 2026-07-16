@@ -1,5 +1,9 @@
 #!/usr/bin/env node
-import { runCli } from '../cli.js'
+import { runRuntimeBin } from '../runtime-bin.js'
 
-const exitCode = await runCli(process.argv.slice(2), process.stdin, process.stdout, process.stderr)
-process.exitCode = exitCode
+process.exitCode = await runRuntimeBin(
+  process.argv.slice(2),
+  process.stdin,
+  process.stdout,
+  process.stderr,
+)

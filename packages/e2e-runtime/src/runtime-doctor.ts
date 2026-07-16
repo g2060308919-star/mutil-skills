@@ -71,6 +71,29 @@ export async function runRuntimeDoctor(options: RunRuntimeDoctorOptions): Promis
   })
 }
 
+export function runtimeDoctorFailureReport(runtimeVersion: string): RuntimeDoctorReport {
+  const probes: Record<string, RuntimeDoctorProbe> = {}
+  for (const name of RUNTIME_DOCTOR_PROBE_NAMES) {
+    probes[name] = name === 'installation'
+      ? {
+          status: 'blocked',
+          reasonCode: 'E2E_RUNTIME_INSTALLATION_CHECK_FAILED',
+          remediation: '重新安装 Runtime 后再次运行 doctor',
+        }
+      : {
+          status: 'not-installed',
+          reasonCode: 'E2E_RUNTIME_PROBE_NOT_RUN',
+          remediation: '先修复 Runtime 安装后再次运行 doctor',
+        }
+  }
+  return RuntimeDoctorReportSchema.parse({
+    ready: false,
+    runtimeVersion,
+    installationDigest: `sha256:${'0'.repeat(64)}`,
+    probes,
+  })
+}
+
 const DEFAULT_RUNTIME_PROBES: Record<RuntimeDoctorProbeName, RuntimeProbe> = {
   installation: verifiedInstallationProbe('E2E_RUNTIME_INSTALLATION_OK'),
   'version-closure': verifiedInstallationProbe('E2E_RUNTIME_VERSION_CLOSURE_OK'),

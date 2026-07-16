@@ -18,6 +18,7 @@ import {
 } from './runtime-discovery.js'
 import {
   runRuntimeDoctor as runRuntimeDoctorDefault,
+  runtimeDoctorFailureReport,
   type RunRuntimeDoctorOptions,
   type RuntimeDoctorReport,
 } from './runtime-doctor.js'
@@ -38,6 +39,7 @@ export interface RuntimeCliDependencies {
   uninstallRuntime: (options: UninstallRuntimeOptions) => Promise<RuntimeUninstallResult>
   inspectRuntimeInstallation?: (options: InspectRuntimeInstallationOptions) => Promise<RuntimeInstallation>
   runRuntimeDoctor?: (options: RunRuntimeDoctorOptions) => Promise<RuntimeDoctorReport>
+  serializeRuntimeDoctorReport?: (report: unknown) => string
 }
 
 export async function runCli(
@@ -58,12 +60,24 @@ export async function runCli(
 
   if ((arguments_.length === 1 && arguments_[0] === 'doctor')
     || (arguments_.length === 2 && arguments_[0] === 'doctor' && arguments_[1] === '--json')) {
-    const installation = await (dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault)({
-      homeDir: dependencies.homeDir,
-    })
-    const report = await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({ installation })
+    let report: RuntimeDoctorReport
+    try {
+      const installation = await (dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault)({
+        homeDir: dependencies.homeDir,
+      })
+      report = await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({ installation })
+    } catch {
+      report = runtimeDoctorFailureReport(RUNTIME_PACKAGE_VERSION)
+    }
     if (arguments_.length === 2) {
-      await writeText(stdout, `${serializeRuntimeDoctorReport(report)}\n`)
+      let serialized: string
+      try {
+        serialized = (dependencies.serializeRuntimeDoctorReport ?? serializeRuntimeDoctorReport)(report)
+      } catch {
+        report = runtimeDoctorFailureReport(RUNTIME_PACKAGE_VERSION)
+        serialized = serializeRuntimeDoctorReport(report)
+      }
+      await writeText(stdout, `${serialized}\n`)
     } else {
       await writeText(stderr, formatDoctorReport(report))
     }
