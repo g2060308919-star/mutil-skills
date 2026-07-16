@@ -1,0 +1,26 @@
+{
+  "name": "@mutil-skills/hooks",
+  "version": "0.0.0",
+  "type": "module",
+  "files": [
+    "dist/src"
+  ],
+  "bin": {
+    "telemetry-hook": "./dist/src/bin/telemetry-hook.js",
+    "install-hooks": "./dist/src/bin/install-hooks.js",
+    "uninstall-hooks": "./dist/src/bin/uninstall-hooks.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./cli": {
+      "types": "./dist/src/runtime/cli.d.ts",
+      "import": "./dist/src/runtime/cli.js"
+    }
+  },
+  "scripts": {
+    "test": "vitest run"
+  }
+}

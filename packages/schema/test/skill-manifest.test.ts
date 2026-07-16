@@ -44,4 +44,19 @@ describe('skill manifest schema', () => {
 
     expect(result.success).toBe(false)
   })
+
+  test('parses fail-closed E2E runtime capabilities', () => {
+    const manifest = parseSkillManifest({
+      ...validManifest,
+      requires: [{
+        capability: 'e2e.gateway',
+        satisfiedBy: ['@mutil-skills/e2e-gateway'],
+        whenMissing: {
+          action: 'block', terminalState: 'safety-blocked', reasonCode: 'E2E_GATEWAY_UNAVAILABLE',
+        },
+      }],
+    })
+
+    expect(manifest.requires[0]).toMatchObject({ capability: 'e2e.gateway' })
+  })
 })

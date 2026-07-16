@@ -14,7 +14,33 @@ export const TestingFoundationRequirementSchema = z.object({
   }),
 })
 
-export const SkillRequirementSchema = TestingFoundationRequirementSchema
+export const E2ERuntimeCapabilitySchema = z.enum([
+  'e2e.contracts',
+  'e2e.engine',
+  'e2e.authority',
+  'e2e.gateway',
+  'browser.chromium',
+  'e2e.report',
+  'e2e.sanitizer',
+  'artifact.posix-local-fs',
+])
+
+export const E2ERuntimeRequirementSchema = z.object({
+  capability: E2ERuntimeCapabilitySchema,
+  satisfiedBy: z.array(z.string().min(1)).min(1),
+  whenMissing: z.object({
+    action: z.literal('block'),
+    terminalState: z.enum([
+      'input-blocked', 'environment-blocked', 'safety-blocked', 'artifact-blocked', 'migration-required',
+    ]),
+    reasonCode: z.string().min(1).regex(/^E2E_[A-Z0-9_]+$/),
+  }),
+})
+
+export const SkillRequirementSchema = z.discriminatedUnion('capability', [
+  TestingFoundationRequirementSchema,
+  E2ERuntimeRequirementSchema,
+])
 
 export const SkillManifestSchema = z.object({
   $schema: z.string().optional(),
@@ -32,6 +58,8 @@ export const SkillManifestSchema = z.object({
 
 export type TemplateReference = z.infer<typeof TemplateReferenceSchema>
 export type TestingFoundationRequirement = z.infer<typeof TestingFoundationRequirementSchema>
+export type E2ERuntimeCapability = z.infer<typeof E2ERuntimeCapabilitySchema>
+export type E2ERuntimeRequirement = z.infer<typeof E2ERuntimeRequirementSchema>
 export type SkillRequirement = z.infer<typeof SkillRequirementSchema>
 export type SkillManifest = z.infer<typeof SkillManifestSchema>
 

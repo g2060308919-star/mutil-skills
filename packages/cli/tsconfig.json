@@ -11,6 +11,7 @@
     { "path": "../schema" },
     { "path": "../template" },
     { "path": "../skills" },
+    { "path": "../hooks" },
     { "path": "../foundation" }
   ],
   "include": ["src/**/*.ts", "test/**/*.ts"]

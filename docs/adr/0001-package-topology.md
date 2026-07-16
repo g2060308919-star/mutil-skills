@@ -1,5 +1,7 @@
 # 使用同级 package 和业务中立 core
 
+> 状态：package 数量已由 ADR 0004 扩展；业务中立 `core` 和同级 package 原则保持有效。
+
 本仓库采用 `packages/*` workspace 布局，包含六个同级 package：`schema`、`template`、`skills`、`cli`、`core`、`foundation`。选择同级 package，而不是单一混合源码树，是因为这些关注点处在不同层级，需要明确依赖边界，也更容易独立测试和演进。`core` 被刻意限制为只包含技术原语，避免变成其他 package 领域逻辑的通用垃圾桶。`skills` 通过声明式方式引用 templates，而 `cli` 执行运行时组装并调用 `template` 代码。仓库的 TDD skill 也依赖由 `cli` 编排的 test-foundation bootstrap，而不是假设测试基建已经存在；缺失 foundation 时，任何安装或文件写入前都必须触发显式用户确认。可外部复用的 foundation 能力由 ADR 0002 中描述的专用 `packages/foundation` package 处理。
 
 ## 备选方案

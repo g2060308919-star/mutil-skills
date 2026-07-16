@@ -1,0 +1,22 @@
+{
+  "name": "@mutil-skills/e2e-contracts",
+  "version": "0.0.0",
+  "type": "module",
+  "files": [
+    "dist/src",
+    "schemas"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^3.25.0",
+    "zod-to-json-schema": "3.25.1"
+  }
+}

@@ -5,7 +5,14 @@
     { "path": "./packages/schema" },
     { "path": "./packages/template" },
     { "path": "./packages/foundation" },
+    { "path": "./packages/hooks" },
     { "path": "./packages/skills" },
+    { "path": "./packages/e2e-contracts" },
+    { "path": "./packages/e2e-engine" },
+    { "path": "./packages/e2e-authority" },
+    { "path": "./packages/e2e-gateway" },
+    { "path": "./packages/e2e-playwright-runtime" },
+    { "path": "./packages/e2e-report" },
     { "path": "./packages/cli" }
   ]
 }

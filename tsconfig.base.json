@@ -9,11 +9,19 @@
     "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
+      "@mutil-skills/hooks": ["packages/hooks/src/index.ts"],
+      "@mutil-skills/hooks/cli": ["packages/hooks/src/runtime/cli.ts"],
       "@mutil-skills/core": ["packages/core/src/index.ts"],
       "@mutil-skills/schema": ["packages/schema/src/index.ts"],
       "@mutil-skills/template": ["packages/template/src/index.ts"],
       "@mutil-skills/foundation/testing": ["packages/foundation/src/testing/index.ts"],
-      "@mutil-skills/skills": ["packages/skills/src/index.ts"]
+      "@mutil-skills/skills": ["packages/skills/src/index.ts"],
+      "@mutil-skills/e2e-contracts": ["packages/e2e-contracts/src/index.ts"],
+      "@mutil-skills/e2e-engine": ["packages/e2e-engine/src/index.ts"],
+      "@mutil-skills/e2e-authority": ["packages/e2e-authority/src/index.ts"],
+      "@mutil-skills/e2e-gateway": ["packages/e2e-gateway/src/index.ts"],
+      "@mutil-skills/e2e-playwright-runtime": ["packages/e2e-playwright-runtime/src/index.ts"],
+      "@mutil-skills/e2e-report": ["packages/e2e-report/src/index.ts"]
     },
     "declaration": true,
     "declarationMap": true,

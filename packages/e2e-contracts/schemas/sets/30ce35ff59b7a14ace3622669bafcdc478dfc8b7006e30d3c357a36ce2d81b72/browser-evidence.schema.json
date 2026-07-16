@@ -1,0 +1,1613 @@
+{
+  "type": "object",
+  "properties": {
+    "artifactId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "artifactType": {
+      "type": "string",
+      "const": "browser-evidence"
+    },
+    "schemaVersion": {
+      "type": "string",
+      "const": "2.0.0"
+    },
+    "engineVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "assetId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9._:-]+(?:\\/[A-Za-z0-9._:-]+)*$"
+    },
+    "prdRevision": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "generationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "contentDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "signatures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "issuer": {
+            "type": "string",
+            "minLength": 1
+          },
+          "keyId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "algorithm": {
+            "type": "string",
+            "const": "Ed25519"
+          },
+          "signedDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "issuer",
+          "keyId",
+          "algorithm",
+          "signedDigest",
+          "signature"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifactId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "artifactType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "schemaVersion": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+          },
+          "relativePath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "pattern": "^(?!\\/)(?!.*\\\\)(?!.*:)(?!.*\\/\\/)(?!.*\\/$)(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:\\/|$))[^\\0/]+(?:\\/[^\\0/]+)*$"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "artifactId",
+          "artifactType",
+          "schemaVersion",
+          "relativePath",
+          "digest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "graph": {
+      "type": "object",
+      "properties": {
+        "defines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100000
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100000
+        }
+      },
+      "required": [
+        "defines",
+        "references"
+      ],
+      "additionalProperties": false
+    },
+    "content": {
+      "type": "object",
+      "properties": {
+        "evidencePolicyDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "evidenceId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "caseId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "relativePath": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "pattern": "^(?!\\/)(?!.*\\\\)(?!.*:)(?!.*\\/\\/)(?!.*\\/$)(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:\\/|$))[^\\0/]+(?:\\/[^\\0/]+)*$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "byteLength": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "evidenceLevel": {
+                "type": "string",
+                "enum": [
+                  "E1",
+                  "E2",
+                  "E3"
+                ]
+              },
+              "sanitizationRecord": {
+                "type": "object",
+                "properties": {
+                  "schemaVersion": {
+                    "type": "string",
+                    "const": "1.0.0"
+                  },
+                  "evidenceType": {
+                    "type": "string",
+                    "enum": [
+                      "network",
+                      "dom",
+                      "console",
+                      "screenshot",
+                      "video",
+                      "trace"
+                    ]
+                  },
+                  "sanitizerVersion": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                  },
+                  "formatCompatibility": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "compatible"
+                          },
+                          "inputFormat": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9._/-]+$"
+                          },
+                          "parserVersion": {
+                            "type": "string",
+                            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "inputFormat",
+                          "parserVersion"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "incompatible"
+                          },
+                          "inputFormat": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "reasonCode": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9._:-]+$"
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "inputFormat",
+                          "reasonCode"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "not-evaluated"
+                          },
+                          "inputFormat": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "reasonCode": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9._:-]+$"
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "inputFormat",
+                          "reasonCode"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "policyDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "inputDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "outputDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "scanResult": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "clean"
+                          },
+                          "scannerVersion": {
+                            "type": "string",
+                            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                          },
+                          "scope": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
+                          "findings": {
+                            "type": "array",
+                            "minItems": 0,
+                            "maxItems": 0,
+                            "items": []
+                          },
+                          "canaries": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "canaryId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "expectedClassification": {
+                                  "type": "string",
+                                  "enum": [
+                                    "credential",
+                                    "government-id",
+                                    "financial",
+                                    "health",
+                                    "contact",
+                                    "customer-content",
+                                    "internal",
+                                    "public"
+                                  ]
+                                },
+                                "detected": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "canaryId",
+                                "expectedClassification",
+                                "detected"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "minItems": 1
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "scannerVersion",
+                          "scope",
+                          "findings",
+                          "canaries"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "findings"
+                          },
+                          "scannerVersion": {
+                            "type": "string",
+                            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                          },
+                          "scope": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
+                          "findings": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "classification": {
+                                  "type": "string",
+                                  "enum": [
+                                    "credential",
+                                    "government-id",
+                                    "financial",
+                                    "health",
+                                    "contact",
+                                    "customer-content",
+                                    "internal",
+                                    "public"
+                                  ]
+                                },
+                                "severity": {
+                                  "type": "string",
+                                  "enum": [
+                                    "critical",
+                                    "high",
+                                    "medium",
+                                    "low"
+                                  ]
+                                },
+                                "detectorId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "location": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 1024
+                                },
+                                "matchDigest": {
+                                  "type": "string",
+                                  "pattern": "^sha256:[a-f0-9]{64}$"
+                                }
+                              },
+                              "required": [
+                                "classification",
+                                "severity",
+                                "detectorId",
+                                "location",
+                                "matchDigest"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "minItems": 1
+                          },
+                          "canaries": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "canaryId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "expectedClassification": {
+                                  "type": "string",
+                                  "enum": [
+                                    "credential",
+                                    "government-id",
+                                    "financial",
+                                    "health",
+                                    "contact",
+                                    "customer-content",
+                                    "internal",
+                                    "public"
+                                  ]
+                                },
+                                "detected": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "canaryId",
+                                "expectedClassification",
+                                "detected"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "minItems": 1
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "scannerVersion",
+                          "scope",
+                          "findings",
+                          "canaries"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "error"
+                          },
+                          "scannerVersion": {
+                            "type": "string",
+                            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                          },
+                          "scope": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
+                          "reasonCode": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9._:-]+$"
+                          },
+                          "canaries": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "canaryId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "expectedClassification": {
+                                  "type": "string",
+                                  "enum": [
+                                    "credential",
+                                    "government-id",
+                                    "financial",
+                                    "health",
+                                    "contact",
+                                    "customer-content",
+                                    "internal",
+                                    "public"
+                                  ]
+                                },
+                                "detected": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "canaryId",
+                                "expectedClassification",
+                                "detected"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "scannerVersion",
+                          "scope",
+                          "reasonCode",
+                          "canaries"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "inspectionScope": {
+                    "type": "object",
+                    "properties": {
+                      "ocr": {
+                        "type": "object",
+                        "properties": {
+                          "performed": {
+                            "type": "boolean"
+                          },
+                          "engineVersion": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "regions": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256
+                            },
+                            "maxItems": 4096
+                          }
+                        },
+                        "required": [
+                          "performed",
+                          "regions"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "frames": {
+                        "type": "object",
+                        "properties": {
+                          "strategy": {
+                            "type": "string",
+                            "enum": [
+                              "not-applicable",
+                              "all",
+                              "sampled"
+                            ]
+                          },
+                          "totalFrames": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "inspectedFrames": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "maxItems": 100000
+                          }
+                        },
+                        "required": [
+                          "strategy",
+                          "inspectedFrames"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "ocr",
+                      "frames"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "manualReview": {
+                    "type": "object",
+                    "properties": {
+                      "required": {
+                        "type": "boolean"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "not-required",
+                          "pending",
+                          "approved",
+                          "rejected"
+                        ]
+                      },
+                      "reasonCodes": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9._:-]+$"
+                        },
+                        "maxItems": 32
+                      }
+                    },
+                    "required": [
+                      "required",
+                      "status",
+                      "reasonCodes"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schemaVersion",
+                  "evidenceType",
+                  "sanitizerVersion",
+                  "formatCompatibility",
+                  "policyDigest",
+                  "inputDigest",
+                  "outputDigest",
+                  "scanResult",
+                  "inspectionScope",
+                  "manualReview"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "evidenceId",
+              "caseId",
+              "relativePath",
+              "digest",
+              "byteLength",
+              "evidenceLevel",
+              "sanitizationRecord"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1000000
+        },
+        "caseCoverage": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "caseId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "evidenceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256,
+                  "pattern": "^[A-Za-z0-9._:-]+$"
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "caseId",
+              "evidenceIds"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100000
+        },
+        "sanitizerProofs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "evidenceId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "record": {
+                "type": "object",
+                "properties": {
+                  "schemaVersion": {
+                    "type": "string",
+                    "const": "1.0.0"
+                  },
+                  "evidenceType": {
+                    "type": "string",
+                    "enum": [
+                      "network",
+                      "dom",
+                      "console",
+                      "screenshot",
+                      "video",
+                      "trace"
+                    ]
+                  },
+                  "sanitizerVersion": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                  },
+                  "formatCompatibility": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "compatible"
+                          },
+                          "inputFormat": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9._/-]+$"
+                          },
+                          "parserVersion": {
+                            "type": "string",
+                            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "inputFormat",
+                          "parserVersion"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "incompatible"
+                          },
+                          "inputFormat": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "reasonCode": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9._:-]+$"
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "inputFormat",
+                          "reasonCode"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "not-evaluated"
+                          },
+                          "inputFormat": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "reasonCode": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9._:-]+$"
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "inputFormat",
+                          "reasonCode"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "policyDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "inputDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "outputDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "scanResult": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "clean"
+                          },
+                          "scannerVersion": {
+                            "type": "string",
+                            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                          },
+                          "scope": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
+                          "findings": {
+                            "type": "array",
+                            "minItems": 0,
+                            "maxItems": 0,
+                            "items": []
+                          },
+                          "canaries": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "canaryId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "expectedClassification": {
+                                  "type": "string",
+                                  "enum": [
+                                    "credential",
+                                    "government-id",
+                                    "financial",
+                                    "health",
+                                    "contact",
+                                    "customer-content",
+                                    "internal",
+                                    "public"
+                                  ]
+                                },
+                                "detected": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "canaryId",
+                                "expectedClassification",
+                                "detected"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "minItems": 1
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "scannerVersion",
+                          "scope",
+                          "findings",
+                          "canaries"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "findings"
+                          },
+                          "scannerVersion": {
+                            "type": "string",
+                            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                          },
+                          "scope": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
+                          "findings": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "classification": {
+                                  "type": "string",
+                                  "enum": [
+                                    "credential",
+                                    "government-id",
+                                    "financial",
+                                    "health",
+                                    "contact",
+                                    "customer-content",
+                                    "internal",
+                                    "public"
+                                  ]
+                                },
+                                "severity": {
+                                  "type": "string",
+                                  "enum": [
+                                    "critical",
+                                    "high",
+                                    "medium",
+                                    "low"
+                                  ]
+                                },
+                                "detectorId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "location": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 1024
+                                },
+                                "matchDigest": {
+                                  "type": "string",
+                                  "pattern": "^sha256:[a-f0-9]{64}$"
+                                }
+                              },
+                              "required": [
+                                "classification",
+                                "severity",
+                                "detectorId",
+                                "location",
+                                "matchDigest"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "minItems": 1
+                          },
+                          "canaries": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "canaryId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "expectedClassification": {
+                                  "type": "string",
+                                  "enum": [
+                                    "credential",
+                                    "government-id",
+                                    "financial",
+                                    "health",
+                                    "contact",
+                                    "customer-content",
+                                    "internal",
+                                    "public"
+                                  ]
+                                },
+                                "detected": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "canaryId",
+                                "expectedClassification",
+                                "detected"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "minItems": 1
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "scannerVersion",
+                          "scope",
+                          "findings",
+                          "canaries"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "const": "error"
+                          },
+                          "scannerVersion": {
+                            "type": "string",
+                            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                          },
+                          "scope": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 1024
+                          },
+                          "reasonCode": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9._:-]+$"
+                          },
+                          "canaries": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "canaryId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "expectedClassification": {
+                                  "type": "string",
+                                  "enum": [
+                                    "credential",
+                                    "government-id",
+                                    "financial",
+                                    "health",
+                                    "contact",
+                                    "customer-content",
+                                    "internal",
+                                    "public"
+                                  ]
+                                },
+                                "detected": {
+                                  "type": "boolean"
+                                }
+                              },
+                              "required": [
+                                "canaryId",
+                                "expectedClassification",
+                                "detected"
+                              ],
+                              "additionalProperties": false
+                            }
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "scannerVersion",
+                          "scope",
+                          "reasonCode",
+                          "canaries"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "inspectionScope": {
+                    "type": "object",
+                    "properties": {
+                      "ocr": {
+                        "type": "object",
+                        "properties": {
+                          "performed": {
+                            "type": "boolean"
+                          },
+                          "engineVersion": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "regions": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256
+                            },
+                            "maxItems": 4096
+                          }
+                        },
+                        "required": [
+                          "performed",
+                          "regions"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "frames": {
+                        "type": "object",
+                        "properties": {
+                          "strategy": {
+                            "type": "string",
+                            "enum": [
+                              "not-applicable",
+                              "all",
+                              "sampled"
+                            ]
+                          },
+                          "totalFrames": {
+                            "type": "integer",
+                            "minimum": 0
+                          },
+                          "inspectedFrames": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 0
+                            },
+                            "maxItems": 100000
+                          }
+                        },
+                        "required": [
+                          "strategy",
+                          "inspectedFrames"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "ocr",
+                      "frames"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "manualReview": {
+                    "type": "object",
+                    "properties": {
+                      "required": {
+                        "type": "boolean"
+                      },
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "not-required",
+                          "pending",
+                          "approved",
+                          "rejected"
+                        ]
+                      },
+                      "reasonCodes": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9._:-]+$"
+                        },
+                        "maxItems": 32
+                      }
+                    },
+                    "required": [
+                      "required",
+                      "status",
+                      "reasonCodes"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "schemaVersion",
+                  "evidenceType",
+                  "sanitizerVersion",
+                  "formatCompatibility",
+                  "policyDigest",
+                  "inputDigest",
+                  "outputDigest",
+                  "scanResult",
+                  "inspectionScope",
+                  "manualReview"
+                ],
+                "additionalProperties": false
+              },
+              "attestation": {
+                "type": "object",
+                "properties": {
+                  "evidenceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "relativePath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2048,
+                    "pattern": "^(?!\\/)(?!.*\\\\)(?!.*:)(?!.*\\/\\/)(?!.*\\/$)(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:\\/|$))[^\\0/]+(?:\\/[^\\0/]+)*$"
+                  },
+                  "evidenceType": {
+                    "type": "string",
+                    "enum": [
+                      "dom",
+                      "screenshot",
+                      "network",
+                      "console",
+                      "trace",
+                      "video"
+                    ]
+                  },
+                  "sanitizerVersion": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                  },
+                  "recordDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "outputDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "policyDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "fileDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "sanitizedBytesDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "schemaVersion": {
+                    "type": "string",
+                    "const": "1.0.0"
+                  },
+                  "issuer": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "keyId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "const": "sanitizer-attestation/v1"
+                  },
+                  "algorithm": {
+                    "type": "string",
+                    "const": "Ed25519"
+                  },
+                  "signedDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "signature": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  }
+                },
+                "required": [
+                  "evidenceId",
+                  "relativePath",
+                  "evidenceType",
+                  "sanitizerVersion",
+                  "recordDigest",
+                  "outputDigest",
+                  "policyDigest",
+                  "fileDigest",
+                  "sanitizedBytesDigest",
+                  "schemaVersion",
+                  "issuer",
+                  "keyId",
+                  "purpose",
+                  "algorithm",
+                  "signedDigest",
+                  "signature"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "evidenceId",
+              "record",
+              "attestation"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1000000
+        },
+        "privacyReviews": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "evidenceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "status": {
+                    "type": "string",
+                    "const": "not-required"
+                  },
+                  "derivationDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "evidenceId",
+                  "status",
+                  "derivationDigest"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "evidenceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "status": {
+                    "type": "string",
+                    "const": "pending"
+                  }
+                },
+                "required": [
+                  "evidenceId",
+                  "status"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "evidenceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "approved",
+                      "rejected"
+                    ]
+                  },
+                  "receipt": {
+                    "type": "object",
+                    "properties": {
+                      "evidenceId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[A-Za-z0-9._:-]+$"
+                      },
+                      "relativePath": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2048,
+                        "pattern": "^(?!\\/)(?!.*\\\\)(?!.*:)(?!.*\\/\\/)(?!.*\\/$)(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:\\/|$))[^\\0/]+(?:\\/[^\\0/]+)*$"
+                      },
+                      "fileDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "outputDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "sanitizerProofDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "policyDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "decision": {
+                        "type": "string",
+                        "enum": [
+                          "approved",
+                          "rejected"
+                        ]
+                      },
+                      "checkedAt": {
+                        "type": "string",
+                        "format": "date-time"
+                      },
+                      "approver": {
+                        "type": "object",
+                        "properties": {
+                          "subject": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "pattern": "^[A-Za-z0-9._:-]+$"
+                          },
+                          "roles": {
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[A-Za-z0-9._:-]+$"
+                            },
+                            "minItems": 1,
+                            "maxItems": 64
+                          }
+                        },
+                        "required": [
+                          "subject",
+                          "roles"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "schemaVersion": {
+                        "type": "string",
+                        "const": "1.0.0"
+                      },
+                      "issuer": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[A-Za-z0-9._:-]+$"
+                      },
+                      "keyId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[A-Za-z0-9._:-]+$"
+                      },
+                      "purpose": {
+                        "type": "string",
+                        "const": "privacy-review-receipt/v1"
+                      },
+                      "algorithm": {
+                        "type": "string",
+                        "const": "Ed25519"
+                      },
+                      "signedDigest": {
+                        "type": "string",
+                        "pattern": "^sha256:[a-f0-9]{64}$"
+                      },
+                      "signature": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096
+                      }
+                    },
+                    "required": [
+                      "evidenceId",
+                      "relativePath",
+                      "fileDigest",
+                      "outputDigest",
+                      "sanitizerProofDigest",
+                      "policyDigest",
+                      "decision",
+                      "checkedAt",
+                      "approver",
+                      "schemaVersion",
+                      "issuer",
+                      "keyId",
+                      "purpose",
+                      "algorithm",
+                      "signedDigest",
+                      "signature"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "evidenceId",
+                  "status",
+                  "receipt"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "maxItems": 1000000
+        }
+      },
+      "required": [
+        "evidencePolicyDigest",
+        "artifacts",
+        "caseCoverage",
+        "sanitizerProofs",
+        "privacyReviews"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "artifactId",
+    "artifactType",
+    "schemaVersion",
+    "engineVersion",
+    "assetId",
+    "prdRevision",
+    "generationId",
+    "createdAt",
+    "contentDigest",
+    "signatures",
+    "dependencies",
+    "graph",
+    "content"
+  ],
+  "additionalProperties": false,
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mutil-skills.local/e2e/schemas/browser-evidence.schema.json",
+  "title": "browser-evidence artifact",
+  "x-e2e-runtime-validation": {
+    "required": true,
+    "constraints": [
+      "contentDigest、Authority 签名、dependency 与 graph 必须由 validateGeneration 校验"
+    ]
+  }
+}

@@ -5,7 +5,7 @@ export interface SkillRegistryEntry {
   id: string
   name: string
   relativePath: string
-  files: Array<{ name: 'SKILL.md' | 'skill.manifest.json' | 'README.md' | 'tests.md' | 'mocking.md'; relativePath: string }>
+  files: Array<{ name: string; relativePath: string }>
 }
 
 const tddSkill: SkillRegistryEntry = {
@@ -21,8 +21,32 @@ const tddSkill: SkillRegistryEntry = {
   ],
 }
 
+const e2eSkill: SkillRegistryEntry = {
+  id: 'e2e',
+  name: 'PRD 驱动 E2E 浏览器验收',
+  relativePath: 'skills/testing/e2e',
+  files: [
+    { name: 'SKILL.md', relativePath: 'skills/testing/e2e/SKILL.md' },
+    { name: 'skill.manifest.json', relativePath: 'skills/testing/e2e/skill.manifest.json' },
+    { name: 'prd-intake.md', relativePath: 'skills/testing/e2e/prd-intake.md' },
+    { name: 'scope-approval.md', relativePath: 'skills/testing/e2e/scope-approval.md' },
+    { name: 'requirement-oracles.md', relativePath: 'skills/testing/e2e/requirement-oracles.md' },
+    { name: 'coverage-universe.md', relativePath: 'skills/testing/e2e/coverage-universe.md' },
+    { name: 'execution-approval.md', relativePath: 'skills/testing/e2e/execution-approval.md' },
+    { name: 'data-and-cleanup.md', relativePath: 'skills/testing/e2e/data-and-cleanup.md' },
+    { name: 'browser-preflight-binding.md', relativePath: 'skills/testing/e2e/browser-preflight-binding.md' },
+    { name: 'safety-gateway.md', relativePath: 'skills/testing/e2e/safety-gateway.md' },
+    { name: 'browser-execution.md', relativePath: 'skills/testing/e2e/browser-execution.md' },
+    { name: 'diagnosis-healing.md', relativePath: 'skills/testing/e2e/diagnosis-healing.md' },
+    { name: 'evidence-privacy.md', relativePath: 'skills/testing/e2e/evidence-privacy.md' },
+    { name: 'regression-publication.md', relativePath: 'skills/testing/e2e/regression-publication.md' },
+    { name: 'report-verdict.md', relativePath: 'skills/testing/e2e/report-verdict.md' },
+    { name: 'artifact-transaction.md', relativePath: 'skills/testing/e2e/artifact-transaction.md' },
+  ],
+}
+
 export function listSkills(): SkillRegistryEntry[] {
-  return [tddSkill]
+  return [tddSkill, e2eSkill]
 }
 
 export function resolveSkill(id: string): SkillRegistryEntry | undefined {

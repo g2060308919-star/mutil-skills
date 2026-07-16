@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { describe, expect, test } from 'vitest'
 
-const packages = ['core', 'schema', 'template', 'foundation', 'skills', 'cli'] as const
+const packages = ['core', 'schema', 'template', 'foundation', 'skills', 'hooks', 'cli'] as const
 
 describe('package publishing metadata', () => {
   test.each(packages)('%s package includes build output and excludes tests by files allowlist', async (packageName) => {

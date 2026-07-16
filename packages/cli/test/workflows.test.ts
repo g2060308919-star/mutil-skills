@@ -104,6 +104,10 @@ describe('CLI workflows', () => {
     expect(resolveRepoTddSkillDirectory(['--skill', 'tdd'])).toMatch(/skills\/engineering\/tdd$/)
   })
 
+  test('repo-tdd rejects non-TDD skills instead of bootstrapping a testing foundation for them', () => {
+    expect(() => resolveRepoTddSkillDirectory(['--skill', 'e2e'])).toThrow(/仅支持 tdd skill/)
+  })
+
   test('repo-tdd does not modify missing-foundation projects when user rejects bootstrap', async ({ task }) => {
     const cwd = join(process.cwd(), '.tmp', `${task.id}-${randomUUID()}`)
     const skillDir = join(cwd, 'skill')
