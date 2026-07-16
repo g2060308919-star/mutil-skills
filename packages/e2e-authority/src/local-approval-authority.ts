@@ -83,6 +83,10 @@ import {
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { SqliteSnapshotStore } from './sqlite-state-store.js'
 import { trustWriteApprovalClient, type TrustedWriteApprovalClient } from './trusted-execution-clients.js'
+import type {
+  StoredWebAuthnCredential,
+  WebAuthnCredentialRepository,
+} from './webauthn-user-presence.js'
 
 const MAX_READ_TTL_MS = 8 * 60 * 60 * 1000
 const MAX_DISCOVERY_TTL_MS = 15 * 60 * 1000
@@ -119,6 +123,7 @@ interface AuthorityPersistentSnapshot {
     primary: EncryptedPrivateKey; freshness: EncryptedPrivateKey; privacyReview: EncryptedPrivateKey
     decision: EncryptedPrivateKey; attempt: EncryptedPrivateKey
   }
+  webAuthnCredentials: EncryptedPrivateKey
   grants: Array<[string, SignedGrant]>
   revoked: Array<[string, string]>
   uses: Array<[string, number]>
@@ -163,6 +168,7 @@ export class LocalApprovalAuthority {
   readonly #manualResultIds = new Set<string>()
   readonly #approvalIdentities = new Map<string, ApproverIdentity>()
   readonly #manualIdentities = new Map<string, ApproverIdentity>()
+  readonly #webAuthnCredentials = new Map<string, StoredWebAuthnCredential>()
 
   private constructor(options: LocalApprovalAuthorityOptions, privateKey: KeyObject, publicKey: KeyObject,
     freshnessPrivateKey: KeyObject, freshnessPublicKey: KeyObject,
@@ -233,6 +239,7 @@ export class LocalApprovalAuthority {
         decision: encryptPrivateKey(decision.privateKey, stateEncryptionKey, 'decision'),
         attempt: encryptPrivateKey(attempt.privateKey, stateEncryptionKey, 'attempt'),
       },
+      webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey),
       grants: [], revoked: [], uses: [], reservations: [], completedPreflights: [], manualResultIds: [], attemptLogs: [],
     }
     const snapshot = parseAuthoritySnapshot(store.initialize(canonicalizeJson(initial)))
@@ -278,6 +285,29 @@ export class LocalApprovalAuthority {
         this.verifyForSubject(grant, currentSubject),
     })
     return trustWriteApprovalClient(client, { transport: 'in-process-test' })
+  }
+
+  createWebAuthnCredentialRepository(): WebAuthnCredentialRepository {
+    return Object.freeze({
+      list: async () => await this.#withStateRead(async () =>
+        [...this.#webAuthnCredentials.values()].map((credential) => structuredClone(credential))),
+      get: async (credentialId: string) => await this.#withStateRead(async () => {
+        const credential = this.#webAuthnCredentials.get(credentialId)
+        return credential === undefined ? undefined : structuredClone(credential)
+      }),
+      put: async (candidate: StoredWebAuthnCredential) => await this.#withStateMutation(async () => {
+        const credential = parseStoredWebAuthnCredential(candidate)
+        const current = this.#webAuthnCredentials.get(credential.id)
+        if (current !== undefined && (current.subject !== credential.subject
+          || current.publicKey !== credential.publicKey || credential.counter < current.counter)) {
+          throw authorityError(
+            'E2E_APPROVAL_CREDENTIAL_STATE_INVALID',
+            'WebAuthn credential 的主体、公钥不可变且 counter 不得回退',
+          )
+        }
+        this.#webAuthnCredentials.set(credential.id, credential)
+      }),
+    })
   }
 
   async issueDiscoveryGrant(input: {
@@ -1395,6 +1425,10 @@ export class LocalApprovalAuthority {
         decision: encryptPrivateKey(this.#decisionPrivateKey, this.#stateEncryptionKey!, 'decision'),
         attempt: encryptPrivateKey(this.#attemptPrivateKey, this.#stateEncryptionKey!, 'attempt'),
       },
+      webAuthnCredentials: encryptWebAuthnCredentials(
+        [...this.#webAuthnCredentials.values()],
+        this.#stateEncryptionKey!,
+      ),
       grants: [...this.#grants.entries()], revoked: [...this.#revoked.entries()], uses: [...this.#uses.entries()],
       reservations: [...this.#reservations.entries()], completedPreflights: [...this.#completedPreflights.entries()],
       manualResultIds: [...this.#manualResultIds], attemptLogs: [...this.#attemptLogs.entries()],
@@ -1414,6 +1448,11 @@ export class LocalApprovalAuthority {
     this.#manualResultIds.clear()
     for (const id of snapshot.manualResultIds) this.#manualResultIds.add(id)
     replaceMap(this.#attemptLogs, snapshot.attemptLogs)
+    replaceMap(
+      this.#webAuthnCredentials,
+      decryptWebAuthnCredentials(snapshot.webAuthnCredentials, this.#stateEncryptionKey!)
+        .map((credential) => [credential.id, credential]),
+    )
   }
 
   private validateApproverAndTtl(
@@ -1483,12 +1522,93 @@ function parseAuthoritySnapshot(value: string): AuthorityPersistentSnapshot {
       || typeof (key as EncryptedPrivateKey).iv !== 'string'
       || typeof (key as EncryptedPrivateKey).ciphertext !== 'string'
       || typeof (key as EncryptedPrivateKey).authTag !== 'string')
+    || !isEncryptedBlob(candidate.webAuthnCredentials)
     || !Array.isArray(candidate.grants) || !Array.isArray(candidate.revoked) || !Array.isArray(candidate.uses)
     || !Array.isArray(candidate.reservations) || !Array.isArray(candidate.completedPreflights)
     || !Array.isArray(candidate.manualResultIds) || !Array.isArray(candidate.attemptLogs)) {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
   return candidate as AuthorityPersistentSnapshot
+}
+
+function encryptWebAuthnCredentials(
+  credentials: StoredWebAuthnCredential[],
+  encryptionKey: Buffer,
+): EncryptedPrivateKey {
+  const iv = randomBytes(12)
+  const cipher = createCipheriv('aes-256-gcm', encryptionKey, iv)
+  cipher.setAAD(Buffer.from('e2e-authority-webauthn-credentials/v1'))
+  const plaintext = Buffer.from(canonicalizeJson(
+    credentials.map(parseStoredWebAuthnCredential).sort((left, right) => left.id.localeCompare(right.id)),
+  ))
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
+  plaintext.fill(0)
+  return {
+    algorithm: 'aes-256-gcm',
+    iv: iv.toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+    authTag: cipher.getAuthTag().toString('base64'),
+  }
+}
+
+function decryptWebAuthnCredentials(
+  encrypted: EncryptedPrivateKey,
+  encryptionKey: Buffer,
+): StoredWebAuthnCredential[] {
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(encrypted.iv, 'base64'))
+    decipher.setAAD(Buffer.from('e2e-authority-webauthn-credentials/v1'))
+    decipher.setAuthTag(Buffer.from(encrypted.authTag, 'base64'))
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(encrypted.ciphertext, 'base64')),
+      decipher.final(),
+    ])
+    try {
+      const parsed = JSON.parse(plaintext.toString('utf8')) as unknown
+      if (!Array.isArray(parsed)) throw new Error('not an array')
+      const credentials = parsed.map(parseStoredWebAuthnCredential)
+      if (new Set(credentials.map((credential) => credential.id)).size !== credentials.length) {
+        throw new Error('duplicate credential')
+      }
+      return credentials
+    } finally {
+      plaintext.fill(0)
+    }
+  } catch (cause) {
+    throw authorityError(
+      'E2E_AUTHORITY_STATE_DECRYPTION_FAILED',
+      `Authority WebAuthn credential 密文损坏: ${cause instanceof Error ? cause.message : 'unknown'}`,
+    )
+  }
+}
+
+function isEncryptedBlob(value: unknown): value is EncryptedPrivateKey {
+  return typeof value === 'object' && value !== null
+    && (value as EncryptedPrivateKey).algorithm === 'aes-256-gcm'
+    && typeof (value as EncryptedPrivateKey).iv === 'string'
+    && typeof (value as EncryptedPrivateKey).ciphertext === 'string'
+    && typeof (value as EncryptedPrivateKey).authTag === 'string'
+}
+
+function parseStoredWebAuthnCredential(value: unknown): StoredWebAuthnCredential {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw authorityError('E2E_APPROVAL_CREDENTIAL_STATE_INVALID', 'WebAuthn credential state 结构无效')
+  }
+  const candidate = value as Partial<StoredWebAuthnCredential>
+  const transports = ['ble', 'cable', 'hybrid', 'internal', 'nfc', 'smart-card', 'usb']
+  let publicKey: Buffer
+  try { publicKey = Buffer.from(candidate.publicKey ?? '', 'base64url') } catch { publicKey = Buffer.alloc(0) }
+  if (Object.keys(value).sort().join('\0') !== ['counter', 'id', 'publicKey', 'subject', 'transports'].join('\0')
+    || typeof candidate.id !== 'string' || !candidate.id || candidate.id.length > 4096
+    || typeof candidate.publicKey !== 'string' || publicKey.byteLength === 0
+    || publicKey.toString('base64url') !== candidate.publicKey
+    || typeof candidate.counter !== 'number' || !Number.isSafeInteger(candidate.counter) || candidate.counter < 0
+    || !Array.isArray(candidate.transports) || candidate.transports.some((item) => !transports.includes(item))
+    || new Set(candidate.transports).size !== candidate.transports.length
+    || typeof candidate.subject !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.subject)) {
+    throw authorityError('E2E_APPROVAL_CREDENTIAL_STATE_INVALID', 'WebAuthn credential state 字段无效')
+  }
+  return structuredClone(candidate) as StoredWebAuthnCredential
 }
 
 function replaceMap<K, V>(target: Map<K, V>, entries: Array<[K, V]>): void {

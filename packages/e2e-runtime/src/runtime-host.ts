@@ -28,6 +28,10 @@ import {
   type RuntimeRunSnapshot,
 } from './run-store.js'
 import { SecureProjectFileReader } from './secure-project-files.js'
+import {
+  computeRuntimeApprovalSubjectDigest,
+  type RuntimeAuthorityHost,
+} from './authority-host.js'
 
 export interface RuntimeHostDependencies {
   installation: RuntimeInstallation
@@ -35,6 +39,8 @@ export interface RuntimeHostDependencies {
   runStore: RuntimeRunStore
   now(): Date
   projectFileReader?: SecureProjectFileReader
+  authorityHost?: Pick<RuntimeAuthorityHost, 'requestApproval'>
+  presentUserPresenceUrl?(url: string): void | Promise<void>
 }
 
 export class E2ERuntimeHost {
@@ -68,6 +74,7 @@ export class E2ERuntimeHost {
       if (request.command === 'create-run') return await this.createRun(request, requestDigest)
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
+      if (request.command === 'open-approval') return await this.openApproval(request, requestDigest)
       throw blockedError('E2E_RUNTIME_COMMAND_NOT_READY')
     } catch (error) {
       const response = this.errorResponse(request.requestId, asRuntimeError(error))
@@ -247,6 +254,70 @@ export class E2ERuntimeHost {
     })
   }
 
+  private async openApproval(
+    request: Extract<RuntimeRequestEnvelope, { command: 'open-approval' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const authorityHost = this.dependencies.authorityHost
+    if (authorityHost === undefined) throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    const initial = await this.readLockedRun(identity.digest, request.payload.runId)
+    this.requireInstallation(initial)
+    requireApprovalType(initial, request.payload.approvalType)
+    const subjectDigest = computeRuntimeApprovalSubjectDigest(initial, request.payload.approvalType)
+    const session = await authorityHost.requestApproval({
+      runId: initial.runId,
+      approvalType: request.payload.approvalType,
+      subjectDigest,
+      installationDigest: initial.runtimeInstallationDigest,
+    })
+    await this.dependencies.presentUserPresenceUrl?.(session.url)
+    await session.wait()
+
+    return await this.withRunLock(identity.digest, initial.runId, async (lock) => {
+      const current = await this.dependencies.runStore.getRun(identity.digest, initial.runId)
+      if (current === undefined) throw runtimeHostError(
+        'E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'WebAuthn callback 返回前 Run 已不存在',
+      )
+      this.requireInstallation(current)
+      requireApprovalType(current, request.payload.approvalType)
+      if (computeRuntimeApprovalSubjectDigest(current, request.payload.approvalType) !== subjectDigest) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED',
+          'safety',
+          'WebAuthn callback 返回前 Run approval subject 已改变',
+        )
+      }
+      const response = this.successResponse(request.requestId, {
+        runId: current.runId,
+        approvalType: request.payload.approvalType,
+        subjectDigest,
+        sessionId: session.sessionId,
+      })
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.readRunOutcome(
+        identity.digest,
+        current.runId,
+        request.requestId,
+        requestDigest,
+        () => response,
+        lock,
+      ))
+    })
+  }
+
+  private async readLockedRun(
+    projectIdentityDigest: string,
+    runId: string,
+  ): Promise<RuntimeRunSnapshot> {
+    return await this.withRunLock(projectIdentityDigest, runId, async () => {
+      const snapshot = await this.dependencies.runStore.getRun(projectIdentityDigest, runId)
+      if (snapshot === undefined) {
+        throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      }
+      return snapshot
+    })
+  }
+
   private async withRunLock<T>(
     projectIdentityDigest: string,
     runId: string,
@@ -353,6 +424,23 @@ function missingCapabilityCode(current: WorkflowNode): string {
     return 'E2E_RUNTIME_AUTHORITY_NOT_READY'
   }
   return 'E2E_RUNTIME_COMMAND_NOT_READY'
+}
+
+function requireApprovalType(snapshot: RuntimeRunSnapshot, approvalType: string): void {
+  const allowed: Partial<Record<WorkflowNode, string[]>> = {
+    'awaiting-scope-approval': ['scope', 'lineage'],
+    'coverage-audited': ['discovery'],
+    'awaiting-execution-approval': ['execution'],
+    diagnosing: ['privacy'],
+    finalizing: ['privacy'],
+  }
+  if (!allowed[snapshot.workflow.current]?.includes(approvalType)) {
+    throw runtimeHostError(
+      'E2E_RUNTIME_APPROVAL_TYPE_MISMATCH',
+      'safety',
+      `approvalType ${approvalType} 不适用于当前 workflow ${snapshot.workflow.current}`,
+    )
+  }
 }
 
 function createRunResult(snapshot: RuntimeRunSnapshot): Record<string, unknown> {

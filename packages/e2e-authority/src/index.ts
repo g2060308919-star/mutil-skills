@@ -21,3 +21,17 @@ export {
 } from './trusted-execution-clients.js'
 export * from './authority-execution-rpc.js'
 export * from './authority-execution-rpc-host.js'
+export {
+  WebAuthnUserPresenceAuthority,
+  createWebAuthnUserPresenceAuthority,
+  type StoredWebAuthnCredential,
+  type WebAuthnApprovalSession,
+  type WebAuthnApprovalType,
+  type WebAuthnCredentialRepository,
+  type WebAuthnEnrollmentSession,
+} from './webauthn-user-presence.js'
+export {
+  startWebAuthnApprovalServer,
+  type WebAuthnApprovalAssets,
+  type WebAuthnApprovalServerHandle,
+} from './webauthn-approval-server.js'

@@ -25,6 +25,12 @@ import {
 import { isExactRuntimeVersion } from './runtime-manifest.js'
 import { E2ERuntimeHost } from './runtime-host.js'
 import { RuntimeRunStore } from './run-store.js'
+import { resolveProjectIdentity } from './project-identity.js'
+import {
+  computeRuntimeApprovalSubjectDigest,
+  startRuntimeAuthorityHost,
+  type RuntimeAuthoritySession,
+} from './authority-host.js'
 import {
   RUNTIME_PACKAGE_VERSION,
   exitCodeForResponse,
@@ -43,6 +49,7 @@ export interface RuntimeCliDependencies {
   runRuntimeDoctor?: (options: RunRuntimeDoctorOptions) => Promise<RuntimeDoctorReport>
   serializeRuntimeDoctorReport?: (report: unknown) => string
   runtimeHost?: Pick<E2ERuntimeHost, 'handle'>
+  openHumanAuthoritySession?: (arguments_: string[]) => Promise<RuntimeAuthoritySession>
 }
 
 export async function runCli(
@@ -59,6 +66,26 @@ export async function runCli(
 
   if (arguments_[0] === 'install-runtime' || arguments_[0] === 'uninstall-runtime') {
     return runInstallManagementCommand(arguments_, stdout, dependencies)
+  }
+
+  if (isHumanAuthorityCommand(arguments_)) {
+    try {
+      const session = await (dependencies.openHumanAuthoritySession?.(arguments_)
+        ?? openDefaultHumanAuthoritySession(arguments_, dependencies))
+      await writeText(stderr, `${session.url}\n`)
+      await session.wait()
+      await writeText(stdout, `${canonicalizeJson({ sessionId: session.sessionId, status: 'verified' })}\n`)
+      return 0
+    } catch (error) {
+      const runtimeError = error instanceof E2EError ? error : new E2EError({
+        code: 'E2E_APPROVAL_USER_PRESENCE_UNAVAILABLE',
+        category: 'safety',
+        message: 'WebAuthn 用户在场流程失败',
+        retryable: false,
+        cause: error,
+      })
+      return writeErrorResponse(stdout, 'UNKNOWN', runtimeError)
+    }
   }
 
   if ((arguments_.length === 1 && arguments_[0] === 'doctor')
@@ -279,6 +306,123 @@ function defaultDependencies(): RuntimeCliDependencies {
     inspectRuntimeInstallation: inspectRuntimeInstallationDefault,
     runRuntimeDoctor: runRuntimeDoctorDefault,
   }
+}
+
+function isHumanAuthorityCommand(arguments_: string[]): boolean {
+  return (arguments_.length === 2 && arguments_[0] === 'identity' && arguments_[1] === 'enroll')
+    || (arguments_.length === 3 && arguments_[0] === 'approve'
+      && arguments_[1] === '--run-id' && SAFE_ID.test(arguments_[2]!))
+}
+
+async function openDefaultHumanAuthoritySession(
+  arguments_: string[],
+  dependencies: RuntimeCliDependencies,
+): Promise<RuntimeAuthoritySession> {
+  const inspect = dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault
+  const installation = await inspect({ homeDir: dependencies.homeDir })
+  const authority = await startRuntimeAuthorityHost({
+    homeDir: dependencies.homeDir,
+    installation,
+    subject: localAuthoritySubject(),
+  })
+  if (arguments_[0] === 'identity') {
+    try {
+      return closeAuthorityAfterWait(await authority.enroll({ subject: localAuthoritySubject() }), authority)
+    } catch (error) {
+      await authority.close()
+      throw error
+    }
+  }
+
+  const projectRoot = process.cwd()
+  const store = await RuntimeRunStore.open({ homeDir: dependencies.homeDir, projectRoot })
+  try {
+    const identity = await resolveProjectIdentity(projectRoot)
+    const runId = arguments_[2]!
+    const initial = await readRunWithLease(store, identity.digest, runId)
+    if (initial.runtimeInstallationDigest !== installation.installationDigest) {
+      throw cliAuthorityError('E2E_RUNTIME_INSTALLATION_BINDING_MISMATCH')
+    }
+    const approvalType = approvalTypeForWorkflow(initial.workflow.current)
+    const subjectDigest = computeRuntimeApprovalSubjectDigest(initial, approvalType)
+    const session = await authority.requestApproval({
+      runId, approvalType, subjectDigest, installationDigest: installation.installationDigest,
+    })
+    return {
+      url: session.url,
+      sessionId: session.sessionId,
+      async wait() {
+        try {
+          await session.wait()
+          const currentIdentity = await resolveProjectIdentity(projectRoot)
+          if (currentIdentity.digest !== identity.digest) {
+            throw cliAuthorityError('E2E_RUNTIME_PROJECT_IDENTITY_CHANGED')
+          }
+          const current = await readRunWithLease(store, identity.digest, runId)
+          if (computeRuntimeApprovalSubjectDigest(current, approvalType) !== subjectDigest) {
+            throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')
+          }
+        } finally {
+          await store.close()
+          await authority.close()
+        }
+      },
+    }
+  } catch (error) {
+    await store.close()
+    await authority.close()
+    throw error
+  }
+}
+
+function closeAuthorityAfterWait(
+  session: RuntimeAuthoritySession,
+  authority: { close(): Promise<void> },
+): RuntimeAuthoritySession {
+  return {
+    url: session.url,
+    sessionId: session.sessionId,
+    async wait() {
+      try { await session.wait() } finally { await authority.close() }
+    },
+  }
+}
+
+async function readRunWithLease(
+  store: RuntimeRunStore,
+  projectIdentityDigest: string,
+  runId: string,
+) {
+  const lock = await store.acquireRunLock(projectIdentityDigest, runId)
+  try {
+    const snapshot = await store.getRun(projectIdentityDigest, runId)
+    if (snapshot === undefined) throw cliAuthorityError('E2E_RUNTIME_RUN_NOT_FOUND')
+    return snapshot
+  } finally { await lock.close() }
+}
+
+function approvalTypeForWorkflow(
+  workflow: string,
+): 'scope' | 'discovery' | 'execution' | 'privacy' {
+  if (workflow === 'awaiting-scope-approval') return 'scope'
+  if (workflow === 'coverage-audited') return 'discovery'
+  if (workflow === 'awaiting-execution-approval') return 'execution'
+  if (workflow === 'diagnosing' || workflow === 'finalizing') return 'privacy'
+  throw cliAuthorityError('E2E_RUNTIME_APPROVAL_TYPE_MISMATCH')
+}
+
+function localAuthoritySubject(): string {
+  if (typeof process.getuid !== 'function') throw cliAuthorityError('E2E_RUNTIME_PLATFORM_UNSUPPORTED')
+  return `local:uid:${process.getuid()}`
+}
+
+function cliAuthorityError(code: string): E2EError {
+  return new E2EError({
+    code,
+    category: 'safety',
+    message: `${code}: 人类审批命令无法建立可信 Run/Authority 绑定`,
+    retryable: false,
+  })
 }
 
 function formatDoctorReport(report: RuntimeDoctorReport): string {

@@ -37,3 +37,10 @@ export {
   E2ERuntimeHost,
   type RuntimeHostDependencies,
 } from './runtime-host.js'
+export {
+  RuntimeAuthorityHost,
+  startRuntimeAuthorityHost,
+  loadRuntimeApprovalAssets,
+  computeRuntimeApprovalSubjectDigest,
+  type RuntimeAuthoritySession,
+} from './authority-host.js'

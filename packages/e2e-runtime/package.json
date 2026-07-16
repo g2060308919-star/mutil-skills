@@ -2,12 +2,16 @@
   "name": "@mutil-skills/e2e-runtime",
   "version": "0.0.0",
   "type": "module",
-  "files": ["dist/src", "assets"],
+  "files": ["dist/src", "assets", "scripts"],
   "bin": { "repo-e2e": "./dist/src/bin/repo-e2e.js" },
   "exports": {
     ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" }
   },
-  "scripts": { "test": "vitest run" },
+  "scripts": {
+    "build": "node scripts/copy-approval-assets.mjs && tsc -b",
+    "copy:approval-assets": "node scripts/copy-approval-assets.mjs",
+    "test": "vitest run"
+  },
   "dependencies": {
     "@mutil-skills/e2e-authority": "0.0.0",
     "@mutil-skills/e2e-contracts": "0.0.0",

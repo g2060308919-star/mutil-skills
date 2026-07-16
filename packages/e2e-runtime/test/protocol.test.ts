@@ -5,7 +5,7 @@ import {
   canonicalizeJson,
   type RuntimeResponseEnvelope,
 } from '@mutil-skills/e2e-contracts'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { runCli } from '../src/cli.js'
 import {
   exitCodeForResponse,
@@ -306,6 +306,32 @@ describe('repo-e2e CLI protocol slice', () => {
     }])
     expect(JSON.parse(stdout.text())).toEqual({ version: '0.0.0', activeVersion: '0.0.1' })
     expect(stderr.text()).toBe('')
+  })
+
+  test('human identity and approval commands print the URL to stderr and wait for the Authority callback', async () => {
+    for (const arguments_ of [['identity', 'enroll'], ['approve', '--run-id', 'RUN-1']]) {
+      const stdout = captureWritable()
+      const stderr = captureWritable()
+      const wait = vi.fn(async () => undefined)
+      const openHumanAuthoritySession = vi.fn(async () => ({
+        url: 'http://localhost:43123/?bearer=secret#session',
+        sessionId: 'SESSION-1',
+        wait,
+      }))
+      const exitCode = await runCli(arguments_, Readable.from([]), stdout.stream, stderr.stream, {
+        homeDir: '/safe/home',
+        installRuntime: async () => ({
+          version: '0.0.0', installationDigest: digest, launcher: '/safe/repo-e2e',
+        }),
+        uninstallRuntime: async () => ({ version: '0.0.0' }),
+        openHumanAuthoritySession,
+      })
+      expect(exitCode).toBe(0)
+      expect(openHumanAuthoritySession).toHaveBeenCalledWith(arguments_)
+      expect(stderr.text()).toBe('http://localhost:43123/?bearer=secret#session\n')
+      expect(wait).toHaveBeenCalledOnce()
+      expect(JSON.parse(stdout.text())).toEqual({ sessionId: 'SESSION-1', status: 'verified' })
+    }
   })
 })
 

@@ -1,0 +1,98 @@
+import type { AuthenticatorTransportFuture, WebAuthnCredential } from '@simplewebauthn/server'
+import {
+  createWebAuthnUserPresenceAuthority,
+  type StoredWebAuthnCredential,
+} from '../src/webauthn-user-presence.js'
+
+interface TestRegistrationResult {
+  verified: boolean
+  credential?: {
+    id: string
+    publicKey: Uint8Array
+    counter: number
+    transports?: AuthenticatorTransportFuture[]
+  }
+}
+
+interface TestAuthenticationResult { verified: boolean; newCounter: number }
+
+interface TestVerificationOptions {
+  now(): Date
+  verifyRegistration?(input: Record<string, any>): Promise<TestRegistrationResult>
+  verifyAuthentication?(input: Record<string, any>): Promise<TestAuthenticationResult>
+}
+
+export interface TestVerificationMocks {
+  registration: { mockImplementation(implementation: (input: Record<string, any>) => Promise<unknown>): void }
+  authentication: { mockImplementation(implementation: (input: Record<string, any>) => Promise<unknown>): void }
+}
+
+export function createForTest(
+  dependencies: TestVerificationOptions,
+  verificationMocks: TestVerificationMocks,
+) {
+  const credentials = new Map<string, StoredWebAuthnCredential>()
+  verificationMocks.registration.mockImplementation(async (input: Record<string, any>) => {
+    const result = await (dependencies.verifyRegistration?.(input) ?? Promise.resolve({ verified: false }))
+    if (!result.verified || result.credential === undefined) return { verified: false }
+    return {
+      verified: true,
+      registrationInfo: {
+        fmt: 'none', aaguid: '00000000-0000-0000-0000-000000000000',
+        credential: result.credential as WebAuthnCredential,
+        credentialType: 'public-key', attestationObject: new Uint8Array(), userVerified: true,
+        credentialDeviceType: 'singleDevice', credentialBackedUp: false,
+        origin: input.expectedOrigin, rpID: input.expectedRPID,
+      },
+    }
+  })
+  verificationMocks.authentication.mockImplementation(async (input: Record<string, any>) => {
+    const result = await (dependencies.verifyAuthentication?.(input)
+      ?? Promise.resolve({ verified: false, newCounter: input.credential?.counter ?? 0 }))
+    return {
+      verified: result.verified,
+      authenticationInfo: {
+        credentialID: input.credential?.id ?? '', newCounter: result.newCounter,
+        userVerified: result.verified, credentialDeviceType: 'singleDevice',
+        credentialBackedUp: false, origin: input.expectedOrigin, rpID: input.expectedRPID,
+      },
+    }
+  })
+  const authority = createWebAuthnUserPresenceAuthority({
+    now: dependencies.now,
+    credentialRepository: {
+      async list() { return [...credentials.values()].map(cloneCredential) },
+      async get(credentialId) {
+        const credential = credentials.get(credentialId)
+        return credential === undefined ? undefined : cloneCredential(credential)
+      },
+      async put(credential) { credentials.set(credential.id, cloneCredential(credential)) },
+    },
+  })
+  return {
+    authority,
+    registerTestCredential(input: {
+      subject: string
+      credentialId: string
+      counter: number
+      publicKey?: Uint8Array
+      transports?: AuthenticatorTransportFuture[]
+    }) {
+      credentials.set(input.credentialId, {
+        id: input.credentialId,
+        publicKey: Buffer.from(input.publicKey ?? new Uint8Array([1, 2, 3])).toString('base64url'),
+        counter: input.counter,
+        transports: input.transports ?? ['internal'],
+        subject: input.subject,
+      })
+    },
+    readCredential(credentialId: string) {
+      const credential = credentials.get(credentialId)
+      return credential === undefined ? undefined : cloneCredential(credential)
+    },
+  }
+}
+
+function cloneCredential(credential: StoredWebAuthnCredential): StoredWebAuthnCredential {
+  return structuredClone(credential)
+}
