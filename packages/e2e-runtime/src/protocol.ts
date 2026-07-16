@@ -23,6 +23,15 @@ export function parseRuntimeRequest(json: string): RuntimeRequestEnvelope {
     throw invalidRuntimeRequest(cause)
   }
 
+  if (hasUnsupportedProtocolMajor(value)) {
+    throw new E2EError({
+      code: 'E2E_RUNTIME_PROTOCOL_MAJOR_UNSUPPORTED',
+      category: 'validation',
+      message: 'Runtime 不支持请求的 protocol major，且不会猜测转换',
+      retryable: false,
+    })
+  }
+
   const parsed = RuntimeRequestEnvelopeSchema.safeParse(value)
   if (!parsed.success) throw invalidRuntimeRequest(parsed.error)
   return parsed.data
@@ -33,7 +42,9 @@ export function runtimeErrorResponse(
   error: E2EError,
   runtime: RuntimeResponseEnvelope['runtime'] = runtimeIdentity,
 ): RuntimeResponseEnvelope {
-  const category = runtimeCategory(error.category)
+  const category = error.code === 'E2E_RUNTIME_PROTOCOL_MAJOR_UNSUPPORTED'
+    ? 'migration'
+    : runtimeCategory(error.category)
   return {
     schemaVersion: '1.0.0',
     requestId,
@@ -74,6 +85,14 @@ function invalidRuntimeRequest(cause: unknown): E2EError {
     retryable: false,
     cause,
   })
+}
+
+function hasUnsupportedProtocolMajor(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const schemaVersion = (value as Record<string, unknown>).schemaVersion
+  if (typeof schemaVersion !== 'string') return false
+  const match = /^(\d+)\.\d+\.\d+$/.exec(schemaVersion)
+  return match !== null && Number(match[1]) !== 1
 }
 
 function runtimeCategory(category: E2EErrorCategory): NonNullable<RuntimeResponseEnvelope['error']>['category'] {

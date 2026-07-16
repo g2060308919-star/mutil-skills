@@ -30,6 +30,13 @@ describe('Runtime protocol', () => {
     expectInvalidRequest(() => parseRuntimeRequest(JSON.stringify({ ...doctorRequest, callerExecutable: '/bin/sh' })))
   })
 
+  test('classifies an unsupported protocol major without converting it', () => {
+    expectRuntimeError(
+      () => parseRuntimeRequest(JSON.stringify({ ...doctorRequest, schemaVersion: '2.0.0' })),
+      'E2E_RUNTIME_PROTOCOL_MAJOR_UNSUPPORTED',
+    )
+  })
+
   test('converts E2E errors to strict runtime responses', () => {
     const response = runtimeErrorResponse('REQ-1', new E2EError({
       code: 'E2E_RUNTIME_NOT_INSTALLED',
@@ -125,17 +132,73 @@ describe('repo-e2e CLI protocol slice', () => {
     expect(stdout.text()).not.toContain('stack')
     expect(stderr.text()).toBe('')
   })
+
+  test('keeps extra envelope fields classified as input errors', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+
+    const exitCode = await runCli(
+      ['rpc'],
+      Readable.from([JSON.stringify({ ...doctorRequest, callerExecutable: '/bin/sh' })]),
+      stdout.stream,
+      stderr.stream,
+    )
+
+    const response = RuntimeResponseEnvelopeSchema.parse(JSON.parse(stdout.text()))
+    expect(exitCode).toBe(2)
+    expect(response).toMatchObject({
+      requestId: 'REQ-1',
+      ok: false,
+      error: {
+        code: 'E2E_RUNTIME_REQUEST_INVALID',
+        category: 'input',
+        terminalState: 'input-blocked',
+        retryable: false,
+      },
+    })
+    expect(stderr.text()).toBe('')
+  })
+
+  test('returns migration-required and exit 5 for an unsupported protocol major', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+
+    const exitCode = await runCli(
+      ['rpc'],
+      Readable.from([JSON.stringify({ ...doctorRequest, schemaVersion: '2.0.0' })]),
+      stdout.stream,
+      stderr.stream,
+    )
+
+    const response = RuntimeResponseEnvelopeSchema.parse(JSON.parse(stdout.text()))
+    expect(exitCode).toBe(5)
+    expect(response).toMatchObject({
+      requestId: 'REQ-1',
+      ok: false,
+      error: {
+        code: 'E2E_RUNTIME_PROTOCOL_MAJOR_UNSUPPORTED',
+        category: 'migration',
+        terminalState: 'migration-required',
+        retryable: false,
+      },
+    })
+    expect(stderr.text()).toBe('')
+  })
 })
 
 function expectInvalidRequest(parse: () => unknown): void {
+  expectRuntimeError(parse, 'E2E_RUNTIME_REQUEST_INVALID', 'input')
+}
+
+function expectRuntimeError(parse: () => unknown, code: string, category?: string): void {
   try {
     parse()
     throw new Error('expected parseRuntimeRequest to throw')
   } catch (error) {
     expect(error).toBeInstanceOf(E2EError)
     expect(error).toMatchObject({
-      code: 'E2E_RUNTIME_REQUEST_INVALID',
-      category: 'input',
+      code,
+      ...(category === undefined ? {} : { category }),
       retryable: false,
     })
   }
