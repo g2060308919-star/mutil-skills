@@ -153,3 +153,44 @@ Commit title: `fix(e2e): harden runtime installation transactions`
 - launcher 集成测试通过真实 executable 构造 symlink-resolved 且 current 绑定匹配的攻击布局，证明拒绝来自 lstat/mode/strict-child gate，而不是偶然的 current mismatch。
 - `git diff --check` PASS；未修改 plan/progress，未运行全量 `npm test`，符合 review 指令。
 - 无阻塞 concern。
+
+## Critical Rollback Cleanup Follow-up
+
+Commit title: `fix(e2e): preserve runtime target on rollback failure`
+
+### 修复内容
+
+- 新增稳定 `RuntimeActivationError`，所有进入 activation write/rollback 路径的错误都显式携带 `targetCleanupSafe`。
+- rollback 全部成功时，错误为 `E2E_RUNTIME_ACTIVATION_FAILED` 且 `targetCleanupSafe: true`；调用方只在该可证明安全状态下删除本次新 target。
+- 任一 current/launcher rollback 失败时，错误为 `E2E_RUNTIME_ACTIVATION_ROLLBACK_FAILED` 且 `targetCleanupSafe: false`；调用方 fail closed 并保留完整 target，避免 current 仍指向新 version 时形成悬空 active。
+- `RuntimeActivationError` 继承 `AggregateError`，`errors` 顺序保留原始 activation error 与全部 rollback errors，同时保留 `activationError` 和 `rollbackErrors` 字段，不吞掉任何错误。
+- production operations seam 新增 `restoreCurrent` / `restoreLauncher`；默认实现仍使用真实原子文件恢复，测试仅在 current rollback I/O 边界注入故障。
+- rollback 成功回归继续断言 target 被清理，并立即以相同 version/body 重试成功，防止过度保留。
+
+### RED
+
+- Command: `npx vitest run packages/e2e-runtime/test/runtime-installer.test.ts`
+- Exit: 1；1 failed / 13 passed。
+- Expected failure: new current 实际写入后抛 activation error、old current rollback seam 再失败时，旧实现只返回原始 error，缺少稳定 rollback code/cleanup-safety/errors；随后会把 current 可能仍引用的新 target 删除。
+
+### GREEN
+
+- Command: `npx vitest run packages/e2e-runtime/test/runtime-installer.test.ts`
+- Result: PASS；14/14 tests。
+- Verified:
+  - rollback failure 返回 `E2E_RUNTIME_ACTIVATION_ROLLBACK_FAILED`、`targetCleanupSafe: false` 和两项原始 errors；
+  - current 仍指向 new version 时 target 保留；
+  - `inspectRuntimeInstallation()` 对该 current/target 完整验证通过，installation 不悬空；
+  - rollback 成功时 target 删除且 exact retry 成功。
+
+### Typecheck / Architecture Lint
+
+- Command: `npm run typecheck && npm run lint:architecture`
+- Result: PASS。
+
+### Self-review / Concerns
+
+- 非 activation 错误仍表示 current 从未进入 write/rollback 路径，因此沿用安全清理；activation 错误不再由调用方猜测清理安全性。
+- target 保留只发生在 rollback 不确定状态；它已在 current write 前完成 manifest/package/realpath 验证，因此若 current 保持新绑定，discovery 可完整验证。
+- `git diff --check` PASS；按指令未运行全量 `npm test`。
+- 无阻塞 concern。

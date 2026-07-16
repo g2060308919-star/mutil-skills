@@ -58,11 +58,41 @@ export interface ProductionClosureInstallInput {
   env: NodeJS.ProcessEnv
 }
 
+export interface RuntimeFileSnapshot {
+  contents: Buffer
+  mode: number
+}
+
+export class RuntimeActivationError extends AggregateError {
+  readonly code: 'E2E_RUNTIME_ACTIVATION_FAILED' | 'E2E_RUNTIME_ACTIVATION_ROLLBACK_FAILED'
+  readonly targetCleanupSafe: boolean
+  readonly activationError: unknown
+  readonly rollbackErrors: readonly unknown[]
+
+  constructor(activationError: unknown, rollbackErrors: readonly unknown[]) {
+    const targetCleanupSafe = rollbackErrors.length === 0
+    const code = targetCleanupSafe
+      ? 'E2E_RUNTIME_ACTIVATION_FAILED'
+      : 'E2E_RUNTIME_ACTIVATION_ROLLBACK_FAILED'
+    super(
+      [activationError, ...rollbackErrors],
+      `${code}: ${errorMessage(activationError)}`,
+    )
+    this.name = 'RuntimeActivationError'
+    this.code = code
+    this.targetCleanupSafe = targetCleanupSafe
+    this.activationError = activationError
+    this.rollbackErrors = [...rollbackErrors]
+  }
+}
+
 export interface RuntimeInstallerOperations {
   fsyncVersions(path: string): Promise<void>
   verifyVersion(layout: RuntimeLayout, version: string): Promise<VerifiedRuntimeVersion>
   writeLauncher(layout: RuntimeLayout): Promise<void>
   writeCurrent(layout: RuntimeLayout, current: RuntimeCurrentPointer): Promise<void>
+  restoreCurrent(layout: RuntimeLayout, snapshot: RuntimeFileSnapshot | undefined): Promise<void>
+  restoreLauncher(layout: RuntimeLayout, snapshot: RuntimeFileSnapshot | undefined): Promise<void>
 }
 
 const INSTALLER_ENVIRONMENT_KEYS = [
@@ -167,7 +197,10 @@ export async function installRuntimeWithOperations(
         launcher: layout.bin,
       }
     } catch (error) {
-      if (createdTarget && !activated) {
+      const targetCleanupSafe = error instanceof RuntimeActivationError
+        ? error.targetCleanupSafe
+        : true
+      if (createdTarget && !activated && targetCleanupSafe) {
         await removeNewVersionTarget(target, stagingIdentity)
       }
       throw error
@@ -182,6 +215,8 @@ export const runtimeInstallerOperations: RuntimeInstallerOperations = Object.fre
   verifyVersion: verifyInstalledRuntimeVersion,
   writeLauncher: writeFixedLauncher,
   writeCurrent: writeCurrentPointer,
+  restoreCurrent: restoreCurrentPointer,
+  restoreLauncher: restoreFixedLauncher,
 })
 
 export async function withRuntimeInstallLock<T>(layout: RuntimeLayout, operation: () => Promise<T>): Promise<T> {
@@ -332,22 +367,19 @@ async function activateRuntimeFiles(
     const rollbackErrors: unknown[] = []
     if (currentWriteAttempted) {
       try {
-        await restoreFile(layout.current, currentBefore)
+        await operations.restoreCurrent(layout, currentBefore)
       } catch (rollbackError) {
         rollbackErrors.push(rollbackError)
       }
     }
     if (launcherWriteAttempted) {
       try {
-        await restoreFile(layout.bin, launcherBefore)
+        await operations.restoreLauncher(layout, launcherBefore)
       } catch (rollbackError) {
         rollbackErrors.push(rollbackError)
       }
     }
-    if (rollbackErrors.length > 0) {
-      throw new AggregateError([error, ...rollbackErrors], 'E2E_RUNTIME_ACTIVATION_ROLLBACK_FAILED')
-    }
-    throw error
+    throw new RuntimeActivationError(error, rollbackErrors)
   }
 }
 
@@ -359,6 +391,20 @@ async function writeFixedLauncher(layout: RuntimeLayout): Promise<void> {
 
 async function writeCurrentPointer(layout: RuntimeLayout, current: RuntimeCurrentPointer): Promise<void> {
   await atomicWriteFile(layout.current, `${canonicalizeJson(current)}\n`, 0o600)
+}
+
+async function restoreCurrentPointer(
+  layout: RuntimeLayout,
+  snapshot: RuntimeFileSnapshot | undefined,
+): Promise<void> {
+  await restoreFile(layout.current, snapshot)
+}
+
+async function restoreFixedLauncher(
+  layout: RuntimeLayout,
+  snapshot: RuntimeFileSnapshot | undefined,
+): Promise<void> {
+  await restoreFile(layout.bin, snapshot)
 }
 
 async function verifyFixedLauncher(layout: RuntimeLayout): Promise<void> {
@@ -373,12 +419,7 @@ async function verifyFixedLauncher(layout: RuntimeLayout): Promise<void> {
   }
 }
 
-interface FileSnapshot {
-  contents: Buffer
-  mode: number
-}
-
-async function snapshotFile(path: string): Promise<FileSnapshot | undefined> {
+async function snapshotFile(path: string): Promise<RuntimeFileSnapshot | undefined> {
   try {
     const metadata = await lstat(path)
     if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.uid !== currentUid()) {
@@ -391,7 +432,7 @@ async function snapshotFile(path: string): Promise<FileSnapshot | undefined> {
   }
 }
 
-async function restoreFile(path: string, snapshot: FileSnapshot | undefined): Promise<void> {
+async function restoreFile(path: string, snapshot: RuntimeFileSnapshot | undefined): Promise<void> {
   if (snapshot === undefined) {
     await unlink(path).catch((error: unknown) => {
       if (!isNodeError(error, 'ENOENT')) throw error
@@ -511,4 +552,8 @@ async function pathExists(path: string): Promise<boolean> {
 
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
   return error instanceof Error && (error as NodeJS.ErrnoException).code === code
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

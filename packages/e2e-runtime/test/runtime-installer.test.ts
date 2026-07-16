@@ -2,6 +2,7 @@ import { chmod, mkdir, readFile, realpath, stat, symlink, writeFile } from 'node
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { createRuntimeTestRoots } from './fixtures.js'
+import { inspectRuntimeInstallation } from '../src/runtime-discovery.js'
 import {
   ProductionClosureInstaller,
   installRuntime,
@@ -182,6 +183,55 @@ describe('versioned runtime installer', () => {
     expect(await readFile(layout.current)).toEqual(currentBefore)
     expect(await readFile(layout.bin)).toEqual(launcherBefore)
     await expect(stat(join(layout.versions, '0.0.1'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const retried = await installFixture(roots.source, roots.home, '0.0.1', 'current-failure')
+    expect(retried.version).toBe('0.0.1')
+  })
+
+  test('preserves the new target when current rollback fails after the new binding was written', async () => {
+    const roots = await createRuntimeTestRoots()
+    await installFixture(roots.source, roots.home, '0.0.0', 'active')
+    const layout = runtimeLayout(roots.home)
+    const operations: RuntimeInstallerOperations = {
+      ...runtimeInstallerOperations,
+      writeCurrent: async (runtimeLayout_, current) => {
+        await runtimeInstallerOperations.writeCurrent(runtimeLayout_, current)
+        throw new Error('injected activation failure after new current')
+      },
+      restoreCurrent: async () => {
+        throw new Error('injected old current rollback failure')
+      },
+    }
+
+    let activationError: unknown
+    try {
+      await installFixture(
+        roots.source,
+        roots.home,
+        '0.0.1',
+        'rollback-failure',
+        '0.0.1',
+        undefined,
+        operations,
+      )
+    } catch (error) {
+      activationError = error
+    }
+
+    expect(activationError).toMatchObject({
+      code: 'E2E_RUNTIME_ACTIVATION_ROLLBACK_FAILED',
+      targetCleanupSafe: false,
+      errors: [
+        expect.objectContaining({ message: 'injected activation failure after new current' }),
+        expect.objectContaining({ message: 'injected old current rollback failure' }),
+      ],
+    })
+    expect(JSON.parse(await readFile(layout.current, 'utf8'))).toMatchObject({ runtimeVersion: '0.0.1' })
+    expect((await stat(join(layout.versions, '0.0.1'))).isDirectory()).toBe(true)
+    await expect(inspectRuntimeInstallation({ homeDir: roots.home })).resolves.toMatchObject({
+      version: '0.0.1',
+      sourceRepositoryIndependent: true,
+    })
   })
 
   test('removes a newly renamed version after fsync failure so an exact retry succeeds', async () => {
