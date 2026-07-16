@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
+import { canonicalizeJson, digestText } from '@mutil-skills/e2e-contracts'
 import { describe, expect, test, vi } from 'vitest'
 import { LocalApprovalAuthority } from '../src/local-approval-authority.js'
 import * as publicAuthorityApi from '../src/index.js'
@@ -21,7 +22,22 @@ const installationDigest = `sha256:${'a'.repeat(64)}`
 const subjectDigest = `sha256:${'b'.repeat(64)}`
 const fixedNow = new Date('2026-07-16T00:00:00.000Z')
 
+type CallerBindingAbsent<T> = 'approvalSessionBinding' extends keyof T ? never : false
+const discoveryBindingAbsent: CallerBindingAbsent<Parameters<LocalApprovalAuthority['issueDiscoveryGrant']>[0]> = false
+const readBindingAbsent: CallerBindingAbsent<Parameters<LocalApprovalAuthority['issueReadGrant']>[0]> = false
+const writeBindingAbsent: CallerBindingAbsent<Parameters<LocalApprovalAuthority['issueWriteGrant']>[0]> = false
+const injectionBindingAbsent: CallerBindingAbsent<Parameters<LocalApprovalAuthority['issueInjectionGrant']>[0]> = false
+const webSocketBindingAbsent: CallerBindingAbsent<Parameters<LocalApprovalAuthority['issueWebSocketReadGrant']>[0]> = false
+const sseBindingAbsent: CallerBindingAbsent<Parameters<LocalApprovalAuthority['issueSseReadGrant']>[0]> = false
+const allGrantInputsDeriveReceiptBindingInternally: [false, false, false, false, false, false] = [
+  discoveryBindingAbsent, readBindingAbsent, writeBindingAbsent,
+  injectionBindingAbsent, webSocketBindingAbsent, sseBindingAbsent,
+]
+
 describe('WebAuthn user presence authority', () => {
+  test('all six grant seams omit caller-controlled receipt bindings', () => {
+    expect(allGrantInputsDeriveReceiptBindingInternally).toEqual([false, false, false, false, false, false])
+  })
   test('does not export test credential or verifier seams from the package entrypoint', () => {
     expect(publicAuthorityApi).not.toHaveProperty('createWebAuthnUserPresenceAuthorityForTest')
     expect(publicAuthorityApi).not.toHaveProperty('registerTestCredential')
@@ -56,8 +72,7 @@ describe('WebAuthn user presence authority', () => {
       credentialId: 'CRED-1', response: 'valid-assertion',
     })
     const binding = {
-      subject: 'local:user', runId: 'RUN-1', approvalType: 'execution' as const,
-      subjectDigest, installationDigest, origin: 'http://localhost:43210',
+      subject: 'local:user', approvalType: 'execution' as const, subjectDigest,
     }
     expect(fixture.authority.authenticateSession(session.sessionId, binding)).toBe('local:user')
     expect(fixture.authority.authenticateSession(session.sessionId, binding)).toBeUndefined()
@@ -116,7 +131,7 @@ describe('WebAuthn user presence authority', () => {
       issuer: 'authority', keyId: 'key-1', now: () => fixedNow,
       approvalIdentities: [approver],
       authenticateApproverSession: (sessionId, expected) =>
-        expected === undefined ? undefined : fixture.authority.authenticateSession(sessionId, expected),
+        fixture.authority.authenticateSession(sessionId, expected),
     })
     const approvalSubject = {
       schemaVersion: '1.0.0' as const,
@@ -128,9 +143,10 @@ describe('WebAuthn user presence authority', () => {
       bootstrapIntentsDigest: subjectDigest,
       actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 }],
     }
+    const approvalSubjectDigest = digestText('approval-subject/v1', canonicalizeJson(approvalSubject))
     const openAndComplete = async (runId: string) => {
       const session = await fixture.authority.beginApproval({
-        runId, approvalType: 'discovery', subjectDigest,
+        runId, approvalType: 'discovery', subjectDigest: approvalSubjectDigest,
         installationDigest, origin: 'http://localhost:43210', ttlMs: 300_000,
       })
       await fixture.authority.completeApproval({
@@ -141,29 +157,31 @@ describe('WebAuthn user presence authority', () => {
         session,
         binding: {
           subject: approver.subject, runId, approvalType: 'discovery' as const,
-          subjectDigest, installationDigest, origin: 'http://localhost:43210',
+          subjectDigest: approvalSubjectDigest, installationDigest, origin: 'http://localhost:43210',
         },
       }
     }
 
-    const mismatch = await openAndComplete('RUN-MISMATCH')
+    const wrongGrantSubject = {
+      ...approvalSubject,
+      expectedPageIdentity: { ...approvalSubject.expectedPageIdentity, heading: 'Different order' },
+    }
+    const subjectMismatch = await openAndComplete('RUN-SUBJECT-MISMATCH')
     await expect(authority.issueDiscoveryGrant({
-      subject: approvalSubject, approver, approvalSessionRef: mismatch.session.sessionId,
-      approvalSessionBinding: { ...mismatch.binding, runId: 'RUN-OTHER' }, ttlMs: 60_000,
-    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' })
-    await expect(authority.issueDiscoveryGrant({
-      subject: approvalSubject, approver, approvalSessionRef: mismatch.session.sessionId,
-      approvalSessionBinding: mismatch.binding, ttlMs: 60_000,
-    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_APPROVER_UNTRUSTED' })
+      subject: wrongGrantSubject, approver, approvalSessionRef: subjectMismatch.session.sessionId,
+      approvalSessionBinding: subjectMismatch.binding, ttlMs: 60_000,
+    } as Parameters<typeof authority.issueDiscoveryGrant>[0])).rejects.toMatchObject({
+      code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH',
+    })
 
     const valid = await openAndComplete('RUN-VALID')
     await expect(authority.issueDiscoveryGrant({
       subject: approvalSubject, approver, approvalSessionRef: valid.session.sessionId,
-      approvalSessionBinding: valid.binding, ttlMs: 60_000,
+      ttlMs: 60_000,
     })).resolves.toMatchObject({ approver })
     await expect(authority.issueDiscoveryGrant({
       subject: approvalSubject, approver, approvalSessionRef: valid.session.sessionId,
-      approvalSessionBinding: valid.binding, ttlMs: 60_000,
+      ttlMs: 60_000,
     })).rejects.toMatchObject({ code: 'E2E_APPROVAL_APPROVER_UNTRUSTED' })
   })
 
@@ -183,8 +201,7 @@ describe('WebAuthn user presence authority', () => {
       credentialId: 'CRED-1', response: 'valid',
     })
     const binding = {
-      subject: 'local:user', runId: 'RUN-EXPIRING', approvalType: 'scope' as const,
-      subjectDigest, installationDigest, origin: 'http://localhost:43210',
+      subject: 'local:user', approvalType: 'scope' as const, subjectDigest,
     }
     now = new Date(fixedNow.getTime() + 11)
     expect(() => fixture.authority.authenticateSession(session.sessionId, binding))

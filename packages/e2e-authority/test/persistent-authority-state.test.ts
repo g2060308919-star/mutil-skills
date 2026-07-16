@@ -103,6 +103,88 @@ describe('SQLite 持久 Authority 状态', () => {
     })
   })
 
+  test('2.0.0 migration validates the supplied key before commit and wrong-key rollback preserves exact bytes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-wrong-key-migration-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: () => approver.subject,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    const legacy = JSON.parse(row.snapshot) as Record<string, unknown>
+    legacy.schemaVersion = '2.0.0'
+    delete legacy.webAuthnCredentials
+    const legacyBytes = JSON.stringify(legacy)
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(legacyBytes)
+    const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
+    database.close()
+
+    const wrongKey = Buffer.alloc(32, 0x55)
+    await expect(LocalApprovalAuthority.open({ ...options, stateEncryptionKey: wrongKey }))
+      .rejects.toMatchObject({ code: 'E2E_AUTHORITY_STATE_DECRYPTION_FAILED' })
+    const afterWrongKeyDatabase = new DatabaseSync(statePath)
+    expect(afterWrongKeyDatabase.prepare('SELECT revision, snapshot FROM authority_snapshots').get()).toEqual(before)
+    afterWrongKeyDatabase.close()
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    migrated.close()
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    expect(migratedRow.revision).toBe(row.revision + 1)
+    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({ schemaVersion: '2.1.0' })
+    migratedDatabase.close()
+  })
+
+  test('2.0.0 migration rejects malformed nested state and rolls back without committing', async () => {
+    const corruptions: Array<[string, (snapshot: Record<string, any>) => void]> = [
+      ['private encrypted blob', (snapshot) => { snapshot.privateKeys.primary.extra = true }],
+      ['grant tuple', (snapshot) => { snapshot.grants = [['GRANT-1', { grantId: 'GRANT-1' }]] }],
+      ['revocation tuple', (snapshot) => { snapshot.revoked = [['GRANT-1', 7]] }],
+      ['use tuple', (snapshot) => { snapshot.uses = [['GRANT-1:CAP-1', -1]] }],
+      ['reservation tuple', (snapshot) => { snapshot.reservations = [['RES-1', { reservationId: 'OTHER' }]] }],
+      ['preflight tuple', (snapshot) => { snapshot.completedPreflights = [['PREFLIGHT-1', { status: 'ready' }]] }],
+      ['manual result id', (snapshot) => { snapshot.manualResultIds = [7] }],
+      ['attempt log tuple', (snapshot) => { snapshot.attemptLogs = [['LOG-1', { events: [] }]] }],
+    ]
+    for (const [name, corrupt] of corruptions) {
+      const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-strict-legacy-'))
+      directories.push(directory)
+      const statePath = join(directory, 'authority.sqlite')
+      const options = {
+        issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+        approvalIdentities: [approver], authenticateApproverSession: () => approver.subject,
+      }
+      const authority = await LocalApprovalAuthority.open(options)
+      authority.close()
+      const database = new DatabaseSync(statePath)
+      const current = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+        revision: number; snapshot: string
+      }
+      const legacy = JSON.parse(current.snapshot) as Record<string, any>
+      legacy.schemaVersion = '2.0.0'
+      delete legacy.webAuthnCredentials
+      corrupt(legacy)
+      database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
+      const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
+      database.close()
+
+      await expect(LocalApprovalAuthority.open(options), name).rejects.toMatchObject({
+        code: 'E2E_AUTHORITY_STATE_CORRUPT',
+      })
+      const afterDatabase = new DatabaseSync(statePath)
+      expect(afterDatabase.prepare('SELECT revision, snapshot FROM authority_snapshots').get(), name).toEqual(before)
+      afterDatabase.close()
+    }
+  })
+
   test('拒绝 expected state directory 被同 pathname 的真实目录替换', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-state-parent-binding-'))
     directories.push(directory)

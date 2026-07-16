@@ -40,6 +40,19 @@ export async function resolveProjectIdentity(
   }
 }
 
+export function assertSameProjectIdentity(expected: ProjectIdentity, current: ProjectIdentity): void {
+  if (current.realRoot !== expected.realRoot
+    || current.device !== expected.device
+    || current.inode !== expected.inode
+    || current.logicalProjectId !== expected.logicalProjectId
+    || current.digest !== expected.digest) {
+    throw projectIdentityError(
+      'E2E_RUNTIME_PROJECT_IDENTITY_CHANGED',
+      '项目物理根、device/inode、逻辑 project ID 或身份摘要已改变',
+    )
+  }
+}
+
 export async function rebindProjectIdentity(
   input: string | RebindProjectIdentityInput,
   verifyUserPresence: (identity: ProjectIdentity) => boolean | Promise<boolean>,

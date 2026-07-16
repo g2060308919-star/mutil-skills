@@ -366,6 +366,8 @@ npm exec --yes --package=@mutil-skills/e2e-runtime@<exact-version> -- repo-e2e i
 
 这些构造器和 Host facade 不得通过 `@mutil-skills/e2e-runtime` 公共导出。公共入口只导出协议类型、Schema 和版本信息；程序化调用方也必须启动稳定 launcher 并走同一进程边界。测试专用 factory 只能通过未导出的 test entry 使用，且不能进入 npm `exports`。
 
+> **Spec Errata（2026-07-17，Task 5 二次外审）**：Authority `2.0.0 → 2.1.0` 迁移必须在同一 SQLite transaction 内先严格解析全部嵌套状态、解密并验证全部私钥及既有签名，再提交新 snapshot；错误密钥或任一损坏必须原样回滚。Grant 签发接口不得接收调用方提供的 receipt binding，而要先验证真实 canonical subject，再由 Authority 内部派生 `{ subject, approvalType, subjectDigest }` 并一次性消费私有 receipt。RPC 与人类审批 callback 必须共用完整项目身份比较。global request replay 必须早于 Authority factory，重放不得启动 Authority；单请求 cleanup 独立关闭全部已打开资源，cleanup 失败时只输出一个 cleanup error。若业务 success 已持久化但 cleanup 失败，本次返回 cleanup error，后续同 requestId 重放仍返回已持久化 success，这是持久幂等优先于本次传输结果的明确语义。stdout 一旦开始写入，不得再追加第二份 JSON。Authority 状态目录和 `state.key` 必须由 Runtime 自带的 `openat`/`mkdirat` helper 通过 dirfd 与 `O_NOFOLLOW` 创建/读取；父进程只读固定最终目录 fd，Authority 子进程继承该 fd、`fchdir` 后 `exec`，SQLite 只使用相对 basename 并在打开前后核对 realpath/dev/inode。Runtime npm 根入口仅导出协议 Schema、类型和版本。
+
 ### 8.2 子进程模型
 
 每个执行 Run 使用一个 Host 父进程，按需启动 Authority、Gateway 和 Controlled Browser 子进程。Host 必须：

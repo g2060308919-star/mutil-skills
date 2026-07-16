@@ -93,7 +93,8 @@ test('starts the real Authority child with user-only state and revokes enrollmen
         },
       })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EPERM') { skip(); return }
+      if (['EPERM', 'E2E_APPROVAL_PLATFORM_PERMISSION_DENIED']
+        .includes(String((error as NodeJS.ErrnoException).code))) { skip(); return }
       throw error
     }
     const enrollment = await host.enroll({ subject: 'local:user' })
@@ -196,7 +197,7 @@ test('Runtime Host recomputes the approval subject from the locked Run before op
       doctor: async () => { throw new Error('not used') },
       runStore,
       now: () => new Date('2026-07-16T00:00:00.000Z'),
-      authorityHost: { requestApproval },
+      authorityHostFactory: async () => ({ requestApproval }),
     })
     const request = RuntimeRequestEnvelopeSchema.parse({
       schemaVersion: '1.0.0', requestId: 'APPROVE-1', client: { name: 'test', version: '1.0.0' },
@@ -262,7 +263,7 @@ test('Runtime Host rejects a replaced physical project root after the user-prese
       installation: runtimeInstallation(),
       doctor: async () => { throw new Error('not used') },
       runStore, now: () => new Date('2026-07-16T00:00:00.000Z'),
-      authorityHost: { requestApproval },
+      authorityHostFactory: async () => ({ requestApproval }),
     })
     const request = RuntimeRequestEnvelopeSchema.parse({
       schemaVersion: '1.0.0', requestId: 'APPROVE-REPLACEMENT',
@@ -297,14 +298,14 @@ test('Runtime Host rejects a logical project rebind after the user-presence wait
       installation: runtimeInstallation(),
       doctor: async () => { throw new Error('not used') }, runStore,
       now: () => new Date('2026-07-16T00:00:00.000Z'),
-      authorityHost: {
+      authorityHostFactory: async () => ({
         requestApproval: async () => ({
           url: `http://localhost:42004/#${'d'.repeat(43)}`, sessionId: 'SESSION-REBIND',
           async wait() {
             await writeFile(identityPath, JSON.stringify({ schemaVersion: '1.0.0', projectId: 'PROJECT-2' }))
           },
         }),
-      },
+      }),
     })
     const request = RuntimeRequestEnvelopeSchema.parse({
       schemaVersion: '1.0.0', requestId: 'APPROVE-REBIND', client: { name: 'test', version: '1.0.0' },
@@ -320,6 +321,75 @@ test('Runtime Host rejects a logical project rebind after the user-presence wait
     await rm(roots.root, { recursive: true, force: true })
   }
 })
+
+test.each(['physical', 'logical'] as const)(
+  'human approval command rejects a %s project identity change after user presence',
+  async (change) => {
+    const roots = await createRuntimeTestRoots()
+    try {
+      await mkdir(`${roots.project}/.biztest`, { recursive: true })
+      const identityPath = `${roots.project}/.biztest/project.json`
+      await writeFile(identityPath, JSON.stringify({ schemaVersion: '1.0.0', projectId: 'PROJECT-1' }))
+      const identity = await resolveProjectIdentity(roots.project)
+      const store = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+      try {
+        const snapshot = { ...runSnapshot(), projectIdentityDigest: identity.digest }
+        const requestDigest = `sha256:${'8'.repeat(64)}`
+        await store.beginRequest(`SEED-HUMAN-${change}`, requestDigest)
+        const lock = await store.acquireRunLock(identity.digest, snapshot.runId)
+        try {
+          await store.createRunOutcome(snapshot, `SEED-HUMAN-${change}`, requestDigest, { seeded: true }, lock)
+        } finally { await lock.close() }
+      } finally { await store.close() }
+
+      const close = vi.fn(async () => undefined)
+      const startAuthorityHost = vi.fn(async () => new RuntimeAuthorityHost({
+        installationDigest,
+        processHandle: {
+          enrollIdentity: vi.fn(),
+          openApprovalSession: vi.fn(async () => ({
+            url: `http://localhost:42005/#${'h'.repeat(43)}`,
+            sessionId: `SESSION-HUMAN-${change}`,
+          })),
+          async waitForSession() {
+            if (change === 'physical') {
+              await rename(roots.project, `${roots.root}/old-human-project`)
+              await mkdir(`${roots.project}/.biztest`, { recursive: true })
+              await writeFile(identityPath, JSON.stringify({ schemaVersion: '1.0.0', projectId: 'PROJECT-1' }))
+            } else {
+              await writeFile(identityPath, JSON.stringify({ schemaVersion: '1.0.0', projectId: 'PROJECT-2' }))
+            }
+          },
+          close,
+        },
+      }))
+      const stdout = captureWritable()
+      const stderr = captureWritable()
+      const exitCode = await runCli(
+        ['approve', '--run-id', 'RUN-1', '--type', 'scope'],
+        Readable.from([]), stdout.stream, stderr.stream,
+        {
+          homeDir: roots.home,
+          installRuntime: async () => { throw new Error('not used') },
+          uninstallRuntime: async () => { throw new Error('not used') },
+          inspectRuntimeInstallation: async () => runtimeInstallation(),
+          startAuthorityHost,
+          currentWorkingDirectory: () => roots.project,
+        },
+      )
+
+      expect(exitCode).toBe(4)
+      expect(JSON.parse(stdout.text())).toMatchObject({
+        ok: false, error: { code: 'E2E_RUNTIME_PROJECT_IDENTITY_CHANGED' },
+      })
+      expect(stderr.text()).toBe(`http://localhost:42005/#${'h'.repeat(43)}\n`)
+      expect(startAuthorityHost).toHaveBeenCalledOnce()
+      expect(close).toHaveBeenCalledOnce()
+    } finally {
+      await rm(roots.root, { recursive: true, force: true })
+    }
+  },
+)
 
 test('default rpc wiring starts Authority only for open-approval, writes URL to stderr, and closes it', async () => {
   const roots = await createRuntimeTestRoots()
@@ -375,7 +445,25 @@ test('default rpc wiring starts Authority only for open-approval, writes URL to 
     expect(startAuthorityHost).toHaveBeenCalledOnce()
     expect(close).toHaveBeenCalledOnce()
 
-    startAuthorityHost.mockClear()
+    const replayStdout = captureWritable()
+    startAuthorityHost.mockRejectedValueOnce(new Error('Authority must not start for replay'))
+    expect(await runCli(
+      ['rpc'], Readable.from([JSON.stringify(request)]), replayStdout.stream, captureWritable().stream,
+      {
+        homeDir: roots.home,
+        installRuntime: async () => { throw new Error('not used') },
+        uninstallRuntime: async () => { throw new Error('not used') },
+        inspectRuntimeInstallation: async () => runtimeInstallation(),
+        startAuthorityHost,
+      },
+    )).toBe(0)
+    expect(JSON.parse(replayStdout.text())).toEqual(JSON.parse(stdout.text()))
+    expect(startAuthorityHost).toHaveBeenCalledTimes(1)
+
+    startAuthorityHost.mockReset()
+    startAuthorityHost.mockImplementation(async () => new RuntimeAuthorityHost({
+      processHandle, installationDigest,
+    }))
     const statusStdout = captureWritable()
     const statusRequest = {
       schemaVersion: '1.0.0', requestId: 'STATUS-CLI', client: { name: 'test', version: '1.0.0' },
@@ -392,6 +480,83 @@ test('default rpc wiring starts Authority only for open-approval, writes URL to 
       },
     )).toBe(0)
     expect(startAuthorityHost).not.toHaveBeenCalled()
+
+    for (const runStoreAlsoThrows of [false, true]) {
+      const originalRunStoreClose = RuntimeRunStore.prototype.close
+      const runStoreClose = vi.spyOn(RuntimeRunStore.prototype, 'close').mockImplementation(async function (this: RuntimeRunStore) {
+        await originalRunStoreClose.call(this)
+        if (runStoreAlsoThrows) throw new Error('run store cleanup failed')
+      })
+      close.mockRejectedValueOnce(new Error('authority cleanup failed'))
+      const cleanupStdout = captureWritable()
+      const cleanupRequest = {
+        ...request,
+        requestId: runStoreAlsoThrows ? 'APPROVE-CLEANUP-BOTH' : 'APPROVE-CLEANUP-AUTHORITY',
+      }
+      try {
+        expect(await runCli(
+          ['rpc'], Readable.from([JSON.stringify(cleanupRequest)]), cleanupStdout.stream, captureWritable().stream,
+          {
+            homeDir: roots.home,
+            installRuntime: async () => { throw new Error('not used') },
+            uninstallRuntime: async () => { throw new Error('not used') },
+            inspectRuntimeInstallation: async () => runtimeInstallation(),
+            startAuthorityHost,
+          },
+        )).toBe(70)
+        expect(cleanupStdout.text().trim().split('\n')).toHaveLength(1)
+        expect(JSON.parse(cleanupStdout.text())).toMatchObject({
+          ok: false, error: { code: 'E2E_RUNTIME_CLEANUP_FAILED' },
+        })
+        expect(runStoreClose).toHaveBeenCalledOnce()
+      } finally { runStoreClose.mockRestore() }
+
+      const callsBeforeReplay = startAuthorityHost.mock.calls.length
+      startAuthorityHost.mockImplementation(async () => { throw new Error('Authority must stay lazy for persisted replay') })
+      const persistedReplayStdout = captureWritable()
+      expect(await runCli(
+        ['rpc'], Readable.from([JSON.stringify(cleanupRequest)]),
+        persistedReplayStdout.stream, captureWritable().stream,
+        {
+          homeDir: roots.home,
+          installRuntime: async () => { throw new Error('not used') },
+          uninstallRuntime: async () => { throw new Error('not used') },
+          inspectRuntimeInstallation: async () => runtimeInstallation(),
+          startAuthorityHost,
+        },
+      )).toBe(0)
+      expect(JSON.parse(persistedReplayStdout.text())).toMatchObject({
+        ok: true, result: { sessionId: 'SESSION-CLI' },
+      })
+      expect(startAuthorityHost).toHaveBeenCalledTimes(callsBeforeReplay)
+      startAuthorityHost.mockImplementation(async () => new RuntimeAuthorityHost({
+        processHandle, installationDigest,
+      }))
+    }
+
+    const partialWrites: Buffer[] = []
+    let writeCalls = 0
+    const partiallyRejectingStdout = new Writable({
+      write(chunk, _encoding, callback) {
+        writeCalls += 1
+        partialWrites.push(Buffer.from(chunk).subarray(0, 8))
+        callback(new Error('stdout failed after partial write'))
+      },
+    })
+    partiallyRejectingStdout.on('error', () => undefined)
+    expect(await runCli(
+      ['rpc'], Readable.from([JSON.stringify({ ...request, requestId: 'APPROVE-PARTIAL-STDOUT' })]),
+      partiallyRejectingStdout, captureWritable().stream,
+      {
+        homeDir: roots.home,
+        installRuntime: async () => { throw new Error('not used') },
+        uninstallRuntime: async () => { throw new Error('not used') },
+        inspectRuntimeInstallation: async () => runtimeInstallation(),
+        startAuthorityHost,
+      },
+    )).toBe(70)
+    expect(writeCalls).toBe(1)
+    expect(Buffer.concat(partialWrites).toString()).toBe('{"ok":tr')
   } finally {
     await rm(roots.root, { recursive: true, force: true })
   }
@@ -462,10 +627,16 @@ test('default rpc production wiring starts a real Authority child and closes it 
       throw error
     }
     url = stderr.text().trim()
-    expect(exitCode).toBe(4)
+    const cliResponse = JSON.parse(stdout.text()) as { error?: { code?: string } }
+    if (cliResponse.error?.code === 'E2E_APPROVAL_PLATFORM_PERMISSION_DENIED') {
+      expect(url).toBe('')
+      skip()
+      return
+    }
+    expect(exitCode, stdout.text()).toBe(4)
     expect(new URL(url).search).toBe('')
     expect(new URL(url).hash).toMatch(/^#[A-Za-z0-9_-]{43}$/)
-    expect(JSON.parse(stdout.text())).toMatchObject({
+    expect(cliResponse).toMatchObject({
       ok: false, error: { code: 'E2E_APPROVAL_SESSION_EXPIRED' },
     })
     await expect(fetch(new URL(url).origin)).rejects.toThrow()

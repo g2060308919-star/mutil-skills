@@ -19,7 +19,7 @@ import {
   transitionWorkflow,
 } from '@mutil-skills/e2e-engine'
 import { runtimeErrorResponse } from './protocol.js'
-import { resolveProjectIdentity } from './project-identity.js'
+import { assertSameProjectIdentity, resolveProjectIdentity } from './project-identity.js'
 import type { RuntimeInstallation } from './runtime-discovery.js'
 import type { RuntimeDoctorReport } from './runtime-doctor.js'
 import {
@@ -39,7 +39,7 @@ export interface RuntimeHostDependencies {
   runStore: RuntimeRunStore
   now(): Date
   projectFileReader?: SecureProjectFileReader
-  authorityHost?: Pick<RuntimeAuthorityHost, 'requestApproval'>
+  authorityHostFactory?: () => Promise<Pick<RuntimeAuthorityHost, 'requestApproval'>>
   presentUserPresenceUrl?(url: string): void | Promise<void>
 }
 
@@ -258,8 +258,9 @@ export class E2ERuntimeHost {
     request: Extract<RuntimeRequestEnvelope, { command: 'open-approval' }>,
     requestDigest: string,
   ): Promise<RuntimeResponseEnvelope> {
-    const authorityHost = this.dependencies.authorityHost
-    if (authorityHost === undefined) throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
+    const authorityHostFactory = this.dependencies.authorityHostFactory
+    if (authorityHostFactory === undefined) throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
+    const authorityHost = await authorityHostFactory()
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     const initial = await this.readLockedRun(identity.digest, request.payload.runId)
     this.requireInstallation(initial)
@@ -285,17 +286,7 @@ export class E2ERuntimeHost {
         cause,
       )
     }
-    if (currentIdentity.digest !== identity.digest
-      || currentIdentity.realRoot !== identity.realRoot
-      || currentIdentity.device !== identity.device
-      || currentIdentity.inode !== identity.inode
-      || currentIdentity.logicalProjectId !== identity.logicalProjectId) {
-      throw runtimeHostError(
-        'E2E_RUNTIME_PROJECT_IDENTITY_CHANGED',
-        'safety',
-        'WebAuthn callback 返回前项目物理身份或逻辑绑定已改变',
-      )
-    }
+    assertSameProjectIdentity(identity, currentIdentity)
 
     return await this.withRunLock(identity.digest, initial.runId, async (lock) => {
       const current = await this.dependencies.runStore.getRun(identity.digest, initial.runId)

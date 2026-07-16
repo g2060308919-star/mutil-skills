@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { createRuntimeTestRoots } from './fixtures.js'
 import {
+  assertSameProjectIdentity,
   rebindProjectIdentity,
   resolveProjectIdentity,
 } from '../src/project-identity.js'
@@ -17,6 +18,23 @@ async function writeProjectIdentity(projectRoot: string, projectId = 'PROJECT-1'
 }
 
 describe('project identity', () => {
+  test('compares every physical and logical identity field instead of trusting a digest alone', () => {
+    const expected = {
+      realRoot: '/project', device: '1', inode: '2', logicalProjectId: 'PROJECT-1', digest: 'same-digest',
+    }
+    for (const current of [
+      { ...expected, realRoot: '/replacement' },
+      { ...expected, device: '3' },
+      { ...expected, inode: '4' },
+      { ...expected, logicalProjectId: 'PROJECT-2' },
+      { ...expected, digest: 'different-digest' },
+    ]) {
+      expect(() => assertSameProjectIdentity(expected, current))
+        .toThrow(/E2E_RUNTIME_PROJECT_IDENTITY_CHANGED/)
+    }
+    expect(() => assertSameProjectIdentity(expected, { ...expected })).not.toThrow()
+  })
+
   test('changes when a project is copied', async () => {
     const roots = await createRuntimeTestRoots()
     await writeProjectIdentity(roots.project)

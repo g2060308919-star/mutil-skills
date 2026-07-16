@@ -11,16 +11,22 @@ import {
   type WebAuthnApprovalType,
   type WebAuthnUserPresenceAuthority,
 } from './webauthn-user-presence.js'
+import type { SqliteStateDirectoryIdentity } from './sqlite-state-store.js'
 
 interface HostConfig {
   rpc: { issuer: string; keyId: string; clientId: string }
   approval: {
     issuer: string; keyId: string; statePath: string; stateEncryptionKeyBase64Url: string
     testWorkspaceRoots: string[]
+    expectedStateDirectory?: SqliteStateDirectoryIdentity
     approvalIdentities?: Array<{ subject: string; roles: string[] }>
     manualIdentities?: Array<{ subject: string; roles: string[] }>
   }
-  lease: { statePath: string; testWorkspaceRoots: string[] }
+  lease: {
+    statePath: string
+    testWorkspaceRoots: string[]
+    expectedStateDirectory?: SqliteStateDirectoryIdentity
+  }
   userPresence?: {
     installationDigest: string
     ttlMs: number
@@ -68,16 +74,19 @@ process.on('message', async (message: unknown) => {
         issuer: config.approval.issuer, keyId: config.approval.keyId, now,
         statePath: config.approval.statePath,
         stateEncryptionKey,
+        ...(config.approval.expectedStateDirectory === undefined
+          ? {} : { expectedStateDirectory: config.approval.expectedStateDirectory }),
         testWorkspaceRoots: config.approval.testWorkspaceRoots,
         approvalIdentities: config.approval.approvalIdentities,
         manualIdentities: config.approval.manualIdentities,
-        authenticateApproverSession: (sessionId, expected) => expected === undefined
-          ? undefined
-          : webAuthnAuthority?.authenticateSession(sessionId, expected),
+        authenticateApproverSession: (sessionId, expected) =>
+          webAuthnAuthority?.authenticateSession(sessionId, expected),
       })
     } finally { stateEncryptionKey.fill(0) }
     leaseAuthority = await LocalLeaseAuthority.open({
       now, statePath: config.lease.statePath, testWorkspaceRoots: config.lease.testWorkspaceRoots,
+      ...(config.lease.expectedStateDirectory === undefined
+        ? {} : { expectedStateDirectory: config.lease.expectedStateDirectory }),
     })
     if (config.userPresence !== undefined) {
       webAuthnAuthority = createWebAuthnUserPresenceAuthority({

@@ -1,9 +1,12 @@
-import { fork, type ChildProcess } from 'node:child_process'
+import { fork, spawn, type ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { ApproverIdentity } from '@mutil-skills/e2e-contracts'
 import type { WebAuthnApprovalAssets } from './webauthn-approval-server.js'
 import type { WebAuthnApprovalType } from './webauthn-user-presence.js'
+import type { SqliteStateDirectoryIdentity } from './sqlite-state-store.js'
 import type {
   AuthenticatedRpcCredential,
   AuthenticatedRpcHttpHandle,
@@ -21,18 +24,32 @@ export interface AuthorityExecutionRpcHostOptions {
     keyId: string
     statePath: string
     stateEncryptionKey: Uint8Array
+    expectedStateDirectory?: SqliteStateDirectoryIdentity
     testWorkspaceRoots: string[]
     approvalIdentities?: ApproverIdentity[]
     manualIdentities?: ApproverIdentity[]
   }
-  lease: { statePath: string; testWorkspaceRoots: string[] }
+  lease: {
+    statePath: string
+    testWorkspaceRoots: string[]
+    expectedStateDirectory?: SqliteStateDirectoryIdentity
+  }
   userPresence?: {
     installationDigest: string
     assets: WebAuthnApprovalAssets
     ttlMs?: number
   }
   clock?: { kind: 'system' } | { kind: 'fixed-test-only'; now: string }
-  process?: { cwd: string; env: Record<string, string> }
+  process?: {
+    cwd: string
+    env: Record<string, string>
+    pinnedStateDirectory?: {
+      fd: number
+      identity: SqliteStateDirectoryIdentity
+      pythonExecutable: string
+      wrapperPath: string
+    }
+  }
 }
 
 export interface AuthorityExecutionRpcProcessHandle extends AuthenticatedRpcHttpHandle {
@@ -59,12 +76,32 @@ export async function startAuthorityExecutionRpcHostProcess(
     sourceMode ? './authority-execution-rpc-host-process.ts' : './authority-execution-rpc-host-process.js',
     import.meta.url,
   ))
-  const child = fork(modulePath, [], {
-    execArgv: sourceMode ? ['--import', 'tsx'] : [],
-    stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
-    serialization: 'json',
-    ...(options.process === undefined ? {} : { cwd: options.process.cwd, env: options.process.env }),
-  })
+  const sourceExecArguments = sourceMode
+    ? ['--import', createRequire(import.meta.url).resolve('tsx')]
+    : []
+  const pinned = options.process?.pinnedStateDirectory
+  const child: ChildProcess = pinned === undefined
+    ? fork(modulePath, [], {
+        execArgv: sourceExecArguments,
+        stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+        serialization: 'json',
+        ...(options.process === undefined ? {} : { cwd: options.process.cwd, env: options.process.env }),
+      })
+    : spawn(pinned.pythonExecutable, [
+        pinned.wrapperPath,
+        '3',
+        pinned.identity.device,
+        pinned.identity.inode,
+        pinned.identity.realPath,
+        process.execPath,
+        ...sourceExecArguments,
+        modulePath,
+      ], {
+        cwd: options.process!.cwd,
+        env: options.process!.env,
+        stdio: ['ignore', 'ignore', 'inherit', pinned.fd, 'ipc'],
+        serialization: 'json',
+      })
   try {
     const { stateEncryptionKey: _stateEncryptionKey, ...approvalConfig } = options.approval
     const ready = await waitForReady(child, {
@@ -307,9 +344,39 @@ function validateOptions(options: AuthorityExecutionRpcHostOptions): void {
       || Object.keys(options.process.env).sort().join('\0') !== ['HOME', 'LANG', 'PATH', 'TMPDIR'].join('\0')
       || options.process.env.LANG !== 'C.UTF-8'
       || Object.values(options.process.env).some((value) => typeof value !== 'string')
+      || (options.process.pinnedStateDirectory !== undefined && (
+        !Number.isSafeInteger(options.process.pinnedStateDirectory.fd)
+        || options.process.pinnedStateDirectory.fd < 0
+        || !isAbsolute(options.process.pinnedStateDirectory.pythonExecutable)
+        || !isAbsolute(options.process.pinnedStateDirectory.wrapperPath)
+        || !isStateDirectoryIdentity(options.process.pinnedStateDirectory.identity)
+        || options.approval.statePath !== 'approval.sqlite'
+        || options.lease.statePath !== 'lease.sqlite'
+        || !sameStateDirectoryIdentity(
+          options.approval.expectedStateDirectory,
+          options.process.pinnedStateDirectory.identity,
+        )
+        || !sameStateDirectoryIdentity(
+          options.lease.expectedStateDirectory,
+          options.process.pinnedStateDirectory.identity,
+        )
+      ))
     ))) {
     throw hostError('E2E_RPC_HOST_CONFIG_INVALID')
   }
+}
+
+function isStateDirectoryIdentity(value: SqliteStateDirectoryIdentity | undefined): value is SqliteStateDirectoryIdentity {
+  return value !== undefined && isAbsolute(value.realPath)
+    && /^\d+$/.test(value.device) && /^\d+$/.test(value.inode)
+}
+
+function sameStateDirectoryIdentity(
+  left: SqliteStateDirectoryIdentity | undefined,
+  right: SqliteStateDirectoryIdentity,
+): boolean {
+  return left !== undefined && left.realPath === right.realPath
+    && left.device === right.device && left.inode === right.inode
 }
 
 function isCanonicalInstant(value: string): boolean {

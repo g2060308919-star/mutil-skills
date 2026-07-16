@@ -144,6 +144,9 @@ export const RuntimeResponseEnvelopeSchema = z.object({
 
 export type RuntimeRequestEnvelope = z.infer<typeof RuntimeRequestEnvelopeSchema>
 export type RuntimeResponseEnvelope = z.infer<typeof RuntimeResponseEnvelopeSchema>
+export type RuntimeError = z.infer<typeof RuntimeErrorSchema>
+export type RuntimeDoctorProbe = z.infer<typeof RuntimeDoctorProbeSchema>
+export type RuntimeDoctorReport = z.infer<typeof RuntimeDoctorReportSchema>
 
 function isPlainJsonObject(value: unknown): value is Record<string, JsonValue> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)

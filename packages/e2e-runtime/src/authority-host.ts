@@ -6,11 +6,12 @@ import {
 } from '@mutil-skills/e2e-authority'
 import { canonicalizeJson, digestText, E2EError } from '@mutil-skills/e2e-contracts'
 import { constants } from 'node:fs'
-import { lstat, mkdir, open, realpath, type FileHandle } from 'node:fs/promises'
+import { lstat, open, realpath, type FileHandle } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import { buildChildEnvironment } from './environment-policy.js'
 import type { RuntimeInstallation } from './runtime-discovery.js'
 import { runtimeLayout } from './runtime-layout.js'
@@ -104,45 +105,60 @@ export async function startRuntimeAuthorityHost(options: {
 }): Promise<RuntimeAuthorityHost> {
   if (!SAFE_ID.test(options.subject)) throw authorityHostError('E2E_APPROVAL_ENROLLMENT_INPUT_INVALID')
   const layout = runtimeLayout(options.homeDir)
-  const authorityDirectory = await ensureAuthorityDirectories(options.homeDir, layout.authority)
-  const stateEncryptionKey = await loadOrCreateAuthorityKey(
-    join(layout.authority, 'state.key'),
-    authorityDirectory,
-  )
-  const assets = await loadRuntimeApprovalAssets()
   const environment = buildChildEnvironment({
     host: process.env,
     runtimeBinPaths: [dirname(process.execPath)],
     homeDir: options.homeDir,
     tempDir: tmpdir(),
   })
+  const prepared = await prepareAuthorityState(options.homeDir, layout.authority, environment)
   try {
-    const processHandle = await startAuthorityExecutionRpcHostProcess({
-      rpc: { issuer: 'e2e-runtime-authority', keyId: 'rpc-v1', clientId: 'runtime-parent' },
-      approval: {
-        issuer: 'e2e-runtime-authority', keyId: 'approval-v1',
-        statePath: join(layout.authority, 'approval.sqlite'),
-        stateEncryptionKey,
-        testWorkspaceRoots: [options.installation.versionRoot],
-        approvalIdentities: [{ subject: options.subject, roles: ['e2e-approver'] }],
-      },
-      lease: {
-        statePath: join(layout.authority, 'lease.sqlite'),
-        testWorkspaceRoots: [options.installation.versionRoot],
-      },
-      userPresence: {
-        installationDigest: options.installation.installationDigest,
-        assets,
-        ...(options.approvalSessionTtlMs === undefined ? {} : { ttlMs: options.approvalSessionTtlMs }),
-      },
-      process: { cwd: options.installation.versionRoot, env: environment },
-    })
+    const assets = await loadRuntimeApprovalAssets()
+    const childWrapperPath = await secureRuntimeScriptPath('authority-child-fchdir.py')
+    let processHandle: AuthorityExecutionRpcProcessHandle
+    try {
+      processHandle = await startAuthorityExecutionRpcHostProcess({
+        rpc: { issuer: 'e2e-runtime-authority', keyId: 'rpc-v1', clientId: 'runtime-parent' },
+        approval: {
+          issuer: 'e2e-runtime-authority', keyId: 'approval-v1',
+          statePath: 'approval.sqlite',
+          stateEncryptionKey: prepared.stateEncryptionKey,
+          expectedStateDirectory: prepared.identity,
+          testWorkspaceRoots: [options.installation.versionRoot],
+          approvalIdentities: [{ subject: options.subject, roles: ['e2e-approver'] }],
+        },
+        lease: {
+          statePath: 'lease.sqlite',
+          expectedStateDirectory: prepared.identity,
+          testWorkspaceRoots: [options.installation.versionRoot],
+        },
+        userPresence: {
+          installationDigest: options.installation.installationDigest,
+          assets,
+          ...(options.approvalSessionTtlMs === undefined ? {} : { ttlMs: options.approvalSessionTtlMs }),
+        },
+        process: {
+          cwd: options.installation.versionRoot,
+          env: environment,
+          pinnedStateDirectory: {
+            fd: prepared.directoryHandle.fd,
+            identity: prepared.identity,
+            pythonExecutable: '/usr/bin/python3',
+            wrapperPath: childWrapperPath,
+          },
+        },
+      })
+    } catch (error) {
+      if (error instanceof E2EError) throw error
+      throw authorityHostError(safeAuthorityErrorCode(error))
+    }
     return new RuntimeAuthorityHost({
       processHandle,
       installationDigest: options.installation.installationDigest,
     })
   } finally {
-    stateEncryptionKey.fill(0)
+    prepared.stateEncryptionKey.fill(0)
+    await prepared.directoryHandle.close()
   }
 }
 
@@ -188,146 +204,152 @@ async function readSecureAsset(root: string, name: string): Promise<Buffer> {
 }
 
 interface SecureDirectoryIdentity {
-  path: string
+  realPath: string
   device: string
   inode: string
-  privateMode: boolean
 }
 
-async function ensureAuthorityDirectories(
+interface PreparedAuthorityState {
+  directoryHandle: FileHandle
+  identity: SecureDirectoryIdentity
+  stateEncryptionKey: Buffer
+}
+
+async function prepareAuthorityState(
   homeDir: string,
   authorityRoot: string,
-): Promise<SecureDirectoryIdentity> {
-  const homeIdentity = await inspectSecureDirectory(homeDir, false)
-  const paths = [
-    join(homeDir, '.mutil-skills'),
-    join(homeDir, '.mutil-skills', 'e2e'),
-    authorityRoot,
-  ]
-  let parent = homeIdentity
-  for (const path of paths) {
-    await assertDirectoryIdentity(parent)
-    try { await mkdir(path, { mode: 0o700 }) }
-    catch (error) { if (!isErrorCode(error, 'EEXIST')) throw error }
-    const identity = await inspectSecureDirectory(path, true)
-    await assertDirectoryIdentity(parent)
-    parent = identity
-  }
-  return parent
-}
-
-async function inspectSecureDirectory(
-  path: string,
-  forcePrivateMode: boolean,
-  repairPrivateMode = true,
-): Promise<SecureDirectoryIdentity> {
-  let handle: FileHandle | undefined
+  environment: Record<string, string>,
+): Promise<PreparedAuthorityState> {
+  let directoryHandle: FileHandle | undefined
+  let stateEncryptionKey: Buffer | undefined
   try {
-    const pathStat = await lstat(path)
-    const resolved = await realpath(path)
-    if (!pathStat.isDirectory() || pathStat.isSymbolicLink()
-      || pathStat.uid !== process.getuid?.() || resolved !== normalizePlatformPathAlias(path)) {
+    const canonicalHome = await realpath(homeDir)
+    if (canonicalHome !== normalizePlatformPathAlias(homeDir)) {
       throw authorityHostError('E2E_APPROVAL_STATE_DIRECTORY_INVALID')
     }
-    handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0))
-    let descriptorStat = await handle.stat()
-    if (!descriptorStat.isDirectory() || !sameFileIdentity(pathStat, descriptorStat)
-      || descriptorStat.uid !== process.getuid?.()) {
-      throw authorityHostError('E2E_APPROVAL_STATE_DIRECTORY_INVALID')
-    }
-    if (forcePrivateMode && repairPrivateMode) {
-      await handle.chmod(0o700)
-      descriptorStat = await handle.stat()
-    }
-    const finalPathStat = await lstat(path)
-    if (!sameFileIdentity(descriptorStat, finalPathStat) || !finalPathStat.isDirectory()
-      || finalPathStat.isSymbolicLink() || finalPathStat.uid !== process.getuid?.()
-      || (forcePrivateMode && (finalPathStat.mode & 0o777) !== 0o700)
-      || await realpath(path) !== normalizePlatformPathAlias(path)) {
+    const helperPath = await secureRuntimeScriptPath('authority-state-openat.py')
+    const output = await runStateHelper(helperPath, canonicalHome, environment)
+    const parsed = parseStateHelperOutput(output, authorityRoot)
+    stateEncryptionKey = parsed.stateEncryptionKey
+    directoryHandle = await open(
+      parsed.identity.realPath,
+      constants.O_RDONLY | constants.O_DIRECTORY | (constants.O_NOFOLLOW ?? 0),
+    )
+    const descriptorStat = await directoryHandle.stat()
+    const pathStat = await lstat(parsed.identity.realPath)
+    if (!descriptorStat.isDirectory() || !sameFileIdentity(descriptorStat, pathStat)
+      || pathStat.isSymbolicLink() || descriptorStat.uid !== process.getuid?.()
+      || (descriptorStat.mode & 0o777) !== 0o700
+      || String(descriptorStat.dev) !== parsed.identity.device
+      || String(descriptorStat.ino) !== parsed.identity.inode
+      || await realpath(parsed.identity.realPath) !== parsed.identity.realPath) {
       throw authorityHostError('E2E_APPROVAL_STATE_DIRECTORY_INVALID')
     }
     return {
-      path, device: String(descriptorStat.dev), inode: String(descriptorStat.ino),
-      privateMode: forcePrivateMode,
+      directoryHandle,
+      identity: parsed.identity,
+      stateEncryptionKey,
     }
   } catch (error) {
+    stateEncryptionKey?.fill(0)
+    await directoryHandle?.close()
     if (error instanceof E2EError) throw error
     throw authorityHostError('E2E_APPROVAL_STATE_DIRECTORY_INVALID')
-  } finally {
-    await handle?.close()
   }
 }
 
-async function assertDirectoryIdentity(expected: SecureDirectoryIdentity): Promise<void> {
-  const current = await inspectSecureDirectory(expected.path, expected.privateMode, false)
-  if (current.device !== expected.device || current.inode !== expected.inode) {
-    throw authorityHostError('E2E_APPROVAL_STATE_DIRECTORY_INVALID')
+async function secureRuntimeScriptPath(name: string): Promise<string> {
+  const sourceMode = import.meta.url.endsWith('.ts')
+  const candidate = fileURLToPath(new URL(
+    sourceMode ? `../scripts/${name}` : `../../scripts/${name}`,
+    import.meta.url,
+  ))
+  const metadata = await lstat(candidate)
+  const resolved = await realpath(candidate)
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || resolved !== candidate) {
+    throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
   }
+  return resolved
 }
 
-async function loadOrCreateAuthorityKey(
-  path: string,
-  expectedDirectory: SecureDirectoryIdentity,
-): Promise<Buffer> {
-  let handle: FileHandle | undefined
-  let created = false
-  try {
-    await assertDirectoryIdentity(expectedDirectory)
+async function runStateHelper(
+  helperPath: string,
+  canonicalHome: string,
+  environment: Record<string, string>,
+): Promise<string> {
+  const child = spawn('/usr/bin/python3', [helperPath, canonicalHome], {
+    stdio: ['ignore', 'pipe', 'pipe'], env: environment,
+  })
+  const stdout: Buffer[] = []
+  let stdoutBytes = 0
+  let stderrBytes = 0
+  let overflow = false
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdoutBytes += chunk.byteLength
+    if (stdoutBytes > 8192) { overflow = true; child.kill('SIGKILL') } else stdout.push(Buffer.from(chunk))
+  })
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderrBytes += chunk.byteLength
+    if (stderrBytes > 8192) { overflow = true; child.kill('SIGKILL') }
+  })
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    const timeout = setTimeout(() => { overflow = true; child.kill('SIGKILL') }, 10_000)
+    child.once('error', (error) => { clearTimeout(timeout); reject(error) })
+    child.once('close', (code) => { clearTimeout(timeout); resolve(code) })
+  }).catch(() => null)
+  if (overflow) throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
+  const text = Buffer.concat(stdout).toString('utf8')
+  if (!text.endsWith('\n') || text.slice(0, -1).includes('\n')) {
+    throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
+  }
+  if (exitCode !== 0) {
     try {
-      handle = await open(
-        path,
-        constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | (constants.O_NOFOLLOW ?? 0),
-        0o600,
-      )
-      created = true
+      const error = JSON.parse(text) as unknown
+      if (isRecord(error) && hasExactKeys(error, ['code', 'ok']) && error.ok === false
+        && (error.code === 'E2E_APPROVAL_STATE_DIRECTORY_INVALID'
+          || error.code === 'E2E_APPROVAL_STATE_KEY_INVALID')) {
+        throw authorityHostError(error.code)
+      }
     } catch (error) {
-      if (!isErrorCode(error, 'EEXIST')) throw error
-      handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+      if (error instanceof E2EError) throw error
     }
-    const before = await handle.stat()
-    const pathStat = await lstat(path)
-    if (!isSecureKeyStat(before, created ? 0 : 32) || !sameFileIdentity(before, pathStat)
-      || pathStat.isSymbolicLink() || await realpath(path) !== normalizePlatformPathAlias(path)) {
-      throw authorityHostError('E2E_APPROVAL_STATE_KEY_INVALID')
-    }
-    await assertDirectoryIdentity(expectedDirectory)
-    if (created) {
-      const generated = randomBytes(32)
-      try {
-        const result = await handle.write(generated, 0, generated.byteLength, 0)
-        if (result.bytesWritten !== 32) throw authorityHostError('E2E_APPROVAL_STATE_KEY_INVALID')
-        await handle.sync()
-      } finally { generated.fill(0) }
-    }
-    const afterWrite = await handle.stat()
-    const finalPathStat = await lstat(path)
-    if (!isSecureKeyStat(afterWrite, 32) || !sameFileIdentity(before, afterWrite)
-      || !sameFileIdentity(afterWrite, finalPathStat) || finalPathStat.isSymbolicLink()
-      || await realpath(path) !== normalizePlatformPathAlias(path)) {
-      throw authorityHostError('E2E_APPROVAL_STATE_KEY_INVALID')
-    }
-    await assertDirectoryIdentity(expectedDirectory)
-    const key = Buffer.alloc(32)
-    const read = await handle.read(key, 0, key.byteLength, 0)
-    if (read.bytesRead !== 32) {
-      key.fill(0)
-      throw authorityHostError('E2E_APPROVAL_STATE_KEY_INVALID')
-    }
-    const afterRead = await handle.stat()
-    if (!sameFileIdentity(afterWrite, afterRead) || !isSecureKeyStat(afterRead, 32)) {
-      key.fill(0)
-      throw authorityHostError('E2E_APPROVAL_STATE_KEY_INVALID')
-    }
-    return key
-  } catch (error) {
-    if (error instanceof E2EError) throw error
-    throw authorityHostError('E2E_APPROVAL_STATE_KEY_INVALID')
-  } finally { await handle?.close() }
+    throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
+  }
+  return text
 }
 
-function isSecureKeyStat(stat: Awaited<ReturnType<FileHandle['stat']>>, size: number): boolean {
-  return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1
-    && stat.uid === process.getuid?.() && (Number(stat.mode) & 0o777) === 0o600 && stat.size === size
+function parseStateHelperOutput(
+  text: string,
+  expectedAuthorityRoot: string,
+): { identity: SecureDirectoryIdentity; stateEncryptionKey: Buffer } {
+  let value: unknown
+  try { value = JSON.parse(text) } catch {
+    throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
+  }
+  if (!isRecord(value) || !hasExactKeys(value, ['directory', 'keyBase64Url', 'ok', 'schemaVersion'])
+    || value.ok !== true || value.schemaVersion !== '1.0.0' || !isRecord(value.directory)
+    || !hasExactKeys(value.directory, ['device', 'inode', 'mode', 'realPath', 'uid'])
+    || value.directory.realPath !== normalizePlatformPathAlias(expectedAuthorityRoot)
+    || typeof value.directory.device !== 'string' || !/^\d+$/.test(value.directory.device)
+    || typeof value.directory.inode !== 'string' || !/^\d+$/.test(value.directory.inode)
+    || value.directory.uid !== process.getuid?.() || value.directory.mode !== 0o700
+    || typeof value.keyBase64Url !== 'string') {
+    throw authorityHostError('E2E_APPROVAL_STATE_HELPER_INVALID')
+  }
+  const stateEncryptionKey = Buffer.from(value.keyBase64Url, 'base64url')
+  if (stateEncryptionKey.byteLength !== 32
+    || stateEncryptionKey.toString('base64url') !== value.keyBase64Url) {
+    stateEncryptionKey.fill(0)
+    throw authorityHostError('E2E_APPROVAL_STATE_KEY_INVALID')
+  }
+  return {
+    identity: {
+      realPath: value.directory.realPath,
+      device: value.directory.device,
+      inode: value.directory.inode,
+    },
+    stateEncryptionKey,
+  }
 }
 
 function sameFileIdentity(
@@ -342,8 +364,15 @@ function isWithin(root: string, candidate: string): boolean {
   return path !== '' && path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path)
 }
 
-function isErrorCode(error: unknown, code: string): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === code
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const actual = Object.keys(value).sort()
+  const sortedExpected = [...expected].sort()
+  return actual.length === sortedExpected.length
+    && actual.every((key, index) => key === sortedExpected[index])
 }
 
 function normalizePlatformPathAlias(path: string): string {
@@ -364,6 +393,10 @@ function authorityHostError(code: string): E2EError {
 }
 
 function safeAuthorityErrorCode(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'code' in error
+    && (error.code === 'EPERM' || error.code === 'EACCES')) {
+    return 'E2E_APPROVAL_PLATFORM_PERMISSION_DENIED'
+  }
   if (typeof error === 'object' && error !== null && 'code' in error
     && typeof error.code === 'string' && /^E2E_[A-Z0-9_]+$/.test(error.code)) return error.code
   return 'E2E_APPROVAL_USER_PRESENCE_UNAVAILABLE'

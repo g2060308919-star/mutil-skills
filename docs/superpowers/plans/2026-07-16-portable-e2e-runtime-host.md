@@ -795,6 +795,8 @@ git commit -m "feat(e2e): persist runtime runs by project identity"
 
 > **Spec Errata（2026-07-17，Task 5 外审）**：本节原方案把公开 session 引用、非原子 credential counter 更新、`2.0.0` 同版本加字段和 bearer Cookie 作为实现细节，无法满足不可伪造、并发安全、可迁移和不泄露要求。以下 Task 5 接口与步骤已更正为私有绑定 receipt、insert/CAS、`2.1.0` 事务迁移、fragment + Authorization bearer、单 waiter 有界生命周期、显式 approval type，以及用户在场返回后的项目身份重验；不改变 Task 6 及之后范围。
 
+> **Spec Errata（2026-07-17，Task 5 二次外审）**：旧 snapshot 迁移在 commit 前必须完成严格嵌套解析、全部私钥解密和既有签名校验，错误密钥保持数据库 bytes/revision 不变。六种 Grant 签发入口移除调用方 receipt binding，由已验证的真实 subject 内部派生三字段 binding 并原子消费 receipt。RPC 和人类审批复用完整项目身份断言。Authority 仅在 global replay miss 的新 `open-approval` 中惰性启动；cleanup 独立尝试关闭所有资源并在任何 stdout bytes 写出前决定唯一 response。请求结果已持久化而 cleanup 失败时，本次只返回 cleanup error，后续重放返回持久 success 且仍不启动 Authority；stdout 一旦开始写入，后续写失败不得再写第二 JSON。Authority 状态使用 Runtime 自包含 Python `openat` helper 安全创建目录/密钥，父进程固定只读 final-dir fd，子进程继承 fd 后 `fchdir+exec`，SQLite 用相对 basename 并在打开前后验证目录身份。`@mutil-skills/e2e-runtime` 根导出仅保留协议 Schema、类型和版本。
+
 **Files:**
 - Create: `packages/e2e-authority/src/webauthn-user-presence.ts`
 - Create: `packages/e2e-authority/src/webauthn-approval-server.ts`

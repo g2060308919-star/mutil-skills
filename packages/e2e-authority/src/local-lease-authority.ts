@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { E2EError, type DataLease, type LeaseRequest } from '@mutil-skills/e2e-contracts'
 import { canonicalizeJson } from '@mutil-skills/e2e-contracts'
-import { SqliteSnapshotStore } from './sqlite-state-store.js'
+import {
+  SqliteSnapshotStore,
+  type SqliteStateDirectoryIdentity,
+} from './sqlite-state-store.js'
 import { trustLeaseClient, type TrustedLeaseClient } from './trusted-execution-clients.js'
 
 const DigestPattern = /^sha256:[a-f0-9]{64}$/
@@ -21,10 +24,15 @@ export class LocalLeaseAuthority {
   }
 
   static async open(options: {
-    now: () => Date; statePath: string; testWorkspaceRoots: string[]
+    now: () => Date
+    statePath: string
+    testWorkspaceRoots: string[]
+    expectedStateDirectory?: SqliteStateDirectoryIdentity
   }): Promise<LocalLeaseAuthority> {
     const store = new SqliteSnapshotStore(options.statePath, 'lease-authority', {
       forbiddenRoots: options.testWorkspaceRoots,
+      ...(options.expectedStateDirectory === undefined
+        ? {} : { expectedStateDirectory: options.expectedStateDirectory }),
     })
     const snapshot = parseLeaseSnapshot(store.initialize(canonicalizeJson({
       schemaVersion: '1.0.0', leases: [], resourceOwners: [], fencingTokens: [],

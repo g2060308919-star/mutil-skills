@@ -25,7 +25,7 @@ import {
 import { isExactRuntimeVersion } from './runtime-manifest.js'
 import { E2ERuntimeHost } from './runtime-host.js'
 import { RuntimeRunStore } from './run-store.js'
-import { resolveProjectIdentity } from './project-identity.js'
+import { assertSameProjectIdentity, resolveProjectIdentity } from './project-identity.js'
 import {
   computeRuntimeApprovalSubjectDigest,
   startRuntimeAuthorityHost,
@@ -57,6 +57,7 @@ export interface RuntimeCliDependencies {
     subject: string
     approvalSessionTtlMs?: number
   }) => Promise<RuntimeAuthorityHost>
+  currentWorkingDirectory?: () => string
   approvalSessionTtlMs?: number
 }
 
@@ -67,13 +68,14 @@ export async function runCli(
   stderr: Writable,
   dependencies: RuntimeCliDependencies = defaultDependencies(),
 ): Promise<number> {
+  const responseWriter = new SingleJsonResponseWriter(stdout)
   if (arguments_.length === 1 && arguments_[0] === '--version') {
     await writeText(stdout, `${RUNTIME_PACKAGE_VERSION}\n`)
     return 0
   }
 
   if (arguments_[0] === 'install-runtime' || arguments_[0] === 'uninstall-runtime') {
-    return runInstallManagementCommand(arguments_, stdout, dependencies)
+    return runInstallManagementCommand(arguments_, responseWriter, dependencies)
   }
 
   if (isHumanAuthorityCommand(arguments_)) {
@@ -82,7 +84,7 @@ export async function runCli(
         ?? openDefaultHumanAuthoritySession(arguments_, dependencies))
       await writeText(stderr, `${session.url}\n`)
       await session.wait()
-      await writeText(stdout, `${canonicalizeJson({ sessionId: session.sessionId, status: 'verified' })}\n`)
+      await responseWriter.write(`${canonicalizeJson({ sessionId: session.sessionId, status: 'verified' })}\n`)
       return 0
     } catch (error) {
       const runtimeError = error instanceof E2EError ? error : new E2EError({
@@ -92,7 +94,7 @@ export async function runCli(
         retryable: false,
         cause: error,
       })
-      return writeErrorResponse(stdout, 'UNKNOWN', runtimeError)
+      return writeErrorResponse(responseWriter, 'UNKNOWN', runtimeError)
     }
   }
 
@@ -115,7 +117,7 @@ export async function runCli(
         report = runtimeDoctorFailureReport(RUNTIME_PACKAGE_VERSION)
         serialized = serializeRuntimeDoctorReport(report)
       }
-      await writeText(stdout, `${serialized}\n`)
+      await responseWriter.write(`${serialized}\n`)
     } else {
       await writeText(stderr, formatDoctorReport(report))
     }
@@ -123,7 +125,7 @@ export async function runCli(
   }
 
   if (arguments_.length !== 1 || arguments_[0] !== 'rpc') {
-    return writeErrorResponse(stdout, 'UNKNOWN', new E2EError({
+    return writeErrorResponse(responseWriter, 'UNKNOWN', new E2EError({
       code: 'E2E_RUNTIME_REQUEST_INVALID',
       category: 'input',
       message: '只支持 --version、rpc 或显式 Runtime 安装管理命令',
@@ -138,7 +140,7 @@ export async function runCli(
     const request = parseRuntimeRequest(json)
     if (dependencies.runtimeHost !== undefined) {
       const response = await dependencies.runtimeHost.handle(request, requestBytes)
-      await writeText(stdout, `${canonicalizeJson(response)}\n`)
+      await responseWriter.write(`${canonicalizeJson(response)}\n`)
       return exitCodeForResponse(response)
     }
     let installation: RuntimeInstallation
@@ -161,33 +163,51 @@ export async function runCli(
       ...(projectRoot === undefined ? {} : { projectRoot }),
     })
     let authorityHost: RuntimeAuthorityHost | undefined
+    let response: Awaited<ReturnType<E2ERuntimeHost['handle']>> | undefined
+    let processingError: unknown
     try {
-      if (request.command === 'open-approval') {
-        authorityHost = await (dependencies.startAuthorityHost ?? startRuntimeAuthorityHost)({
-          homeDir: dependencies.homeDir,
-          installation,
-          subject: localAuthoritySubject(),
-          ...(dependencies.approvalSessionTtlMs === undefined
-            ? {} : { approvalSessionTtlMs: dependencies.approvalSessionTtlMs }),
-        })
-      }
       const host = new E2ERuntimeHost({
         installation,
         doctor: async () => await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({ installation }),
         runStore,
         now: () => new Date(),
-        ...(authorityHost === undefined ? {} : {
-          authorityHost,
+        ...(request.command !== 'open-approval' ? {} : {
+          authorityHostFactory: async () => {
+            if (authorityHost !== undefined) return authorityHost
+            authorityHost = await (dependencies.startAuthorityHost ?? startRuntimeAuthorityHost)({
+              homeDir: dependencies.homeDir,
+              installation,
+              subject: localAuthoritySubject(),
+              ...(dependencies.approvalSessionTtlMs === undefined
+                ? {} : { approvalSessionTtlMs: dependencies.approvalSessionTtlMs }),
+            })
+            return authorityHost
+          },
           presentUserPresenceUrl: async (url: string) => await writeText(stderr, `${url}\n`),
         }),
       })
-      const response = await host.handle(request, requestBytes)
-      await writeText(stdout, `${canonicalizeJson(response)}\n`)
-      return exitCodeForResponse(response)
-    } finally {
-      await authorityHost?.close()
-      await runStore.close()
+      response = await host.handle(request, requestBytes)
+    } catch (error) {
+      processingError = error
     }
+    const cleanupErrors: unknown[] = []
+    if (authorityHost !== undefined) {
+      try { await authorityHost.close() } catch (error) { cleanupErrors.push(error) }
+    }
+    try { await runStore.close() } catch (error) { cleanupErrors.push(error) }
+    if (cleanupErrors.length > 0) {
+      throw new E2EError({
+        code: 'E2E_RUNTIME_CLEANUP_FAILED',
+        category: 'internal',
+        message: 'Runtime 单请求资源未能完整关闭',
+        retryable: false,
+        cause: new AggregateError(cleanupErrors),
+      })
+    }
+    if (processingError !== undefined) throw processingError
+    if (response === undefined) throw new Error('Runtime response missing')
+    await responseWriter.write(`${canonicalizeJson(response)}\n`)
+    return exitCodeForResponse(response)
   } catch (error) {
     const runtimeError = error instanceof E2EError
       ? error
@@ -198,13 +218,13 @@ export async function runCli(
           retryable: false,
           cause: error,
         })
-    return writeErrorResponse(stdout, requestIdFromUntrustedJson(json), runtimeError)
+    return writeErrorResponse(responseWriter, requestIdFromUntrustedJson(json), runtimeError)
   }
 }
 
 async function runInstallManagementCommand(
   arguments_: string[],
-  stdout: Writable,
+  responseWriter: SingleJsonResponseWriter,
   dependencies: RuntimeCliDependencies,
 ): Promise<number> {
   try {
@@ -224,7 +244,7 @@ async function runInstallManagementCommand(
         homeDir: dependencies.homeDir,
         version: arguments_[2],
       })
-      await writeText(stdout, `${canonicalizeJson({
+      await responseWriter.write(`${canonicalizeJson({
         version: result.version,
         installationDigest: result.installationDigest,
         launcher: result.launcher,
@@ -248,7 +268,7 @@ async function runInstallManagementCommand(
       version: arguments_[2]!,
       ...(withReplacement ? { activateVersion: arguments_[4]! } : {}),
     })
-    await writeText(stdout, `${canonicalizeJson(result)}\n`)
+    await responseWriter.write(`${canonicalizeJson(result)}\n`)
     return 0
   } catch (error) {
     const runtimeError = error instanceof E2EError
@@ -260,14 +280,35 @@ async function runInstallManagementCommand(
           retryable: false,
           cause: error,
         })
-    return writeErrorResponse(stdout, 'UNKNOWN', runtimeError)
+    return writeErrorResponse(responseWriter, 'UNKNOWN', runtimeError)
   }
 }
 
-async function writeErrorResponse(stdout: Writable, requestId: string, error: E2EError): Promise<number> {
+async function writeErrorResponse(
+  responseWriter: SingleJsonResponseWriter,
+  requestId: string,
+  error: E2EError,
+): Promise<number> {
+  if (responseWriter.started) return 70
   const response = runtimeErrorResponse(requestId, error)
-  await writeText(stdout, `${canonicalizeJson(response)}\n`)
+  try {
+    await responseWriter.write(`${canonicalizeJson(response)}\n`)
+  } catch {
+    return 70
+  }
   return exitCodeForResponse(response)
+}
+
+class SingleJsonResponseWriter {
+  started = false
+
+  constructor(private readonly stdout: Writable) {}
+
+  async write(text: string): Promise<void> {
+    if (this.started) throw new Error('Runtime stdout response has already started')
+    this.started = true
+    await writeText(this.stdout, text)
+  }
 }
 
 async function readBytes(stream: Readable): Promise<Buffer> {
@@ -344,7 +385,7 @@ async function openDefaultHumanAuthoritySession(
 ): Promise<RuntimeAuthoritySession> {
   const inspect = dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault
   const installation = await inspect({ homeDir: dependencies.homeDir })
-  const authority = await startRuntimeAuthorityHost({
+  const authority = await (dependencies.startAuthorityHost ?? startRuntimeAuthorityHost)({
     homeDir: dependencies.homeDir,
     installation,
     subject: localAuthoritySubject(),
@@ -360,7 +401,7 @@ async function openDefaultHumanAuthoritySession(
     }
   }
 
-  const projectRoot = process.cwd()
+  const projectRoot = (dependencies.currentWorkingDirectory ?? process.cwd)()
   const store = await RuntimeRunStore.open({ homeDir: dependencies.homeDir, projectRoot })
   try {
     const identity = await resolveProjectIdentity(projectRoot)
@@ -381,9 +422,7 @@ async function openDefaultHumanAuthoritySession(
         try {
           await session.wait()
           const currentIdentity = await resolveProjectIdentity(projectRoot)
-          if (currentIdentity.digest !== identity.digest) {
-            throw cliAuthorityError('E2E_RUNTIME_PROJECT_IDENTITY_CHANGED')
-          }
+          assertSameProjectIdentity(identity, currentIdentity)
           const current = await readRunWithLease(store, identity.digest, runId)
           if (computeRuntimeApprovalSubjectDigest(current, approvalType) !== subjectDigest) {
             throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')

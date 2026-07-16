@@ -46,6 +46,12 @@ export interface WebAuthnApprovalBinding {
   origin: string
 }
 
+export interface WebAuthnGrantApprovalBinding {
+  subject: string
+  approvalType: WebAuthnApprovalType
+  subjectDigest: string
+}
+
 interface RegistrationVerificationResult {
   verified: boolean
   credential?: {
@@ -311,20 +317,17 @@ export class WebAuthnUserPresenceAuthority {
     })
   }
 
-  authenticateSession(sessionId: string, expected: WebAuthnApprovalBinding): string | undefined {
+  authenticateSession(sessionId: string, expected: WebAuthnGrantApprovalBinding): string | undefined {
     const receipt = this.#authenticatedSessions.get(sessionId)
     if (receipt === undefined) return undefined
     this.#authenticatedSessions.delete(sessionId)
     if (this.#now().getTime() > Date.parse(receipt.expiresAt)) {
       throw approvalError('E2E_APPROVAL_SESSION_EXPIRED', 'WebAuthn approval receipt 已过期')
     }
-    const actualBinding: WebAuthnApprovalBinding = {
+    const actualBinding: WebAuthnGrantApprovalBinding = {
       subject: receipt.subject,
-      runId: receipt.runId,
       approvalType: receipt.approvalType,
       subjectDigest: receipt.subjectDigest,
-      installationDigest: receipt.installationDigest,
-      origin: receipt.origin,
     }
     if (canonicalizeJson(actualBinding) !== canonicalizeJson(expected)) {
       throw approvalError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'WebAuthn approval receipt 与当前审批绑定不一致')

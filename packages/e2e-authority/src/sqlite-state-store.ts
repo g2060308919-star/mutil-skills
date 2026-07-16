@@ -25,11 +25,13 @@ export class SqliteSnapshotStore {
   constructor(statePath: string, namespace: string, options: SqliteSnapshotStoreOptions) {
     if (!statePath || !namespace) throw new Error('E2E_AUTHORITY_STATE_CONFIG_INVALID')
     if (options.forbiddenRoots.length === 0) throw new Error('E2E_AUTHORITY_STATE_FORBIDDEN_ROOTS_REQUIRED')
-    mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
+    if (options.expectedStateDirectory === undefined) {
+      mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
+    }
+    assertExpectedStateDirectory(dirname(statePath), options.expectedStateDirectory)
     if (existsSync(statePath) && lstatSync(statePath).isSymbolicLink()) {
       throw new Error('E2E_AUTHORITY_STATE_SYMLINK_FORBIDDEN')
     }
-    assertExpectedStateDirectory(dirname(statePath), options.expectedStateDirectory)
     const realStateDirectory = realpathSync(dirname(statePath))
     for (const root of options.forbiddenRoots) {
       const realRoot = realpathSync(root)
