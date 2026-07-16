@@ -6,8 +6,12 @@ import {
   type RuntimeResponseEnvelope,
 } from '@mutil-skills/e2e-contracts'
 
+export const RUNTIME_PACKAGE_VERSION = '0.0.0'
+
+const runtimeInstallRemediation = `npm exec --yes --package=@mutil-skills/e2e-runtime@${RUNTIME_PACKAGE_VERSION} -- repo-e2e install-runtime --version ${RUNTIME_PACKAGE_VERSION}`
+
 const runtimeIdentity = {
-  version: '0.0.0',
+  version: RUNTIME_PACKAGE_VERSION,
   installationDigest: `sha256:${'0'.repeat(64)}`,
 } as const
 
@@ -41,6 +45,9 @@ export function runtimeErrorResponse(
       terminalState: terminalStateForCategory(category),
       message: error.message,
       retryable: error.retryable,
+      ...(error.code === 'E2E_RUNTIME_NOT_INSTALLED'
+        ? { details: { remediation: runtimeInstallRemediation } }
+        : {}),
     },
   }
 }

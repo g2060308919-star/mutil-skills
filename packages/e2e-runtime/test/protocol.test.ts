@@ -14,6 +14,7 @@ import {
 } from '../src/protocol.js'
 
 const digest = `sha256:${'0'.repeat(64)}`
+const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.0.0 -- repo-e2e install-runtime --version 0.0.0'
 const doctorRequest = {
   schemaVersion: '1.0.0',
   requestId: 'REQ-1',
@@ -48,6 +49,7 @@ describe('Runtime protocol', () => {
         category: 'environment',
         terminalState: 'environment-blocked',
         retryable: false,
+        details: { remediation: installRemediation },
       },
     })
   })
@@ -96,6 +98,7 @@ describe('repo-e2e CLI protocol slice', () => {
         code: 'E2E_RUNTIME_NOT_INSTALLED',
         category: 'environment',
         terminalState: 'environment-blocked',
+        details: { remediation: installRemediation },
       },
     })
     expect(stdout.text()).toBe(`${canonicalizeJson(response)}\n`)

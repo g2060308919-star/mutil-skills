@@ -7,6 +7,18 @@ const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const EmptySchema = z.object({}).strict()
 const RunIdPayloadSchema = z.object({ runId: SafeIdSchema }).strict()
 
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
+
+const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
+  z.null(),
+  z.boolean(),
+  z.number().finite(),
+  z.string(),
+  z.array(JsonValueSchema),
+  z.custom<Record<string, JsonValue>>(isPlainJsonObject, 'JSON object 必须是只含可枚举数据属性的普通对象')
+    .pipe(z.record(JsonValueSchema)),
+]))
+
 const RuntimeRequestHeaderShape = {
   schemaVersion: z.literal('1.0.0'),
   requestId: SafeIdSchema,
@@ -40,7 +52,7 @@ const commandSchemas = [
       runId: SafeIdSchema,
       expectedState: WorkflowNodeSchema,
       artifactType: ArtifactTypeSchema,
-      candidate: z.unknown(),
+      candidate: JsonValueSchema,
     }).strict(),
   }).strict(),
   z.object({
@@ -62,7 +74,7 @@ const commandSchemas = [
     ...RuntimeRequestHeaderShape,
     command: z.literal('resume-run'),
     projectRoot: z.string().min(1),
-    payload: z.object({ runId: SafeIdSchema, decision: z.unknown() }).strict(),
+    payload: z.object({ runId: SafeIdSchema, decision: JsonValueSchema }).strict(),
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
@@ -132,3 +144,13 @@ export const RuntimeResponseEnvelopeSchema = z.object({
 
 export type RuntimeRequestEnvelope = z.infer<typeof RuntimeRequestEnvelopeSchema>
 export type RuntimeResponseEnvelope = z.infer<typeof RuntimeResponseEnvelopeSchema>
+
+function isPlainJsonObject(value: unknown): value is Record<string, JsonValue> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype) return false
+  return Reflect.ownKeys(value).every((key) => {
+    if (typeof key !== 'string') return false
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    return descriptor?.enumerable === true && 'value' in descriptor
+  })
+}

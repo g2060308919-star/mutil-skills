@@ -1,6 +1,11 @@
 import { E2EError, canonicalizeJson } from '@mutil-skills/e2e-contracts'
 import type { Readable, Writable } from 'node:stream'
-import { exitCodeForResponse, parseRuntimeRequest, runtimeErrorResponse } from './protocol.js'
+import {
+  RUNTIME_PACKAGE_VERSION,
+  exitCodeForResponse,
+  parseRuntimeRequest,
+  runtimeErrorResponse,
+} from './protocol.js'
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 
@@ -13,7 +18,7 @@ export async function runCli(
   void stderr
 
   if (arguments_.length === 1 && arguments_[0] === '--version') {
-    await writeText(stdout, '0.0.0\n')
+    await writeText(stdout, `${RUNTIME_PACKAGE_VERSION}\n`)
     return 0
   }
 
