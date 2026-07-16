@@ -184,6 +184,97 @@ describe('repo-e2e CLI protocol slice', () => {
     })
     expect(stderr.text()).toBe('')
   })
+
+  test('installs only an exact requested runtime version and prints bounded installation metadata', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    const calls: unknown[] = []
+
+    const exitCode = await runCli(
+      ['install-runtime', '--version', '0.0.0'],
+      Readable.from([]),
+      stdout.stream,
+      stderr.stream,
+      {
+        homeDir: '/safe/home',
+        installRuntime: async (options) => {
+          calls.push(options)
+          return {
+            version: '0.0.0',
+            installationDigest: digest,
+            launcher: '/safe/home/.mutil-skills/bin/repo-e2e',
+          }
+        },
+        uninstallRuntime: async () => ({ version: '0.0.0' }),
+      },
+    )
+
+    expect(exitCode).toBe(0)
+    expect(calls).toEqual([{ homeDir: '/safe/home', version: '0.0.0' }])
+    expect(stdout.text()).toBe(`${canonicalizeJson({
+      version: '0.0.0',
+      installationDigest: digest,
+      launcher: '/safe/home/.mutil-skills/bin/repo-e2e',
+    })}\n`)
+    expect(stdout.text()).not.toContain('cache')
+    expect(stderr.text()).toBe('')
+  })
+
+  test('rejects missing, floating, and purge install-management arguments with exit 2', async () => {
+    const invocations = [
+      ['install-runtime'],
+      ['install-runtime', '--version', 'latest'],
+      ['uninstall-runtime', '--version', '0.0.0', '--purge-state'],
+      ['uninstall-runtime', '--version', '0.0.0', '--purge-quarantine'],
+      ['uninstall-runtime', '--version', '0.0.0', '--purge-identity'],
+    ]
+    for (const arguments_ of invocations) {
+      const stdout = captureWritable()
+      const stderr = captureWritable()
+      const exitCode = await runCli(arguments_, Readable.from([]), stdout.stream, stderr.stream)
+      const response = RuntimeResponseEnvelopeSchema.parse(JSON.parse(stdout.text()))
+      expect(exitCode).toBe(2)
+      expect(response.error).toMatchObject({
+        code: 'E2E_RUNTIME_INSTALL_ARGUMENT_INVALID',
+        category: 'input',
+      })
+      expect(stderr.text()).toBe('')
+    }
+  })
+
+  test('passes an exact replacement only to explicit runtime uninstall', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    const calls: unknown[] = []
+
+    const exitCode = await runCli(
+      ['uninstall-runtime', '--version', '0.0.0', '--activate', '0.0.1'],
+      Readable.from([]),
+      stdout.stream,
+      stderr.stream,
+      {
+        homeDir: '/safe/home',
+        installRuntime: async () => ({
+          version: '0.0.0',
+          installationDigest: digest,
+          launcher: '/safe/home/.mutil-skills/bin/repo-e2e',
+        }),
+        uninstallRuntime: async (options) => {
+          calls.push(options)
+          return { version: '0.0.0', activeVersion: '0.0.1' }
+        },
+      },
+    )
+
+    expect(exitCode).toBe(0)
+    expect(calls).toEqual([{
+      homeDir: '/safe/home',
+      version: '0.0.0',
+      activateVersion: '0.0.1',
+    }])
+    expect(JSON.parse(stdout.text())).toEqual({ version: '0.0.0', activeVersion: '0.0.1' })
+    expect(stderr.text()).toBe('')
+  })
 })
 
 function expectInvalidRequest(parse: () => unknown): void {

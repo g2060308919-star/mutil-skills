@@ -1,5 +1,16 @@
 import { E2EError, canonicalizeJson } from '@mutil-skills/e2e-contracts'
+import { homedir } from 'node:os'
 import type { Readable, Writable } from 'node:stream'
+import {
+  installRuntime as installRuntimeDefault,
+  type InstallRuntimeOptions,
+  type RuntimeInstallResult,
+} from './runtime-installer.js'
+import {
+  uninstallRuntime as uninstallRuntimeDefault,
+  type RuntimeUninstallResult,
+  type UninstallRuntimeOptions,
+} from './runtime-uninstaller.js'
 import {
   RUNTIME_PACKAGE_VERSION,
   exitCodeForResponse,
@@ -8,12 +19,20 @@ import {
 } from './protocol.js'
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
+const EXACT_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/
+
+export interface RuntimeCliDependencies {
+  homeDir: string
+  installRuntime: (options: InstallRuntimeOptions) => Promise<RuntimeInstallResult>
+  uninstallRuntime: (options: UninstallRuntimeOptions) => Promise<RuntimeUninstallResult>
+}
 
 export async function runCli(
   arguments_: string[],
   stdin: Readable,
   stdout: Writable,
   stderr: Writable,
+  dependencies: RuntimeCliDependencies = defaultDependencies(),
 ): Promise<number> {
   void stderr
 
@@ -22,11 +41,15 @@ export async function runCli(
     return 0
   }
 
+  if (arguments_[0] === 'install-runtime' || arguments_[0] === 'uninstall-runtime') {
+    return runInstallManagementCommand(arguments_, stdout, dependencies)
+  }
+
   if (arguments_.length !== 1 || arguments_[0] !== 'rpc') {
     return writeErrorResponse(stdout, 'UNKNOWN', new E2EError({
       code: 'E2E_RUNTIME_REQUEST_INVALID',
       category: 'input',
-      message: '只支持 --version 或 rpc',
+      message: '只支持 --version、rpc 或显式 Runtime 安装管理命令',
       retryable: false,
     }))
   }
@@ -51,6 +74,68 @@ export async function runCli(
           cause: error,
         })
     return writeErrorResponse(stdout, requestIdFromUntrustedJson(json), runtimeError)
+  }
+}
+
+async function runInstallManagementCommand(
+  arguments_: string[],
+  stdout: Writable,
+  dependencies: RuntimeCliDependencies,
+): Promise<number> {
+  try {
+    if (arguments_.some((argument) => [
+      '--purge-state',
+      '--purge-quarantine',
+      '--purge-identity',
+    ].includes(argument))) {
+      throw installArgumentError('Runtime 卸载不得混入 state、quarantine 或 identity 销毁')
+    }
+
+    if (arguments_[0] === 'install-runtime') {
+      if (arguments_.length !== 3 || arguments_[1] !== '--version' || !isExactVersion(arguments_[2])) {
+        throw installArgumentError('install-runtime 需要 --version <exact>')
+      }
+      const result = await dependencies.installRuntime({
+        homeDir: dependencies.homeDir,
+        version: arguments_[2],
+      })
+      await writeText(stdout, `${canonicalizeJson({
+        version: result.version,
+        installationDigest: result.installationDigest,
+        launcher: result.launcher,
+      })}\n`)
+      return 0
+    }
+
+    const withoutReplacement = arguments_.length === 3
+      && arguments_[1] === '--version'
+      && isExactVersion(arguments_[2])
+    const withReplacement = arguments_.length === 5
+      && arguments_[1] === '--version'
+      && isExactVersion(arguments_[2])
+      && arguments_[3] === '--activate'
+      && isExactVersion(arguments_[4])
+    if (!withoutReplacement && !withReplacement) {
+      throw installArgumentError('uninstall-runtime 需要 --version <exact> [--activate <exact>]')
+    }
+    const result = await dependencies.uninstallRuntime({
+      homeDir: dependencies.homeDir,
+      version: arguments_[2]!,
+      ...(withReplacement ? { activateVersion: arguments_[4]! } : {}),
+    })
+    await writeText(stdout, `${canonicalizeJson(result)}\n`)
+    return 0
+  } catch (error) {
+    const runtimeError = error instanceof E2EError
+      ? error
+      : new E2EError({
+          code: 'E2E_RUNTIME_INTERNAL_ERROR',
+          category: 'internal',
+          message: 'Runtime 安装管理发生内部错误',
+          retryable: false,
+          cause: error,
+        })
+    return writeErrorResponse(stdout, 'UNKNOWN', runtimeError)
   }
 }
 
@@ -86,4 +171,25 @@ function requestIdFromUntrustedJson(json: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isExactVersion(value: string | undefined): value is string {
+  return value !== undefined && EXACT_VERSION.test(value)
+}
+
+function installArgumentError(message: string): E2EError {
+  return new E2EError({
+    code: 'E2E_RUNTIME_INSTALL_ARGUMENT_INVALID',
+    category: 'input',
+    message,
+    retryable: false,
+  })
+}
+
+function defaultDependencies(): RuntimeCliDependencies {
+  return {
+    homeDir: process.env.HOME ?? homedir(),
+    installRuntime: installRuntimeDefault,
+    uninstallRuntime: uninstallRuntimeDefault,
+  }
 }
