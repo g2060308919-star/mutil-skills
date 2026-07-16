@@ -793,6 +793,8 @@ git commit -m "feat(e2e): persist runtime runs by project identity"
 
 ### Task 5: WebAuthn 用户在场审批与 Authority Host 控制面
 
+> **Spec Errata（2026-07-17，Task 5 外审）**：本节原方案把公开 session 引用、非原子 credential counter 更新、`2.0.0` 同版本加字段和 bearer Cookie 作为实现细节，无法满足不可伪造、并发安全、可迁移和不泄露要求。以下 Task 5 接口与步骤已更正为私有绑定 receipt、insert/CAS、`2.1.0` 事务迁移、fragment + Authorization bearer、单 waiter 有界生命周期、显式 approval type，以及用户在场返回后的项目身份重验；不改变 Task 6 及之后范围。
+
 **Files:**
 - Create: `packages/e2e-authority/src/webauthn-user-presence.ts`
 - Create: `packages/e2e-authority/src/webauthn-approval-server.ts`
@@ -847,12 +849,16 @@ test('authentication session is one-time and bound to the approval subject', asy
     installationDigest, origin: 'http://localhost:43210', ttlMs: 300_000,
   })
 
-  const sessionRef = await authority.completeApproval({
+  await authority.completeApproval({
     sessionId: session.sessionId, challenge: session.challenge,
     credentialId: 'CRED-1', response: 'valid-assertion',
   })
-  expect(authority.authenticateSession(sessionRef)).toBe('local:user')
-  expect(authority.authenticateSession(sessionRef)).toBeUndefined()
+  const binding = {
+    subject: 'local:user', runId: 'RUN-1', approvalType: 'execution', subjectDigest,
+    installationDigest, origin: 'http://localhost:43210',
+  }
+  expect(authority.authenticateSession(session.sessionId, binding)).toBe('local:user')
+  expect(authority.authenticateSession(session.sessionId, binding)).toBeUndefined()
   await expect(authority.completeApproval({
     sessionId: session.sessionId, challenge: session.challenge,
     credentialId: 'CRED-1', response: 'valid-assertion',
@@ -907,11 +913,11 @@ const authentication = await verifyAuthenticationResponse({
 })
 ```
 
-credential state 包含 `id/publicKey/counter/transports/subject`，随 Authority snapshot 加密持久化。challenge 最长 5 分钟，单次消费，绑定 runId、approval type、subject digest、installation digest、origin；验证后更新 counter。注册选项固定 `attestationType:'none'`、`userVerification:'required'`、`supportedAlgorithmIDs:[-7,-257]`。
+credential state 包含 `id/publicKey/counter/transports/subject`，随 Authority `2.1.0` snapshot 加密持久化；真实旧版 `2.0.0` snapshot 通过事务迁移补入空 credential state，未知或非精确结构失败关闭。challenge 最长 5 分钟，单次消费，绑定 runId、approval type、subject digest、installation digest、origin；验证后使用完整 credential 作为期望值执行原子 CAS，counter 必须严格递增。注册使用原子 insert 拒绝并发重复 credential。注册选项固定 `attestationType:'none'`、`userVerification:'required'`、`supportedAlgorithmIDs:[-7,-257]`。
 
 - [ ] **Step 5: 实现 loopback 静态审批页**
 
-Server 只绑定 `127.0.0.1`，每次 session 生成随机 port 和 32-byte bearer cookie；GET 只提供当前 Runtime package 内的静态 bytes，POST body 上限 64KiB，所有响应 `cache-control:no-store`、CSP `default-src 'self'`。页面从本地 `/simplewebauthn-browser.js` 加载 bundle，展示 Authority 生成的不可编辑摘要，再调用 `startRegistration()`/`startAuthentication()`。
+Server 只绑定 `127.0.0.1`，每次 session 生成随机 port 和 32-byte bearer。bearer 只放在 URL fragment，浏览器立即从地址栏移除；不得进入 query、Cookie、Referer 或 session payload。静态 GET 只提供当前 Runtime package 内的固定 bytes；私有 `/session` 和 `/submit` 必须使用规范 base64url `Authorization: Bearer` 且按 session 隔离。POST body 上限 64KiB，所有响应 `cache-control:no-store`、CSP `default-src 'self'`。页面从本地 `/simplewebauthn-browser.js` 加载 bundle，展示 Authority 生成的不可编辑摘要，再调用 `startRegistration()`/`startAuthentication()`。
 
 `copy-approval-assets.mjs` 在 Runtime build 时从锁定的 `@simplewebauthn/browser@13.3.0` package realpath 复制 `dist/bundle/index.umd.min.js` 到 `assets/approval/simplewebauthn-browser.js`，复制前后校验 package version 和 bytes digest；源文件缺失、版本不符或目标发生漂移时 build 失败。Runtime server 通过 `import.meta.url` 定位该文件，不从 cwd、CDN 或项目依赖解析。
 
@@ -931,11 +937,11 @@ openApprovalSession(input: {
 }): Promise<{ url: string; sessionId: string }>
 ```
 
-Authority child 内部把已完成 WebAuthn session 映射给 `authenticateApproverSession`；Runtime parent 只能创建 session/取得 URL，不能提交“通过”结果。子进程 shutdown 时撤销所有未消费 challenge。
+Authority child 内部把已完成 WebAuthn session 映射为绑定 subject/run/type/digests/origin/expiry 的一次性私有 receipt，并在 `authenticateApproverSession` 精确匹配后消费；Runtime parent 只能创建 session/取得 URL，不能取得 receipt 或提交“通过”结果。每个 session 只允许一个 waiter；子进程 error/exit/disconnect 必须有界拒绝全部 waiter。子进程 shutdown 时撤销所有未消费 challenge。
 
 - [ ] **Step 7: 接入 Runtime 人类命令和 Host**
 
-`repo-e2e identity enroll` 创建 enrollment URL；`repo-e2e approve --run-id` 从 Run Store 重算 approval subject 后创建 approval URL。两者把 URL 输出到 stderr 并等待 Authority callback；RPC `open-approval` 只能启动该流程，不能携带 credential response 或 approved 字段。
+`repo-e2e identity enroll` 创建 enrollment URL；`repo-e2e approve --run-id <id> --type <scope|lineage|discovery|execution|privacy>` 使用显式 type，从 Run Store 重算 approval subject 后创建 approval URL，不允许从 workflow 猜测审批类型。两者把 URL 输出到 stderr 并等待 Authority callback；RPC `open-approval` 生产默认接线必须真实启动 Authority，其他 RPC 命令不得启动它，且不能携带 credential response 或 approved 字段。用户在场返回后重新解析并核对项目 real root、device/inode、logical project ID 和 digest，再重新取得 Run lease。
 
 Run: `npx vitest run packages/e2e-authority/test/webauthn-user-presence.test.ts packages/e2e-authority/test/webauthn-approval-server.test.ts packages/e2e-runtime/test/authority-host.test.ts`
 

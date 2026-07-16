@@ -238,6 +238,8 @@ type RuntimeError = {
 | `get-status` | 返回状态、已验证摘要、下一条合法边和最小阻塞项 | 不产生新领域事实 |
 | `render-report` | 从冻结 FinalizationSnapshot 复算并渲染报告 | 不覆盖 Engine verdict |
 
+> **Spec Errata（2026-07-17，Task 5 外审）**：审批命令必须显式携带审批类型，Runtime 只校验该类型是否适用于当前 workflow，不得从 workflow 猜测类型。下列命令表已按此外审结论更正。
+
 人类命令固定为：
 
 ```text
@@ -248,7 +250,7 @@ repo-e2e project rebind --project <path>
 repo-e2e doctor [--json]
 repo-e2e start --request <path>
 repo-e2e status --run-id <id> [--json]
-repo-e2e approve --run-id <id>
+repo-e2e approve --run-id <id> --type <scope|lineage|discovery|execution|privacy>
 repo-e2e secret provide --run-id <id> --ref <secret-ref>
 repo-e2e resume --run-id <id> --input <path>
 repo-e2e report --run-id <id>

@@ -66,7 +66,24 @@ export function createForTest(
         const credential = credentials.get(credentialId)
         return credential === undefined ? undefined : cloneCredential(credential)
       },
-      async put(credential) { credentials.set(credential.id, cloneCredential(credential)) },
+      async insert(credential) {
+        if (credentials.has(credential.id)) {
+          throw Object.assign(new Error('E2E_APPROVAL_CREDENTIAL_DUPLICATE'), {
+            code: 'E2E_APPROVAL_CREDENTIAL_DUPLICATE',
+          })
+        }
+        credentials.set(credential.id, cloneCredential(credential))
+      },
+      async compareAndSet(expected, next) {
+        const current = credentials.get(expected.id)
+        if (current === undefined || JSON.stringify(current) !== JSON.stringify(expected)
+          || next.counter <= expected.counter) {
+          throw Object.assign(new Error('E2E_APPROVAL_CREDENTIAL_STATE_CONFLICT'), {
+            code: 'E2E_APPROVAL_CREDENTIAL_STATE_CONFLICT',
+          })
+        }
+        credentials.set(next.id, cloneCredential(next))
+      },
     },
   })
   return {

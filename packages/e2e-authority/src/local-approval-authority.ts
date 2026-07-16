@@ -85,6 +85,7 @@ import { SqliteSnapshotStore } from './sqlite-state-store.js'
 import { trustWriteApprovalClient, type TrustedWriteApprovalClient } from './trusted-execution-clients.js'
 import type {
   StoredWebAuthnCredential,
+  WebAuthnApprovalBinding,
   WebAuthnCredentialRepository,
 } from './webauthn-user-presence.js'
 
@@ -104,7 +105,10 @@ export interface LocalApprovalAuthorityOptions {
   approvalIdentities?: ApproverIdentity[]
   manualIdentities?: ApproverIdentity[]
   /** 由 Authority Host 注入的 OS/SSO 会话认证器；普通调用方不能控制其返回值。 */
-  authenticateApproverSession?: (sessionRef: string) => string | undefined
+  authenticateApproverSession?: (
+    sessionRef: string,
+    expected: WebAuthnApprovalBinding | undefined,
+  ) => string | undefined
 }
 
 interface EncryptedPrivateKey {
@@ -115,7 +119,7 @@ interface EncryptedPrivateKey {
 }
 
 interface AuthorityPersistentSnapshot {
-  schemaVersion: '2.0.0'
+  schemaVersion: '2.1.0'
   issuer: string
   keyId: string
   identityDigest: string
@@ -154,7 +158,10 @@ export class LocalApprovalAuthority {
   readonly #stateStore?: SqliteSnapshotStore
   readonly #stateEncryptionKey?: Buffer
   readonly #identityDigest: string
-  readonly #authenticateApproverSession: (sessionRef: string) => string | undefined
+  readonly #authenticateApproverSession: (
+    sessionRef: string,
+    expected: WebAuthnApprovalBinding | undefined,
+  ) => string | undefined
   readonly #stateContext = new AsyncLocalStorage<boolean>()
   #activeStateTransactions = 0
   readonly #grants = new Map<string, SignedGrant>()
@@ -230,7 +237,7 @@ export class LocalApprovalAuthority {
     const decision = generateKeyPairSync('ed25519')
     const attempt = generateKeyPairSync('ed25519')
     const initial: AuthorityPersistentSnapshot = {
-      schemaVersion: '2.0.0', issuer: options.issuer, keyId: options.keyId,
+      schemaVersion: '2.1.0', issuer: options.issuer, keyId: options.keyId,
       identityDigest: authorityIdentityDigest(options),
       privateKeys: {
         primary: encryptPrivateKey(primary.privateKey, stateEncryptionKey, 'primary'),
@@ -242,7 +249,19 @@ export class LocalApprovalAuthority {
       webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey),
       grants: [], revoked: [], uses: [], reservations: [], completedPreflights: [], manualResultIds: [], attemptLogs: [],
     }
-    const snapshot = parseAuthoritySnapshot(store.initialize(canonicalizeJson(initial)))
+    store.initialize(canonicalizeJson(initial))
+    let snapshot: AuthorityPersistentSnapshot
+    try {
+      const migration = migrateAuthoritySnapshot(store.begin(), stateEncryptionKey)
+      snapshot = migration.snapshot
+      if (migration.migrated) store.commit(canonicalizeJson(snapshot))
+      else store.rollback()
+    } catch (error) {
+      store.rollback()
+      store.close()
+      stateEncryptionKey.fill(0)
+      throw error
+    }
     if (snapshot.issuer !== options.issuer || snapshot.keyId !== options.keyId
       || snapshot.identityDigest !== authorityIdentityDigest(options)) {
       store.close()
@@ -295,17 +314,31 @@ export class LocalApprovalAuthority {
         const credential = this.#webAuthnCredentials.get(credentialId)
         return credential === undefined ? undefined : structuredClone(credential)
       }),
-      put: async (candidate: StoredWebAuthnCredential) => await this.#withStateMutation(async () => {
+      insert: async (candidate: StoredWebAuthnCredential) => await this.#withStateMutation(async () => {
         const credential = parseStoredWebAuthnCredential(candidate)
-        const current = this.#webAuthnCredentials.get(credential.id)
-        if (current !== undefined && (current.subject !== credential.subject
-          || current.publicKey !== credential.publicKey || credential.counter < current.counter)) {
-          throw authorityError(
-            'E2E_APPROVAL_CREDENTIAL_STATE_INVALID',
-            'WebAuthn credential 的主体、公钥不可变且 counter 不得回退',
-          )
+        if (this.#webAuthnCredentials.has(credential.id)) {
+          throw authorityError('E2E_APPROVAL_CREDENTIAL_DUPLICATE', 'WebAuthn credential 已登记')
         }
         this.#webAuthnCredentials.set(credential.id, credential)
+      }),
+      compareAndSet: async (
+        expectedCandidate: StoredWebAuthnCredential,
+        nextCandidate: StoredWebAuthnCredential,
+      ) => await this.#withStateMutation(async () => {
+        const expected = parseStoredWebAuthnCredential(expectedCandidate)
+        const next = parseStoredWebAuthnCredential(nextCandidate)
+        const current = this.#webAuthnCredentials.get(expected.id)
+        if (current === undefined || canonicalizeJson(current) !== canonicalizeJson(expected)
+          || next.id !== expected.id || next.subject !== expected.subject
+          || next.publicKey !== expected.publicKey
+          || canonicalizeJson(next.transports) !== canonicalizeJson(expected.transports)
+          || next.counter <= expected.counter) {
+          throw authorityError(
+            'E2E_APPROVAL_CREDENTIAL_STATE_CONFLICT',
+            'WebAuthn credential CAS 失败或 counter 未严格递增',
+          )
+        }
+        this.#webAuthnCredentials.set(next.id, next)
       }),
     })
   }
@@ -314,13 +347,15 @@ export class LocalApprovalAuthority {
     subject: DiscoveryApprovalSubject
     approver: ApproverIdentity
     approvalSessionRef?: string
+    approvalSessionBinding?: WebAuthnApprovalBinding
     ttlMs: number
   }): Promise<SignedDiscoveryGrant> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
       return await this.#withStateMutation(() => this.issueDiscoveryGrant(input))
     }
     const request = immutableSnapshot(input)
-    this.validateApproverAndTtl(request.approver, request.approvalSessionRef, request.ttlMs, MAX_DISCOVERY_TTL_MS)
+    this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+      request.approvalSessionBinding, request.ttlMs, MAX_DISCOVERY_TTL_MS)
     validateDiscoverySubject(request.subject)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedDiscoveryGrant, 'signature'> = {
@@ -354,6 +389,7 @@ export class LocalApprovalAuthority {
     subject: ReadApprovalSubject
     approver: ApproverIdentity
     approvalSessionRef?: string
+    approvalSessionBinding?: WebAuthnApprovalBinding
     ttlMs: number
   }): Promise<SignedReadGrant> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
@@ -376,7 +412,8 @@ export class LocalApprovalAuthority {
         'Read Grant 必须引用同一 Asset、Revision、Scope、环境和 actor 的 ready Discovery preflight',
       )
     }
-    this.validateApproverAndTtl(request.approver, request.approvalSessionRef, request.ttlMs, MAX_READ_TTL_MS)
+    this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+      request.approvalSessionBinding, request.ttlMs, MAX_READ_TTL_MS)
 
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedReadGrant, 'signature'> = {
@@ -410,6 +447,7 @@ export class LocalApprovalAuthority {
     subject: WriteApprovalSubject
     approver: ApproverIdentity
     approvalSessionRef?: string
+    approvalSessionBinding?: WebAuthnApprovalBinding
     ttlMs: number
   }): Promise<SignedWriteGrant> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
@@ -433,7 +471,8 @@ export class LocalApprovalAuthority {
         'Write Grant 必须引用同一 Asset、Revision、Scope、环境和 actor 的 ready Discovery preflight',
       )
     }
-    this.validateApproverAndTtl(request.approver, request.approvalSessionRef, request.ttlMs, MAX_WRITE_TTL_MS)
+    this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+      request.approvalSessionBinding, request.ttlMs, MAX_WRITE_TTL_MS)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedWriteGrant, 'signature'> = {
       grantId: randomUUID(),
@@ -470,12 +509,14 @@ export class LocalApprovalAuthority {
     subject: InjectionApprovalSubject
     approver: ApproverIdentity
     approvalSessionRef?: string
+    approvalSessionBinding?: WebAuthnApprovalBinding
     ttlMs: number
   }): Promise<SignedInjectionGrant> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
       return await this.#withStateMutation(() => this.issueInjectionGrant(input))
     }
-    this.validateApproverAndTtl(input.approver, input.approvalSessionRef, input.ttlMs, MAX_INJECTION_TTL_MS)
+    this.validateApproverAndTtl(input.approver, input.approvalSessionRef,
+      input.approvalSessionBinding, input.ttlMs, MAX_INJECTION_TTL_MS)
     validateInjectionSubject(input.subject)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedInjectionGrant, 'signature'> = {
@@ -515,12 +556,14 @@ export class LocalApprovalAuthority {
     subject: WebSocketReadApprovalSubject
     approver: ApproverIdentity
     approvalSessionRef?: string
+    approvalSessionBinding?: WebAuthnApprovalBinding
     ttlMs: number
   }): Promise<SignedWebSocketReadGrant> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
       return await this.#withStateMutation(() => this.issueWebSocketReadGrant(input))
     }
-    this.validateApproverAndTtl(input.approver, input.approvalSessionRef, input.ttlMs, MAX_READ_TTL_MS)
+    this.validateApproverAndTtl(input.approver, input.approvalSessionRef,
+      input.approvalSessionBinding, input.ttlMs, MAX_READ_TTL_MS)
     validateWebSocketReadSubject(input.subject)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedWebSocketReadGrant, 'signature'> = {
@@ -557,12 +600,14 @@ export class LocalApprovalAuthority {
     subject: SseReadApprovalSubject
     approver: ApproverIdentity
     approvalSessionRef?: string
+    approvalSessionBinding?: WebAuthnApprovalBinding
     ttlMs: number
   }): Promise<SignedSseReadGrant> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
       return await this.#withStateMutation(() => this.issueSseReadGrant(input))
     }
-    this.validateApproverAndTtl(input.approver, input.approvalSessionRef, input.ttlMs, MAX_READ_TTL_MS)
+    this.validateApproverAndTtl(input.approver, input.approvalSessionRef,
+      input.approvalSessionBinding, input.ttlMs, MAX_READ_TTL_MS)
     validateSseReadSubject(input.subject)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedSseReadGrant, 'signature'> = {
@@ -1417,7 +1462,7 @@ export class LocalApprovalAuthority {
 
   #persistentSnapshot(): AuthorityPersistentSnapshot {
     return {
-      schemaVersion: '2.0.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
+      schemaVersion: '2.1.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
       privateKeys: {
         primary: encryptPrivateKey(this.#privateKey, this.#stateEncryptionKey!, 'primary'),
         freshness: encryptPrivateKey(this.#freshnessPrivateKey, this.#stateEncryptionKey!, 'freshness'),
@@ -1458,13 +1503,15 @@ export class LocalApprovalAuthority {
   private validateApproverAndTtl(
     approver: ApproverIdentity,
     approvalSessionRef: string | undefined,
+    approvalSessionBinding: WebAuthnApprovalBinding | undefined,
     ttlMs: number,
     maximum: number,
   ): void {
     const authenticatedSubject = approvalSessionRef
-      ? this.#authenticateApproverSession(approvalSessionRef)
+      ? this.#authenticateApproverSession(approvalSessionRef, approvalSessionBinding)
       : undefined
-    if (authenticatedSubject !== approver.subject
+    if ((approvalSessionBinding !== undefined && approvalSessionBinding.subject !== approver.subject)
+      || authenticatedSubject !== approver.subject
       || !matchesRegisteredIdentity(approver, this.#approvalIdentities.get(approver.subject))
       || !approver.roles.includes('e2e-approver')) {
       throw authorityError('E2E_APPROVAL_APPROVER_UNTRUSTED', '审批人必须通过 Authority 会话认证且是登记的 e2e-approver')
@@ -1514,21 +1561,72 @@ function parseAuthoritySnapshot(value: string): AuthorityPersistentSnapshot {
   try { parsed = JSON.parse(value) } catch {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 不是合法 JSON')
   }
-  const candidate = parsed as Partial<AuthorityPersistentSnapshot>
-  if (!candidate || candidate.schemaVersion !== '2.0.0' || typeof candidate.issuer !== 'string'
+  return parseCurrentAuthoritySnapshot(parsed)
+}
+
+function migrateAuthoritySnapshot(
+  value: string,
+  stateEncryptionKey: Buffer,
+): { snapshot: AuthorityPersistentSnapshot; migrated: boolean } {
+  let parsed: unknown
+  try { parsed = JSON.parse(value) } catch {
+    throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 不是合法 JSON')
+  }
+  if (!isPlainSnapshot(parsed)) {
+    throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
+  }
+  if (parsed.schemaVersion === '2.1.0') {
+    return { snapshot: parseCurrentAuthoritySnapshot(parsed), migrated: false }
+  }
+  if (parsed.schemaVersion !== '2.0.0' || !hasExactSnapshotKeys(parsed, false)
+    || !hasAuthoritySnapshotFields(parsed, false)) {
+    throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 版本未知或旧结构无效')
+  }
+  const migrated = {
+    ...parsed,
+    schemaVersion: '2.1.0',
+    webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey),
+  }
+  return { snapshot: parseCurrentAuthoritySnapshot(migrated), migrated: true }
+}
+
+function parseCurrentAuthoritySnapshot(parsed: unknown): AuthorityPersistentSnapshot {
+  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.1.0'
+    || !hasExactSnapshotKeys(parsed, true) || !hasAuthoritySnapshotFields(parsed, true)) {
+    throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
+  }
+  return parsed as unknown as AuthorityPersistentSnapshot
+}
+
+function hasAuthoritySnapshotFields(candidate: Record<string, unknown>, withCredentials: boolean): boolean {
+  const privateKeys = candidate.privateKeys as Record<string, unknown> | undefined
+  return !(typeof candidate.issuer !== 'string'
     || typeof candidate.keyId !== 'string' || typeof candidate.identityDigest !== 'string'
-    || !candidate.privateKeys || Object.values(candidate.privateKeys).some((key) =>
+    || !privateKeys || Object.keys(privateKeys).sort().join('\0')
+      !== ['attempt', 'decision', 'freshness', 'primary', 'privacyReview'].join('\0')
+    || Object.values(privateKeys).some((key) =>
       typeof key !== 'object' || key === null || (key as EncryptedPrivateKey).algorithm !== 'aes-256-gcm'
       || typeof (key as EncryptedPrivateKey).iv !== 'string'
       || typeof (key as EncryptedPrivateKey).ciphertext !== 'string'
       || typeof (key as EncryptedPrivateKey).authTag !== 'string')
-    || !isEncryptedBlob(candidate.webAuthnCredentials)
+    || (withCredentials && !isEncryptedBlob(candidate.webAuthnCredentials))
     || !Array.isArray(candidate.grants) || !Array.isArray(candidate.revoked) || !Array.isArray(candidate.uses)
     || !Array.isArray(candidate.reservations) || !Array.isArray(candidate.completedPreflights)
-    || !Array.isArray(candidate.manualResultIds) || !Array.isArray(candidate.attemptLogs)) {
-    throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
-  }
-  return candidate as AuthorityPersistentSnapshot
+    || !Array.isArray(candidate.manualResultIds) || !Array.isArray(candidate.attemptLogs))
+}
+
+function hasExactSnapshotKeys(candidate: Record<string, unknown>, withCredentials: boolean): boolean {
+  const keys = [
+    'attemptLogs', 'completedPreflights', 'grants', 'identityDigest', 'issuer', 'keyId', 'manualResultIds',
+    'privateKeys', 'reservations', 'revoked', 'schemaVersion', 'uses',
+    ...(withCredentials ? ['webAuthnCredentials'] : []),
+  ].sort()
+  return Object.keys(candidate).sort().join('\0') === keys.join('\0')
+}
+
+function isPlainSnapshot(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype
 }
 
 function encryptWebAuthnCredentials(

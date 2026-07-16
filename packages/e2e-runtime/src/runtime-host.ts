@@ -274,6 +274,29 @@ export class E2ERuntimeHost {
     await this.dependencies.presentUserPresenceUrl?.(session.url)
     await session.wait()
 
+    let currentIdentity
+    try {
+      currentIdentity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    } catch (cause) {
+      throw runtimeHostError(
+        'E2E_RUNTIME_PROJECT_IDENTITY_CHANGED',
+        'safety',
+        'WebAuthn callback 返回前项目身份已不可重新验证',
+        cause,
+      )
+    }
+    if (currentIdentity.digest !== identity.digest
+      || currentIdentity.realRoot !== identity.realRoot
+      || currentIdentity.device !== identity.device
+      || currentIdentity.inode !== identity.inode
+      || currentIdentity.logicalProjectId !== identity.logicalProjectId) {
+      throw runtimeHostError(
+        'E2E_RUNTIME_PROJECT_IDENTITY_CHANGED',
+        'safety',
+        'WebAuthn callback 返回前项目物理身份或逻辑绑定已改变',
+      )
+    }
+
     return await this.withRunLock(identity.digest, initial.runId, async (lock) => {
       const current = await this.dependencies.runStore.getRun(identity.digest, initial.runId)
       if (current === undefined) throw runtimeHostError(

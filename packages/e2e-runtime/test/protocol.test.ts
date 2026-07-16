@@ -308,13 +308,16 @@ describe('repo-e2e CLI protocol slice', () => {
     expect(stderr.text()).toBe('')
   })
 
-  test('human identity and approval commands print the URL to stderr and wait for the Authority callback', async () => {
-    for (const arguments_ of [['identity', 'enroll'], ['approve', '--run-id', 'RUN-1']]) {
+  test('human identity and explicitly typed approval commands print the URL to stderr and wait', async () => {
+    for (const arguments_ of [
+      ['identity', 'enroll'],
+      ['approve', '--run-id', 'RUN-1', '--type', 'lineage'],
+    ]) {
       const stdout = captureWritable()
       const stderr = captureWritable()
       const wait = vi.fn(async () => undefined)
       const openHumanAuthoritySession = vi.fn(async () => ({
-        url: 'http://localhost:43123/?bearer=secret#session',
+        url: `http://localhost:43123/#${'s'.repeat(43)}`,
         sessionId: 'SESSION-1',
         wait,
       }))
@@ -328,10 +331,35 @@ describe('repo-e2e CLI protocol slice', () => {
       })
       expect(exitCode).toBe(0)
       expect(openHumanAuthoritySession).toHaveBeenCalledWith(arguments_)
-      expect(stderr.text()).toBe('http://localhost:43123/?bearer=secret#session\n')
+      expect(stderr.text()).toBe(`http://localhost:43123/#${'s'.repeat(43)}\n`)
       expect(wait).toHaveBeenCalledOnce()
       expect(JSON.parse(stdout.text())).toEqual({ sessionId: 'SESSION-1', status: 'verified' })
     }
+  })
+
+  test('human approval command rejects an omitted approval type instead of guessing from workflow', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    const openHumanAuthoritySession = vi.fn()
+
+    const exitCode = await runCli(
+      ['approve', '--run-id', 'RUN-1'],
+      Readable.from([]), stdout.stream, stderr.stream,
+      {
+        homeDir: '/safe/home',
+        installRuntime: async () => ({
+          version: '0.0.0', installationDigest: digest, launcher: '/safe/repo-e2e',
+        }),
+        uninstallRuntime: async () => ({ version: '0.0.0' }),
+        openHumanAuthoritySession,
+      },
+    )
+
+    expect(exitCode).toBe(2)
+    expect(openHumanAuthoritySession).not.toHaveBeenCalled()
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_REQUEST_INVALID' },
+    })
   })
 })
 

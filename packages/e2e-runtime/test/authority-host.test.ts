@@ -1,6 +1,8 @@
-import { lstat, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { link, lstat, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { Readable, Writable } from 'node:stream'
 import { expect, test, vi } from 'vitest'
 import { RuntimeRequestEnvelopeSchema } from '@mutil-skills/e2e-contracts'
+import { LocalApprovalAuthority } from '@mutil-skills/e2e-authority'
 import {
   RuntimeAuthorityHost,
   computeRuntimeApprovalSubjectDigest,
@@ -11,21 +13,28 @@ import type { RuntimeRunSnapshot } from '../src/run-store.js'
 import { RuntimeRunStore } from '../src/run-store.js'
 import { E2ERuntimeHost } from '../src/runtime-host.js'
 import { resolveProjectIdentity } from '../src/project-identity.js'
+import { runCli } from '../src/cli.js'
 import { createRuntimeTestRoots } from './fixtures.js'
 
 const installationDigest = `sha256:${'a'.repeat(64)}`
 
 test('Runtime Authority adapter can only open and wait for child-owned sessions', async () => {
+  const enrollmentBearer = 'a'.repeat(43)
+  const approvalBearer = 'b'.repeat(43)
   const waitForSession = vi.fn(async () => undefined)
   const processHandle = {
-    enrollIdentity: vi.fn(async () => ({ url: 'http://localhost:41001/#enroll', sessionId: 'SESSION-1' })),
-    openApprovalSession: vi.fn(async () => ({ url: 'http://localhost:41002/#approve', sessionId: 'SESSION-2' })),
+    enrollIdentity: vi.fn(async () => ({
+      url: `http://localhost:41001/#${enrollmentBearer}`, sessionId: 'SESSION-1',
+    })),
+    openApprovalSession: vi.fn(async () => ({
+      url: `http://localhost:41002/#${approvalBearer}`, sessionId: 'SESSION-2',
+    })),
     waitForSession,
     close: vi.fn(async () => undefined),
   }
   const host = new RuntimeAuthorityHost({ processHandle, installationDigest })
   const enrollment = await host.enroll({ subject: 'local:user' })
-  expect(enrollment.url).toBe('http://localhost:41001/#enroll')
+  expect(enrollment.url).toBe(`http://localhost:41001/#${enrollmentBearer}`)
   await enrollment.wait()
   const approval = await host.requestApproval({
     runId: 'RUN-1', approvalType: 'execution',
@@ -40,12 +49,31 @@ test('Runtime Authority adapter can only open and wait for child-owned sessions'
   expect(waitForSession).toHaveBeenNthCalledWith(2, 'SESSION-2')
   expect('submit' in host).toBe(false)
   await host.close()
+
+  const unsafe = new RuntimeAuthorityHost({
+    installationDigest,
+    processHandle: {
+      ...processHandle,
+      openApprovalSession: async () => ({
+        url: 'http://localhost:41002/?bearer=leaked#fragment', sessionId: 'SESSION-UNSAFE',
+      }),
+    },
+  })
+  await expect(unsafe.requestApproval({
+    runId: 'RUN-1', approvalType: 'execution',
+    subjectDigest: `sha256:${'b'.repeat(64)}`, installationDigest,
+  })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_REFERENCE_INVALID' })
+  await unsafe.close()
 })
 
 test('loads approval assets only from this Runtime package and verifies the pinned bundle', async () => {
   const assets = await loadRuntimeApprovalAssets()
+  const approvalJavaScript = Buffer.from(assets.approvalJavaScript).toString()
   expect(Buffer.from(assets.indexHtml).toString()).toContain('Authority 审批摘要')
-  expect(Buffer.from(assets.approvalJavaScript).toString()).toContain('startAuthentication')
+  expect(approvalJavaScript).toContain('startAuthentication')
+  expect(approvalJavaScript).toContain('authorization')
+  expect(approvalJavaScript).not.toContain('document.cookie')
+  expect(approvalJavaScript).not.toContain('bearer=')
   expect(Buffer.from(assets.simpleWebAuthnBrowser).byteLength).toBe(9269)
 })
 
@@ -79,6 +107,46 @@ test('starts the real Authority child with user-only state and revokes enrollmen
   } finally {
     await host?.close()
     await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
+test('rejects symlinked Authority ancestors without chmod or writes to the canary target', async () => {
+  const roots = await createRuntimeTestRoots()
+  const canary = `${roots.root}/canary-product-root`
+  try {
+    await mkdir(canary, { mode: 0o755 })
+    await writeFile(`${canary}/canary.txt`, 'UNCHANGED', { mode: 0o644 })
+    await symlink(canary, `${roots.home}/.mutil-skills`)
+
+    await expect(startRuntimeAuthorityHost({
+      homeDir: roots.home, subject: 'local:user', installation: runtimeInstallation(),
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_STATE_DIRECTORY_INVALID' })
+    expect((await stat(canary)).mode & 0o777).toBe(0o755)
+    expect(await readFile(`${canary}/canary.txt`, 'utf8')).toBe('UNCHANGED')
+  } finally {
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
+test('rejects symlinked and hardlinked state keys without changing canary bytes or mode', async () => {
+  for (const kind of ['symlink', 'hardlink'] as const) {
+    const roots = await createRuntimeTestRoots()
+    const authorityDirectory = `${roots.home}/.mutil-skills/e2e/authority`
+    const canary = `${roots.root}/${kind}-key-canary`
+    try {
+      await mkdir(authorityDirectory, { recursive: true, mode: 0o700 })
+      await writeFile(canary, Buffer.alloc(32, 0x5a), { mode: 0o600 })
+      if (kind === 'symlink') await symlink(canary, `${authorityDirectory}/state.key`)
+      else await link(canary, `${authorityDirectory}/state.key`)
+
+      await expect(startRuntimeAuthorityHost({
+        homeDir: roots.home, subject: 'local:user', installation: runtimeInstallation(),
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_STATE_KEY_INVALID' })
+      expect(await readFile(canary)).toEqual(Buffer.alloc(32, 0x5a))
+      expect((await stat(canary)).mode & 0o777).toBe(0o600)
+    } finally {
+      await rm(roots.root, { recursive: true, force: true })
+    }
   }
 })
 
@@ -164,6 +232,249 @@ test('Runtime Host recomputes the approval subject from the locked Run before op
   }
 })
 
+test('Runtime Host rejects a replaced physical project root after the user-presence wait', async () => {
+  const roots = await createRuntimeTestRoots()
+  const runStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+  try {
+    await mkdir(`${roots.project}/.biztest`, { recursive: true })
+    await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-1',
+    }))
+    const identity = await resolveProjectIdentity(roots.project)
+    const snapshot = { ...runSnapshot(), projectIdentityDigest: identity.digest }
+    const seedDigest = `sha256:${'e'.repeat(64)}`
+    await runStore.beginRequest('SEED-REPLACEMENT', seedDigest)
+    const lock = await runStore.acquireRunLock(identity.digest, snapshot.runId)
+    try {
+      await runStore.createRunOutcome(snapshot, 'SEED-REPLACEMENT', seedDigest, { seeded: true }, lock)
+    } finally { await lock.close() }
+    const requestApproval = vi.fn(async () => ({
+      url: 'http://localhost:42003/#approval', sessionId: 'SESSION-REPLACEMENT',
+      async wait() {
+        await rename(roots.project, `${roots.root}/old-project`)
+        await mkdir(`${roots.project}/.biztest`, { recursive: true })
+        await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+          schemaVersion: '1.0.0', projectId: 'PROJECT-1',
+        }))
+      },
+    }))
+    const host = new E2ERuntimeHost({
+      installation: runtimeInstallation(),
+      doctor: async () => { throw new Error('not used') },
+      runStore, now: () => new Date('2026-07-16T00:00:00.000Z'),
+      authorityHost: { requestApproval },
+    })
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'APPROVE-REPLACEMENT',
+      client: { name: 'test', version: '1.0.0' }, command: 'open-approval', projectRoot: roots.project,
+      payload: { runId: 'RUN-1', approvalType: 'scope' },
+    })
+
+    expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_PROJECT_IDENTITY_CHANGED' },
+    })
+  } finally {
+    await runStore.close()
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
+test('Runtime Host rejects a logical project rebind after the user-presence wait', async () => {
+  const roots = await createRuntimeTestRoots()
+  const runStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+  try {
+    await mkdir(`${roots.project}/.biztest`, { recursive: true })
+    const identityPath = `${roots.project}/.biztest/project.json`
+    await writeFile(identityPath, JSON.stringify({ schemaVersion: '1.0.0', projectId: 'PROJECT-1' }))
+    const identity = await resolveProjectIdentity(roots.project)
+    const snapshot = { ...runSnapshot(), projectIdentityDigest: identity.digest }
+    const seedDigest = `sha256:${'9'.repeat(64)}`
+    await runStore.beginRequest('SEED-REBIND', seedDigest)
+    const lock = await runStore.acquireRunLock(identity.digest, snapshot.runId)
+    try { await runStore.createRunOutcome(snapshot, 'SEED-REBIND', seedDigest, { seeded: true }, lock) }
+    finally { await lock.close() }
+    const host = new E2ERuntimeHost({
+      installation: runtimeInstallation(),
+      doctor: async () => { throw new Error('not used') }, runStore,
+      now: () => new Date('2026-07-16T00:00:00.000Z'),
+      authorityHost: {
+        requestApproval: async () => ({
+          url: `http://localhost:42004/#${'d'.repeat(43)}`, sessionId: 'SESSION-REBIND',
+          async wait() {
+            await writeFile(identityPath, JSON.stringify({ schemaVersion: '1.0.0', projectId: 'PROJECT-2' }))
+          },
+        }),
+      },
+    })
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'APPROVE-REBIND', client: { name: 'test', version: '1.0.0' },
+      command: 'open-approval', projectRoot: roots.project,
+      payload: { runId: 'RUN-1', approvalType: 'scope' },
+    })
+
+    expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_PROJECT_IDENTITY_CHANGED' },
+    })
+  } finally {
+    await runStore.close()
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
+test('default rpc wiring starts Authority only for open-approval, writes URL to stderr, and closes it', async () => {
+  const roots = await createRuntimeTestRoots()
+  const store = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+  try {
+    await mkdir(`${roots.project}/.biztest`, { recursive: true })
+    await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-1',
+    }))
+    const identity = await resolveProjectIdentity(roots.project)
+    const snapshot = { ...runSnapshot(), projectIdentityDigest: identity.digest }
+    const seedDigest = `sha256:${'d'.repeat(64)}`
+    await store.beginRequest('SEED-CLI', seedDigest)
+    const lock = await store.acquireRunLock(identity.digest, snapshot.runId)
+    try { await store.createRunOutcome(snapshot, 'SEED-CLI', seedDigest, { seeded: true }, lock) }
+    finally { await lock.close() }
+  } finally { await store.close() }
+
+  const close = vi.fn(async () => undefined)
+  const processHandle = {
+    enrollIdentity: vi.fn(),
+    openApprovalSession: vi.fn(async () => ({
+      url: `http://localhost:43001/#${'c'.repeat(43)}`, sessionId: 'SESSION-CLI',
+    })),
+    waitForSession: vi.fn(async () => undefined),
+    close,
+  }
+  const startAuthorityHost = vi.fn(async () => new RuntimeAuthorityHost({
+    processHandle, installationDigest,
+  }))
+  const request = {
+    schemaVersion: '1.0.0', requestId: 'APPROVE-CLI', client: { name: 'test', version: '1.0.0' },
+    command: 'open-approval', projectRoot: roots.project,
+    payload: { runId: 'RUN-1', approvalType: 'scope' },
+  }
+  const stdout = captureWritable()
+  const stderr = captureWritable()
+  try {
+    const exitCode = await runCli(
+      ['rpc'], Readable.from([JSON.stringify(request)]), stdout.stream, stderr.stream,
+      {
+        homeDir: roots.home,
+        installRuntime: async () => { throw new Error('not used') },
+        uninstallRuntime: async () => { throw new Error('not used') },
+        inspectRuntimeInstallation: async () => runtimeInstallation(),
+        startAuthorityHost,
+      },
+    )
+
+    expect(exitCode).toBe(0)
+    expect(JSON.parse(stdout.text())).toMatchObject({ ok: true, result: { sessionId: 'SESSION-CLI' } })
+    expect(stderr.text()).toBe(`http://localhost:43001/#${'c'.repeat(43)}\n`)
+    expect(startAuthorityHost).toHaveBeenCalledOnce()
+    expect(close).toHaveBeenCalledOnce()
+
+    startAuthorityHost.mockClear()
+    const statusStdout = captureWritable()
+    const statusRequest = {
+      schemaVersion: '1.0.0', requestId: 'STATUS-CLI', client: { name: 'test', version: '1.0.0' },
+      command: 'get-status', projectRoot: roots.project, payload: { runId: 'RUN-1' },
+    }
+    expect(await runCli(
+      ['rpc'], Readable.from([JSON.stringify(statusRequest)]), statusStdout.stream, captureWritable().stream,
+      {
+        homeDir: roots.home,
+        installRuntime: async () => { throw new Error('not used') },
+        uninstallRuntime: async () => { throw new Error('not used') },
+        inspectRuntimeInstallation: async () => runtimeInstallation(),
+        startAuthorityHost,
+      },
+    )).toBe(0)
+    expect(startAuthorityHost).not.toHaveBeenCalled()
+  } finally {
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
+test('default rpc production wiring starts a real Authority child and closes it after TTL', async ({ skip }) => {
+  const roots = await createRuntimeTestRoots()
+  const installation = {
+    ...runtimeInstallation(),
+    versionRoot: await realpath(process.cwd()),
+    entrypoint: `${process.cwd()}/packages/e2e-runtime/src/bin/repo-e2e.ts`,
+  }
+  const authorityDirectory = `${roots.home}/.mutil-skills/e2e/authority`
+  const stateKey = Buffer.alloc(32, 0x31)
+  const subject = `local:uid:${process.getuid?.()}`
+  let url = ''
+  try {
+    await mkdir(authorityDirectory, { recursive: true, mode: 0o700 })
+    await writeFile(`${authorityDirectory}/state.key`, stateKey, { mode: 0o600 })
+    const authority = await LocalApprovalAuthority.open({
+      issuer: 'e2e-runtime-authority', keyId: 'approval-v1', now: () => new Date(),
+      statePath: `${authorityDirectory}/approval.sqlite`, stateEncryptionKey: stateKey,
+      testWorkspaceRoots: [installation.versionRoot],
+      approvalIdentities: [{ subject, roles: ['e2e-approver'] }],
+    })
+    await authority.createWebAuthnCredentialRepository().insert({
+      id: 'CRED-REAL-CHILD', publicKey: Buffer.from([1, 2, 3]).toString('base64url'),
+      counter: 0, transports: ['internal'], subject,
+    })
+    authority.close()
+
+    const store = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+    try {
+      await mkdir(`${roots.project}/.biztest`, { recursive: true })
+      await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+        schemaVersion: '1.0.0', projectId: 'PROJECT-1',
+      }))
+      const identity = await resolveProjectIdentity(roots.project)
+      const snapshot = { ...runSnapshot(), projectIdentityDigest: identity.digest }
+      const seedDigest = `sha256:${'c'.repeat(64)}`
+      await store.beginRequest('SEED-REAL-CLI', seedDigest)
+      const lock = await store.acquireRunLock(identity.digest, snapshot.runId)
+      try { await store.createRunOutcome(snapshot, 'SEED-REAL-CLI', seedDigest, { seeded: true }, lock) }
+      finally { await lock.close() }
+    } finally { await store.close() }
+
+    const request = {
+      schemaVersion: '1.0.0', requestId: 'APPROVE-REAL-CLI', client: { name: 'test', version: '1.0.0' },
+      command: 'open-approval', projectRoot: roots.project,
+      payload: { runId: 'RUN-1', approvalType: 'scope' },
+    }
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    let exitCode: number
+    try {
+      exitCode = await runCli(
+        ['rpc'], Readable.from([JSON.stringify(request)]), stdout.stream, stderr.stream,
+        {
+          homeDir: roots.home,
+          installRuntime: async () => { throw new Error('not used') },
+          uninstallRuntime: async () => { throw new Error('not used') },
+          inspectRuntimeInstallation: async () => installation,
+          approvalSessionTtlMs: 30,
+        },
+      )
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') { skip(); return }
+      throw error
+    }
+    url = stderr.text().trim()
+    expect(exitCode).toBe(4)
+    expect(new URL(url).search).toBe('')
+    expect(new URL(url).hash).toMatch(/^#[A-Za-z0-9_-]{43}$/)
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false, error: { code: 'E2E_APPROVAL_SESSION_EXPIRED' },
+    })
+    await expect(fetch(new URL(url).origin)).rejects.toThrow()
+  } finally {
+    stateKey.fill(0)
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
 function runSnapshot(): RuntimeRunSnapshot {
   return {
     schemaVersion: '1.0.0', runId: 'RUN-1', assetId: 'ASSET-1',
@@ -172,5 +483,21 @@ function runSnapshot(): RuntimeRunSnapshot {
     workflow: { current: 'awaiting-scope-approval', sequence: 2, eventChainDigest: `sha256:${'2'.repeat(64)}` },
     artifactDigests: { 'prd-source': `sha256:${'3'.repeat(64)}`, scope: `sha256:${'4'.repeat(64)}` },
     requestResponses: {}, createdAt: '2026-07-16T00:00:00.000Z', updatedAt: '2026-07-16T00:00:00.000Z',
+  }
+}
+
+function runtimeInstallation() {
+  return {
+    version: '0.0.0', protocolMajor: 1 as const,
+    versionRoot: '/runtime', entrypoint: '/runtime/repo-e2e.js',
+    installationDigest, sourceRepositoryIndependent: true as const,
+  }
+}
+
+function captureWritable(): { stream: Writable; text(): string } {
+  const chunks: Buffer[] = []
+  return {
+    stream: new Writable({ write(chunk, _encoding, callback) { chunks.push(Buffer.from(chunk)); callback() } }),
+    text: () => Buffer.concat(chunks).toString('utf8'),
   }
 }

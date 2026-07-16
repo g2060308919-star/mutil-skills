@@ -29,6 +29,7 @@ export interface AuthorityExecutionRpcHostOptions {
   userPresence?: {
     installationDigest: string
     assets: WebAuthnApprovalAssets
+    ttlMs?: number
   }
   clock?: { kind: 'system' } | { kind: 'fixed-test-only'; now: string }
   process?: { cwd: string; env: Record<string, string> }
@@ -76,6 +77,7 @@ export async function startAuthorityExecutionRpcHostProcess(
         ...(options.userPresence === undefined ? {} : {
           userPresence: {
             installationDigest: options.userPresence.installationDigest,
+            ttlMs: options.userPresence.ttlMs ?? 5 * 60 * 1000,
             assets: {
               indexHtmlBase64Url: Buffer.from(options.userPresence.assets.indexHtml).toString('base64url'),
               approvalJavaScriptBase64Url:
@@ -95,6 +97,21 @@ export async function startAuthorityExecutionRpcHostProcess(
     const finishedSessions = new Set<string>()
     const failedSessions = new Map<string, string>()
     const waiters = new Map<string, { resolve(): void; reject(error: Error): void }>()
+    const claimedWaits = new Set<string>()
+    let terminalError: Error | undefined
+    const clearSessionState = () => {
+      openedSessions.clear()
+      finishedSessions.clear()
+      failedSessions.clear()
+      claimedWaits.clear()
+    }
+    const failAllWaiters = (error: Error) => {
+      if (terminalError === undefined) terminalError = error
+      for (const waiter of waiters.values()) waiter.reject(terminalError)
+      waiters.clear()
+      clearSessionState()
+    }
+    const onChildTerminated = () => failAllWaiters(hostError('E2E_RPC_HOST_EXITED'))
     const onSessionMessage = (message: unknown) => {
       if (!isObject(message) || typeof message.sessionId !== 'string') return
       if (message.type === 'session-finished') {
@@ -108,8 +125,12 @@ export async function startAuthorityExecutionRpcHostProcess(
       }
     }
     child.on('message', onSessionMessage)
+    child.once('error', onChildTerminated)
+    child.once('exit', onChildTerminated)
+    child.once('disconnect', onChildTerminated)
     const open = async (type: 'enroll-identity' | 'open-approval-session', input: unknown) => {
       if (closed) throw hostError('E2E_RPC_HOST_CLOSED')
+      if (terminalError !== undefined) throw terminalError
       const result = await callControl(child, type, input)
       openedSessions.add(result.sessionId)
       return result
@@ -122,20 +143,45 @@ export async function startAuthorityExecutionRpcHostProcess(
       async enrollIdentity(input) { return await open('enroll-identity', input) },
       async openApprovalSession(input) { return await open('open-approval-session', input) },
       async waitForSession(sessionId) {
+        if (terminalError !== undefined) throw terminalError
         if (!openedSessions.has(sessionId)) throw hostError('E2E_APPROVAL_SESSION_INVALID')
-        if (finishedSessions.has(sessionId)) return
+        if (claimedWaits.has(sessionId)) throw hostError('E2E_APPROVAL_SESSION_WAIT_DUPLICATE')
+        claimedWaits.add(sessionId)
+        if (finishedSessions.has(sessionId)) {
+          openedSessions.delete(sessionId)
+          finishedSessions.delete(sessionId)
+          claimedWaits.delete(sessionId)
+          return
+        }
         const failed = failedSessions.get(sessionId)
-        if (failed !== undefined) throw hostError(failed)
-        await new Promise<void>((resolve, reject) => waiters.set(sessionId, { resolve, reject }))
+        if (failed !== undefined) {
+          openedSessions.delete(sessionId)
+          failedSessions.delete(sessionId)
+          claimedWaits.delete(sessionId)
+          throw hostError(failed)
+        }
+        try {
+          await new Promise<void>((resolve, reject) => waiters.set(sessionId, { resolve, reject }))
+        } finally {
+          waiters.delete(sessionId)
+          openedSessions.delete(sessionId)
+          finishedSessions.delete(sessionId)
+          failedSessions.delete(sessionId)
+          claimedWaits.delete(sessionId)
+        }
       },
       async close() {
         if (closed) return
         closed = true
-        try { await stopChild(child) }
+        try {
+          if (terminalError === undefined) await stopChild(child)
+        }
         finally {
           child.off('message', onSessionMessage)
-          for (const waiter of waiters.values()) waiter.reject(hostError('E2E_RPC_HOST_CLOSED'))
-          waiters.clear()
+          child.off('error', onChildTerminated)
+          child.off('exit', onChildTerminated)
+          child.off('disconnect', onChildTerminated)
+          failAllWaiters(hostError('E2E_RPC_HOST_CLOSED'))
           sessionKey.fill(0)
           credential.sessionKeyBase64Url = ''
         }
@@ -162,11 +208,13 @@ function waitForReady(child: ChildProcess, startMessage: Record<string, any>): P
       child.off('message', onMessage)
       child.off('error', finishReject)
       child.off('exit', onExit)
+      child.off('disconnect', onDisconnect)
     }
     const finishReject = (error: unknown) => { cleanup(); reject(error) }
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
       finishReject(hostError('E2E_RPC_HOST_EXITED', { code, signal }))
     }
+    const onDisconnect = () => finishReject(hostError('E2E_RPC_HOST_EXITED'))
     const onMessage = (message: unknown) => {
       if (!isObject(message)) return
       if (message.type === 'error' && typeof message.code === 'string') {
@@ -180,6 +228,7 @@ function waitForReady(child: ChildProcess, startMessage: Record<string, any>): P
     child.on('message', onMessage)
     child.once('error', finishReject)
     child.once('exit', onExit)
+    child.once('disconnect', onDisconnect)
     child.send(startMessage, (error) => { if (error) finishReject(error) })
   })
 }
@@ -212,9 +261,11 @@ function callControl(
       child.off('message', onMessage)
       child.off('error', finishReject)
       child.off('exit', onExit)
+      child.off('disconnect', onDisconnect)
     }
     const finishReject = (error: unknown) => { cleanup(); reject(error) }
     const onExit = () => finishReject(hostError('E2E_RPC_HOST_EXITED'))
+    const onDisconnect = () => finishReject(hostError('E2E_RPC_HOST_EXITED'))
     const onMessage = (message: unknown) => {
       if (!isObject(message) || message.requestId !== requestId) return
       if (message.type === 'control-error' && typeof message.code === 'string') {
@@ -229,6 +280,7 @@ function callControl(
     child.on('message', onMessage)
     child.once('error', finishReject)
     child.once('exit', onExit)
+    child.once('disconnect', onDisconnect)
     child.send({ type, requestId, input }, (error) => { if (error) finishReject(error) })
   })
 }
@@ -242,6 +294,10 @@ function validateOptions(options: AuthorityExecutionRpcHostOptions): void {
     || (options.clock?.kind === 'fixed-test-only' && !isCanonicalInstant(options.clock.now))
     || (options.userPresence !== undefined && (
       !/^sha256:[a-f0-9]{64}$/.test(options.userPresence.installationDigest)
+      || (options.userPresence.ttlMs !== undefined && (
+        !Number.isSafeInteger(options.userPresence.ttlMs)
+        || options.userPresence.ttlMs < 1 || options.userPresence.ttlMs > 5 * 60 * 1000
+      ))
       || options.userPresence.assets.indexHtml.byteLength === 0
       || options.userPresence.assets.approvalJavaScript.byteLength === 0
       || options.userPresence.assets.simpleWebAuthnBrowser.byteLength === 0

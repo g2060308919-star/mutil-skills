@@ -23,6 +23,7 @@ interface HostConfig {
   lease: { statePath: string; testWorkspaceRoots: string[] }
   userPresence?: {
     installationDigest: string
+    ttlMs: number
     assets: {
       indexHtmlBase64Url: string
       approvalJavaScriptBase64Url: string
@@ -40,7 +41,6 @@ let leaseAuthority: LocalLeaseAuthority | undefined
 let httpHandle: Awaited<ReturnType<typeof startAuthenticatedRpcLoopbackServer>> | undefined
 let webAuthnAuthority: WebAuthnUserPresenceAuthority | undefined
 const approvalServers = new Map<string, WebAuthnApprovalServerHandle>()
-const completedApprovalSessionRefs = new Map<string, string>()
 let hostConfig: HostConfig | undefined
 let started = false
 
@@ -71,7 +71,9 @@ process.on('message', async (message: unknown) => {
         testWorkspaceRoots: config.approval.testWorkspaceRoots,
         approvalIdentities: config.approval.approvalIdentities,
         manualIdentities: config.approval.manualIdentities,
-        authenticateApproverSession: (sessionRef) => webAuthnAuthority?.authenticateSession(sessionRef),
+        authenticateApproverSession: (sessionId, expected) => expected === undefined
+          ? undefined
+          : webAuthnAuthority?.authenticateSession(sessionId, expected),
       })
     } finally { stateEncryptionKey.fill(0) }
     leaseAuthority = await LocalLeaseAuthority.open({
@@ -93,9 +95,9 @@ process.on('message', async (message: unknown) => {
       gatewayAuthority: approvalAuthority,
     })
     httpHandle = await startAuthenticatedRpcLoopbackServer(rpc)
-    process.send?.({ type: 'ready', endpoint: httpHandle.endpoint, verifierMaterial: rpc.verifierMaterial })
+    sendToParent({ type: 'ready', endpoint: httpHandle.endpoint, verifierMaterial: rpc.verifierMaterial })
   } catch (error) {
-    process.send?.({ type: 'error', code: safeCode(error) })
+    sendToParent({ type: 'error', code: safeCode(error) })
     await shutdown()
     process.disconnect()
   }
@@ -117,7 +119,6 @@ async function shutdown(): Promise<void> {
   approvalAuthority = undefined
   leaseAuthority = undefined
   webAuthnAuthority = undefined
-  completedApprovalSessionRefs.clear()
   hostConfig = undefined
 }
 
@@ -137,26 +138,25 @@ async function handleUserPresenceControl(message: Record<string, any>): Promise<
     const server = await startWebAuthnApprovalServer({
       authority: webAuthnAuthority,
       assets,
-      ttlMs: 5 * 60 * 1000,
+      ttlMs: hostConfig.userPresence.ttlMs,
       session: control,
-      onAuthenticatedSessionRef(sessionId, sessionRef) {
-        completedApprovalSessionRefs.set(sessionId, sessionRef)
-      },
     })
     approvalServers.set(server.sessionId, server)
     void server.completion.then(async (result) => {
-      if (result.completed) {
-        process.send?.({ type: 'session-finished', sessionId: server.sessionId })
-      } else {
-        process.send?.({ type: 'session-failed', sessionId: server.sessionId, code: result.code })
-      }
+      if (result.completed) sendToParent({ type: 'session-finished', sessionId: server.sessionId })
+      else sendToParent({ type: 'session-failed', sessionId: server.sessionId, code: result.code })
       approvalServers.delete(server.sessionId)
       await server.close().catch(() => undefined)
     })
-    process.send?.({ type: 'session-opened', requestId, url: server.url, sessionId: server.sessionId })
+    sendToParent({ type: 'session-opened', requestId, url: server.url, sessionId: server.sessionId })
   } catch (error) {
-    process.send?.({ type: 'control-error', requestId, code: safeCode(error) })
+    sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
   }
+}
+
+function sendToParent(message: Record<string, unknown>): void {
+  if (!process.connected || process.send === undefined) return
+  try { process.send(message, () => undefined) } catch { /* parent 已退出，shutdown 会清理 session */ }
 }
 
 function parseEnrollmentInput(

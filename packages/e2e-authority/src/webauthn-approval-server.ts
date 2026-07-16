@@ -7,7 +7,6 @@ import type {
 } from './webauthn-user-presence.js'
 
 const MAX_BODY_BYTES = 64 * 1024
-const COOKIE_NAME = 'e2e_approval'
 
 export interface WebAuthnApprovalAssets {
   indexHtml: Uint8Array
@@ -38,18 +37,31 @@ export async function startWebAuthnApprovalServer(options: {
   assets: WebAuthnApprovalAssets
   ttlMs: number
   session: ApprovalSessionInput
-  onAuthenticatedSessionRef?: (sessionId: string, sessionRef: string) => void
 }): Promise<WebAuthnApprovalServerHandle> {
   validateAssets(options.assets)
-  const bearer = randomBytes(32).toString('base64url')
+  const bearer = randomBytes(32)
+  const bearerFragment = bearer.toString('base64url')
   let origin = ''
   let sessionId = ''
+  let sessionPayload = Buffer.alloc(0)
   let submitted = false
   let closed = false
+  let settled = false
+  let expiryTimer: NodeJS.Timeout | undefined
+  let closing: Promise<void> | undefined
   let settleCompletion!: (result: { completed: true } | { completed: false; code: string }) => void
   const completion = new Promise<{ completed: true } | { completed: false; code: string }>((resolve) => {
     settleCompletion = resolve
   })
+  const settle = (result: { completed: true } | { completed: false; code: string }): boolean => {
+    if (settled) return false
+    settled = true
+    if (expiryTimer !== undefined) clearTimeout(expiryTimer)
+    expiryTimer = undefined
+    bearer.fill(0)
+    settleCompletion(result)
+    return true
+  }
 
   const server = createServer((request, response) => {
     void handleRequest(request, response, {
@@ -57,11 +69,11 @@ export async function startWebAuthnApprovalServer(options: {
       assets: options.assets,
       get origin() { return origin },
       get sessionId() { return sessionId },
+      get sessionPayload() { return sessionPayload },
       bearer,
       get submitted() { return submitted },
       markSubmitted() { submitted = true },
-      settleCompletion,
-      onAuthenticatedSessionRef: options.onAuthenticatedSessionRef,
+      settle,
     })
   })
   await new Promise<void>((resolve, reject) => {
@@ -99,23 +111,43 @@ export async function startWebAuthnApprovalServer(options: {
       summary: session.summary,
       options: session.options,
     })) as unknown
-    const fragment = Buffer.from(canonicalizeJson(fragmentPayload)).toString('base64url')
+    sessionPayload = Buffer.from(canonicalizeJson(fragmentPayload))
+    const closeServer = async () => {
+      if (closing !== undefined) return await closing
+      closing = (async () => {
+        if (closed) return
+        closed = true
+        server.closeAllConnections()
+        if (!server.listening) return
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve())
+        })
+      })()
+      return await closing
+    }
+    expiryTimer = setTimeout(() => {
+      options.authority.revokeSession(sessionId)
+      if (settle({ completed: false, code: 'E2E_APPROVAL_SESSION_EXPIRED' })) {
+        sessionPayload.fill(0)
+        void closeServer()
+      }
+    }, options.ttlMs)
+    expiryTimer.unref()
     return {
       origin,
       sessionId,
       completion,
-      url: `${origin}/?bearer=${bearer}#${fragment}`,
+      url: `${origin}/#${bearerFragment}`,
       async close() {
-        if (closed) return
-        closed = true
         options.authority.revokeSession(sessionId)
-        await new Promise<void>((resolve, reject) => {
-          server.closeAllConnections()
-          server.close((error) => error ? reject(error) : resolve())
-        })
+        settle({ completed: false, code: 'E2E_APPROVAL_SESSION_CANCELLED' })
+        sessionPayload.fill(0)
+        await closeServer()
       },
     }
   } catch (error) {
+    bearer.fill(0)
+    sessionPayload.fill(0)
     await new Promise<void>((resolve) => server.close(() => resolve()))
     throw error
   }
@@ -126,11 +158,11 @@ interface RequestContext {
   assets: WebAuthnApprovalAssets
   readonly origin: string
   readonly sessionId: string
-  bearer: string
+  readonly sessionPayload: Uint8Array
+  bearer: Uint8Array
   readonly submitted: boolean
   markSubmitted(): void
-  settleCompletion(result: { completed: true } | { completed: false; code: string }): void
-  onAuthenticatedSessionRef?: (sessionId: string, sessionRef: string) => void
+  settle(result: { completed: true } | { completed: false; code: string }): boolean
 }
 
 async function handleRequest(
@@ -149,17 +181,6 @@ async function handleRequest(
     return
   }
   if (request.method === 'GET') {
-    const queryBearer = url.pathname === '/' ? url.searchParams.get('bearer') : undefined
-    if (!hasBearer(request, context.bearer) && !sameBearer(queryBearer, context.bearer)) {
-      respond(response, 401, 'authentication required')
-      return
-    }
-    if (sameBearer(queryBearer, context.bearer)) {
-      response.setHeader(
-        'set-cookie',
-        `${COOKIE_NAME}=${context.bearer}; HttpOnly; SameSite=Strict; Path=/`,
-      )
-    }
     if (url.pathname === '/') {
       respondBytes(response, 200, 'text/html; charset=utf-8', context.assets.indexHtml)
       return
@@ -170,6 +191,14 @@ async function handleRequest(
     }
     if (url.pathname === '/simplewebauthn-browser.js') {
       respondBytes(response, 200, 'text/javascript; charset=utf-8', context.assets.simpleWebAuthnBrowser)
+      return
+    }
+    if (url.pathname === '/session') {
+      if (!hasBearer(request, context.bearer)) {
+        respond(response, 401, 'authentication required')
+        return
+      }
+      respondBytes(response, 200, 'application/json; charset=utf-8', context.sessionPayload)
       return
     }
     respond(response, 404, 'not found')
@@ -228,13 +257,12 @@ async function handleRequest(
         || typeof payload.credentialId !== 'string') {
         throw approvalServerError('E2E_APPROVAL_SUBMISSION_INVALID')
       }
-      const sessionRef = await context.authority.completeApproval({
+      await context.authority.completeApproval({
         sessionId: context.sessionId,
         challenge: payload.challenge,
         credentialId: payload.credentialId,
         response: payload.response,
       })
-      context.onAuthenticatedSessionRef?.(context.sessionId, sessionRef)
     } else {
       if (!hasExactKeys(payload, ['challenge', 'response', 'sessionId'])) {
         throw approvalServerError('E2E_APPROVAL_SUBMISSION_INVALID')
@@ -245,11 +273,11 @@ async function handleRequest(
         response: payload.response,
       })
     }
-    context.settleCompletion({ completed: true })
+    context.settle({ completed: true })
     respondBytes(response, 204, 'text/plain; charset=utf-8', Buffer.alloc(0))
   } catch (error) {
     const code = safeErrorCode(error)
-    context.settleCompletion({ completed: false, code })
+    context.settle({ completed: false, code })
     respond(response, code === 'E2E_APPROVAL_SESSION_EXPIRED' ? 410 : 403, code)
   } finally {
     body.fill(0)
@@ -294,20 +322,18 @@ function respondBytes(
   response.end(body)
 }
 
-function hasBearer(request: IncomingMessage, bearer: string): boolean {
-  const cookie = request.headers.cookie
-  if (typeof cookie !== 'string') return false
-  return cookie.split(';').map((part) => part.trim()).some((part) => {
-    const prefix = `${COOKIE_NAME}=`
-    return part.startsWith(prefix) && sameBearer(part.slice(prefix.length), bearer)
-  })
+function hasBearer(request: IncomingMessage, bearer: Uint8Array): boolean {
+  const authorization = request.headers.authorization
+  if (typeof authorization !== 'string' || !authorization.startsWith('Bearer ')) return false
+  return sameBearer(authorization.slice('Bearer '.length), bearer)
 }
 
-function sameBearer(candidate: string | null | undefined, expected: string): boolean {
-  if (typeof candidate !== 'string') return false
-  const actualBytes = Buffer.from(candidate)
-  const expectedBytes = Buffer.from(expected)
-  return actualBytes.byteLength === expectedBytes.byteLength && timingSafeEqual(actualBytes, expectedBytes)
+function sameBearer(candidate: string | null | undefined, expected: Uint8Array): boolean {
+  if (typeof candidate !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(candidate)) return false
+  const actualBytes = Buffer.from(candidate, 'base64url')
+  const expectedBytes = Buffer.from(expected.buffer, expected.byteOffset, expected.byteLength)
+  return actualBytes.byteLength === 32 && actualBytes.toString('base64url') === candidate
+    && expectedBytes.byteLength === 32 && timingSafeEqual(actualBytes, expectedBytes)
 }
 
 export function isLoopbackApprovalClientAddress(address: string | undefined): boolean {

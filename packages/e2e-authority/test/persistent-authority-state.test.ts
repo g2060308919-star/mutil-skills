@@ -60,6 +60,49 @@ const attemptContext = {
 }
 
 describe('SQLite 持久 Authority 状态', () => {
+  test('将真实 2.0.0 snapshot 幂等迁移到 2.1.0，并对未知版本 fail closed', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-migration-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: () => approver.subject,
+    }
+    const first = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(first, 'LEASE-MIGRATION', 1)
+    const grant = await first.issueWriteGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    const verifierBefore = first.artifactVerifierMaterial
+    first.close()
+
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const legacy = JSON.parse(row.snapshot) as Record<string, unknown>
+    legacy.schemaVersion = '2.0.0'
+    delete legacy.webAuthnCredentials
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
+    database.close()
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    expect(migrated.artifactVerifierMaterial).toEqual(verifierBefore)
+    expect(await migrated.verify(grant)).toEqual({ allowed: true })
+    await expect(migrated.createWebAuthnCredentialRepository().list()).resolves.toEqual([])
+    migrated.close()
+
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const persisted = JSON.parse(migratedRow.snapshot) as Record<string, unknown>
+    expect(persisted.schemaVersion).toBe('2.1.0')
+    expect(persisted.webAuthnCredentials).toMatchObject({ algorithm: 'aes-256-gcm' })
+    persisted.schemaVersion = '9.9.9'
+    migratedDatabase.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(persisted))
+    migratedDatabase.close()
+
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_CORRUPT',
+    })
+  })
+
   test('拒绝 expected state directory 被同 pathname 的真实目录替换', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-state-parent-binding-'))
     directories.push(directory)

@@ -25,6 +25,7 @@ export {
   WebAuthnUserPresenceAuthority,
   createWebAuthnUserPresenceAuthority,
   type StoredWebAuthnCredential,
+  type WebAuthnApprovalBinding,
   type WebAuthnApprovalSession,
   type WebAuthnApprovalType,
   type WebAuthnCredentialRepository,

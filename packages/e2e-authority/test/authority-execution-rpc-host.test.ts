@@ -73,7 +73,7 @@ test('Authority child opens WebAuthn sessions while the parent receives only URL
       stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()],
       approvalIdentities: [{ subject: 'local:user', roles: ['e2e-approver'] }],
     })
-    await approval.createWebAuthnCredentialRepository().put({
+    await approval.createWebAuthnCredentialRepository().insert({
       id: 'Q1JFRC0x', publicKey: Buffer.from([1, 2, 3]).toString('base64url'),
       counter: 0, transports: ['internal'], subject: 'local:user',
     })
@@ -116,6 +116,21 @@ test('Authority child opens WebAuthn sessions while the parent receives only URL
     })
     expect(Object.keys(approvalSession).sort()).toEqual(['sessionId', 'url'])
     expect('submitApproval' in host).toBe(false)
+
+    const firstWait = host.waitForSession(enrollment.sessionId)
+    const duplicateWait = host.waitForSession(enrollment.sessionId)
+    process.kill(host.pid, 'SIGKILL')
+    const waiterResults = await Promise.race([
+      Promise.allSettled([firstWait, duplicateWait]),
+      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 1_000)),
+    ])
+    expect(waiterResults).not.toBe('timeout')
+    expect(waiterResults).toEqual([
+      expect.objectContaining({ status: 'rejected', reason: expect.objectContaining({ code: 'E2E_RPC_HOST_EXITED' }) }),
+      expect.objectContaining({
+        status: 'rejected', reason: expect.objectContaining({ code: 'E2E_APPROVAL_SESSION_WAIT_DUPLICATE' }),
+      }),
+    ])
     await host.close()
     host = undefined
   } finally {

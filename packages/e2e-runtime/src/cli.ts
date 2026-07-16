@@ -29,6 +29,7 @@ import { resolveProjectIdentity } from './project-identity.js'
 import {
   computeRuntimeApprovalSubjectDigest,
   startRuntimeAuthorityHost,
+  type RuntimeAuthorityHost,
   type RuntimeAuthoritySession,
 } from './authority-host.js'
 import {
@@ -50,6 +51,13 @@ export interface RuntimeCliDependencies {
   serializeRuntimeDoctorReport?: (report: unknown) => string
   runtimeHost?: Pick<E2ERuntimeHost, 'handle'>
   openHumanAuthoritySession?: (arguments_: string[]) => Promise<RuntimeAuthoritySession>
+  startAuthorityHost?: (options: {
+    homeDir: string
+    installation: RuntimeInstallation
+    subject: string
+    approvalSessionTtlMs?: number
+  }) => Promise<RuntimeAuthorityHost>
+  approvalSessionTtlMs?: number
 }
 
 export async function runCli(
@@ -152,17 +160,32 @@ export async function runCli(
       homeDir: dependencies.homeDir,
       ...(projectRoot === undefined ? {} : { projectRoot }),
     })
+    let authorityHost: RuntimeAuthorityHost | undefined
     try {
+      if (request.command === 'open-approval') {
+        authorityHost = await (dependencies.startAuthorityHost ?? startRuntimeAuthorityHost)({
+          homeDir: dependencies.homeDir,
+          installation,
+          subject: localAuthoritySubject(),
+          ...(dependencies.approvalSessionTtlMs === undefined
+            ? {} : { approvalSessionTtlMs: dependencies.approvalSessionTtlMs }),
+        })
+      }
       const host = new E2ERuntimeHost({
         installation,
         doctor: async () => await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({ installation }),
         runStore,
         now: () => new Date(),
+        ...(authorityHost === undefined ? {} : {
+          authorityHost,
+          presentUserPresenceUrl: async (url: string) => await writeText(stderr, `${url}\n`),
+        }),
       })
       const response = await host.handle(request, requestBytes)
       await writeText(stdout, `${canonicalizeJson(response)}\n`)
       return exitCodeForResponse(response)
     } finally {
+      await authorityHost?.close()
       await runStore.close()
     }
   } catch (error) {
@@ -310,8 +333,9 @@ function defaultDependencies(): RuntimeCliDependencies {
 
 function isHumanAuthorityCommand(arguments_: string[]): boolean {
   return (arguments_.length === 2 && arguments_[0] === 'identity' && arguments_[1] === 'enroll')
-    || (arguments_.length === 3 && arguments_[0] === 'approve'
-      && arguments_[1] === '--run-id' && SAFE_ID.test(arguments_[2]!))
+    || (arguments_.length === 5 && arguments_[0] === 'approve'
+      && arguments_[1] === '--run-id' && SAFE_ID.test(arguments_[2]!)
+      && arguments_[3] === '--type' && isApprovalType(arguments_[4]))
 }
 
 async function openDefaultHumanAuthoritySession(
@@ -324,6 +348,8 @@ async function openDefaultHumanAuthoritySession(
     homeDir: dependencies.homeDir,
     installation,
     subject: localAuthoritySubject(),
+    ...(dependencies.approvalSessionTtlMs === undefined
+      ? {} : { approvalSessionTtlMs: dependencies.approvalSessionTtlMs }),
   })
   if (arguments_[0] === 'identity') {
     try {
@@ -343,7 +369,7 @@ async function openDefaultHumanAuthoritySession(
     if (initial.runtimeInstallationDigest !== installation.installationDigest) {
       throw cliAuthorityError('E2E_RUNTIME_INSTALLATION_BINDING_MISMATCH')
     }
-    const approvalType = approvalTypeForWorkflow(initial.workflow.current)
+    const approvalType = approvalTypeForWorkflow(initial.workflow.current, arguments_[4]!)
     const subjectDigest = computeRuntimeApprovalSubjectDigest(initial, approvalType)
     const session = await authority.requestApproval({
       runId, approvalType, subjectDigest, installationDigest: installation.installationDigest,
@@ -403,12 +429,23 @@ async function readRunWithLease(
 
 function approvalTypeForWorkflow(
   workflow: string,
-): 'scope' | 'discovery' | 'execution' | 'privacy' {
-  if (workflow === 'awaiting-scope-approval') return 'scope'
-  if (workflow === 'coverage-audited') return 'discovery'
-  if (workflow === 'awaiting-execution-approval') return 'execution'
-  if (workflow === 'diagnosing' || workflow === 'finalizing') return 'privacy'
-  throw cliAuthorityError('E2E_RUNTIME_APPROVAL_TYPE_MISMATCH')
+  requested: string,
+): 'scope' | 'lineage' | 'discovery' | 'execution' | 'privacy' {
+  if (!isApprovalType(requested)) throw cliAuthorityError('E2E_RUNTIME_APPROVAL_TYPE_MISMATCH')
+  const allowed: Record<string, Array<typeof requested>> = {
+    'awaiting-scope-approval': ['scope', 'lineage'],
+    'coverage-audited': ['discovery'],
+    'awaiting-execution-approval': ['execution'],
+    diagnosing: ['privacy'],
+    finalizing: ['privacy'],
+  }
+  if (!allowed[workflow]?.includes(requested)) throw cliAuthorityError('E2E_RUNTIME_APPROVAL_TYPE_MISMATCH')
+  return requested
+}
+
+function isApprovalType(value: string | undefined): value is
+  'scope' | 'lineage' | 'discovery' | 'execution' | 'privacy' {
+  return value !== undefined && ['scope', 'lineage', 'discovery', 'execution', 'privacy'].includes(value)
 }
 
 function localAuthoritySubject(): string {
