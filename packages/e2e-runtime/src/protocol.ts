@@ -1,6 +1,8 @@
 import {
   E2EError,
+  RuntimeDoctorReportSchema,
   RuntimeRequestEnvelopeSchema,
+  canonicalizeJson,
   type E2EErrorCategory,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
@@ -75,6 +77,20 @@ export function exitCodeForResponse(response: RuntimeResponseEnvelope): number {
     case 'internal':
     default: return 70
   }
+}
+
+export function serializeRuntimeDoctorReport(report: unknown): string {
+  const parsed = RuntimeDoctorReportSchema.safeParse(report)
+  if (!parsed.success) {
+    throw new E2EError({
+      code: 'E2E_RUNTIME_DOCTOR_REPORT_INVALID',
+      category: 'internal',
+      message: 'Runtime Doctor 报告不符合固定协议',
+      retryable: false,
+      cause: parsed.error,
+    })
+  }
+  return canonicalizeJson(parsed.data)
 }
 
 function invalidRuntimeRequest(cause: unknown): E2EError {

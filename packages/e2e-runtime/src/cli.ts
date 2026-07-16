@@ -11,12 +11,23 @@ import {
   type RuntimeUninstallResult,
   type UninstallRuntimeOptions,
 } from './runtime-uninstaller.js'
+import {
+  inspectRuntimeInstallation as inspectRuntimeInstallationDefault,
+  type InspectRuntimeInstallationOptions,
+  type RuntimeInstallation,
+} from './runtime-discovery.js'
+import {
+  runRuntimeDoctor as runRuntimeDoctorDefault,
+  type RunRuntimeDoctorOptions,
+  type RuntimeDoctorReport,
+} from './runtime-doctor.js'
 import { isExactRuntimeVersion } from './runtime-manifest.js'
 import {
   RUNTIME_PACKAGE_VERSION,
   exitCodeForResponse,
   parseRuntimeRequest,
   runtimeErrorResponse,
+  serializeRuntimeDoctorReport,
 } from './protocol.js'
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
@@ -25,6 +36,8 @@ export interface RuntimeCliDependencies {
   homeDir: string
   installRuntime: (options: InstallRuntimeOptions) => Promise<RuntimeInstallResult>
   uninstallRuntime: (options: UninstallRuntimeOptions) => Promise<RuntimeUninstallResult>
+  inspectRuntimeInstallation?: (options: InspectRuntimeInstallationOptions) => Promise<RuntimeInstallation>
+  runRuntimeDoctor?: (options: RunRuntimeDoctorOptions) => Promise<RuntimeDoctorReport>
 }
 
 export async function runCli(
@@ -34,8 +47,6 @@ export async function runCli(
   stderr: Writable,
   dependencies: RuntimeCliDependencies = defaultDependencies(),
 ): Promise<number> {
-  void stderr
-
   if (arguments_.length === 1 && arguments_[0] === '--version') {
     await writeText(stdout, `${RUNTIME_PACKAGE_VERSION}\n`)
     return 0
@@ -43,6 +54,20 @@ export async function runCli(
 
   if (arguments_[0] === 'install-runtime' || arguments_[0] === 'uninstall-runtime') {
     return runInstallManagementCommand(arguments_, stdout, dependencies)
+  }
+
+  if ((arguments_.length === 1 && arguments_[0] === 'doctor')
+    || (arguments_.length === 2 && arguments_[0] === 'doctor' && arguments_[1] === '--json')) {
+    const installation = await (dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault)({
+      homeDir: dependencies.homeDir,
+    })
+    const report = await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({ installation })
+    if (arguments_.length === 2) {
+      await writeText(stdout, `${serializeRuntimeDoctorReport(report)}\n`)
+    } else {
+      await writeText(stderr, formatDoctorReport(report))
+    }
+    return report.ready ? 0 : 3
   }
 
   if (arguments_.length !== 1 || arguments_[0] !== 'rpc') {
@@ -187,5 +212,25 @@ function defaultDependencies(): RuntimeCliDependencies {
     homeDir: process.env.HOME ?? homedir(),
     installRuntime: installRuntimeDefault,
     uninstallRuntime: uninstallRuntimeDefault,
+    inspectRuntimeInstallation: inspectRuntimeInstallationDefault,
+    runRuntimeDoctor: runRuntimeDoctorDefault,
   }
+}
+
+function formatDoctorReport(report: RuntimeDoctorReport): string {
+  const statusLabels: Record<RuntimeDoctorReport['probes'][string]['status'], string> = {
+    passed: '通过',
+    blocked: '阻塞',
+    'not-installed': '未安装',
+  }
+  const lines = [
+    'Runtime Doctor',
+    `运行时版本：${report.runtimeVersion}`,
+    `就绪：${report.ready ? '是' : '否'}`,
+    '探针\t状态\t原因代码\t修复建议',
+  ]
+  for (const [name, probe] of Object.entries(report.probes)) {
+    lines.push(`${name}\t${statusLabels[probe.status]}\t${probe.reasonCode}\t${probe.remediation}`)
+  }
+  return `${lines.join('\n')}\n`
 }
