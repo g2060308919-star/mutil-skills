@@ -11,7 +11,7 @@ import { describe, expect, test } from 'vitest'
 import { createRuntimeTestRoots } from './fixtures.js'
 import type { RuntimeInstallation } from '../src/runtime-discovery.js'
 import { E2ERuntimeHost } from '../src/runtime-host.js'
-import { RuntimeRunStore, type RuntimeRunStoreTestHooks } from '../src/run-store.js'
+import { RuntimeRunStore } from '../src/run-store.js'
 import { SecureProjectFileReader } from '../src/secure-project-files.js'
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`
@@ -251,12 +251,46 @@ describe('E2ERuntimeHost', () => {
       await fixture.store.close()
     },
   )
+
+  test.each(['inputs/prd.md', 'inputs/policy.json'])(
+    'rejects a real project root replacement before reading %s',
+    async (targetPath) => {
+      const roots = await createRuntimeTestRoots()
+      let targetRead = false
+      let swapped = false
+      const reader = new SecureProjectFileReader({
+        beforeOpenFile: async ({ relativePath }) => {
+          if (relativePath !== targetPath || swapped) return
+          swapped = true
+          await rename(roots.project, `${roots.project}-original`)
+          await mkdir(join(roots.project, '.biztest'), { recursive: true })
+          await writeFile(join(roots.project, '.biztest', 'project.json'), JSON.stringify({
+            schemaVersion: '1.0.0', projectId: 'REPLACEMENT-CANARY',
+          }))
+          await mkdir(join(roots.project, 'inputs'))
+          await writeFile(join(roots.project, 'inputs', 'prd.md'), 'REPLACEMENT-PRD-CANARY')
+          await writeFile(join(roots.project, 'inputs', 'policy.json'), 'REPLACEMENT-POLICY-CANARY')
+        },
+        beforeRead: async ({ relativePath }) => {
+          if (relativePath === targetPath) targetRead = true
+        },
+      })
+      const fixture = await hostFixture({ roots, reader })
+
+      const response = await handleRequest(
+        fixture.host,
+        createRunRequest(`REQUEST-ROOT-${targetPath.endsWith('prd.md') ? 'PRD' : 'POLICY'}`, roots.project),
+      )
+      expect(response).toMatchObject({ ok: false, error: { code: 'E2E_RUNTIME_PROJECT_FILE_UNSAFE' } })
+      expect(targetRead).toBe(false)
+      await fixture.store.close()
+    },
+  )
 })
 
 async function hostFixture(options: {
   roots?: Awaited<ReturnType<typeof createRuntimeTestRoots>>
   reader?: SecureProjectFileReader
-  storeHooks?: RuntimeRunStoreTestHooks
 } = {}) {
   const roots = options.roots ?? await createRuntimeTestRoots()
   await mkdir(join(roots.project, '.biztest'), { recursive: true })
@@ -269,7 +303,6 @@ async function hostFixture(options: {
   const store = await RuntimeRunStore.open({
     homeDir: roots.home,
     projectRoot: roots.project,
-    ...(options.storeHooks === undefined ? {} : { testHooks: options.storeHooks }),
   })
   const host = new E2ERuntimeHost({
     installation,

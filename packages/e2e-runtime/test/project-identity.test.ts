@@ -74,6 +74,25 @@ describe('project identity', () => {
     expect(beforeReadCalled).toBe(false)
   })
 
+  test('rejects a real project root replacement before reading its identity declaration', async () => {
+    const roots = await createRuntimeTestRoots()
+    await writeProjectIdentity(roots.project)
+    let replacementRead = false
+    const reader = new SecureProjectFileReader({
+      beforeOpenFile: async ({ relativePath }) => {
+        if (relativePath !== '.biztest/project.json') return
+        await rename(roots.project, `${roots.project}-original`)
+        await mkdir(roots.project)
+        await writeProjectIdentity(roots.project, 'REPLACEMENT-CANARY')
+      },
+      beforeRead: async () => { replacementRead = true },
+    })
+
+    await expect(resolveProjectIdentity(roots.project, reader))
+      .rejects.toThrow(/E2E_RUNTIME_PROJECT_FILE_UNSAFE/)
+    expect(replacementRead).toBe(false)
+  })
+
   test('rejects a hard-linked project declaration', async () => {
     const roots = await createRuntimeTestRoots()
     const outsideDeclaration = join(roots.root, 'outside-project.json')

@@ -90,6 +90,7 @@ export class SecureProjectFileReader {
     let handle: FileHandle | undefined
     try {
       handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW)
+      await assertRootPathStillBound(root)
       const before = await handle.stat()
       validateFileDescriptor(before, maxBytes)
       await assertOpenFileStillContained(root, absolutePath, before)
@@ -100,6 +101,7 @@ export class SecureProjectFileReader {
       if (bytes.byteLength !== before.size) {
         throw projectFileError('E2E_RUNTIME_PROJECT_FILE_UNSAFE', '读取 bytes 与已验证文件大小不一致')
       }
+      await assertRootPathStillBound(root)
       await assertOpenFileStillContained(root, absolutePath, after)
       return bytes
     } catch (error) {
@@ -108,6 +110,15 @@ export class SecureProjectFileReader {
     } finally {
       await handle?.close().catch(() => undefined)
     }
+  }
+}
+
+async function assertRootPathStillBound(root: SecureProjectRootBinding): Promise<void> {
+  const current = await stat(root.realRoot)
+  if (!current.isDirectory()
+    || String(current.dev) !== root.device
+    || String(current.ino) !== root.inode) {
+    throw projectFileError('E2E_RUNTIME_PROJECT_FILE_UNSAFE', '项目根目录 pathname 已重新绑定')
   }
 }
 

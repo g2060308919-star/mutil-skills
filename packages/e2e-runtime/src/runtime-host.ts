@@ -22,7 +22,11 @@ import { runtimeErrorResponse } from './protocol.js'
 import { resolveProjectIdentity } from './project-identity.js'
 import type { RuntimeInstallation } from './runtime-discovery.js'
 import type { RuntimeDoctorReport } from './runtime-doctor.js'
-import { RuntimeRunStore, type RuntimeRunSnapshot } from './run-store.js'
+import {
+  RuntimeRunStore,
+  type RuntimeRunLock,
+  type RuntimeRunSnapshot,
+} from './run-store.js'
 import { SecureProjectFileReader } from './secure-project-files.js'
 
 export interface RuntimeHostDependencies {
@@ -128,12 +132,16 @@ export class E2ERuntimeHost {
       updatedAt: timestamp,
     }
     const response = this.successResponse(request.requestId, createRunResult(snapshot))
-    return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.createRunOutcome(
-      snapshot,
-      request.requestId,
-      requestDigest,
-      response,
-    ))
+    return await this.withRunLock(identity.digest, runId, async (lock) => {
+      const outcome = await this.dependencies.runStore.createRunOutcome(
+        snapshot,
+        request.requestId,
+        requestDigest,
+        response,
+        lock,
+      )
+      return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
   }
 
   private async getStatus(
@@ -141,16 +149,20 @@ export class E2ERuntimeHost {
     requestDigest: string,
   ): Promise<RuntimeResponseEnvelope> {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
-    return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.readRunOutcome(
-      identity.digest,
-      request.payload.runId,
-      request.requestId,
-      requestDigest,
-      (snapshot) => {
-        this.requireInstallation(snapshot)
-        return this.successResponse(request.requestId, statusResult(snapshot))
-      },
-    ))
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const outcome = await this.dependencies.runStore.readRunOutcome(
+        identity.digest,
+        request.payload.runId,
+        request.requestId,
+        requestDigest,
+        (snapshot) => {
+          this.requireInstallation(snapshot)
+          return this.successResponse(request.requestId, statusResult(snapshot))
+        },
+        lock,
+      )
+      return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
   }
 
   private async submitCandidate(
@@ -158,77 +170,94 @@ export class E2ERuntimeHost {
     requestDigest: string,
   ): Promise<RuntimeResponseEnvelope> {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
-    return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
-      identity.digest,
-      request.payload.runId,
-      request.requestId,
-      requestDigest,
-      (snapshot) => {
-        this.requireInstallation(snapshot)
-        if (request.payload.expectedState !== snapshot.workflow.current) {
-          throw runtimeHostError(
-            'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH',
-            'input',
-            'expectedState 只能作为当前状态的并发前置条件，不能指定 next state',
-          )
-        }
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const outcome = await this.dependencies.runStore.updateRunOutcome(
+        identity.digest,
+        request.payload.runId,
+        request.requestId,
+        requestDigest,
+        (snapshot) => {
+          this.requireInstallation(snapshot)
+          if (request.payload.expectedState !== snapshot.workflow.current) {
+            throw runtimeHostError(
+              'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH',
+              'input',
+              'expectedState 只能作为当前状态的并发前置条件，不能指定 next state',
+            )
+          }
 
-        const candidate = parseCandidate(request.payload.artifactType, request.payload.candidate)
-        const expectedDigest = digestArtifactContent(
-          `artifact-content/${candidate.schemaVersion}/${candidate.artifactType}`,
-          candidate as unknown as Record<string, unknown>,
-        )
-        if (candidate.contentDigest !== expectedDigest) {
-          throw runtimeHostError(
-            'E2E_RUNTIME_CANDIDATE_DIGEST_MISMATCH',
-            'artifact',
-            'Candidate contentDigest 与 Runtime 重算结果不一致',
+          const candidate = parseCandidate(request.payload.artifactType, request.payload.candidate)
+          const expectedDigest = digestArtifactContent(
+            `artifact-content/${candidate.schemaVersion}/${candidate.artifactType}`,
+            candidate as unknown as Record<string, unknown>,
           )
-        }
-        if (candidate.assetId !== snapshot.assetId
-          || candidate.prdRevision !== snapshot.artifactDigests['prd-source']
-          || candidate.generationId !== snapshot.runId) {
-          throw runtimeHostError(
-            'E2E_RUNTIME_CANDIDATE_BINDING_MISMATCH',
-            'artifact',
-            'Candidate assetId、prdRevision 或 generationId 未绑定当前 Run',
-          )
-        }
+          if (candidate.contentDigest !== expectedDigest) {
+            throw runtimeHostError(
+              'E2E_RUNTIME_CANDIDATE_DIGEST_MISMATCH',
+              'artifact',
+              'Candidate contentDigest 与 Runtime 重算结果不一致',
+            )
+          }
+          if (candidate.assetId !== snapshot.assetId
+            || candidate.prdRevision !== snapshot.artifactDigests['prd-source']
+            || candidate.generationId !== snapshot.runId) {
+            throw runtimeHostError(
+              'E2E_RUNTIME_CANDIDATE_BINDING_MISMATCH',
+              'artifact',
+              'Candidate assetId、prdRevision 或 generationId 未绑定当前 Run',
+            )
+          }
 
-        const next = nextWorkflowNode(snapshot.workflow.current, request.payload.artifactType)
-        if (next === undefined) {
-          throw blockedError(missingCapabilityCode(snapshot.workflow.current))
-        }
-        const transition = transitionWorkflow({
-          state: snapshot.workflow,
-          next,
-          reason: `accepted candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
-          timestamp: this.dependencies.now().toISOString(),
-          engineVersion: this.dependencies.installation.version,
-        })
-        const updated: RuntimeRunSnapshot = {
-          ...snapshot,
-          workflow: transition.state,
-          artifactDigests: {
-            ...snapshot.artifactDigests,
-            [request.payload.artifactType]: candidate.contentDigest,
-          },
-          updatedAt: this.dependencies.now().toISOString(),
-        }
-        return {
-          snapshot: updated,
-          response: this.successResponse(request.requestId, {
-            runId: updated.runId,
-            workflow: updated.workflow,
-            acceptedArtifact: {
-              artifactType: request.payload.artifactType,
-              contentDigest: candidate.contentDigest,
+          const next = nextWorkflowNode(snapshot.workflow.current, request.payload.artifactType)
+          if (next === undefined) {
+            throw blockedError(missingCapabilityCode(snapshot.workflow.current))
+          }
+          const transition = transitionWorkflow({
+            state: snapshot.workflow,
+            next,
+            reason: `accepted candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
+            timestamp: this.dependencies.now().toISOString(),
+            engineVersion: this.dependencies.installation.version,
+          })
+          const updated: RuntimeRunSnapshot = {
+            ...snapshot,
+            workflow: transition.state,
+            artifactDigests: {
+              ...snapshot.artifactDigests,
+              [request.payload.artifactType]: candidate.contentDigest,
             },
-          }),
-        }
-      },
-      'candidate-accepted',
-    ))
+            updatedAt: this.dependencies.now().toISOString(),
+          }
+          return {
+            snapshot: updated,
+            response: this.successResponse(request.requestId, {
+              runId: updated.runId,
+              workflow: updated.workflow,
+              acceptedArtifact: {
+                artifactType: request.payload.artifactType,
+                contentDigest: candidate.contentDigest,
+              },
+            }),
+          }
+        },
+        'candidate-accepted',
+        lock,
+      )
+      return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
+  }
+
+  private async withRunLock<T>(
+    projectIdentityDigest: string,
+    runId: string,
+    operation: (lock: RuntimeRunLock) => Promise<T>,
+  ): Promise<T> {
+    const lock = await this.dependencies.runStore.acquireRunLock(projectIdentityDigest, runId)
+    try {
+      return await operation(lock)
+    } finally {
+      await lock.close()
+    }
   }
 
   private requireInstallation(snapshot: RuntimeRunSnapshot): void {

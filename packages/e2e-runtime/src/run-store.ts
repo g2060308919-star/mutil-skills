@@ -1,4 +1,7 @@
-import { SqliteSnapshotStore } from '@mutil-skills/e2e-authority'
+import {
+  SqliteSnapshotStore,
+  type SqliteStateDirectoryIdentity,
+} from '@mutil-skills/e2e-authority'
 import {
   canonicalizeJson,
   digestText,
@@ -33,17 +36,12 @@ export interface RuntimeRunLock {
   close(): Promise<void>
 }
 
-export interface RuntimeRunStoreTestHooks {
-  beforeResponseLedgerCommit?(): void
-}
-
 export interface RuntimeRunStoreOptions {
   homeDir: string
   projectRoot?: string
   forbiddenRoots?: string[]
   now?: () => Date
   leaseMilliseconds?: number
-  testHooks?: RuntimeRunStoreTestHooks
 }
 
 export type RuntimeRequestReservation =
@@ -67,6 +65,13 @@ interface CompletedGlobalRequest {
   requestDigest: string
   status: 'completed'
   response: unknown
+  runOutcome?: GlobalRunOutcomeBinding
+}
+
+interface GlobalRunOutcomeBinding {
+  runKey: string
+  snapshotDigest: string
+  outcomeKind: string
 }
 
 type GlobalRequestEntry = PendingGlobalRequest | CompletedGlobalRequest
@@ -78,7 +83,14 @@ interface GlobalReplayLedger {
 
 interface LeaseRow {
   ownerNonce: string
+  fencingToken: number
   expiresAt: string
+}
+
+interface LeaseClaim {
+  key: string
+  ownerNonce: string
+  fencingToken: number
 }
 
 interface RunStoreSnapshot {
@@ -92,31 +104,29 @@ interface RunStoreSnapshot {
 export class RuntimeRunStore {
   readonly #snapshotStore: SqliteSnapshotStore
   readonly #processNonce = randomUUID()
+  readonly #lockClaims = new WeakMap<RuntimeRunLock, LeaseClaim>()
   readonly #now: () => Date
   readonly #leaseMilliseconds: number
-  readonly #testHooks: RuntimeRunStoreTestHooks
 
   private constructor(
     snapshotStore: SqliteSnapshotStore,
     now: () => Date,
     leaseMilliseconds: number,
-    testHooks: RuntimeRunStoreTestHooks,
   ) {
     this.#snapshotStore = snapshotStore
     this.#now = now
     this.#leaseMilliseconds = leaseMilliseconds
-    this.#testHooks = testHooks
   }
 
   static async open(options: RuntimeRunStoreOptions): Promise<RuntimeRunStore> {
-    if (!options.homeDir || 'stateRoot' in options) {
+    if (!options.homeDir || 'stateRoot' in options || 'testHooks' in options) {
       throw runtimeStoreError(
         'E2E_RUNTIME_STATE_CONFIG_INVALID',
         'Run Store 必须从 homeDir 的固定用户级 layout 派生',
       )
     }
     const stateRoot = runtimeLayout(options.homeDir).state
-    await ensureSecureUserStateRoot(options.homeDir, stateRoot)
+    const expectedStateDirectory = await ensureSecureUserStateRoot(options.homeDir, stateRoot)
     const forbiddenRoots = [...new Set([
       '/dev',
       ...(options.projectRoot === undefined ? [] : [options.projectRoot]),
@@ -125,14 +135,13 @@ export class RuntimeRunStore {
     const snapshotStore = new SqliteSnapshotStore(
       join(stateRoot, 'runtime-runs.sqlite'),
       'e2e-runtime-runs/v1',
-      { forbiddenRoots },
+      { forbiddenRoots, expectedStateDirectory },
     )
     snapshotStore.initialize(canonicalizeJson(emptyStoreSnapshot()))
     const store = new RuntimeRunStore(
       snapshotStore,
       options.now ?? (() => new Date()),
       options.leaseMilliseconds ?? LEASE_MILLISECONDS,
-      options.testHooks ?? {},
     )
     try {
       await store.#verifyPersistedState()
@@ -171,7 +180,6 @@ export class RuntimeRunStore {
       verifyStoreSnapshot(snapshot)
       const replay = completedReplay(snapshot, requestId, requestDigest)
       if (replay.found) return replay.response
-      this.#testHooks.beforeResponseLedgerCommit?.()
       completeGlobalLedger(snapshot.globalLedger, requestId, requestDigest, response)
       return structuredClone(response)
     })
@@ -182,14 +190,16 @@ export class RuntimeRunStore {
     requestId: string,
     requestDigest: string,
     response: unknown,
+    lock: RuntimeRunLock,
   ): Promise<unknown> {
     const validatedInput = migrateRuntimeRunSnapshot(runSnapshot)
     return await this.#mutate((snapshot) => {
       verifyStoreSnapshot(snapshot)
+      const key = runKey(validatedInput.projectIdentityDigest, validatedInput.runId)
+      this.#requireCurrentLease(snapshot, key, lock)
       const replay = completedReplay(snapshot, requestId, requestDigest)
       if (replay.found) return replay.response
       requirePendingRequest(snapshot, requestId, requestDigest)
-      const key = runKey(validatedInput.projectIdentityDigest, validatedInput.runId)
       if (snapshot.runs[key] !== undefined || snapshot.journals[key] !== undefined) {
         throw runtimeStoreError('E2E_RUNTIME_RUN_ALREADY_EXISTS', 'Run 已存在')
       }
@@ -202,9 +212,8 @@ export class RuntimeRunStore {
       })
       snapshot.runs[key] = persisted
       snapshot.journals[key] = []
-      appendRunSnapshotJournal(snapshot, key, 'run-created')
-      this.#testHooks.beforeResponseLedgerCommit?.()
-      completeGlobalLedger(snapshot.globalLedger, requestId, requestDigest, response)
+      const runOutcome = appendRunSnapshotJournal(snapshot, key, 'run-created', requestId)
+      completeGlobalLedger(snapshot.globalLedger, requestId, requestDigest, response, runOutcome)
       return structuredClone(response)
     })
   }
@@ -218,14 +227,16 @@ export class RuntimeRunStore {
       snapshot: RuntimeRunSnapshot
       response: unknown
     },
-    eventKind = 'run-updated',
+    eventKind: string,
+    lock: RuntimeRunLock,
   ): Promise<unknown> {
     return await this.#mutate((snapshot) => {
       verifyStoreSnapshot(snapshot)
+      const key = runKey(projectIdentityDigest, runId)
+      this.#requireCurrentLease(snapshot, key, lock)
       const replay = completedReplay(snapshot, requestId, requestDigest)
       if (replay.found) return replay.response
       requirePendingRequest(snapshot, requestId, requestDigest)
-      const key = runKey(projectIdentityDigest, runId)
       const existing = snapshot.runs[key]
       if (existing === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
       const outcome = update(migrateRuntimeRunSnapshot(existing))
@@ -240,9 +251,10 @@ export class RuntimeRunStore {
         throw runtimeStoreError('E2E_RUNTIME_RUN_REBIND_FORBIDDEN', '更新不得改变 Run 主键')
       }
       snapshot.runs[key] = persisted
-      appendRunSnapshotJournal(snapshot, key, eventKind)
-      this.#testHooks.beforeResponseLedgerCommit?.()
-      completeGlobalLedger(snapshot.globalLedger, requestId, requestDigest, outcome.response)
+      const runOutcome = appendRunSnapshotJournal(snapshot, key, eventKind, requestId)
+      completeGlobalLedger(
+        snapshot.globalLedger, requestId, requestDigest, outcome.response, runOutcome,
+      )
       return structuredClone(outcome.response)
     })
   }
@@ -253,13 +265,15 @@ export class RuntimeRunStore {
     requestId: string,
     requestDigest: string,
     project: (snapshot: RuntimeRunSnapshot) => unknown,
+    lock: RuntimeRunLock,
   ): Promise<unknown> {
     return await this.#mutate((snapshot) => {
       verifyStoreSnapshot(snapshot)
+      const key = runKey(projectIdentityDigest, runId)
+      this.#requireCurrentLease(snapshot, key, lock)
       const replay = completedReplay(snapshot, requestId, requestDigest)
       if (replay.found) return replay.response
       requirePendingRequest(snapshot, requestId, requestDigest)
-      const key = runKey(projectIdentityDigest, runId)
       const existing = snapshot.runs[key]
       if (existing === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
       const response = project(migrateRuntimeRunSnapshot(existing))
@@ -270,9 +284,8 @@ export class RuntimeRunStore {
           [requestId]: { requestDigest, response },
         },
       })
-      appendRunSnapshotJournal(snapshot, key, 'status-recorded')
-      this.#testHooks.beforeResponseLedgerCommit?.()
-      completeGlobalLedger(snapshot.globalLedger, requestId, requestDigest, response)
+      const runOutcome = appendRunSnapshotJournal(snapshot, key, 'status-recorded', requestId)
+      completeGlobalLedger(snapshot.globalLedger, requestId, requestDigest, response, runOutcome)
       return structuredClone(response)
     })
   }
@@ -290,6 +303,7 @@ export class RuntimeRunStore {
 
   async acquireRunLock(projectIdentityDigest: string, runId: string): Promise<RuntimeRunLock> {
     const key = runKey(projectIdentityDigest, runId)
+    let claim!: LeaseClaim
     await this.#mutate((snapshot) => {
       verifyStoreSnapshot(snapshot)
       const existing = snapshot.leases[key]
@@ -297,21 +311,47 @@ export class RuntimeRunStore {
       if (existing !== undefined && Date.parse(existing.expiresAt) > now.getTime()) {
         throw runtimeStoreError('E2E_RUNTIME_RUN_LOCKED', 'Run 正由 mutation owner 持有')
       }
+      claim = {
+        key,
+        ownerNonce: `${this.#processNonce}:${randomUUID()}`,
+        fencingToken: (existing?.fencingToken ?? 0) + 1,
+      }
       snapshot.leases[key] = {
-        ownerNonce: this.#processNonce,
+        ownerNonce: claim.ownerNonce,
+        fencingToken: claim.fencingToken,
         expiresAt: new Date(now.getTime() + this.#leaseMilliseconds).toISOString(),
       }
     })
     let closed = false
-    return {
+    const lock: RuntimeRunLock = {
       close: async () => {
         if (closed) return
-        closed = true
         await this.#mutate((snapshot) => {
           verifyStoreSnapshot(snapshot)
-          if (snapshot.leases[key]?.ownerNonce === this.#processNonce) delete snapshot.leases[key]
+          const existing = snapshot.leases[key]
+          if (existing?.ownerNonce === claim.ownerNonce
+            && existing.fencingToken === claim.fencingToken) {
+            existing.expiresAt = this.#now().toISOString()
+          }
         })
+        closed = true
       },
+    }
+    this.#lockClaims.set(lock, claim)
+    return lock
+  }
+
+  #requireCurrentLease(snapshot: RunStoreSnapshot, key: string, lock: RuntimeRunLock): void {
+    const claim = this.#lockClaims.get(lock)
+    const persisted = snapshot.leases[key]
+    if (claim?.key !== key
+      || persisted?.ownerNonce !== claim.ownerNonce
+      || persisted.fencingToken !== claim.fencingToken
+      || Date.parse(persisted.expiresAt) <= this.#now().getTime()) {
+      throw runtimeStoreError(
+        'E2E_RUNTIME_RUN_LEASE_FENCED',
+        'Run mutation 必须持有当前未过期的 persisted lease owner 与 fencing token',
+      )
     }
   }
 
@@ -339,6 +379,7 @@ export class RuntimeRunStore {
       try {
         const snapshot = parseStoreSnapshot(serialized)
         const result = operation(snapshot)
+        verifyStoreSnapshot(snapshot)
         this.#snapshotStore.commit(canonicalizeJson(snapshot))
         return result
       } catch (error) {
@@ -405,6 +446,7 @@ function verifyStoreSnapshot(snapshot: RunStoreSnapshot): void {
       }
     }
     verifyGlobalLedger(snapshot.globalLedger)
+    verifyRunGlobalClosure(snapshot)
     verifyLeases(snapshot.leases)
   } catch (error) {
     if (error instanceof E2EError && error.code === 'E2E_RUNTIME_JOURNAL_INTEGRITY_FAILED') throw error
@@ -414,7 +456,12 @@ function verifyStoreSnapshot(snapshot: RunStoreSnapshot): void {
 
 function verifyGlobalLedger(ledger: GlobalReplayLedger): void {
   verifyJournalRows(ledger.journal)
-  const projected = new Map<string, { requestDigest: string; status: 'pending' | 'completed'; responseDigest?: string }>()
+  const projected = new Map<string, {
+    requestDigest: string
+    status: 'pending' | 'completed'
+    responseDigest?: string
+    runOutcome?: GlobalRunOutcomeBinding
+  }>()
   for (const row of ledger.journal) {
     const event = row.event
     if (event.kind === 'request-reserved'
@@ -425,8 +472,12 @@ function verifyGlobalLedger(ledger: GlobalReplayLedger): void {
       projected.set(event.requestId, { requestDigest: event.requestDigest, status: 'pending' })
       continue
     }
+    const eventRunOutcome = parseRunOutcomeBinding(event.runOutcome)
+    const completionKeys = eventRunOutcome === undefined
+      ? ['kind', 'requestDigest', 'requestId', 'responseDigest']
+      : ['kind', 'requestDigest', 'requestId', 'responseDigest', 'runOutcome']
     if (event.kind === 'request-completed'
-      && hasExactKeys(event, ['kind', 'requestDigest', 'requestId', 'responseDigest'])
+      && hasExactKeys(event, completionKeys)
       && typeof event.requestId === 'string'
       && typeof event.requestDigest === 'string'
       && typeof event.responseDigest === 'string') {
@@ -436,6 +487,7 @@ function verifyGlobalLedger(ledger: GlobalReplayLedger): void {
           requestDigest: event.requestDigest,
           status: 'completed',
           responseDigest: event.responseDigest,
+          ...(eventRunOutcome === undefined ? {} : { runOutcome: eventRunOutcome }),
         })
         continue
       }
@@ -459,10 +511,76 @@ function verifyGlobalLedger(ledger: GlobalReplayLedger): void {
       }
       continue
     }
-    if (!hasExactKeys(entry, ['requestDigest', 'response', 'status'])
-      || responseDigest(entry.response) !== expected.responseDigest) {
+    const entryRunOutcome = parseRunOutcomeBinding(entry.runOutcome)
+    const completedKeys = entryRunOutcome === undefined
+      ? ['requestDigest', 'response', 'status']
+      : ['requestDigest', 'response', 'runOutcome', 'status']
+    if (!hasExactKeys(entry, completedKeys)
+      || responseDigest(entry.response) !== expected.responseDigest
+      || !sameRunOutcome(entryRunOutcome, expected.runOutcome)) {
       throw journalIntegrityError('completed replay response 与 journal 不一致')
     }
+  }
+}
+
+function sameRunOutcome(
+  first: GlobalRunOutcomeBinding | undefined,
+  second: GlobalRunOutcomeBinding | undefined,
+): boolean {
+  if (first === undefined || second === undefined) return first === second
+  return canonicalizeJson(first) === canonicalizeJson(second)
+}
+
+function verifyRunGlobalClosure(snapshot: RunStoreSnapshot): void {
+  for (const [requestId, entry] of Object.entries(snapshot.globalLedger.entries)) {
+    if (entry.status !== 'completed' || entry.runOutcome === undefined) continue
+    const run = snapshot.runs[entry.runOutcome.runKey]
+    const local = run?.requestResponses[requestId]
+    if (run === undefined || local === undefined
+      || local.requestDigest !== entry.requestDigest
+      || responseDigest(local.response) !== responseDigest(entry.response)
+      || !runJournalContainsOutcome(snapshot.journals[entry.runOutcome.runKey], requestId, entry.runOutcome)) {
+      throw journalIntegrityError('global Run outcome 无法与 Run response/journal 双向闭合')
+    }
+  }
+  for (const [key, run] of Object.entries(snapshot.runs)) {
+    for (const [requestId, local] of Object.entries(run.requestResponses)) {
+      const global = snapshot.globalLedger.entries[requestId]
+      if (global?.status !== 'completed'
+        || global.runOutcome?.runKey !== key
+        || local.requestDigest !== global.requestDigest
+        || responseDigest(local.response) !== responseDigest(global.response)
+        || !runJournalContainsOutcome(snapshot.journals[key], requestId, global.runOutcome)) {
+        throw journalIntegrityError('Run response 无法与 global outcome/journal 双向闭合')
+      }
+    }
+  }
+}
+
+function runJournalContainsOutcome(
+  rows: JournalRow[] | undefined,
+  requestId: string,
+  binding: GlobalRunOutcomeBinding,
+): boolean {
+  return rows?.some((row) => row.event.requestId === requestId
+    && row.event.kind === binding.outcomeKind
+    && row.event.digest === binding.snapshotDigest
+    && hasExactKeys(row.event, ['digest', 'kind', 'requestId'])) ?? false
+}
+
+function parseRunOutcomeBinding(value: unknown): GlobalRunOutcomeBinding | undefined {
+  if (value === undefined) return undefined
+  if (!isPlainRecord(value)
+    || !hasExactKeys(value, ['outcomeKind', 'runKey', 'snapshotDigest'])
+    || typeof value.runKey !== 'string'
+    || typeof value.snapshotDigest !== 'string'
+    || typeof value.outcomeKind !== 'string') {
+    throw journalIntegrityError('global Run outcome binding 结构非法')
+  }
+  return {
+    runKey: value.runKey,
+    snapshotDigest: value.snapshotDigest,
+    outcomeKind: value.outcomeKind,
   }
 }
 
@@ -492,8 +610,10 @@ function verifyJournalRows(rows: JournalRow[]): void {
 function verifyLeases(leases: Record<string, LeaseRow>): void {
   for (const lease of Object.values(leases)) {
     if (!isPlainRecord(lease)
-      || !hasExactKeys(lease, ['expiresAt', 'ownerNonce'])
+      || !hasExactKeys(lease, ['expiresAt', 'fencingToken', 'ownerNonce'])
       || typeof lease.ownerNonce !== 'string'
+      || !Number.isSafeInteger(lease.fencingToken)
+      || lease.fencingToken <= 0
       || typeof lease.expiresAt !== 'string'
       || !Number.isFinite(Date.parse(lease.expiresAt))) {
       throw journalIntegrityError('lease row 结构非法')
@@ -541,28 +661,43 @@ function completeGlobalLedger(
   requestId: string,
   requestDigest: string,
   response: unknown,
+  runOutcome?: GlobalRunOutcomeBinding,
 ): void {
   const entry = ledger.entries[requestId]
   if (entry?.requestDigest !== requestDigest || entry.status !== 'pending') {
     if (entry !== undefined && entry.requestDigest !== requestDigest) throw requestReplayMismatch()
     throw runtimeStoreError('E2E_RUNTIME_REQUEST_NOT_RESERVED', '只能完成已 reservation 的 request')
   }
-  ledger.entries[requestId] = { requestDigest, status: 'completed', response }
+  ledger.entries[requestId] = {
+    requestDigest,
+    status: 'completed',
+    response,
+    ...(runOutcome === undefined ? {} : { runOutcome }),
+  }
   appendJournalRow(ledger.journal, {
     kind: 'request-completed',
     requestId,
     requestDigest,
     responseDigest: responseDigest(response),
+    ...(runOutcome === undefined ? {} : { runOutcome }),
   })
 }
 
-function appendRunSnapshotJournal(snapshot: RunStoreSnapshot, key: string, kind: string): void {
+function appendRunSnapshotJournal(
+  snapshot: RunStoreSnapshot,
+  key: string,
+  kind: string,
+  requestId: string,
+): GlobalRunOutcomeBinding {
   const run = snapshot.runs[key]
   if (run === undefined) throw journalIntegrityError('无法为缺失 Run 写 journal')
+  const snapshotDigest = runtimeRunSnapshotDigest(run)
   appendJournalRow(snapshot.journals[key]!, {
     kind,
-    digest: runtimeRunSnapshotDigest(run),
+    digest: snapshotDigest,
+    requestId,
   })
+  return { runKey: key, snapshotDigest, outcomeKind: kind }
 }
 
 function appendJournalRow(journal: JournalRow[], event: Record<string, unknown>): void {
@@ -596,7 +731,10 @@ function requestReplayMismatch(): E2EError {
   )
 }
 
-async function ensureSecureUserStateRoot(homeDir: string, stateRoot: string): Promise<void> {
+async function ensureSecureUserStateRoot(
+  homeDir: string,
+  stateRoot: string,
+): Promise<SqliteStateDirectoryIdentity> {
   const absoluteHome = resolve(homeDir)
   let realHome: string
   try {
@@ -627,8 +765,15 @@ async function ensureSecureUserStateRoot(homeDir: string, stateRoot: string): Pr
       )
     }
   }
-  if (await realpath(stateRoot) !== normalizePlatformPathAlias(resolve(stateRoot))) {
+  const realStateRoot = await realpath(stateRoot)
+  if (realStateRoot !== normalizePlatformPathAlias(resolve(stateRoot))) {
     throw runtimeStoreError('E2E_RUNTIME_STATE_SYMLINK_FORBIDDEN', 'state root canonical path 不一致')
+  }
+  const stateMetadata = await lstat(stateRoot)
+  return {
+    realPath: realStateRoot,
+    device: String(stateMetadata.dev),
+    inode: String(stateMetadata.ino),
   }
 }
 

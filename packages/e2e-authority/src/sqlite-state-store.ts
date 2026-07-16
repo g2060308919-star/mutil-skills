@@ -1,8 +1,19 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, realpathSync, statSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 const processTransactionTails = new Map<string, Promise<void>>()
+
+export interface SqliteStateDirectoryIdentity {
+  realPath: string
+  device: string
+  inode: string
+}
+
+export interface SqliteSnapshotStoreOptions {
+  forbiddenRoots: string[]
+  expectedStateDirectory?: SqliteStateDirectoryIdentity
+}
 
 /** 单主机 Authority 状态的同步事务容器；调用方在事务内完成内存重建和 CAS。 */
 export class SqliteSnapshotStore {
@@ -11,13 +22,14 @@ export class SqliteSnapshotStore {
   readonly #processLockKey: string
   #closed = false
 
-  constructor(statePath: string, namespace: string, options: { forbiddenRoots: string[] }) {
+  constructor(statePath: string, namespace: string, options: SqliteSnapshotStoreOptions) {
     if (!statePath || !namespace) throw new Error('E2E_AUTHORITY_STATE_CONFIG_INVALID')
     if (options.forbiddenRoots.length === 0) throw new Error('E2E_AUTHORITY_STATE_FORBIDDEN_ROOTS_REQUIRED')
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     if (existsSync(statePath) && lstatSync(statePath).isSymbolicLink()) {
       throw new Error('E2E_AUTHORITY_STATE_SYMLINK_FORBIDDEN')
     }
+    assertExpectedStateDirectory(dirname(statePath), options.expectedStateDirectory)
     const realStateDirectory = realpathSync(dirname(statePath))
     for (const root of options.forbiddenRoots) {
       const realRoot = realpathSync(root)
@@ -27,6 +39,12 @@ export class SqliteSnapshotStore {
       }
     }
     this.#database = new DatabaseSync(statePath)
+    try {
+      assertExpectedStateDirectory(dirname(statePath), options.expectedStateDirectory)
+    } catch (error) {
+      this.#database.close()
+      throw error
+    }
     if (lstatSync(statePath).isSymbolicLink()) {
       this.#database.close()
       throw new Error('E2E_AUTHORITY_STATE_SYMLINK_FORBIDDEN')
@@ -143,5 +161,18 @@ export class SqliteSnapshotStore {
       'SELECT snapshot FROM authority_snapshots WHERE namespace = ?',
     ).get(this.#namespace) as { snapshot?: unknown } | undefined
     return typeof row?.snapshot === 'string' ? row.snapshot : undefined
+  }
+}
+
+function assertExpectedStateDirectory(
+  stateDirectory: string,
+  expected: SqliteStateDirectoryIdentity | undefined,
+): void {
+  if (expected === undefined) return
+  const metadata = statSync(stateDirectory)
+  if (realpathSync(stateDirectory) !== expected.realPath
+    || String(metadata.dev) !== expected.device
+    || String(metadata.ino) !== expected.inode) {
+    throw new Error('E2E_AUTHORITY_STATE_DIRECTORY_REBOUND')
   }
 }

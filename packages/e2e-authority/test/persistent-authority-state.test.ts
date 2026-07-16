@@ -1,10 +1,10 @@
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import { digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
-import { LocalApprovalAuthority, LocalLeaseAuthority } from '../src/index.js'
+import { LocalApprovalAuthority, LocalLeaseAuthority, SqliteSnapshotStore } from '../src/index.js'
 
 const directories: string[] = []
 const now = () => new Date('2026-07-13T00:00:00.000Z')
@@ -60,6 +60,27 @@ const attemptContext = {
 }
 
 describe('SQLite 持久 Authority 状态', () => {
+  test('拒绝 expected state directory 被同 pathname 的真实目录替换', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-state-parent-binding-'))
+    directories.push(directory)
+    const stateDirectory = join(directory, 'state')
+    await mkdir(stateDirectory, { mode: 0o700 })
+    const metadata = await stat(stateDirectory)
+    const expectedStateDirectory = {
+      realPath: await realpath(stateDirectory),
+      device: String(metadata.dev),
+      inode: String(metadata.ino),
+    }
+    await rename(stateDirectory, join(directory, 'state-original'))
+    await mkdir(stateDirectory, { mode: 0o700 })
+
+    expect(() => new SqliteSnapshotStore(
+      join(stateDirectory, 'authority.sqlite'),
+      'state-parent-binding-test',
+      { forbiddenRoots: ['/dev'], expectedStateDirectory },
+    )).toThrow('E2E_AUTHORITY_STATE_DIRECTORY_REBOUND')
+  })
+
   test('重启后保留 key、Grant、unknown reservation 和防重放计数', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-state-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')
