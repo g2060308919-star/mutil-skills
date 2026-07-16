@@ -21,7 +21,8 @@
       "@mutil-skills/e2e-authority": ["packages/e2e-authority/src/index.ts"],
       "@mutil-skills/e2e-gateway": ["packages/e2e-gateway/src/index.ts"],
       "@mutil-skills/e2e-playwright-runtime": ["packages/e2e-playwright-runtime/src/index.ts"],
-      "@mutil-skills/e2e-report": ["packages/e2e-report/src/index.ts"]
+      "@mutil-skills/e2e-report": ["packages/e2e-report/src/index.ts"],
+      "@mutil-skills/e2e-runtime": ["packages/e2e-runtime/src/index.ts"]
     },
     "declaration": true,
     "declarationMap": true,

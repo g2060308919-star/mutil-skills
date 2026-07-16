@@ -1,0 +1,19 @@
+{
+  "name": "@mutil-skills/e2e-runtime",
+  "version": "0.0.0",
+  "type": "module",
+  "files": ["dist/src", "assets"],
+  "bin": { "repo-e2e": "./dist/src/bin/repo-e2e.js" },
+  "exports": {
+    ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" }
+  },
+  "scripts": { "test": "vitest run" },
+  "dependencies": {
+    "@mutil-skills/e2e-authority": "0.0.0",
+    "@mutil-skills/e2e-contracts": "0.0.0",
+    "@mutil-skills/e2e-engine": "0.0.0",
+    "@mutil-skills/e2e-gateway": "0.0.0",
+    "@mutil-skills/e2e-playwright-runtime": "0.0.0",
+    "@mutil-skills/e2e-report": "0.0.0"
+  }
+}

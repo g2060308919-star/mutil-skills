@@ -1,0 +1,100 @@
+import {
+  E2EError,
+  RuntimeRequestEnvelopeSchema,
+  type E2EErrorCategory,
+  type RuntimeRequestEnvelope,
+  type RuntimeResponseEnvelope,
+} from '@mutil-skills/e2e-contracts'
+
+const runtimeIdentity = {
+  version: '0.0.0',
+  installationDigest: `sha256:${'0'.repeat(64)}`,
+} as const
+
+export function parseRuntimeRequest(json: string): RuntimeRequestEnvelope {
+  let value: unknown
+  try {
+    value = JSON.parse(json)
+  } catch (cause) {
+    throw invalidRuntimeRequest(cause)
+  }
+
+  const parsed = RuntimeRequestEnvelopeSchema.safeParse(value)
+  if (!parsed.success) throw invalidRuntimeRequest(parsed.error)
+  return parsed.data
+}
+
+export function runtimeErrorResponse(
+  requestId: string,
+  error: E2EError,
+  runtime: RuntimeResponseEnvelope['runtime'] = runtimeIdentity,
+): RuntimeResponseEnvelope {
+  const category = runtimeCategory(error.category)
+  return {
+    schemaVersion: '1.0.0',
+    requestId,
+    runtime,
+    ok: false,
+    error: {
+      code: error.code,
+      category,
+      terminalState: terminalStateForCategory(category),
+      message: error.message,
+      retryable: error.retryable,
+    },
+  }
+}
+
+export function exitCodeForResponse(response: RuntimeResponseEnvelope): number {
+  if (response.ok) return 0
+  switch (response.error?.category) {
+    case 'input': return 2
+    case 'environment':
+    case 'automation': return 3
+    case 'safety': return 4
+    case 'artifact':
+    case 'migration': return 5
+    case 'internal':
+    default: return 70
+  }
+}
+
+function invalidRuntimeRequest(cause: unknown): E2EError {
+  return new E2EError({
+    code: 'E2E_RUNTIME_REQUEST_INVALID',
+    category: 'input',
+    message: 'Runtime 请求必须是符合协议 1.0.0 的严格 JSON envelope',
+    retryable: false,
+    cause,
+  })
+}
+
+function runtimeCategory(category: E2EErrorCategory): NonNullable<RuntimeResponseEnvelope['error']>['category'] {
+  switch (category) {
+    case 'input':
+    case 'validation':
+    case 'source':
+    case 'decision': return 'input'
+    case 'environment': return 'environment'
+    case 'safety': return 'safety'
+    case 'automation':
+    case 'business':
+    case 'evidence': return 'automation'
+    case 'artifact': return 'artifact'
+    case 'internal': return 'internal'
+  }
+}
+
+function terminalStateForCategory(
+  category: NonNullable<RuntimeResponseEnvelope['error']>['category'],
+): NonNullable<RuntimeResponseEnvelope['error']>['terminalState'] {
+  switch (category) {
+    case 'input': return 'input-blocked'
+    case 'environment':
+    case 'internal': return 'environment-blocked'
+    case 'safety': return 'safety-blocked'
+    case 'automation': return 'automation-blocked'
+    case 'artifact': return 'artifact-blocked'
+    case 'migration': return 'migration-required'
+  }
+}
