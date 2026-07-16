@@ -23,6 +23,9 @@ import {
   type RuntimeDoctorReport,
 } from './runtime-doctor.js'
 import { isExactRuntimeVersion } from './runtime-manifest.js'
+import { runtimeLayout } from './runtime-layout.js'
+import { E2ERuntimeHost } from './runtime-host.js'
+import { RuntimeRunStore } from './run-store.js'
 import {
   RUNTIME_PACKAGE_VERSION,
   exitCodeForResponse,
@@ -40,6 +43,7 @@ export interface RuntimeCliDependencies {
   inspectRuntimeInstallation?: (options: InspectRuntimeInstallationOptions) => Promise<RuntimeInstallation>
   runRuntimeDoctor?: (options: RunRuntimeDoctorOptions) => Promise<RuntimeDoctorReport>
   serializeRuntimeDoctorReport?: (report: unknown) => string
+  runtimeHost?: Pick<E2ERuntimeHost, 'handle'>
 }
 
 export async function runCli(
@@ -96,12 +100,43 @@ export async function runCli(
   const json = await readUtf8(stdin)
   try {
     const request = parseRuntimeRequest(json)
-    return writeErrorResponse(stdout, request.requestId, new E2EError({
-      code: 'E2E_RUNTIME_NOT_INSTALLED',
-      category: 'environment',
-      message: 'E2E Runtime Host 尚未安装',
-      retryable: false,
-    }))
+    if (dependencies.runtimeHost !== undefined) {
+      const response = await dependencies.runtimeHost.handle(request, json)
+      await writeText(stdout, `${canonicalizeJson(response)}\n`)
+      return exitCodeForResponse(response)
+    }
+    let installation: RuntimeInstallation
+    try {
+      installation = await (dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault)({
+        homeDir: dependencies.homeDir,
+      })
+    } catch (cause) {
+      throw new E2EError({
+        code: 'E2E_RUNTIME_NOT_INSTALLED',
+        category: 'environment',
+        message: 'E2E Runtime Host 尚未安装或 active installation 无法验证',
+        retryable: false,
+        cause,
+      })
+    }
+    const projectRoot = 'projectRoot' in request ? request.projectRoot : undefined
+    const runStore = await RuntimeRunStore.open({
+      stateRoot: runtimeLayout(dependencies.homeDir).state,
+      ...(projectRoot === undefined ? {} : { forbiddenRoots: [projectRoot] }),
+    })
+    try {
+      const host = new E2ERuntimeHost({
+        installation,
+        doctor: async () => await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({ installation }),
+        runStore,
+        now: () => new Date(),
+      })
+      const response = await host.handle(request, json)
+      await writeText(stdout, `${canonicalizeJson(response)}\n`)
+      return exitCodeForResponse(response)
+    } finally {
+      await runStore.close()
+    }
   } catch (error) {
     const runtimeError = error instanceof E2EError
       ? error

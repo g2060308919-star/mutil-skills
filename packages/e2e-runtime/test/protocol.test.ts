@@ -112,6 +112,37 @@ describe('repo-e2e CLI protocol slice', () => {
     expect(stderr.text()).toBe('')
   })
 
+  test('routes a parsed rpc request through the installed Runtime Host', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    const calls: unknown[] = []
+
+    const exitCode = await runCli(
+      ['rpc'],
+      Readable.from([JSON.stringify(doctorRequest)]),
+      stdout.stream,
+      stderr.stream,
+      {
+        homeDir: '/safe/home',
+        installRuntime: async () => ({
+          version: '0.0.0', installationDigest: digest, launcher: '/safe/home/bin/repo-e2e',
+        }),
+        uninstallRuntime: async () => ({ version: '0.0.0' }),
+        runtimeHost: {
+          handle: async (request) => {
+            calls.push(request)
+            return successResponse()
+          },
+        },
+      },
+    )
+
+    expect(exitCode).toBe(0)
+    expect(calls).toEqual([doctorRequest])
+    expect(stdout.text()).toBe(`${canonicalizeJson(successResponse())}\n`)
+    expect(stderr.text()).toBe('')
+  })
+
   test('returns a sanitized input error instead of a stack for invalid rpc JSON', async () => {
     const stdout = captureWritable()
     const stderr = captureWritable()

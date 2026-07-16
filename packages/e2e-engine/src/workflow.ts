@@ -42,6 +42,17 @@ const allowedTransitions: Readonly<Record<WorkflowNode, readonly WorkflowNode[]>
   'migration-required': [],
 }
 
+export function createWorkflow(): WorkflowState {
+  return {
+    current: 'created',
+    sequence: 0,
+    eventChainDigest: digestText(
+      'workflow-event-chain/v1',
+      canonicalizeJson({ initial: 'created' }),
+    ),
+  }
+}
+
 export interface TransitionWorkflowInput {
   state: WorkflowState
   next: WorkflowNode

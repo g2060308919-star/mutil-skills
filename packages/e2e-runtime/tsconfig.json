@@ -6,6 +6,10 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo"
   },
-  "references": [{ "path": "../e2e-contracts" }],
+  "references": [
+    { "path": "../e2e-contracts" },
+    { "path": "../e2e-engine" },
+    { "path": "../e2e-authority" }
+  ],
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

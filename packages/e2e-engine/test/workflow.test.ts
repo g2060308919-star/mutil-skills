@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import type { WorkflowState } from '@mutil-skills/e2e-contracts'
 import {
-  pauseWorkflow, resumeWorkflow, transitionWorkflow, workflowResumeAuthorizationDigest,
+  createWorkflow, pauseWorkflow, resumeWorkflow, transitionWorkflow, workflowResumeAuthorizationDigest,
 } from '../src/index.js'
 
 function state(current: WorkflowState['current']): WorkflowState {
@@ -9,6 +9,18 @@ function state(current: WorkflowState['current']): WorkflowState {
 }
 
 describe('transitionWorkflow', () => {
+  test('creates the stable initial workflow state inside the Engine boundary', () => {
+    const first = createWorkflow()
+    const second = createWorkflow()
+
+    expect(first).toEqual(second)
+    expect(first).toEqual({
+      current: 'created',
+      sequence: 0,
+      eventChainDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+    })
+  })
+
   test('歧义暂停保留原节点，且只能用有效决定从同一事件链恢复', () => {
     const original = state('awaiting-scope-approval')
     const paused = pauseWorkflow({
