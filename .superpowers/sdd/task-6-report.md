@@ -1,64 +1,66 @@
-# Task 6 实施报告：Secret Broker 与一次性秘密注入
+# Task 6 实施报告：Secret Broker 与一次性秘密边界
 
 ## 结果
 
-完成 Task 6 范围：跨进程持久 Secret Broker、interactive/macOS Keychain/Linux Secret Service 三类来源、`repo-e2e secret provide` 隐藏 TTY 输入、RuntimeHost 构造依赖和普通子进程 env 隔离。未进入 Gateway、Browser 或页面注入实现。
+Task 6 已完成二次外审修复：建立跨 CLI/进程持久的 Secret Broker、一次性 handle、macOS Keychain/Linux Secret Service provider 与真实 TTY 隐藏输入；补齐状态完整性、项目身份、崩溃恢复、终态退役和子进程关闭边界。Task 6 不实现 Browser Bridge/page injection；真正把秘密消费到页面属于 Task 8/9。
 
-## TDD 证据
+## 最终架构
 
-按 RED → GREEN 分六个纵向切片推进：
+- `secret-contract.ts` 是 run/ref/provider grammar 与 64KiB、1024 entries、4MiB 上限的单一来源。
+- `secret-state.ts` 负责 strict `1.0.0` envelope、HMAC、AES-256-GCM 与持久状态解析；`secret-broker.ts` 只负责 provide/resolve/consume/reservation/retire 状态机，原 738 行职责已拆分。
+- Secret 不再使用独立 key 文件。Broker 复用 Task 5 `authority-state-openat.py` 与可信 Python 边界读取 `~/.mutil-skills/e2e/authority/state.key`，以 HKDF 固定域分离 wrapping/MAC key；原始 key、派生 key、Run data key 与明文 Buffer 在成功和异常路径清零。state 目录内不存在旁路 key。
+- SQLite envelope 为严格 `{ schemaVersion, revision, payload, mac }`。HMAC-SHA256 覆盖 capacity 和全部 project/run/ref/version/status/attempt/expiry/tombstone/ciphertext；envelope revision 必须等于同一事务读取的 SQLite row revision。删除 tombstone、修改 reservation、增加字段或重放旧 snapshot 均 fail closed。
+- Run key 是 `projectIdentityDigest + NUL + runId`；不同项目可安全共存同名 Run。Broker 不接受 caller digest，open 及每次 provide/resolve/consume/retire 都重新解析并比较 realRoot、device/inode、logicalProjectId 与 digest。
+- 系统 provider 读取前写 `{ attemptId, createdAt, expiresAt, status: resolving }`。成功密封为 available；缺失/失败或崩溃过期后变 authenticated `abandoned`，同 ref 永不再次读取 provider。真实 SQLite commit-abort 回归证明 crash window 不会产生二次读取。
+- consumed/abandoned tombstone 计入固定容量，只能凭 RunStore 签发的一次性私有 retirement capability 删除。capability 绑定签发 Store 的校验闭包、project/run、当前 persisted lease、不可恢复终态、Run snapshot digest 与 SQLite revision；伪造、跨项目、重放、非终态、lease/revision 变化全部拒绝。
+- handle 只暴露随机 `handleId`。WeakMap 保存当前绑定；消费成功或外部已消费后删除 WeakMap，并用 WeakSet 保留稳定 `CONSUMED` 语义。跨 Broker/伪造 handle 为 `INVALID`。
+- Provider 固定绝对命令、argv、`shell:false` 与最小 env。Linux 只设置从 UID 派生的 `unix:path=/run/user/<uid>/bus`，并验证 0700 UID 目录、真实 socket 及 spawn 前后 dev/inode。所有 timeout、overflow、child/stream error 与 TOCTOU abort 都执行 SIGKILL，并有界等待真实 close；kill false/no-close 返回稳定 shutdown failure。
+- CLI 使用单个固定 64KiB Buffer，退格立即清零被删字节，Ctrl-D/回车结束，所有路径恢复进入前精确 `isRaw` 状态。真实 PTY 回归验证不回显、退格/Ctrl-D 与退出前恢复。
+- `E2ERuntimeHost` 删除未使用的 `secretBroker` 构造依赖。普通 Runtime 子进程环境仍不含 secret/handle/host env/`.env`。
 
-1. Broker 模块不存在；新增持久化、加密、opaque handle 和重复消费测试后观察到 module-not-found RED。
-2. 系统 provider 模块不存在；固定命令、输出上限、替换、signal/error/timeout 测试先 RED。
-3. CLI 尚不识别 `secret provide`；真实 TTY adapter、非 TTY、Ctrl-C/EOF/read/restore/store failure 先返回旧 input error。
-4. 两 Broker 实例与真实 OS 子进程并发消费；验证旧实现只有内存语义不足。
-5. 同 runId 跨项目最初可读；新增失败测试后加入项目身份绑定和 wrapped-key AAD。
-6. 4MiB snapshot 原先会先提交超限状态、下次读取才报 integrity failure；新增 RED 后改为 commit 前原子容量阻塞。
+## TDD 与定向证据
 
-## 架构与安全边界
-
-- 固定 state：`~/.mutil-skills/e2e/state/runtime-secrets.sqlite`；master key 为当前 UID、单链接、真实普通文件、`0600`，目录逐层 `0700`。
-- 每 Run 随机 32-byte data key；master key 只包装 data key。secret AES-256-GCM AAD 精确为 canonical `{ runId, secretRef, providerId }`；wrapped key AAD 认证 runId 与项目 identity digest。
-- snapshot strict `1.0.0`，拒绝额外字段、未知版本、非规范 base64url、错误 key、认证失败和超过 1024 entries/4MiB。首发没有旧 Secret schema，不猜测迁移。
-- provide 在 SQLite `BEGIN IMMEDIATE` 中原子递增 ref version；旧 handle 失效。consume 在事务内删除 ciphertext、写 consumed tombstone并提交后才返回 Buffer。提交后崩溃可能丢失本次值，但不能二次消费。
-- handle 只暴露随机 `handleId`，由当前实例 WeakMap 绑定 run/ref/provider/version；伪造、跨 Broker、跨 ref/run/project、旧 version 和重放均拒绝。
-- 系统 provider 在调用前写持久 `resolving` reservation；另一进程不再读取。成功后密封为同一持久记录，缺失/失败写 consumed tombstone，不回退 env。
-- macOS/Linux 仅使用固定系统工具、argv 数组、`shell:false`、最小 env、64KiB stdout/stderr 上限、10s timeout、signal/error/exit 脱敏。路径要求 canonical、root owner、单链接、不可 group/world 修改，并在 spawn 边界复验 inode。
-- CLI 必须真实 TTY；raw/no-echo 在成功、Ctrl-C、EOF、读取、恢复和 Broker 失败路径恢复。主错误不被 cleanup 错误覆盖；原始 terminal/provider/CLI/plaintext/data-key Buffer 在最早边界清零。
-- Runtime package 根入口不导出 Broker/provider/handle；`E2ERuntimeHost` 只接受构造依赖。普通子进程 env 仍固定 `HOME/LANG/PATH/TMPDIR`，不含 handle、value、host env 或 `.env`。
-
-## 定向验证
+修复按 state/MAC → identity/composite → reservation crash recovery → retirement capability → Provider supervisor/Linux bus → TTY/CLI 的 RED/GREEN 切片完成。
 
 ```text
-npx vitest run packages/e2e-runtime/test/secret-broker.test.ts \
+npx vitest run \
+  packages/e2e-runtime/test/secret-state.test.ts \
+  packages/e2e-runtime/test/secret-broker.test.ts \
+  packages/e2e-runtime/test/secret-retirement.test.ts \
   packages/e2e-runtime/test/secret-providers.test.ts \
   packages/e2e-runtime/test/secret-cli.test.ts \
-  packages/e2e-runtime/test/environment-policy.test.ts \
-  packages/e2e-runtime/test/public-exports.test.ts
+  packages/e2e-runtime/test/secret-cli-pty.test.ts
 
-Test Files  5 passed
-Tests       43 passed
-
-npm run typecheck          PASS
-npm run lint:architecture  PASS
-git diff --check           PASS
+Test Files  6 passed
+Tests       57 passed
 ```
 
-其中包含真实 OS child：子进程 A provide 后退出，两个独立子进程并发重开 Broker/consume，恰好一个成功；任何 stdout/stderr 不含 canary。
+定向套件含真实 OS 子进程并发 Broker、真实 SQLite trigger commit-abort、真实 provider child timeout→SIGKILL→close，以及 macOS Python PTY→Node CLI 交互；不是只有 mock 单测。
 
 ## 全量门禁
 
 ```text
 npm test
-  Test Files  123 passed
-  Tests       909 passed | 15 sandbox skips
+  Test Files  126 passed
+  Tests       928 passed | 15 sandbox skips
 
-npm run typecheck                         PASS
-npm run lint:architecture                 PASS
-npm run build                             PASS
-npm pack --dry-run --workspace @mutil-skills/e2e-runtime
-  PASS / 104 files / 104.0 kB tarball / 507.2 kB unpacked
-git diff --check                          PASS
+npm run typecheck          PASS
+npm run lint:architecture  PASS
+npm run build              PASS
+git diff --check           PASS
+
+npm pack --dry-run --workspace @mutil-skills/e2e-runtime \
+  --cache /private/tmp/mutil-skills-npm-cache
+  PASS / 112 files / 112.5 kB tarball / 541.6 kB unpacked
+
+npm run e2e:golden
+  默认 sandbox：24 个在产品断言前被 loopback/MachPort 权限阻塞
+  2026-07-17 提交前工作树，经 managed auto-review 批准的 require_escalated 本轮复跑：
+  Test Files 10 passed；Tests 24 passed
 ```
 
-默认 sandbox 的 `npm run e2e:golden` 在产品断言前环境阻塞：21 个用例因 `listen EPERM 127.0.0.1` 无法绑定 loopback，3 个用例因 Chromium MachPort/process sandbox `Permission denied/kill EPERM` 无法启动浏览器；共 24 blocked、0 个进入产品断言。本轮没有申请 elevated Golden，不能把该结果记为产品通过。Task 6 自身的真实 OS child/SQLite 并发测试在默认 sandbox 已通过。
+全量单测的 15 个 skip 都带明确 sandbox 原因。Golden 默认 sandbox 结果仍是 24 blocked；随后同一提交前工作树经 managed auto-review 明确批准 `require_escalated`，本轮复跑 24/24 通过。该结果不等同于普通 sandbox 通过。
+
+## 明确 residual
+
+SQLite row revision 能识别“旧 snapshot 单独覆盖”，但不能识别攻击者把完整 SQLite 文件连同 revision 一起回滚。消除整库回滚需要 OS keychain 单调计数器、远端透明日志或其他项目范围之外的可信单调锚；本地单用户首发模型不声称具备该能力。

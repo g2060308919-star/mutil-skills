@@ -148,14 +148,18 @@ export class SqliteSnapshotStore {
   }
 
   begin(): string {
+    return this.beginVersioned().snapshot
+  }
+
+  beginVersioned(): { snapshot: string; revision: number } {
     if (this.#closed) throw new Error('E2E_AUTHORITY_STATE_STORE_CLOSED')
     this.#database.exec('BEGIN IMMEDIATE')
-    const snapshot = this.#read()
-    if (snapshot === undefined) {
+    const row = this.#readVersioned()
+    if (row === undefined) {
       this.#database.exec('ROLLBACK')
       throw new Error('E2E_AUTHORITY_STATE_MISSING')
     }
-    return snapshot
+    return row
   }
 
   commit(snapshot: string): void {
@@ -184,10 +188,17 @@ export class SqliteSnapshotStore {
   }
 
   #read(): string | undefined {
+    return this.#readVersioned()?.snapshot
+  }
+
+  #readVersioned(): { snapshot: string; revision: number } | undefined {
     const row = this.#database.prepare(
-      'SELECT snapshot FROM authority_snapshots WHERE namespace = ?',
-    ).get(this.#namespace) as { snapshot?: unknown } | undefined
-    return typeof row?.snapshot === 'string' ? row.snapshot : undefined
+      'SELECT revision, snapshot FROM authority_snapshots WHERE namespace = ?',
+    ).get(this.#namespace) as { revision?: unknown; snapshot?: unknown } | undefined
+    return typeof row?.snapshot === 'string' && typeof row.revision === 'number'
+      && Number.isSafeInteger(row.revision) && row.revision >= 1
+      ? { snapshot: row.snapshot, revision: row.revision }
+      : undefined
   }
 }
 

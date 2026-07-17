@@ -17,6 +17,7 @@ afterEach(async () => {
 describe('repo-e2e secret provide', () => {
   test('真实 TTY adapter 关闭 echo/raw 后只输出无秘密的严格 JSON，且新 Broker 可消费', async () => {
     const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    await writeProjectIdentity(roots.project, 'PROJECT-SECRET-CLI-REAL')
     const stdout = captureWritable(); const stderr = captureWritable()
     const terminal = terminalWith([Buffer.from('interactive-secret-canary'), Buffer.from('\n')])
     const exitCode = await runCli(
@@ -145,6 +146,7 @@ describe('repo-e2e secret provide', () => {
 
   test('EOF 可结束一次输入并将 terminal adapter 提供的原始 Buffer 清零', async () => {
     const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    await writeProjectIdentity(roots.project, 'PROJECT-SECRET-CLI-EOF')
     const raw = Buffer.from('eof-secret-canary')
     const terminal = terminalWith([raw])
     const stdout = captureWritable(); const stderr = captureWritable()
@@ -155,6 +157,53 @@ describe('repo-e2e secret provide', () => {
     )
     expect(exitCode).toBe(0)
     expect([...raw]).toEqual(new Array(raw.length).fill(0))
+  })
+
+  test('Ctrl-D 结束输入、退格删除字节，并恢复进入前已开启的 raw 状态', async () => {
+    const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    const chunk = Buffer.from([0x61, 0x62, 0x7f, 0x63, 0x04, 0x64])
+    const terminal = terminalWith([chunk], true, true)
+    const stdout = captureWritable(); const stderr = captureWritable()
+    const provide = vi.fn(async (input: { value: Uint8Array }) => {
+      expect(Buffer.from(input.value).toString()).toBe('ac')
+    })
+    const deps = dependencies(roots.home, terminal, async () => undefined, roots.project)
+    deps.openSecretBroker = async () => ({ provide, close: async () => undefined })
+    expect(await runCli(
+      ['secret', 'provide', '--run-id', 'RUN-1', '--ref', 'PASSWORD'],
+      Readable.from([]), stdout.stream, stderr.stream, deps,
+    )).toBe(0)
+    expect(terminal.setRawMode).toHaveBeenLastCalledWith(true)
+    expect([...chunk]).toEqual(new Array(chunk.length).fill(0))
+  })
+
+  test('进入前 raw 已开启时，中断失败也恢复为 raw 开启状态', async () => {
+    const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    const terminal = terminalWith([Buffer.from([0x03])], true, true)
+    const stdout = captureWritable(); const stderr = captureWritable()
+    expect(await runCli(
+      ['secret', 'provide', '--run-id', 'RUN-1', '--ref', 'PASSWORD'],
+      Readable.from([]), stdout.stream, stderr.stream,
+      dependencies(roots.home, terminal, async () => undefined, roots.project),
+    )).toBe(4)
+    expect(terminal.setRawMode).toHaveBeenLastCalledWith(true)
+  })
+
+  test('交互输入使用固定 64KiB 上限，超限后清零输入且不写 Broker', async () => {
+    const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    const chunk = Buffer.alloc(64 * 1024 + 1, 0x61)
+    const terminal = terminalWith([chunk])
+    const stdout = captureWritable(); const stderr = captureWritable()
+    const provide = vi.fn()
+    const deps = dependencies(roots.home, terminal, async () => undefined, roots.project)
+    deps.openSecretBroker = async () => ({ provide, close: async () => undefined })
+    expect(await runCli(
+      ['secret', 'provide', '--run-id', 'RUN-1', '--ref', 'PASSWORD'],
+      Readable.from([]), stdout.stream, stderr.stream, deps,
+    )).toBe(4)
+    expect(JSON.parse(stdout.text())).toMatchObject({ error: { code: 'E2E_SECRET_VALUE_TOO_LARGE' } })
+    expect(provide).not.toHaveBeenCalled()
+    expect([...chunk]).toEqual(new Array(chunk.length).fill(0))
   })
 
   test('Broker 主错误不会被 close cleanup 错误覆盖', async () => {
@@ -180,7 +229,7 @@ describe('repo-e2e secret provide', () => {
     expect(`${stdout.text()}${stderr.text()}`).not.toContain('cleanup-secret-canary')
   })
 
-  test('默认 CLI 从 Task4 Run Store 复验当前项目 Run 并把项目 identity 传给 Broker', async () => {
+  test('默认 CLI 从 Task4 Run Store 复验当前项目 Run，Broker 自行解析项目 identity', async () => {
     const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
     await mkdir(`${roots.project}/.biztest`)
     await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
@@ -216,7 +265,7 @@ describe('repo-e2e secret provide', () => {
       Readable.from([]), stdout.stream, stderr.stream, deps,
     )).toBe(0)
     expect(openSecretBroker).toHaveBeenCalledWith({
-      homeDir: roots.home, projectRoot: roots.project, projectIdentityDigest: identity.digest,
+      homeDir: roots.home, projectRoot: roots.project,
     })
   })
 })
@@ -237,9 +286,11 @@ function dependencies(
   }
 }
 
-function terminalWith(chunks: Buffer[], isTTY = true): SecretTerminalAdapter & { setRawMode: ReturnType<typeof vi.fn> } {
+function terminalWith(
+  chunks: Buffer[], isTTY = true, isRaw = false,
+): SecretTerminalAdapter & { setRawMode: ReturnType<typeof vi.fn> } {
   return {
-    isTTY,
+    isTTY, isRaw,
     setRawMode: vi.fn(),
     async *read() { for (const chunk of chunks) yield chunk },
   }
@@ -263,4 +314,11 @@ function captureWritable(): { stream: Writable; text: () => string } {
 
 function digest(character: string): string {
   return `sha256:${character.repeat(64)}`
+}
+
+async function writeProjectIdentity(projectRoot: string, projectId: string): Promise<void> {
+  await mkdir(`${projectRoot}/.biztest`, { recursive: true })
+  await writeFile(`${projectRoot}/.biztest/project.json`, JSON.stringify({
+    schemaVersion: '1.0.0', projectId,
+  }))
 }

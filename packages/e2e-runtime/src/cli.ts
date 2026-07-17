@@ -37,6 +37,11 @@ import { assertSameProjectIdentity, resolveProjectIdentity } from './project-ide
 import { SecureProjectFileReader } from './secure-project-files.js'
 import { RuntimeSecretBroker } from './secret-broker.js'
 import {
+  MAX_SECRET_BYTES,
+  SECRET_REF_PATTERN,
+  SECRET_RUN_ID_PATTERN,
+} from './secret-contract.js'
+import {
   computeRuntimeApprovalSubjectDigest,
   startRuntimeAuthorityHost,
   type RuntimeAuthorityHost,
@@ -51,12 +56,12 @@ import {
 } from './protocol.js'
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
-const SECRET_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
-const SECRET_REF = /^[A-Z][A-Z0-9_-]{0,127}$/
-const MAX_INTERACTIVE_SECRET_BYTES = 64 * 1024
+const SECRET_RUN_ID = SECRET_RUN_ID_PATTERN
+const SECRET_REF = SECRET_REF_PATTERN
 
 export interface SecretTerminalAdapter {
   readonly isTTY: boolean
+  readonly isRaw?: boolean
   setRawMode(enabled: boolean): void
   read(): AsyncIterable<Uint8Array>
 }
@@ -89,7 +94,6 @@ export interface RuntimeCliDependencies {
   openSecretBroker?: (options: {
     homeDir: string
     projectRoot: string
-    projectIdentityDigest?: string
   }) => Promise<CliSecretBroker>
 }
 
@@ -287,13 +291,12 @@ async function runSecretCommand(
   let secret: Buffer | undefined
   let broker: CliSecretBroker | undefined
   try {
-    const projectIdentityDigest = await (dependencies.validateSecretRun?.(runId)
+    await (dependencies.validateSecretRun?.(runId)
       ?? validateDefaultSecretRun(dependencies.homeDir, projectRoot, runId))
     secret = await readHiddenSecret(terminal)
     broker = await (dependencies.openSecretBroker ?? RuntimeSecretBroker.open)({
       homeDir: dependencies.homeDir,
       projectRoot,
-      ...(projectIdentityDigest === undefined ? {} : { projectIdentityDigest }),
     })
     await broker.provide({ runId, secretRef, value: secret })
     await broker.close()
@@ -312,7 +315,7 @@ async function runSecretCommand(
   } finally { secret?.fill(0) }
 }
 
-async function validateDefaultSecretRun(homeDir: string, projectRoot: string, runId: string): Promise<string> {
+async function validateDefaultSecretRun(homeDir: string, projectRoot: string, runId: string): Promise<void> {
   const store = await RuntimeRunStore.open({ homeDir, projectRoot })
   try {
     const identity = await resolveProjectIdentity(projectRoot)
@@ -322,14 +325,18 @@ async function validateDefaultSecretRun(homeDir: string, projectRoot: string, ru
         message: 'secret provide 必须绑定当前项目中已存在的 Run', retryable: false,
       })
     }
-    return identity.digest
   } finally { await store.close() }
 }
 
 function terminalAdapterFor(stdin: Readable): SecretTerminalAdapter {
-  const candidate = stdin as Readable & { isTTY?: boolean; setRawMode?(enabled: boolean): void }
+  const candidate = stdin as Readable & {
+    isTTY?: boolean
+    isRaw?: boolean
+    setRawMode?(enabled: boolean): void
+  }
   return {
     isTTY: candidate.isTTY === true && typeof candidate.setRawMode === 'function',
+    get isRaw() { return candidate.isRaw === true },
     setRawMode(enabled: boolean) {
       if (typeof candidate.setRawMode !== 'function') throw new Error('TTY raw mode unavailable')
       candidate.setRawMode(enabled)
@@ -339,12 +346,14 @@ function terminalAdapterFor(stdin: Readable): SecretTerminalAdapter {
 }
 
 async function readHiddenSecret(terminal: SecretTerminalAdapter): Promise<Buffer> {
-  const bytes: number[] = []
-  let rawMode = false
+  const bytes = Buffer.alloc(MAX_SECRET_BYTES)
+  let length = 0
+  const originalRawMode = terminal.isRaw === true
+  let restoreRequired = false
   let result: Buffer | undefined
   let failure: E2EError | undefined
   try {
-    rawMode = true
+    restoreRequired = true
     terminal.setRawMode(true)
     let completed = false
     for await (const raw of terminal.read()) {
@@ -356,22 +365,27 @@ async function readHiddenSecret(terminal: SecretTerminalAdapter): Promise<Buffer
             code: 'E2E_SECRET_INTERACTIVE_INTERRUPTED', category: 'safety',
             message: '交互秘密输入已中断', retryable: false,
           })
-          if (byte === 0x0a || byte === 0x0d) { completed = true; continue }
-          if (byte === 0x7f || byte === 0x08) { bytes.pop(); continue }
-          bytes.push(byte)
-          if (bytes.length > MAX_INTERACTIVE_SECRET_BYTES) throw new E2EError({
+          if (byte === 0x04 || byte === 0x0a || byte === 0x0d) { completed = true; continue }
+          if (byte === 0x7f || byte === 0x08) {
+            if (length > 0) { length -= 1; bytes[length] = 0 }
+            continue
+          }
+          if (length >= MAX_SECRET_BYTES) throw new E2EError({
             code: 'E2E_SECRET_VALUE_TOO_LARGE', category: 'safety',
             message: '交互秘密超过 64KiB 上限', retryable: false,
           })
+          bytes[length] = byte
+          length += 1
         }
       } finally { chunk.fill(0) }
       if (completed) break
     }
-    if (bytes.length === 0) throw new E2EError({
+    if (length === 0) throw new E2EError({
       code: 'E2E_SECRET_INPUT_INVALID', category: 'safety',
       message: '交互秘密不能为空', retryable: false,
     })
-    result = Buffer.from(bytes)
+    result = Buffer.alloc(length)
+    bytes.copy(result, 0, 0, length)
   } catch (cause) {
     failure = cause instanceof E2EError ? cause : new E2EError({
       code: 'E2E_SECRET_INTERACTIVE_FAILED', category: 'safety',
@@ -379,8 +393,8 @@ async function readHiddenSecret(terminal: SecretTerminalAdapter): Promise<Buffer
     })
   } finally {
     bytes.fill(0)
-    if (rawMode) {
-      try { terminal.setRawMode(false) } catch {
+    if (restoreRequired) {
+      try { terminal.setRawMode(originalRawMode) } catch {
         result?.fill(0)
         failure ??= new E2EError({
           code: 'E2E_SECRET_INTERACTIVE_RESTORE_FAILED', category: 'safety',

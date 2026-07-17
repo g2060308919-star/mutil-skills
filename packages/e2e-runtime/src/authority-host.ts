@@ -22,7 +22,7 @@ import { spawn } from 'node:child_process'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
-import { createHash } from 'node:crypto'
+import { createHash, hkdfSync } from 'node:crypto'
 import { buildChildEnvironment } from './environment-policy.js'
 import type { RuntimeInstallation } from './runtime-discovery.js'
 import { runtimeLayout } from './runtime-layout.js'
@@ -366,6 +366,65 @@ interface PreparedAuthorityState {
   directoryHandle: FileHandle
   identity: SecureDirectoryIdentity
   stateEncryptionKey: Buffer
+}
+
+export interface RuntimeSecretStateKeys {
+  wrappingKey: Buffer
+  macKey: Buffer
+  clear(): void
+}
+
+/** Runtime 内部专用：复用 Authority openat/key helper，并以固定域派生 Secret keys。 */
+export async function deriveRuntimeSecretStateKeys(homeDir: string): Promise<RuntimeSecretStateKeys> {
+  const layout = runtimeLayout(homeDir)
+  const environment = buildChildEnvironment({
+    host: {}, runtimeBinPaths: [dirname(process.execPath)], homeDir, tempDir: tmpdir(),
+  })
+  const trustedPython = await discoverTrustedPython()
+  const prepared = await prepareAuthorityState(
+    homeDir, layout.authority, environment, trustedPython,
+  )
+  let derived: Buffer | undefined
+  let wrappingKey: Buffer | undefined
+  let macKey: Buffer | undefined
+  let preparationError: unknown
+  try {
+    derived = Buffer.from(hkdfSync(
+      'sha256',
+      prepared.stateEncryptionKey,
+      Buffer.from('mutil-skills/e2e/authority-state-key/v1', 'utf8'),
+      Buffer.from('e2e-runtime-secret-state/wrap-and-mac/v1', 'utf8'),
+      64,
+    ))
+    wrappingKey = Buffer.from(derived.subarray(0, 32))
+    macKey = Buffer.from(derived.subarray(32, 64))
+  } catch (error) {
+    preparationError = error
+  } finally {
+    derived?.fill(0)
+    prepared.stateEncryptionKey.fill(0)
+    try { await prepared.directoryHandle.close() } catch (error) {
+      preparationError = preparationError === undefined
+        ? error
+        : new AggregateError([preparationError, error], 'E2E_SECRET_KEY_DERIVATION_CLEANUP_FAILED')
+    }
+  }
+  if (preparationError !== undefined || wrappingKey === undefined || macKey === undefined) {
+    wrappingKey?.fill(0)
+    macKey?.fill(0)
+    throw preparationError ?? authorityHostError('E2E_SECRET_KEY_DERIVATION_FAILED')
+  }
+  let cleared = false
+  return {
+    wrappingKey,
+    macKey,
+    clear() {
+      if (cleared) return
+      cleared = true
+      wrappingKey.fill(0)
+      macKey.fill(0)
+    },
+  }
 }
 
 async function prepareAuthorityState(

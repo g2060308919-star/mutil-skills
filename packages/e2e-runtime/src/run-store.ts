@@ -17,6 +17,26 @@ import { migrateRuntimeRunSnapshot } from './runtime-state-migration.js'
 
 const EMPTY_DIGEST = `sha256:${'0'.repeat(64)}`
 const LEASE_MILLISECONDS = 30_000
+const TERMINAL_SECRET_RETIREMENT_STATES = new Set<WorkflowState['current']>([
+  'accepted', 'rejected', 'incomplete', 'environment-blocked', 'safety-blocked',
+  'automation-blocked', 'artifact-blocked', 'migration-required',
+])
+
+declare const runtimeSecretRetirementCapabilityBrand: unique symbol
+
+/** 仅供 Runtime 内部模块传递；运行时真实性由本模块私有 WeakMap 保证。 */
+export interface RuntimeSecretRetirementCapability {
+  readonly [runtimeSecretRetirementCapabilityBrand]: true
+}
+
+interface RetirementCapabilityRecord {
+  projectIdentityDigest: string
+  runId: string
+  used: boolean
+  verify(): Promise<void>
+}
+
+const retirementCapabilities = new WeakMap<object, RetirementCapabilityRecord>()
 
 export interface RuntimeRunSnapshot {
   schemaVersion: '1.0.0'
@@ -342,6 +362,48 @@ export class RuntimeRunStore {
     return lock
   }
 
+  async authorizeSecretRetirement(
+    projectIdentityDigest: string,
+    runId: string,
+    lock: RuntimeRunLock,
+  ): Promise<RuntimeSecretRetirementCapability> {
+    const key = runKey(projectIdentityDigest, runId)
+    let revision!: number
+    let snapshotDigest!: string
+    await this.#snapshotStore.runExclusive(async () => {
+      const transaction = this.#snapshotStore.beginVersioned()
+      try {
+        const snapshot = parseStoreSnapshot(transaction.snapshot)
+        verifyStoreSnapshot(snapshot)
+        this.#requireCurrentLease(snapshot, key, lock)
+        const run = snapshot.runs[key]
+        if (run === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+        if (!TERMINAL_SECRET_RETIREMENT_STATES.has(run.workflow.current)) {
+          throw runtimeStoreError(
+            'E2E_SECRET_RETIREMENT_RUN_NOT_TERMINAL',
+            '只有不可恢复的终态 Run 才能退役 secret tombstone',
+          )
+        }
+        revision = transaction.revision
+        snapshotDigest = runtimeRunSnapshotDigest(run)
+        this.#snapshotStore.rollback()
+      } catch (error) {
+        this.#snapshotStore.rollback()
+        throw error
+      }
+    })
+    const capability = Object.freeze({}) as RuntimeSecretRetirementCapability
+    retirementCapabilities.set(capability, {
+      projectIdentityDigest,
+      runId,
+      used: false,
+      verify: async () => await this.#verifySecretRetirementCapability({
+        projectIdentityDigest, runId, key, lock, revision, snapshotDigest,
+      }),
+    })
+    return capability
+  }
+
   #requireCurrentLease(snapshot: RunStoreSnapshot, key: string, lock: RuntimeRunLock): void {
     const claim = this.#lockClaims.get(lock)
     const persisted = snapshot.leases[key]
@@ -359,6 +421,45 @@ export class RuntimeRunStore {
         'Run mutation 必须持有当前未过期的 persisted lease owner 与 fencing token',
       )
     }
+  }
+
+  async #verifySecretRetirementCapability(input: {
+    projectIdentityDigest: string
+    runId: string
+    key: string
+    lock: RuntimeRunLock
+    revision: number
+    snapshotDigest: string
+  }): Promise<void> {
+    await this.#snapshotStore.runExclusive(async () => {
+      const transaction = this.#snapshotStore.beginVersioned()
+      try {
+        if (transaction.revision !== input.revision) {
+          throw runtimeStoreError(
+            'E2E_SECRET_RETIREMENT_CAPABILITY_STALE',
+            'Run Store revision 已改变，必须重新授权退役',
+          )
+        }
+        const snapshot = parseStoreSnapshot(transaction.snapshot)
+        verifyStoreSnapshot(snapshot)
+        this.#requireCurrentLease(snapshot, input.key, input.lock)
+        const run = snapshot.runs[input.key]
+        if (run === undefined
+          || run.projectIdentityDigest !== input.projectIdentityDigest
+          || run.runId !== input.runId
+          || !TERMINAL_SECRET_RETIREMENT_STATES.has(run.workflow.current)
+          || runtimeRunSnapshotDigest(run) !== input.snapshotDigest) {
+          throw runtimeStoreError(
+            'E2E_SECRET_RETIREMENT_CAPABILITY_STALE',
+            'Run 终态或 snapshot 已改变，必须重新授权退役',
+          )
+        }
+        this.#snapshotStore.rollback()
+      } catch (error) {
+        this.#snapshotStore.rollback()
+        throw error
+      }
+    })
   }
 
   async #verifyPersistedState(): Promise<void> {
@@ -393,6 +494,27 @@ export class RuntimeRunStore {
         throw error
       }
     })
+  }
+}
+
+/** RuntimeSecretBroker 内部消费；伪造、跨项目和重放均 fail closed。 */
+export async function consumeRuntimeSecretRetirementCapability(
+  capability: RuntimeSecretRetirementCapability,
+  expectedProjectIdentityDigest: string,
+): Promise<{ projectIdentityDigest: string; runId: string }> {
+  const record = retirementCapabilities.get(capability)
+  if (record === undefined || record.used
+    || record.projectIdentityDigest !== expectedProjectIdentityDigest) {
+    throw runtimeStoreError(
+      'E2E_SECRET_RETIREMENT_CAPABILITY_INVALID',
+      'Secret 退役 capability 伪造、跨项目或已消费',
+    )
+  }
+  record.used = true
+  await record.verify()
+  return {
+    projectIdentityDigest: record.projectIdentityDigest,
+    runId: record.runId,
   }
 }
 
@@ -737,7 +859,8 @@ function requestReplayMismatch(): E2EError {
   )
 }
 
-async function ensureSecureUserStateRoot(
+/** Runtime 内部共享：固定创建并钉住用户级 state 根；不从包根导出。 */
+export async function ensureSecureUserStateRoot(
   homeDir: string,
   stateRoot: string,
 ): Promise<SqliteStateDirectoryIdentity> {

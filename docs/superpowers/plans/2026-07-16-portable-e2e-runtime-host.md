@@ -978,6 +978,8 @@ git commit -m "feat(e2e): require user presence for runtime approvals"
 
 > **CLI/Provider Errata（2026-07-17，Task 6 实施）**：隐藏输入必须是真实 TTY raw/no-echo 通道，Ctrl-C、EOF、读取、存储及恢复失败均恢复终端并清零原始 Buffer；stdout 只输出无 secret 的 canonical JSON。系统命令只允许 `/usr/bin/security` 或经 realpath/root-owner/不可修改/前后 inode 复验的 `/usr/bin/secret-tool`，argv 固定、`shell:false`、64KiB 上限、超时 kill、最小固定 env，所有 error/signal/stderr 路径脱敏。普通 Runtime 子进程 env 继续只有 `HOME/LANG/PATH/TMPDIR`，不传 handle 或 value；秘密只通过 RuntimeHost 构造注入的 Broker 与后续受控 Bridge API 传递。首发没有可迁移的旧 Secret schema，未知版本必须 fail closed，不猜测升级。
 
+> **Spec Errata（2026-07-17，Task 6 二次外审，覆盖前两段冲突结论）**：Secret key 统一来自 Task 5 Authority `state.key`，由安全 helper 读取并经 HKDF 域分离为 wrapping/MAC key；state 目录不得再出现旁路 key。Snapshot 使用 strict version/revision/HMAC envelope，MAC 覆盖全部 payload 和 tombstone，且 envelope revision 与 SQLite row revision 精确相等；单独旧 snapshot replay 被拒绝，完整数据库文件回滚仍是需要外部单调锚才能消除的 residual。Broker 不接受 caller digest，每次公开数据操作都重验完整 ProjectIdentity；复合 project/run 主键允许不同项目同名 Run 共存。`resolving` 具有有界 attempt/created/expiry，失败或崩溃过期后成为不可重读的 `abandoned`；只有 RunStore 当前 lease、不可恢复终态、未变化 Run snapshot 与 SQLite revision 共同签发的一次性私有 capability 才可删除该 Run 的 secret/tombstone。Provider 失败统一 kill→有界等待 close，Linux session bus 固定从 UID 派生并前后钉住；TTY 用固定 64KiB Buffer、精确恢复原 raw 状态并在退格/Ctrl-D/异常路径清零。Task 6 不实现 Browser Bridge/page injection；该闭环属于 Task 8/9，当前 RuntimeHost 不注入未使用的 Broker。
+
 **Files:**
 - Create: `packages/e2e-runtime/src/secret-broker.ts`
 - Create: `packages/e2e-runtime/src/secret-providers.ts`
@@ -992,7 +994,7 @@ git commit -m "feat(e2e): require user presence for runtime approvals"
 - Produces: `RuntimeSecretBroker.provide()`、`resolve()`、`consume()`；opaque `OneTimeSecretHandle`。
 - Provider IDs: `interactive`、`macos-keychain`、`linux-secret-service`；不实现 env provider。
 
-- [ ] **Step 1: 写 env/重复消费/日志泄漏失败测试**
+- [x] **Step 1: 写 env/重复消费/日志泄漏失败测试**
 
 ```ts
 import { describe, expect, test } from 'vitest'
@@ -1016,13 +1018,13 @@ test('does not resolve process environment variables', async () => {
 })
 ```
 
-- [ ] **Step 2: 运行测试并确认 RED**
+- [x] **Step 2: 运行测试并确认 RED**
 
 Run: `npx vitest run packages/e2e-runtime/test/secret-broker.test.ts`
 
 Expected: FAIL，模块不存在。
 
-- [ ] **Step 3: 实现加密存储和 opaque handle**
+- [x] **Step 3: 实现加密存储和 opaque handle**
 
 每 Run 生成 32-byte data key；secret value 使用 AES-256-GCM，AAD 固定绑定 `{ runId, secretRef, providerId }`。master key 位于 Authority 用户级 root、0600，项目 root 被禁止。opaque handle 只含随机 ID，并在模块内 WeakMap/Map 绑定 runId/ref；消费后立即清零 plaintext Buffer 和删除 handle。
 
@@ -1041,11 +1043,11 @@ export interface OneTimeSecretHandle {
 
 接口不从 `packages/e2e-runtime/src/index.ts` 导出；Browser Host 通过构造依赖获得 broker。
 
-- [ ] **Step 4: 实现平台 provider 与隐藏输入**
+- [x] **Step 4: 实现平台 provider 与隐藏输入**
 
 macOS 使用绝对 `/usr/bin/security find-generic-password -w -s <service> -a <account>`；Linux 使用经过 realpath 验证的 `/usr/bin/secret-tool lookup service <service> account <account>`。都使用 `spawn` 参数数组、禁止 shell、stdout 上限 64KiB、stderr 脱敏。`repo-e2e secret provide` 要求 `stdin.isTTY`，关闭 echo 后读取一次，写入 broker 后清空 buffer；非 TTY 返回 `E2E_SECRET_INTERACTIVE_TTY_REQUIRED`。
 
-- [ ] **Step 5: 运行 GREEN 验证**
+- [x] **Step 5: 运行 GREEN 验证**
 
 Run: `npx vitest run packages/e2e-runtime/test/secret-broker.test.ts packages/e2e-runtime/test/secret-providers.test.ts packages/e2e-runtime/test/environment-policy.test.ts`
 
@@ -1055,7 +1057,7 @@ Run: `npm run typecheck && npm run lint:architecture`
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交 Secret Broker**
+- [x] **Step 6: 提交 Secret Broker**
 
 ```bash
 git add packages/e2e-runtime

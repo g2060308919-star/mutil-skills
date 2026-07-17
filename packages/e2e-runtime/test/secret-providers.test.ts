@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import { spawn as spawnChild } from 'node:child_process'
 import { PassThrough } from 'node:stream'
 import { describe, expect, test, vi } from 'vitest'
 import { createSystemSecretProvider, type SecretProviderChild } from '../src/secret-providers.js'
@@ -13,6 +14,10 @@ describe('系统 Secret Provider', () => {
     const provider = createSystemSecretProvider({
       id,
       platform,
+      ...(platform === 'linux' ? {
+        uid: 501,
+        inspectLinuxSessionBus: async () => trustedLinuxBus(501),
+      } : {}),
       inspectExecutable: async () => ({ device: '1', inode: '2' }),
       spawn: (command, arguments_, options) => {
         calls.push([command, arguments_, options])
@@ -25,8 +30,71 @@ describe('系统 Secret Provider', () => {
     expect(calls).toEqual([[executable, expectedArguments, {
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { LANG: 'C.UTF-8', PATH: '/usr/bin:/bin' },
+      env: platform === 'linux'
+        ? {
+          LANG: 'C.UTF-8', PATH: '/usr/bin:/bin',
+          DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/501/bus',
+        }
+        : { LANG: 'C.UTF-8', PATH: '/usr/bin:/bin' },
     }]])
+  })
+
+  test('Linux provider 只使用严格验证后的固定 session bus 环境，不继承宿主环境', async () => {
+    const child = fakeChild()
+    let actualOptions: unknown
+    const spawn = vi.fn((_command: string, _arguments: string[], options: unknown) => {
+      actualOptions = options
+      queueMicrotask(() => { child.stdout.end('secret\n'); child.emit('close', 0, null) })
+      return child
+    })
+    const inspectLinuxSessionBus = vi.fn(async () => trustedLinuxBus(501))
+    const provider = createSystemSecretProvider({
+      id: 'linux-secret-service', platform: 'linux', uid: 501,
+      inspectExecutable: async () => ({ device: '1', inode: '2' }),
+      inspectLinuxSessionBus, spawn,
+    })
+    const value = await provider.resolve('TOKEN')
+    value?.fill(0)
+    expect(inspectLinuxSessionBus).toHaveBeenCalledTimes(2)
+    expect(inspectLinuxSessionBus).toHaveBeenLastCalledWith(501)
+    expect(actualOptions).toEqual({
+      shell: false, stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        LANG: 'C.UTF-8', PATH: '/usr/bin:/bin',
+        DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/501/bus',
+      },
+    })
+    expect((actualOptions as { env: object }).env).not.toHaveProperty('HOME')
+  })
+
+  test('Linux session bus 不可验证时在 spawn 前 fail closed', async () => {
+    const spawn = vi.fn()
+    const provider = createSystemSecretProvider({
+      id: 'linux-secret-service', platform: 'linux', uid: 501, spawn,
+      inspectExecutable: async () => ({ device: '1', inode: '2' }),
+      inspectLinuxSessionBus: async () => { throw new Error('host-path-canary') },
+    })
+    const error = await provider.resolve('TOKEN').catch((cause: unknown) => cause)
+    expect(error).toMatchObject({ code: 'E2E_SECRET_PROVIDER_SESSION_BUS_INVALID' })
+    expect(String(error)).not.toContain('host-path-canary')
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
+  test('Linux session bus 在 spawn 边界被替换时 SIGKILL 并 fail closed', async () => {
+    const child = fakeChild()
+    let inspection = 0
+    const provider = createSystemSecretProvider({
+      id: 'linux-secret-service', platform: 'linux', uid: 501,
+      inspectExecutable: async () => ({ device: '1', inode: '2' }),
+      inspectLinuxSessionBus: async () => ({
+        ...trustedLinuxBus(501), socketInode: inspection++ === 0 ? '3' : '4',
+      }),
+      spawn: () => child,
+    })
+    await expect(provider.resolve('TOKEN')).rejects.toMatchObject({
+      code: 'E2E_SECRET_PROVIDER_SESSION_BUS_REPLACED',
+    })
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL')
   })
 
   test('拒绝可注入 account 并且不会启动命令', async () => {
@@ -42,7 +110,8 @@ describe('系统 Secret Provider', () => {
   test('输出超过 64KiB 时 kill 并完全脱敏', async () => {
     const child = fakeChild()
     const provider = createSystemSecretProvider({
-      id: 'linux-secret-service', platform: 'linux',
+      id: 'linux-secret-service', platform: 'linux', uid: 501,
+      inspectLinuxSessionBus: async () => trustedLinuxBus(501),
       inspectExecutable: async () => ({ device: '1', inode: '2' }),
       spawn: () => {
         queueMicrotask(() => {
@@ -136,6 +205,95 @@ describe('系统 Secret Provider', () => {
       expect(child.kill).toHaveBeenCalledWith('SIGKILL')
     }
   })
+
+  test('失败会先 SIGKILL 并等待真实 close，close 前不会返回', async () => {
+    const child = fakeChild()
+    let closed = false
+    child.kill.mockImplementation(() => {
+      queueMicrotask(() => { closed = true; child.emit('close', null, 'SIGKILL') })
+      return true
+    })
+    const provider = createSystemSecretProvider({
+      id: 'macos-keychain', platform: 'darwin', shutdownTimeoutMs: 50,
+      inspectExecutable: async () => ({ device: '1', inode: '2' }),
+      spawn: () => {
+        queueMicrotask(() => child.stdout.emit('error', new Error('stream-secret')))
+        return child
+      },
+    })
+    await expect(provider.resolve('TOKEN')).rejects.toMatchObject({ code: 'E2E_SECRET_PROVIDER_UNAVAILABLE' })
+    expect(closed).toBe(true)
+    expect(child.kill).toHaveBeenCalledTimes(1)
+  })
+
+  test('真实 OS 子进程超时后必须完成 SIGKILL/close 才返回', async () => {
+    let actuallyClosed = false
+    const provider = createSystemSecretProvider({
+      id: 'macos-keychain', platform: 'darwin', timeoutMs: 20, shutdownTimeoutMs: 1_000,
+      inspectExecutable: async () => ({ device: '1', inode: '2' }),
+      spawn: () => {
+        const child = spawnChild(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+          shell: false, stdio: ['ignore', 'pipe', 'pipe'], env: {},
+        })
+        child.once('close', () => { actuallyClosed = true })
+        return child as unknown as SecretProviderChild
+      },
+    })
+    await expect(provider.resolve('TOKEN')).rejects.toMatchObject({
+      code: 'E2E_SECRET_PROVIDER_TIMEOUT',
+    })
+    expect(actuallyClosed).toBe(true)
+  })
+
+  test.each([
+    ['kill-false', false],
+    ['kill-true-no-close', true],
+  ] as const)('%s 不会无限挂起，返回脱敏的 shutdown 错误', async (_name, killResult) => {
+    const child = fakeChild()
+    child.kill.mockReturnValue(killResult)
+    const provider = createSystemSecretProvider({
+      id: 'macos-keychain', platform: 'darwin', timeoutMs: 1, shutdownTimeoutMs: 2,
+      inspectExecutable: async () => ({ device: '1', inode: '2' }), spawn: () => child,
+    })
+    const error = await provider.resolve('TOKEN').catch((cause: unknown) => cause)
+    expect(error).toMatchObject({ code: 'E2E_SECRET_PROVIDER_SHUTDOWN_FAILED' })
+    expect(String(error)).not.toMatch(/kill-false|kill-true/)
+    expect(child.kill).toHaveBeenCalledTimes(1)
+    expect(child.listenerCount('close')).toBe(0)
+    expect(child.stdout.listenerCount('data')).toBe(0)
+    expect(child.stderr.listenerCount('data')).toBe(0)
+  })
+
+  test('close/error race 与 shutdown 期间 late data 不改写主错误，并清理所有 listener', async () => {
+    const child = fakeChild()
+    const late = Buffer.from('late-secret-canary')
+    child.kill.mockImplementation(() => {
+      queueMicrotask(() => {
+        child.stdout.write(late)
+        child.emit('close', null, 'SIGKILL')
+        child.emit('error', new Error('late-child-error'))
+      })
+      return true
+    })
+    const provider = createSystemSecretProvider({
+      id: 'macos-keychain', platform: 'darwin', shutdownTimeoutMs: 50,
+      inspectExecutable: async () => ({ device: '1', inode: '2' }),
+      spawn: () => {
+        queueMicrotask(() => child.stderr.emit('error', new Error('primary-stream-error')))
+        return child
+      },
+    })
+    const error = await provider.resolve('TOKEN').catch((cause: unknown) => cause)
+    expect(error).toMatchObject({ code: 'E2E_SECRET_PROVIDER_UNAVAILABLE' })
+    expect(String(error)).not.toMatch(/late-secret|late-child|primary-stream/)
+    expect([...late]).toEqual(new Array(late.length).fill(0))
+    expect(child.listenerCount('close')).toBe(0)
+    expect(child.listenerCount('error')).toBe(0)
+    expect(child.stdout.listenerCount('data')).toBe(0)
+    expect(child.stdout.listenerCount('error')).toBe(0)
+    expect(child.stderr.listenerCount('data')).toBe(0)
+    expect(child.stderr.listenerCount('error')).toBe(0)
+  })
 })
 
 function fakeChild(): SecretProviderChild & {
@@ -150,6 +308,17 @@ function fakeChild(): SecretProviderChild & {
   }
   child.stdout = new PassThrough()
   child.stderr = new PassThrough()
-  child.kill = vi.fn(() => true)
+  child.kill = vi.fn(() => {
+    queueMicrotask(() => child.emit('close', null, 'SIGKILL'))
+    return true
+  })
   return child
+}
+
+function trustedLinuxBus(uid: number) {
+  return {
+    path: `/run/user/${uid}/bus`,
+    directoryDevice: '1', directoryInode: '2',
+    socketDevice: '1', socketInode: '3',
+  }
 }
