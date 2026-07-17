@@ -35,20 +35,24 @@ describe('E2E skill package', () => {
     expect(existsSync(resolveSkillDirectory('e2e') ?? '')).toBe(true)
   })
 
-  test('E2E manifest 对完整 Runtime 能力 fail-closed', async () => {
+  test('E2E manifest 只声明一个可安装 Runtime Host 能力门', async () => {
     const manifestText = await readFile(new URL('../skills/testing/e2e/skill.manifest.json', import.meta.url), 'utf8')
     const manifest = parseSkillManifest(JSON.parse(manifestText))
 
     expect(manifest).toMatchObject({
       id: 'e2e',
       name: 'PRD 驱动 E2E 浏览器验收',
-      requires: expect.arrayContaining([
-        expect.objectContaining({ capability: 'e2e.contracts', whenMissing: expect.objectContaining({ action: 'block' }) }),
-        expect.objectContaining({ capability: 'e2e.authority', whenMissing: expect.objectContaining({ action: 'block' }) }),
-        expect.objectContaining({ capability: 'e2e.gateway', whenMissing: expect.objectContaining({ action: 'block' }) }),
-        expect.objectContaining({ capability: 'browser.chromium', whenMissing: expect.objectContaining({ action: 'block' }) }),
-        expect.objectContaining({ capability: 'artifact.posix-local-fs', whenMissing: expect.objectContaining({ action: 'block' }) }),
-      ]),
+      requires: [{
+        capability: 'e2e.runtime-host',
+        satisfiedBy: [
+          '~/.mutil-skills/bin/repo-e2e doctor --json',
+          'verified installation manifest + protocol major + safety probes',
+        ],
+        whenMissing: {
+          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.1.0',
+          terminalState: 'environment-blocked', reasonCode: 'E2E_RUNTIME_HOST_UNAVAILABLE',
+        },
+      }],
       source: {
         url: 'https://github.com/g2060308919-star/mutil-skills/blob/main/packages/skills/skills/testing/e2e/SKILL.md',
         rawUrl: 'https://raw.githubusercontent.com/g2060308919-star/mutil-skills/main/packages/skills/skills/testing/e2e/SKILL.md',
@@ -76,6 +80,51 @@ describe('E2E skill package', () => {
     expect(text).toContain('不得重建上游')
   })
 
+  test.each(['SKILL.md', ...workflowFiles])('%s 以中文为主要语言并统一使用固定 Runtime JSON 协议', async (file) => {
+    const text = await readFile(new URL(`../skills/testing/e2e/${file}`, import.meta.url), 'utf8')
+    const chineseCharacters = text.match(/\p{Script=Han}/gu)?.length ?? 0
+
+    expect(chineseCharacters).toBeGreaterThanOrEqual(200)
+    expect(text).toContain('~/.mutil-skills/bin/repo-e2e rpc')
+    expect(text).toContain('JSON stdin/stdout')
+    expect(text).toContain('RuntimeRequestEnvelope')
+    expect(text).toContain('RuntimeResponseEnvelope')
+    expect(text).toContain('verifiedDigests')
+    expect(text).toContain('minimumMissingInput')
+    expect(text).not.toMatch(/import\s+.*@mutil-skills\/e2e-/)
+    expect(text).not.toMatch(/(?:npx|npm exec)[^\n]*e2e-(?:contracts|engine|authority|gateway|report|playwright)/)
+  })
+
+  test('入口 frontmatter description 使用中文开头', async () => {
+    const text = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+
+    expect(text).toMatch(/^---\nname: e2e\ndescription: [\p{Script=Han}]/u)
+    expect(text).not.toContain('description: Use when')
+  })
+
+  test('入口使用严格成功投影并把恢复、报告渲染建模为真实 Runtime 命令', async () => {
+    const text = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+
+    for (const field of ['state', 'nextEdge', 'verifiedDigests', 'minimumMissingInput']) {
+      expect(text).toContain(`\`${field}\``)
+    }
+    expect(text).toContain('`"command":"resume-run"`')
+    expect(text).toContain('`"command":"render-report"`')
+    expect(text).toContain('拒绝未知字段')
+    expect(text).toContain('不得把 `approved: true` 当作审批')
+  })
+
+  test('恢复与报告子流程只能调用真实 Runtime 命令', async () => {
+    const diagnosis = await readFile(new URL('../skills/testing/e2e/diagnosis-healing.md', import.meta.url), 'utf8')
+    const transaction = await readFile(new URL('../skills/testing/e2e/artifact-transaction.md', import.meta.url), 'utf8')
+    const report = await readFile(new URL('../skills/testing/e2e/report-verdict.md', import.meta.url), 'utf8')
+
+    expect(diagnosis).toContain('`"command":"resume-run"`')
+    expect(transaction).toContain('`"command":"resume-run"`')
+    expect(report).toContain('`"command":"render-report"`')
+    expect(report).not.toContain('Skill 自行渲染')
+  })
+
   test('入口只消费 Engine WorkflowDecision，不维护第二份状态表', async () => {
     const text = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
 
@@ -85,11 +134,9 @@ describe('E2E skill package', () => {
     expect(text).toContain('WorkflowDecision')
     expect(text).toContain('不得维护状态顺序或终态副本')
     expect(text).not.toContain('created → source-frozen')
-    expect(text).toContain('Authority')
-    expect(text).toContain('Safety Gateway')
-    expect(text).toContain('受控 Chromium')
-    expect(text).toContain('@mutil-skills/e2e-contracts')
-    expect(text).toContain('POSIX 本地文件系统')
+    expect(text).toContain('Runtime Host')
+    expect(text).toContain('doctor --json')
+    expect(text).toContain('~/.mutil-skills/bin/repo-e2e rpc')
     expect(text).toContain('Skill 不计算 SHA、覆盖率、审批有效性、verdict 或发布状态')
     expect(text).toContain('docs-only')
   })
@@ -184,13 +231,12 @@ describe('E2E skill package', () => {
     expect(intake).toContain('migration-required')
   })
 
-  test('sanitizer prerequisite 使用真实 package export 和健康探针', async () => {
+  test('Sanitizer 由单一 Runtime Host doctor 探针证明', async () => {
     const manifestText = await readFile(new URL('../skills/testing/e2e/skill.manifest.json', import.meta.url), 'utf8')
     const manifest = parseSkillManifest(JSON.parse(manifestText))
-    const sanitizer = manifest.requires.find((requirement) => requirement.capability === 'e2e.sanitizer')
-
-    expect(sanitizer?.satisfiedBy).toContain('@mutil-skills/e2e-engine')
-    expect(sanitizer?.satisfiedBy).not.toContain('@mutil-skills/e2e-engine/privacy')
+    expect(manifest.requires).toHaveLength(1)
+    expect(manifest.requires[0]?.capability).toBe('e2e.runtime-host')
+    expect(manifest.requires[0]?.satisfiedBy).toContain('verified installation manifest + protocol major + safety probes')
   })
 
   test('回归发布只接受受信编译器与隔离 discovery 专用证明', async () => {

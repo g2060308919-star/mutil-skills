@@ -14,7 +14,9 @@ Coverage obligation、disposition 候选、原子 Case、manual procedure 候选
 
 ## 调用的确定性 API
 
-调用 Engine 构造/审计 Universe、`auditDesign()` 和 `transition()`；覆盖率、集合闭包和 100% 判断只读取 Engine 输出。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`；设计审计、覆盖闭包和状态转换均由 Runtime 内部完成。
+
+Runtime 内部必须调用 Engine 构造/审计 Universe、`auditDesign()` 和 `transition()`；覆盖率、集合闭包和 100% 判断只读取 Runtime 返回的 Engine 输出。
 
 ## 执行步骤
 

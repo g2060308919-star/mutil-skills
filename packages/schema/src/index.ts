@@ -37,9 +37,22 @@ export const E2ERuntimeRequirementSchema = z.object({
   }),
 })
 
+export const E2ERuntimeHostRequirementSchema = z.object({
+  capability: z.literal('e2e.runtime-host'),
+  satisfiedBy: z.array(z.string().min(1)).min(1),
+  whenMissing: z.object({
+    action: z.literal('prompt-install'),
+    package: z.literal('@mutil-skills/e2e-runtime'),
+    version: z.string().regex(/^\d+\.\d+\.\d+$/),
+    terminalState: z.literal('environment-blocked'),
+    reasonCode: z.literal('E2E_RUNTIME_HOST_UNAVAILABLE'),
+  }).strict(),
+}).strict()
+
 export const SkillRequirementSchema = z.discriminatedUnion('capability', [
   TestingFoundationRequirementSchema,
   E2ERuntimeRequirementSchema,
+  E2ERuntimeHostRequirementSchema,
 ])
 
 export const SkillManifestSchema = z.object({
@@ -60,6 +73,7 @@ export type TemplateReference = z.infer<typeof TemplateReferenceSchema>
 export type TestingFoundationRequirement = z.infer<typeof TestingFoundationRequirementSchema>
 export type E2ERuntimeCapability = z.infer<typeof E2ERuntimeCapabilitySchema>
 export type E2ERuntimeRequirement = z.infer<typeof E2ERuntimeRequirementSchema>
+export type E2ERuntimeHostRequirement = z.infer<typeof E2ERuntimeHostRequirementSchema>
 export type SkillRequirement = z.infer<typeof SkillRequirementSchema>
 export type SkillManifest = z.infer<typeof SkillManifestSchema>
 

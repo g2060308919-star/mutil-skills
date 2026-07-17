@@ -14,7 +14,9 @@ REQ/RULE、actor、state/transition、可观察 oracle、interaction flow 和明
 
 ## 调用的确定性 API
 
-调用 Contracts 校验 `requirement-model`/`interaction-flow`，调用 Engine 分配稳定 ID、验证来源闭包并执行 `transition()`。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`；稳定 ID、来源闭包、Schema 与状态转换均由 Runtime 内部完成。
+
+Runtime 内部必须调用 Contracts 校验 `requirement-model`/`interaction-flow`，并调用 Engine 分配稳定 ID、验证来源闭包及执行 `transition()`。
 
 ## 执行步骤
 

@@ -14,7 +14,9 @@
 
 ## 调用的确定性 API
 
-调用 Contracts 完整 generation 校验、Engine 持久化 Attempt 审计、`computeVerdict()`/FinalizationSnapshot、Report JSON→Markdown/HTML renderer 和 Engine `transition()`；Attempt Authority verifier 必须从公开验签材料恢复，不得捕获首次构建时的内存选择结果。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`。报告只能发送真实的 `"command":"render-report"`，Skill 不自行渲染 Markdown/HTML，也不得用 `get-status` 响应冒充报告产物。
+
+Runtime 内部必须调用 Contracts 完整 generation 校验、Engine 持久化 Attempt 审计、`computeVerdict()`/FinalizationSnapshot、Report JSON→Markdown/HTML renderer 和 Engine `transition()`；Attempt Authority verifier 必须从公开验签材料恢复，不得捕获首次构建时的内存选择结果。
 
 ## 执行步骤
 
@@ -22,7 +24,7 @@
 
 ## 退出条件
 
-唯一 verdict 可独立复算；approvals 必须且只能是 scope、lineage、execution，pending 决定的 grantDigests 必须为空；测试域与执行 Profile 在 attestation、manifest、final-report 三处一致；traceability、traceabilityMatrix、dispositions、selectedAttemptId、diagnostics.attempts 与浏览器 `cannotClaim` 可从本代事实独立重算且逐行完全一致；零分母为 not-applicable，real/injection/manual 分区完整，FinalizationSnapshot 验证后进入 `publication-ready`。
+唯一 verdict 可独立复算；approvals 必须且只能是 scope、lineage、execution，pending 决定的 grantDigests 必须为空；测试域与执行 Profile 在 attestation、manifest、final-report 三处一致；traceability、traceabilityMatrix、dispositions、selectedAttemptId、diagnostics.attempts 与浏览器 `cannotClaim` 可从本代事实独立重算且逐行完全一致；零分母为 not-applicable，real/injection/manual 分区完整，FinalizationSnapshot 验证后进入 `publication-ready`。默认本地 Authority 只能表述为 `local-crash-integrity`，报告不得从“检测 DB 单独回放”推导“抵抗同 UID 整体回滚”；只有实际绑定独立 `trusted-monotonic` provider 的本次证明才可声明更高等级。
 
 ## 暂停条件
 

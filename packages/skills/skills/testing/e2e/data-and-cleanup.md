@@ -14,7 +14,9 @@
 
 ## 调用的确定性 API
 
-使用 `LocalLeaseAuthority.open({ statePath, testWorkspaceRoots })` 在全部测试工作区之外打开持久 Lease Authority，调用 acquire/activate/release/quarantine；调用 Gateway 校验最新 fencing token，调用 Engine 分类 cleanup 状态。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`；Lease、Gateway 和 cleanup 分类均为 Runtime 内部责任，Skill 只提交声明式候选与 `secretRef`。
+
+Runtime 内部必须使用 `LocalLeaseAuthority.open({ statePath, testWorkspaceRoots })` 在全部测试工作区之外打开持久 Lease Authority，调用 acquire/activate/release/quarantine；调用 Gateway 校验最新 fencing token，并由 Engine 分类 cleanup 状态。
 
 ## 执行步骤
 

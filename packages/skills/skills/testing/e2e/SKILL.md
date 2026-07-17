@@ -1,32 +1,33 @@
 ---
 name: e2e
-description: Use when 用户要求依据 PRD 完成浏览器 E2E 验收、真实链路验证、受控故障注入、可复跑回归资产或可追踪验收报告。
+description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路验证、受控故障注入、可复跑回归资产或可追踪验收报告时使用。
 ---
 
 # PRD 驱动 E2E 浏览器验收
 
-把 PRD、审批、受控 Chromium 事实和同代测试资产编排成可审计闭环。Skill 只组织语义步骤和用户交互；确定性计算与安全决定必须来自受信 Runtime。
+把 PRD、审批、受控 Chromium 事实和同代测试资产编排成可审计闭环。Skill 只组织中文语义步骤和用户交互；确定性计算与安全决定必须来自独立的 Runtime Host。
 
 ## Runtime 能力门
 
-启动任何状态转换前读取 `skill.manifest.json` 并验证全部 capability。能力缺失时按 manifest 的 `terminalState` 和 `reasonCode` 返回结构化阻塞；保留 `resumeState`、缺失 capability 和已有 artifact digest。
+启动任何状态转换前读取 `skill.manifest.json`，并且只验证 `e2e.runtime-host`。固定执行 `~/.mutil-skills/bin/repo-e2e doctor --json`；只有安装清单、协议 major 与全部安全探针都通过，才允许调用 Runtime。`ready=false` 时进入 docs-only，原样展示 Doctor 的 `reasonCode` 与 `remediation`，不执行 Case、不生成审批、不发布资产。
 
-| 能力 | 证明 | 缺失时 |
+| 唯一能力 | 机器证明 | 缺失时 |
 | --- | --- | --- |
-| Contracts | `@mutil-skills/e2e-contracts` 可解析当前 Schema major | 缺包为 `environment-blocked`；major 不兼容为 `migration-required` |
-| Engine | `@mutil-skills/e2e-engine` 状态机、审计和 verdict API 可调用 | `environment-blocked` |
-| Authority | 独立 Authority 进程、受信公钥和审批 UI 可用 | `safety-blocked` |
-| Safety Gateway | 独立 Gateway/Egress Guard 可安装签名 policy | `safety-blocked` |
-| 受控 Chromium | `@mutil-skills/e2e-playwright-runtime`、Chromium sandbox 和 Host 启动器可用 | `environment-blocked` |
-| Sanitizer | 分类型 sanitizer、scanner 和 quarantine 可用 | `safety-blocked` |
-| Report | `@mutil-skills/e2e-report` 可从 final-report 渲染 | `environment-blocked` |
-| Artifact Runtime | macOS/Linux 的 POSIX 本地文件系统、Python 3.9+、advisory lock、dirfd no-follow 和目录 fsync 可用 | `artifact-blocked` |
+| Runtime Host | `doctor --json` 返回经过验证的 installation manifest、protocol major 和 safety probes | `environment-blocked / E2E_RUNTIME_HOST_UNAVAILABLE`，仅建议精确版本安装 |
 
-任一能力没有机器可验证的证明时进入 docs-only：只解释缺失项和恢复方式，不执行 Case、不生成签名审批、不计算 verdict、不发布 active generation，也不宣称已经完成 E2E。
+缺失时只展示以下精确建议，不得自行执行：`npm exec --yes --package=@mutil-skills/e2e-runtime@0.1.0 -- repo-e2e install-runtime --version 0.1.0`。不得探测、导入或建议安装 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Report、Store 等低层包。
+
+## 固定 Runtime JSON 调用协议
+
+除 Doctor 外，唯一可执行入口是 `~/.mutil-skills/bin/repo-e2e rpc`。Skill 必须以参数数组直接启动固定绝对路径，不使用 shell，不拼接 PRD、路径、selector 或 secret。每次只构造一个协议 `1.0.0` 的严格 `RuntimeRequestEnvelope`，请求 JSON 只经标准输入写入；标准输出只接受一个严格 `RuntimeResponseEnvelope`。这就是本 Skill 唯一允许的 **JSON stdin/stdout** 协议。
+
+`ok:true` 时，命令专用 `result` 必须拒绝未知字段，并提供公共投影：`state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`。Skill 只原样转述这些字段，不补值、不猜测下一边、不自行计算摘要。`ok:false` 时只转述 `error.code/category/terminalState/resumeState/details`；响应版本、requestId、Runtime 身份或字段闭包不合法时进入 `environment-blocked`，不得把传输成功当业务成功。
+
+真实命令包括 `create-run`、`submit-candidate`、`open-approval`、`run-preflight`、`execute-run`、`get-status`、`"command":"resume-run"` 和 `"command":"render-report"`。恢复必须发送新的严格 `resume-run` envelope；报告必须发送新的严格 `render-report` envelope，不能把读取状态、重新执行或 Skill 自行渲染冒充这两个命令。审批只认 Runtime 打开的 WebAuthn session 与签名结果，不得把 `approved: true` 当作审批；secret 只传 `secretRef`，绝不传 secret value。
 
 ## 权威状态决策
 
-每一步先调用 Engine `transition()`，只消费其 `WorkflowDecision` 中的 currentState、accepted/blocked、nextState、terminalState、resumeState、required IDs 和 artifact digests。Skill 不得维护状态顺序或终态副本；Engine 未接受的边不执行。暂停时原样保存决定中的 resumeState、冻结 Case 队列和摘要。
+每一步只通过 Runtime Host 获取 Engine `WorkflowDecision`，消费其中的 currentState、accepted/blocked、nextState、terminalState、resumeState、required IDs 和 artifact digests。Skill 不得维护状态顺序或终态副本；Runtime 未接受的边不执行。暂停时原样保存决定中的 resumeState、冻结 Case 队列和摘要。
 
 ## 按状态加载子流程
 
@@ -51,7 +52,7 @@ description: Use when 用户要求依据 PRD 完成浏览器 E2E 验收、真实
 
 ## 编排不变量
 
-- Skill 不计算 SHA、覆盖率、审批有效性、verdict 或发布状态；调用 Contracts、Engine、Authority、Gateway、Runtime、Sanitizer、Store、Report 的确定性接口。
+- Skill 不计算 SHA、覆盖率、审批有效性、verdict 或发布状态；只调用 Runtime Host，由 Runtime 内部协调 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Store 与 Report。
 - DiscoveryCapability 只允许冻结的静态导航和 DOM 读取；Execution Approval 前不执行 Case。
 - 真实链路不加载注入规则；正式注入只由浏览器外 Safety Gateway 执行并签名计数。
 - 写操作绑定 capability、attempt、DataLease 与 cleanup；每个写 action 必须生成、跨进程验签并落库一份结构化 `ExecutionOutcomeReceipt`，Authority reservation 的 outcomeDigest 必须等于回执 signedDigest；effect unknown 不自动重试。

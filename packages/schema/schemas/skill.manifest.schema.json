@@ -78,6 +78,31 @@
               }
             },
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": ["capability", "satisfiedBy", "whenMissing"],
+            "properties": {
+              "capability": { "const": "e2e.runtime-host" },
+              "satisfiedBy": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "whenMissing": {
+                "type": "object",
+                "required": ["action", "package", "version", "terminalState", "reasonCode"],
+                "properties": {
+                  "action": { "const": "prompt-install" },
+                  "package": { "const": "@mutil-skills/e2e-runtime" },
+                  "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+                  "terminalState": { "const": "environment-blocked" },
+                  "reasonCode": { "const": "E2E_RUNTIME_HOST_UNAVAILABLE" }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
           }
         ]
       }
