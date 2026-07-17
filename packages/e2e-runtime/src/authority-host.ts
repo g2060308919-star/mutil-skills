@@ -37,7 +37,9 @@ const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 
 type RuntimeAuthorityProcess = Pick<AuthorityExecutionRpcProcessHandle,
   'enrollIdentity' | 'openApprovalSession' | 'waitForSession' | 'close'> &
-  Partial<Pick<AuthorityExecutionRpcProcessHandle, 'finalizeApproval'>>
+  Partial<Pick<AuthorityExecutionRpcProcessHandle,
+    'finalizeApproval' | 'recoverApproval' | 'activateGrant'
+    | 'endpoint' | 'credential' | 'verifierMaterial'>>
 
 export interface RuntimeAuthoritySession {
   url: string
@@ -79,21 +81,84 @@ export class RuntimeAuthorityHost {
     approvalType: WebAuthnApprovalType
     subjectDigest: string
     installationDigest: string
+    finalizationId?: string
+    requestDigest?: string
   }): Promise<RuntimeAuthoritySession> {
     this.#requireOpen()
     if (input.installationDigest !== this.#installationDigest) {
       throw authorityHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
     }
-    const reference = await this.#process.openApprovalSession(input)
-    const binding = input.approvalType === 'discovery' || input.approvalType === 'execution'
+    const grantsCapability = input.approvalType === 'discovery' || input.approvalType === 'execution'
+    if (grantsCapability && (!input.finalizationId || !SAFE_ID.test(input.finalizationId)
+      || !input.requestDigest || !DIGEST.test(input.requestDigest))) {
+      throw authorityHostError('E2E_APPROVAL_FINALIZATION_INVALID')
+    }
+    const reference = await this.#process.openApprovalSession({
+      runId: input.runId, approvalType: input.approvalType,
+      subjectDigest: input.subjectDigest, installationDigest: input.installationDigest,
+    })
+    const binding: TrustedApprovalExecutionBinding | undefined = grantsCapability
       ? {
           runId: input.runId,
           installationDigest: input.installationDigest,
-          approvalType: input.approvalType,
+          approvalType: input.approvalType as 'discovery' | 'execution',
           subjectDigest: input.subjectDigest,
         }
       : undefined
-    return this.#session(reference, binding)
+    return this.#session(reference, binding, binding === undefined ? undefined : {
+      finalizationId: input.finalizationId!, requestDigest: input.requestDigest!,
+    })
+  }
+
+  async recoverApproval(input: {
+    finalizationId: string
+    requestDigest: string
+    grantSubject: ApprovalGrantSubject
+    approvalBinding: TrustedApprovalExecutionBinding
+  }): Promise<{
+    grant: SignedGrant
+    approvalBinding: TrustedApprovalExecutionBinding
+    sessionId: string
+  } | undefined> {
+    this.#requireOpen()
+    if (!this.#process.recoverApproval) throw authorityHostError('E2E_APPROVAL_FINALIZE_UNAVAILABLE')
+    if (input.approvalBinding.installationDigest !== this.#installationDigest) {
+      throw authorityHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
+    }
+    try {
+      const recovered = await this.#process.recoverApproval(input)
+      if (recovered !== undefined
+        && canonicalizeJson(recovered.approvalBinding) !== canonicalizeJson(input.approvalBinding)) {
+        throw authorityHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
+      }
+      return recovered
+    } catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
+  }
+
+  async activateGrant(input: {
+    grant: SignedGrant
+    approvalBinding: TrustedApprovalExecutionBinding
+  }): Promise<void> {
+    this.#requireOpen()
+    if (!this.#process.activateGrant) throw authorityHostError('E2E_APPROVAL_ACTIVATE_UNAVAILABLE')
+    if (input.approvalBinding.installationDigest !== this.#installationDigest) {
+      throw authorityHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
+    }
+    try { await this.#process.activateGrant(input) }
+    catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
+  }
+
+  executionRpcConnection(approvalBinding: TrustedApprovalExecutionBinding) {
+    this.#requireOpen()
+    if (!this.#process.endpoint || !this.#process.credential || !this.#process.verifierMaterial) {
+      throw authorityHostError('E2E_RPC_HOST_NOT_READY')
+    }
+    return {
+      endpoint: this.#process.endpoint,
+      credential: structuredClone(this.#process.credential),
+      verifierMaterial: structuredClone(this.#process.verifierMaterial),
+      approvalBinding: structuredClone(approvalBinding),
+    }
   }
 
   async close(): Promise<void> {
@@ -105,6 +170,7 @@ export class RuntimeAuthorityHost {
   #session(
     reference: { url: string; sessionId: string },
     expectedBinding?: TrustedApprovalExecutionBinding,
+    finalization?: { finalizationId: string; requestDigest: string },
   ): RuntimeAuthoritySession {
     let url: URL
     try { url = new URL(reference.url) } catch {
@@ -128,7 +194,11 @@ export class RuntimeAuthorityHost {
       ...(expectedBinding === undefined ? {} : { finalize: async (grantSubject: ApprovalGrantSubject) => {
         if (!this.#process.finalizeApproval) throw authorityHostError('E2E_APPROVAL_FINALIZE_UNAVAILABLE')
         try {
-          const finalized = await this.#process.finalizeApproval({ sessionId: reference.sessionId, grantSubject })
+          const finalized = await this.#process.finalizeApproval({
+            sessionId: reference.sessionId, grantSubject,
+            finalizationId: finalization!.finalizationId,
+            requestDigest: finalization!.requestDigest,
+          })
           if (canonicalizeJson(finalized.approvalBinding) !== canonicalizeJson(expectedBinding)) {
             throw authorityHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
           }

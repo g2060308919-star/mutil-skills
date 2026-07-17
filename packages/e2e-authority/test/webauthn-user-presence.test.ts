@@ -371,8 +371,9 @@ describe('WebAuthn user presence authority', () => {
     const statePath = join(directory, 'authority.sqlite')
     const stateEncryptionKey = randomBytes(32)
     const approver = { subject: 'local:user', roles: ['e2e-approver'] }
+    let authorityNow = fixedNow
     const options = {
-      issuer: 'authority', keyId: 'key-1', now: () => fixedNow, statePath, stateEncryptionKey,
+      issuer: 'authority', keyId: 'key-1', now: () => authorityNow, statePath, stateEncryptionKey,
       testWorkspaceRoots: [process.cwd()], approvalIdentities: [approver],
     }
     const grantSubject = {
@@ -386,6 +387,12 @@ describe('WebAuthn user presence authority', () => {
       actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 as const }],
     }
     const grantSubjectDigest = canonicalGrantApprovalSubjectDigest(grantSubject)
+    const approvalBinding = {
+      runId: 'RUN-PERSISTED', approvalType: 'discovery' as const,
+      subjectDigest: grantSubjectDigest, installationDigest,
+    }
+    const finalizationId = 'FINALIZE-PERSISTED-1'
+    const requestDigest = `sha256:${'f'.repeat(64)}`
     try {
       verificationMocks.authentication.mockImplementation(async (input: Record<string, any>) => ({
         verified: true,
@@ -422,34 +429,57 @@ describe('WebAuthn user presence authority', () => {
       secondPresence = createWebAuthnUserPresenceAuthority({
         now: () => fixedNow, credentialRepository: second.createWebAuthnCredentialRepository(),
       })
-      await expect(second.issueGrantFromApprovalSession({
-        subject: grantSubject, approvalSessionRef: session.sessionId, ttlMs: 60_000,
-        registerApprovalContext: () => {
-          throw new Error('registration failed')
-        },
-      })).rejects.toThrow('registration failed')
+      const [grant, concurrentGrant] = await Promise.all([0, 1].map(async () =>
+        await second.finalizeApprovalGrant({
+          subject: grantSubject, approvalSessionRef: session.sessionId, ttlMs: 60_000,
+          finalizationId, requestDigest, approvalBinding,
+        })))
+      expect(concurrentGrant).toEqual(grant)
+      const registerEphemeralGrant = vi.fn((_context: unknown) => {
+        throw Object.assign(new Error('simulated ephemeral registration failure'), {
+          code: 'E2E_RPC_REGISTRATION_FAILED',
+        })
+      })
+      expect(() => registerEphemeralGrant(grant.approvalContext))
+        .toThrow('simulated ephemeral registration failure')
       second.close()
 
-      let thirdPresence: ReturnType<typeof createWebAuthnUserPresenceAuthority>
-      const third = await LocalApprovalAuthority.open({
-        ...options,
-        authenticateApproverSession: (sessionId) => thirdPresence.authenticateSession(sessionId),
-      })
-      thirdPresence = createWebAuthnUserPresenceAuthority({
-        now: () => fixedNow, credentialRepository: third.createWebAuthnCredentialRepository(),
-      })
-      let registeredContext: unknown
-      const grant = await third.issueGrantFromApprovalSession({
+      const third = await LocalApprovalAuthority.open(options)
+      await expect(third.recoverFinalizedGrant({
+        finalizationId, requestDigest, subject: grantSubject, approvalBinding,
+      })).resolves.toEqual({ grant, approvalSessionRef: session.sessionId })
+      await expect(third.finalizeApprovalGrant({
         subject: grantSubject, approvalSessionRef: session.sessionId, ttlMs: 60_000,
-        registerApprovalContext: (context) => {
-          registeredContext = context
-        },
-      })
+        finalizationId, requestDigest, approvalBinding,
+      })).resolves.toEqual(grant)
+      await expect(third.finalizeApprovalGrant({
+        subject: grantSubject, approvalSessionRef: 'SESSION-REBOUND', ttlMs: 60_000,
+        finalizationId, requestDigest, approvalBinding,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_MISMATCH' })
+      await expect(third.recoverFinalizedGrant({
+        finalizationId, requestDigest: `sha256:${'e'.repeat(64)}`,
+        subject: grantSubject, approvalBinding,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_MISMATCH' })
+      await expect(third.activatePersistedGrant({ grant, approvalBinding })).resolves.toEqual(
+        grant.approvalContext,
+      )
+      await expect(third.activatePersistedGrant({
+        grant, approvalBinding: { ...approvalBinding, runId: 'RUN-REBOUND' },
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' })
+      await expect(third.activatePersistedGrant({
+        grant: { ...grant, injected: true } as never, approvalBinding,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_GRANT_INVALID' })
+      authorityNow = new Date(fixedNow.getTime() + 120_000)
+      await expect(third.activatePersistedGrant({ grant, approvalBinding }))
+        .rejects.toMatchObject({ code: 'E2E_APPROVAL_EXPIRED' })
+      authorityNow = fixedNow
+      await third.revoke(grant.grantId, 'test-revocation')
+      await expect(third.activatePersistedGrant({ grant, approvalBinding }))
+        .rejects.toMatchObject({ code: 'E2E_APPROVAL_REVOKED' })
       expect(grant.approvalContext).toMatchObject({
         subject: approver.subject, runId: 'RUN-PERSISTED', approvalType: 'discovery',
         subjectDigest: grantSubjectDigest, installationDigest, origin: 'http://localhost:43210',
       })
-      expect(registeredContext).toEqual(grant.approvalContext)
       third.close()
 
       let fourthPresence: ReturnType<typeof createWebAuthnUserPresenceAuthority>
@@ -460,9 +490,9 @@ describe('WebAuthn user presence authority', () => {
       fourthPresence = createWebAuthnUserPresenceAuthority({
         now: () => fixedNow, credentialRepository: fourth.createWebAuthnCredentialRepository(),
       })
-      await expect(fourth.issueGrantFromApprovalSession({
+      await expect(fourth.finalizeApprovalGrant({
         subject: grantSubject, approvalSessionRef: session.sessionId, ttlMs: 60_000,
-        registerApprovalContext: () => undefined,
+        finalizationId: 'FINALIZE-PERSISTED-2', requestDigest, approvalBinding,
       })).rejects.toMatchObject({ code: 'E2E_APPROVAL_APPROVER_UNTRUSTED' })
       fourth.close()
     } finally {

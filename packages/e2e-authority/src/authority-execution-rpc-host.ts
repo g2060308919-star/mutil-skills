@@ -5,9 +5,7 @@ import { isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   ApprovalGrantSubjectSchema,
-  CanonicalApprovalContextSchema,
-  canonicalGrantApprovalSubjectDigest,
-  canonicalGrantApprovalType,
+  SignedGrantSchema,
   type ApproverIdentity,
   type ApprovalGrantSubject,
   type SignedGrant,
@@ -78,7 +76,23 @@ export interface AuthorityExecutionRpcProcessHandle extends AuthenticatedRpcHttp
   finalizeApproval(input: {
     sessionId: string
     grantSubject: ApprovalGrantSubject
+    finalizationId: string
+    requestDigest: string
   }): Promise<{ grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }>
+  recoverApproval(input: {
+    finalizationId: string
+    requestDigest: string
+    grantSubject: ApprovalGrantSubject
+    approvalBinding: TrustedApprovalExecutionBinding
+  }): Promise<{
+    grant: SignedGrant
+    approvalBinding: TrustedApprovalExecutionBinding
+    sessionId: string
+  } | undefined>
+  activateGrant(input: {
+    grant: SignedGrant
+    approvalBinding: TrustedApprovalExecutionBinding
+  }): Promise<void>
 }
 
 export async function startAuthorityExecutionRpcHostProcess(
@@ -169,7 +183,16 @@ export async function startAuthorityExecutionRpcHostProcess(
     }
     const onChildTerminated = () => failAllWaiters(hostError('E2E_RPC_HOST_EXITED'))
     const onSessionMessage = (message: unknown) => {
-      if (!isObject(message) || typeof message.sessionId !== 'string') return
+      if (!isObject(message)
+        || (message.type !== 'session-finished' && message.type !== 'session-failed')) return
+      if (typeof message.sessionId !== 'string' || !SAFE_ID.test(message.sessionId)
+        || (message.type === 'session-finished'
+          ? Object.keys(message).sort().join('\0') !== ['sessionId', 'type'].join('\0')
+          : Object.keys(message).sort().join('\0') !== ['code', 'sessionId', 'type'].join('\0')
+            || typeof message.code !== 'string' || !SAFE_ID.test(message.code))) {
+        failAllWaiters(hostError('E2E_RPC_HOST_CONTROL_RESULT_INVALID'))
+        return
+      }
       if (message.type === 'session-finished') {
         finishedSessions.add(message.sessionId)
         if (approvalSessions.has(message.sessionId)) completedApprovalSessions.add(message.sessionId)
@@ -210,6 +233,16 @@ export async function startAuthorityExecutionRpcHostProcess(
         completedApprovalSessions.delete(input.sessionId)
         approvalSessions.delete(input.sessionId)
         return result
+      },
+      async recoverApproval(input) {
+        if (closed) throw hostError('E2E_RPC_HOST_CLOSED')
+        if (terminalError !== undefined) throw terminalError
+        return await callRecoverControl(child, input)
+      },
+      async activateGrant(input) {
+        if (closed) throw hostError('E2E_RPC_HOST_CLOSED')
+        if (terminalError !== undefined) throw terminalError
+        await callActivateControl(child, input)
       },
       async waitForSession(sessionId) {
         if (terminalError !== undefined) throw terminalError
@@ -258,7 +291,11 @@ export async function startAuthorityExecutionRpcHostProcess(
     }
   } catch (error) {
     try {
-      return await aggregateStartupAndCleanupFailure(error, async () => await stopChild(child))
+      const childCleanupReported = isObject(error) && error.childCleanupReported === true
+      return await aggregateStartupAndCleanupFailure(
+        error,
+        async () => await stopChild(child, !childCleanupReported),
+      )
     } finally { sessionKey.fill(0) }
   }
 }
@@ -284,6 +321,11 @@ interface HostReadyMessage {
   verifierMaterial: AuthenticatedRpcVerifierMaterial
 }
 
+interface ChildCleanupFailure {
+  code: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED'
+  causes: string[]
+}
+
 function waitForReady(child: ChildProcess, startMessage: Record<string, any>): Promise<HostReadyMessage> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => finishReject(hostError('E2E_RPC_HOST_START_TIMEOUT')), HOST_START_TIMEOUT_MS)
@@ -305,14 +347,18 @@ function waitForReady(child: ChildProcess, startMessage: Record<string, any>): P
     const onDisconnect = () => finishReject(hostError('E2E_RPC_HOST_EXITED'))
     const onMessage = (message: unknown) => {
       if (!isObject(message)) return
-      if (message.type === 'error' && typeof message.code === 'string') {
-        finishReject(hostError(message.code))
+      if (message.type === 'startup-error') {
+        try { finishReject(parseStartupFailure(message)) }
+        catch (error) { finishReject(error) }
         return
       }
-      if (message.type !== 'ready' || typeof message.endpoint !== 'string' || !isObject(message.verifierMaterial)) return
-      scrubStartMessageSecrets(startMessage)
-      cleanup()
-      resolve(message as unknown as HostReadyMessage)
+      if (message.type !== 'ready') return
+      try {
+        const ready = parseReadyMessage(message)
+        scrubStartMessageSecrets(startMessage)
+        cleanup()
+        resolve(ready)
+      } catch (error) { finishReject(error) }
     }
     child.on('message', onMessage)
     child.once('error', finishReject)
@@ -325,6 +371,75 @@ function waitForReady(child: ChildProcess, startMessage: Record<string, any>): P
   })
 }
 
+function parseReadyMessage(message: Record<string, any>): HostReadyMessage {
+  if (Object.keys(message).sort().join('\0') !== ['endpoint', 'type', 'verifierMaterial'].join('\0')
+    || typeof message.endpoint !== 'string' || !isObject(message.verifierMaterial)) {
+    throw hostError('E2E_RPC_HOST_START_RESULT_INVALID')
+  }
+  let endpoint: URL
+  try { endpoint = new URL(message.endpoint) }
+  catch { throw hostError('E2E_RPC_HOST_START_RESULT_INVALID') }
+  const material = message.verifierMaterial
+  if (endpoint.protocol !== 'http:' || (endpoint.hostname !== '127.0.0.1' && endpoint.hostname !== 'localhost')
+    || endpoint.username !== '' || endpoint.password !== '' || endpoint.pathname !== '/v1/authority-rpc'
+    || endpoint.search !== '' || endpoint.hash !== '' || endpoint.port === ''
+    || Object.keys(material).sort().join('\0') !== [
+      'algorithm', 'issuer', 'keyId', 'publicKeyDigest', 'publicKeySpkiBase64Url', 'purpose', 'schemaVersion',
+    ].join('\0')
+    || material.schemaVersion !== '1.0.0' || material.purpose !== 'authority-rpc-response/v1'
+    || material.algorithm !== 'Ed25519' || typeof material.issuer !== 'string' || !SAFE_ID.test(material.issuer)
+    || typeof material.keyId !== 'string' || !SAFE_ID.test(material.keyId)
+    || typeof material.publicKeyDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(material.publicKeyDigest)
+    || typeof material.publicKeySpkiBase64Url !== 'string') {
+    throw hostError('E2E_RPC_HOST_START_RESULT_INVALID')
+  }
+  const publicKey = Buffer.from(material.publicKeySpkiBase64Url, 'base64url')
+  if (publicKey.byteLength === 0 || publicKey.byteLength > 16 * 1024
+    || publicKey.toString('base64url') !== material.publicKeySpkiBase64Url) {
+    throw hostError('E2E_RPC_HOST_START_RESULT_INVALID')
+  }
+  return structuredClone(message) as HostReadyMessage
+}
+
+function parseStartupFailure(message: Record<string, any>): Error {
+  if (Object.keys(message).sort().join('\0') !== ['cleanup', 'code', 'type'].join('\0')
+    || typeof message.code !== 'string' || !SAFE_ID.test(message.code) || !isObject(message.cleanup)) {
+    return hostError('E2E_RPC_HOST_START_RESULT_INVALID')
+  }
+  const startup = Object.assign(hostError(message.code), { childCleanupReported: true })
+  if (message.cleanup.ok === true
+    && Object.keys(message.cleanup).join('\0') === 'ok') return startup
+  if (message.cleanup.ok !== false
+    || Object.keys(message.cleanup).sort().join('\0') !== ['error', 'ok'].join('\0')) {
+    return hostError('E2E_RPC_HOST_START_RESULT_INVALID')
+  }
+  let cleanup: ChildCleanupFailure
+  try { cleanup = parseChildCleanupFailure(message.cleanup.error) }
+  catch { return hostError('E2E_RPC_HOST_START_RESULT_INVALID') }
+  return Object.assign(new AggregateError(
+    [startup, ...cleanup.causes.map((code) => hostError(code))],
+    'E2E_RPC_HOST_START_AND_CLEANUP_FAILED',
+  ), { childCleanupReported: true })
+}
+
+function parseChildCleanupFailure(value: unknown): ChildCleanupFailure {
+  if (!isObject(value)
+    || Object.keys(value).sort().join('\0') !== ['causes', 'code'].join('\0')
+    || value.code !== 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED'
+    || !Array.isArray(value.causes) || value.causes.length === 0 || value.causes.length > 1_000
+    || value.causes.some((code) => typeof code !== 'string' || !SAFE_ID.test(code))) {
+    throw hostError('E2E_RPC_HOST_SHUTDOWN_RESULT_INVALID')
+  }
+  return { code: value.code, causes: [...value.causes] }
+}
+
+function cleanupAggregate(failure: ChildCleanupFailure): AggregateError {
+  return new AggregateError(
+    failure.causes.map((code) => hostError(code)),
+    failure.code,
+  )
+}
+
 function scrubStartMessageSecrets(startMessage: Record<string, any>): void {
   if (!isObject(startMessage.config)) return
   if (isObject(startMessage.config.approval)) {
@@ -333,17 +448,72 @@ function scrubStartMessageSecrets(startMessage: Record<string, any>): void {
   startMessage.config.sessionKeyBase64Url = ''
 }
 
-async function stopChild(child: ChildProcess): Promise<void> {
+async function stopChild(child: ChildProcess, requestShutdown = true): Promise<void> {
   if (hasChildExited(child)) return
-  if (child.connected) {
-    try { child.send({ type: 'shutdown' }, () => undefined) } catch { /* 继续 TERM/KILL 回收 */ }
+  let shutdownError: unknown
+  if (requestShutdown && child.connected) {
+    try { await requestChildShutdown(child) }
+    catch (error) { shutdownError = error }
   }
-  if (await waitForChildExit(child, HOST_STOP_TIMEOUT_MS)) return
+  if (await waitForChildExit(child, HOST_STOP_TIMEOUT_MS)) {
+    if (shutdownError !== undefined) throw shutdownError
+    return
+  }
   try { child.kill('SIGTERM') } catch { /* 继续等待或 KILL */ }
-  if (await waitForChildExit(child, HOST_TERM_TIMEOUT_MS)) return
+  if (await waitForChildExit(child, HOST_TERM_TIMEOUT_MS)) {
+    if (shutdownError !== undefined) throw shutdownError
+    return
+  }
   try { child.kill('SIGKILL') } catch { /* 最后一次等待会给出稳定错误 */ }
-  if (await waitForChildExit(child, HOST_KILL_TIMEOUT_MS)) return
-  throw hostError('E2E_RPC_HOST_STOP_TIMEOUT')
+  if (await waitForChildExit(child, HOST_KILL_TIMEOUT_MS)) {
+    if (shutdownError !== undefined) throw shutdownError
+    return
+  }
+  const stopError = hostError('E2E_RPC_HOST_STOP_TIMEOUT')
+  if (shutdownError !== undefined) {
+    throw new AggregateError(
+      [shutdownError, stopError],
+      'E2E_RPC_HOST_CLEANUP_AND_STOP_FAILED',
+    )
+  }
+  throw stopError
+}
+
+function requestChildShutdown(child: ChildProcess): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const requestId = randomBytes(16).toString('hex')
+    const timeout = setTimeout(
+      () => finishReject(hostError('E2E_RPC_HOST_SHUTDOWN_RESULT_MISSING')),
+      HOST_STOP_TIMEOUT_MS,
+    )
+    const cleanup = () => {
+      clearTimeout(timeout)
+      child.off('message', onMessage)
+      child.off('error', finishReject)
+    }
+    const finishReject = (error: unknown) => { cleanup(); reject(error) }
+    const onMessage = (message: unknown) => {
+      if (!isObject(message) || message.requestId !== requestId || message.type !== 'shutdown-result') return
+      try {
+        if (message.ok === true) {
+          if (Object.keys(message).sort().join('\0') !== ['ok', 'requestId', 'type'].join('\0')) {
+            throw hostError('E2E_RPC_HOST_SHUTDOWN_RESULT_INVALID')
+          }
+          cleanup(); resolve(); return
+        }
+        if (message.ok !== false
+          || Object.keys(message).sort().join('\0') !== ['error', 'ok', 'requestId', 'type'].join('\0')) {
+          throw hostError('E2E_RPC_HOST_SHUTDOWN_RESULT_INVALID')
+        }
+        throw cleanupAggregate(parseChildCleanupFailure(message.error))
+      } catch (error) { finishReject(error) }
+    }
+    child.on('message', onMessage)
+    child.once('error', finishReject)
+    try {
+      child.send({ type: 'shutdown', requestId }, (error) => { if (error) finishReject(error) })
+    } catch (error) { finishReject(error) }
+  })
 }
 
 function hasChildExited(child: ChildProcess): boolean {
@@ -369,6 +539,109 @@ function callControl(
   type: 'enroll-identity' | 'open-approval-session',
   input: unknown,
 ): Promise<{ url: string; sessionId: string }> {
+  return callChildControl(child, type, input, 'session-opened', (message) => {
+    if (Object.keys(message).sort().join('\0') !== ['requestId', 'sessionId', 'type', 'url'].join('\0')
+      || typeof message.url !== 'string' || typeof message.sessionId !== 'string'
+      || !SAFE_ID.test(message.sessionId) || !isUserPresenceReference(message.url)) {
+      throw hostError('E2E_RPC_HOST_CONTROL_RESULT_INVALID')
+    }
+    return { url: message.url, sessionId: message.sessionId }
+  })
+}
+
+function isUserPresenceReference(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' && url.hostname === 'localhost' && url.port !== ''
+      && url.username === '' && url.password === '' && url.pathname === '/'
+      && url.search === '' && /^#[A-Za-z0-9_-]{43}$/.test(url.hash)
+  } catch { return false }
+}
+
+function callFinalizeControl(
+  child: ChildProcess,
+  input: {
+    sessionId: string
+    grantSubject: ApprovalGrantSubject
+    finalizationId: string
+    requestDigest: string
+  },
+): Promise<{ grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }> {
+  const parsedSubject = ApprovalGrantSubjectSchema.parse(input.grantSubject)
+  validateFinalizationControl(input.finalizationId, input.requestDigest)
+  return callChildControl(child, 'finalize-approval', {
+    sessionId: input.sessionId, grantSubject: parsedSubject,
+    finalizationId: input.finalizationId, requestDigest: input.requestDigest,
+  }, 'approval-finalized', (message) => {
+    if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
+      || !isObject(message.result)) throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID')
+    return parseFinalizedApproval(message.result)
+  })
+}
+
+function callRecoverControl(
+  child: ChildProcess,
+  input: {
+    finalizationId: string
+    requestDigest: string
+    grantSubject: ApprovalGrantSubject
+    approvalBinding: TrustedApprovalExecutionBinding
+  },
+): Promise<{
+  grant: SignedGrant
+  approvalBinding: TrustedApprovalExecutionBinding
+  sessionId: string
+} | undefined> {
+  validateFinalizationControl(input.finalizationId, input.requestDigest)
+  return callChildControl(child, 'recover-approval', {
+    finalizationId: input.finalizationId,
+    requestDigest: input.requestDigest,
+    grantSubject: ApprovalGrantSubjectSchema.parse(input.grantSubject),
+    approvalBinding: parseApprovalBinding(input.approvalBinding),
+  }, 'approval-recovered', (message) => {
+    if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
+      || !isObject(message.result) || typeof message.result.found !== 'boolean') {
+      throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID')
+    }
+    if (!message.result.found) {
+      if (Object.keys(message.result).join('\0') !== 'found') {
+        throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID')
+      }
+      return undefined
+    }
+    if (Object.keys(message.result).sort().join('\0')
+      !== ['approvalBinding', 'found', 'grant', 'sessionId'].join('\0')
+      || typeof message.result.sessionId !== 'string' || !SAFE_ID.test(message.result.sessionId)) {
+      throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID')
+    }
+    return { ...parseFinalizedApproval(message.result), sessionId: message.result.sessionId }
+  })
+}
+
+function callActivateControl(
+  child: ChildProcess,
+  input: { grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding },
+): Promise<void> {
+  const parsedGrant = SignedGrantSchema.safeParse(input.grant)
+  if (!parsedGrant.success) throw hostError('E2E_APPROVAL_GRANT_INVALID')
+  return callChildControl(child, 'activate-grant', {
+    grant: parsedGrant.data,
+    approvalBinding: parseApprovalBinding(input.approvalBinding),
+  }, 'grant-activated', (message) => {
+    if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
+      || !isObject(message.result)
+      || Object.keys(message.result).join('\0') !== 'activated'
+      || message.result.activated !== true) throw hostError('E2E_APPROVAL_ACTIVATE_RESULT_INVALID')
+  })
+}
+
+function callChildControl<T>(
+  child: ChildProcess,
+  type: string,
+  input: unknown,
+  resultType: string,
+  parse: (message: Record<string, any>) => T,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const requestId = randomBytes(16).toString('hex')
     const timeout = setTimeout(() => finishReject(hostError('E2E_RPC_HOST_CONTROL_TIMEOUT')), HOST_START_TIMEOUT_MS)
@@ -384,60 +657,22 @@ function callControl(
     const onDisconnect = () => finishReject(hostError('E2E_RPC_HOST_EXITED'))
     const onMessage = (message: unknown) => {
       if (!isObject(message) || message.requestId !== requestId) return
-      if (message.type === 'control-error' && typeof message.code === 'string') {
-        finishReject(hostError(message.code))
-        return
+      if (message.type === 'control-error') {
+        if (Object.keys(message).sort().join('\0') !== ['code', 'requestId', 'type'].join('\0')
+          || typeof message.code !== 'string' || !SAFE_ID.test(message.code)) {
+          finishReject(hostError('E2E_RPC_HOST_CONTROL_RESULT_INVALID')); return
+        }
+        finishReject(hostError(message.code)); return
       }
-      if (message.type !== 'session-opened' || typeof message.url !== 'string'
-        || typeof message.sessionId !== 'string') return
-      cleanup()
-      resolve({ url: message.url, sessionId: message.sessionId })
+      if (message.type !== resultType) return
+      try { const result = parse(message); cleanup(); resolve(result) }
+      catch (error) { finishReject(error) }
     }
     child.on('message', onMessage)
     child.once('error', finishReject)
     child.once('exit', onExit)
     child.once('disconnect', onDisconnect)
     child.send({ type, requestId, input }, (error) => { if (error) finishReject(error) })
-  })
-}
-
-function callFinalizeControl(
-  child: ChildProcess,
-  input: { sessionId: string; grantSubject: ApprovalGrantSubject },
-): Promise<{ grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }> {
-  const parsedSubject = ApprovalGrantSubjectSchema.parse(input.grantSubject)
-  return new Promise((resolve, reject) => {
-    const requestId = randomBytes(16).toString('hex')
-    const timeout = setTimeout(() => finishReject(hostError('E2E_RPC_HOST_CONTROL_TIMEOUT')), HOST_START_TIMEOUT_MS)
-    const cleanup = () => {
-      clearTimeout(timeout)
-      child.off('message', onMessage)
-      child.off('error', finishReject)
-      child.off('exit', onExit)
-      child.off('disconnect', onDisconnect)
-    }
-    const finishReject = (error: unknown) => { cleanup(); reject(error) }
-    const onExit = () => finishReject(hostError('E2E_RPC_HOST_EXITED'))
-    const onDisconnect = () => finishReject(hostError('E2E_RPC_HOST_EXITED'))
-    const onMessage = (message: unknown) => {
-      if (!isObject(message) || message.requestId !== requestId) return
-      if (message.type === 'control-error' && typeof message.code === 'string') {
-        finishReject(hostError(message.code)); return
-      }
-      if (message.type !== 'approval-finalized' || !isObject(message.result)) return
-      let result: { grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }
-      try { result = parseFinalizedApproval(message.result) }
-      catch (error) { finishReject(error); return }
-      cleanup()
-      resolve(result)
-    }
-    child.on('message', onMessage)
-    child.once('error', finishReject)
-    child.once('exit', onExit)
-    child.once('disconnect', onDisconnect)
-    child.send({ type: 'finalize-approval', requestId,
-      input: { sessionId: input.sessionId, grantSubject: parsedSubject } },
-    (error) => { if (error) finishReject(error) })
   })
 }
 
@@ -450,20 +685,35 @@ function parseFinalizedApproval(
       !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')) {
     throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID')
   }
-  const subject = ApprovalGrantSubjectSchema.safeParse(value.grant.subject)
-  const context = CanonicalApprovalContextSchema.safeParse(value.grant.approvalContext)
-  if (!subject.success || !context.success
-    || value.grant.subjectDigest !== canonicalGrantApprovalSubjectDigest(subject.data)
-    || context.data.subjectDigest !== value.grant.subjectDigest
-    || canonicalGrantApprovalType(subject.data) !== context.data.approvalType
-    || value.grant.approver?.subject !== context.data.subject
-    || value.approvalBinding.runId !== context.data.runId
-    || value.approvalBinding.installationDigest !== context.data.installationDigest
-    || value.approvalBinding.approvalType !== context.data.approvalType
-    || value.approvalBinding.subjectDigest !== context.data.subjectDigest) {
+  const grant = SignedGrantSchema.safeParse(value.grant)
+  const approvalBinding = parseApprovalBinding(value.approvalBinding)
+  if (!grant.success
+    || approvalBinding.runId !== grant.data.approvalContext.runId
+    || approvalBinding.installationDigest !== grant.data.approvalContext.installationDigest
+    || approvalBinding.approvalType !== grant.data.approvalContext.approvalType
+    || approvalBinding.subjectDigest !== grant.data.approvalContext.subjectDigest) {
     throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID')
   }
-  return structuredClone(value) as { grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }
+  return { grant: structuredClone(grant.data) as SignedGrant, approvalBinding }
+}
+
+function validateFinalizationControl(finalizationId: string, requestDigest: string): void {
+  if (!SAFE_ID.test(finalizationId) || !/^sha256:[a-f0-9]{64}$/.test(requestDigest)) {
+    throw hostError('E2E_APPROVAL_FINALIZATION_INVALID')
+  }
+}
+
+function parseApprovalBinding(value: unknown): TrustedApprovalExecutionBinding {
+  if (!isObject(value)
+    || Object.keys(value).sort().join('\0')
+      !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')
+    || typeof value.runId !== 'string' || !SAFE_ID.test(value.runId)
+    || (value.approvalType !== 'discovery' && value.approvalType !== 'execution')
+    || typeof value.subjectDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.subjectDigest)
+    || typeof value.installationDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.installationDigest)) {
+    throw hostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
+  }
+  return structuredClone(value) as TrustedApprovalExecutionBinding
 }
 
 function validateOptions(options: AuthorityExecutionRpcHostOptions): void {

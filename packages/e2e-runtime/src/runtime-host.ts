@@ -42,7 +42,8 @@ export interface RuntimeHostDependencies {
   runStore: RuntimeRunStore
   now(): Date
   projectFileReader?: SecureProjectFileReader
-  authorityHostFactory?: () => Promise<Pick<RuntimeAuthorityHost, 'requestApproval'>>
+  authorityHostFactory?: () => Promise<Pick<RuntimeAuthorityHost, 'requestApproval'>
+    & Partial<Pick<RuntimeAuthorityHost, 'recoverApproval'>>>
   presentUserPresenceUrl?(url: string): void | Promise<void>
 }
 
@@ -81,6 +82,12 @@ export class E2ERuntimeHost {
       throw blockedError('E2E_RUNTIME_COMMAND_NOT_READY')
     } catch (error) {
       const response = this.errorResponse(request.requestId, asRuntimeError(error))
+      if (error instanceof E2EError && (
+        error.code === 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING'
+        || error.code === 'E2E_RUNTIME_APPROVAL_RECOVERY_BINDING_CHANGED'
+      )) {
+        return response
+      }
       try {
         return await this.completeGlobalResponse(request.requestId, requestDigest, response)
       } catch (persistenceError) {
@@ -274,14 +281,33 @@ export class E2ERuntimeHost {
       request.payload.approvalType,
       request.payload.grantSubject,
     )
-    const session = await authorityHost.requestApproval({
+    const approvalBinding = request.payload.grantSubject === undefined ? undefined : {
       runId: initial.runId,
-      approvalType: request.payload.approvalType,
+      approvalType: request.payload.approvalType as 'discovery' | 'execution',
       subjectDigest,
       installationDigest: initial.runtimeInstallationDigest,
-    })
-    await this.dependencies.presentUserPresenceUrl?.(session.url)
-    await session.wait()
+    }
+    const recovered = approvalBinding === undefined || authorityHost.recoverApproval === undefined
+      ? undefined
+      : await authorityHost.recoverApproval({
+          finalizationId: request.requestId, requestDigest,
+          grantSubject: request.payload.grantSubject!, approvalBinding,
+        })
+    const session = recovered === undefined
+      ? await authorityHost.requestApproval({
+          runId: initial.runId,
+          approvalType: request.payload.approvalType,
+          subjectDigest,
+          installationDigest: initial.runtimeInstallationDigest,
+          ...(approvalBinding === undefined ? {} : {
+            finalizationId: request.requestId, requestDigest,
+          }),
+        })
+      : undefined
+    if (session !== undefined) {
+      await this.dependencies.presentUserPresenceUrl?.(session.url)
+      await session.wait()
+    }
 
     let currentIdentity
     try {
@@ -296,50 +322,73 @@ export class E2ERuntimeHost {
     }
     assertSameProjectIdentity(identity, currentIdentity)
 
-    return await this.withRunLock(identity.digest, initial.runId, async (lock) => {
-      const current = await this.dependencies.runStore.getRun(identity.digest, initial.runId)
-      if (current === undefined) throw runtimeHostError(
-        'E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'WebAuthn callback 返回前 Run 已不存在',
-      )
-      this.requireInstallation(current)
-      requireApprovalType(current, request.payload.approvalType)
-      assertRuntimeGrantSubject(current, request.payload.approvalType, request.payload.grantSubject)
-      if (computeRuntimeApprovalSubjectDigest(
-        current,
-        request.payload.approvalType,
-        request.payload.grantSubject,
-      ) !== subjectDigest) {
+    try {
+      return await this.withRunLock(identity.digest, initial.runId, async (lock) => {
+        const current = await this.dependencies.runStore.getRun(identity.digest, initial.runId)
+        if (current === undefined) throw runtimeHostError(
+          'E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'WebAuthn callback 返回前 Run 已不存在',
+        )
+        this.requireInstallation(current)
+        requireApprovalType(current, request.payload.approvalType)
+        assertRuntimeGrantSubject(current, request.payload.approvalType, request.payload.grantSubject)
+        if (computeRuntimeApprovalSubjectDigest(
+          current,
+          request.payload.approvalType,
+          request.payload.grantSubject,
+        ) !== subjectDigest) {
+          throw runtimeHostError(
+            'E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED',
+            'safety',
+            'WebAuthn callback 返回前 Run approval subject 已改变',
+          )
+        }
+        if (request.payload.grantSubject !== undefined && recovered === undefined && session?.finalize === undefined) {
+          throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
+        }
+        const finalized = request.payload.grantSubject === undefined
+          ? undefined
+          : recovered ?? await session!.finalize!(request.payload.grantSubject)
+        const response = this.successResponse(request.requestId, {
+          runId: current.runId,
+          approvalType: request.payload.approvalType,
+          subjectDigest,
+          sessionId: recovered?.sessionId ?? session!.sessionId,
+          ...(finalized === undefined ? {} : {
+            signedGrant: finalized.grant,
+            approvalBinding: finalized.approvalBinding,
+          }),
+        })
+        try {
+          return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.readRunOutcome(
+            identity.digest,
+            current.runId,
+            request.requestId,
+            requestDigest,
+            () => response,
+            lock,
+          ))
+        } catch (cause) {
+          if (finalized !== undefined) throw runtimeHostError(
+            'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING',
+            'safety',
+            'Authority 已最终化 Grant，但 Run Store outcome 尚未持久化；请求保持 pending 并可恢复',
+            cause,
+          )
+          throw cause
+        }
+      })
+    } catch (cause) {
+      if (recovered !== undefined
+        && !(cause instanceof E2EError && cause.code === 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING')) {
         throw runtimeHostError(
-          'E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED',
+          'E2E_RUNTIME_APPROVAL_RECOVERY_BINDING_CHANGED',
           'safety',
-          'WebAuthn callback 返回前 Run approval subject 已改变',
+          '恢复 Grant 后 Run 绑定已改变；请求保持 pending 且未写入 outcome',
+          cause,
         )
       }
-      if (request.payload.grantSubject !== undefined && session.finalize === undefined) {
-        throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
-      }
-      const finalized = request.payload.grantSubject === undefined
-        ? undefined
-        : await session.finalize!(request.payload.grantSubject)
-      const response = this.successResponse(request.requestId, {
-        runId: current.runId,
-        approvalType: request.payload.approvalType,
-        subjectDigest,
-        sessionId: session.sessionId,
-        ...(finalized === undefined ? {} : {
-          signedGrant: finalized.grant,
-          approvalBinding: finalized.approvalBinding,
-        }),
-      })
-      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.readRunOutcome(
-        identity.digest,
-        current.runId,
-        request.requestId,
-        requestDigest,
-        () => response,
-        lock,
-      ))
-    })
+      throw cause
+    }
   }
 
   private async readLockedRun(

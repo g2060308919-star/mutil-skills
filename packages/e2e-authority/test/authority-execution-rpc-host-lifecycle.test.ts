@@ -1,5 +1,8 @@
 import { expect, test, vi } from 'vitest'
-import { closeAuthorityExecutionRpcHostResources } from '../src/authority-execution-rpc-host-lifecycle.js'
+import {
+  authorityHostCleanupFailurePayload,
+  closeAuthorityExecutionRpcHostResources,
+} from '../src/authority-execution-rpc-host-lifecycle.js'
 
 test('listen failure without an HTTP handle still destroys RPC keys and closes every other resource', async () => {
   const destroy = vi.fn()
@@ -28,4 +31,19 @@ test('listen failure without an HTTP handle still destroys RPC keys and closes e
   expect(destroy).toHaveBeenCalledOnce()
   expect(approvalClose).toHaveBeenCalledOnce()
   expect(leaseClose).toHaveBeenCalledOnce()
+})
+
+test('cleanup IPC exposes only stable E2E cause codes', () => {
+  expect(authorityHostCleanupFailurePayload(new AggregateError([
+    Object.assign(new Error('stable'), { code: 'E2E_RPC_CLOSE_FAILED' }),
+    Object.assign(new Error('platform'), { code: 'EACCES' }),
+    new Error('untyped'),
+  ]))).toEqual({
+    code: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED',
+    causes: [
+      'E2E_RPC_CLOSE_FAILED',
+      'E2E_RPC_HOST_RESOURCE_CLEANUP_CAUSE',
+      'E2E_RPC_HOST_RESOURCE_CLEANUP_CAUSE',
+    ],
+  })
 })

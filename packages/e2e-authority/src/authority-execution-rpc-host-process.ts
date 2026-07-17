@@ -11,42 +11,24 @@ import {
   type WebAuthnApprovalType,
   type WebAuthnUserPresenceAuthority,
 } from './webauthn-user-presence.js'
-import type { SqliteStateDirectoryIdentity } from './sqlite-state-store.js'
-import { closeAuthorityExecutionRpcHostResources } from './authority-execution-rpc-host-lifecycle.js'
+import {
+  authorityHostCleanupFailurePayload,
+  closeAuthorityExecutionRpcHostResources,
+} from './authority-execution-rpc-host-lifecycle.js'
+import {
+  parseAuthorityExecutionHostConfig,
+  type AuthorityExecutionHostConfig as HostConfig,
+} from './authority-execution-rpc-host-ipc.js'
 import {
   ApprovalGrantSubjectSchema,
   canonicalGrantApprovalSubjectDigest,
   canonicalGrantApprovalType,
+  SignedGrantSchema,
   type ApprovalGrantSubject,
   type CanonicalApprovalContext,
+  type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
-
-interface HostConfig {
-  rpc: { issuer: string; keyId: string; clientId: string }
-  approval: {
-    issuer: string; keyId: string; statePath: string; stateEncryptionKeyBase64Url: string
-    testWorkspaceRoots: string[]
-    expectedStateDirectory?: SqliteStateDirectoryIdentity
-    approvalIdentities?: Array<{ subject: string; roles: string[] }>
-    manualIdentities?: Array<{ subject: string; roles: string[] }>
-  }
-  lease: {
-    statePath: string
-    testWorkspaceRoots: string[]
-    expectedStateDirectory?: SqliteStateDirectoryIdentity
-  }
-  userPresence?: {
-    installationDigest: string
-    ttlMs: number
-    assets: {
-      indexHtmlBase64Url: string
-      approvalJavaScriptBase64Url: string
-      simpleWebAuthnBrowserBase64Url: string
-    }
-  }
-  clock: { kind: 'system' } | { kind: 'fixed-test-only'; now: string }
-  sessionKeyBase64Url: string
-}
+import type { TrustedApprovalExecutionBinding } from './trusted-execution-clients.js'
 
 type EncodedApprovalAssets = NonNullable<HostConfig['userPresence']>['assets']
 
@@ -54,7 +36,6 @@ let approvalAuthority: LocalApprovalAuthority | undefined
 let leaseAuthority: LocalLeaseAuthority | undefined
 let httpHandle: Awaited<ReturnType<typeof startAuthenticatedRpcLoopbackServer>> | undefined
 let executionRpc: AuthenticatedRpcServer | undefined
-let registeredApprovalContext: CanonicalApprovalContext | undefined
 let webAuthnAuthority: WebAuthnUserPresenceAuthority | undefined
 const approvalServers = new Map<string, WebAuthnApprovalServerHandle>()
 const approvalControls = new Map<string, {
@@ -66,12 +47,23 @@ const approvalControls = new Map<string, {
 }>()
 let hostConfig: HostConfig | undefined
 let started = false
+let controlTail = Promise.resolve()
 
 process.on('message', async (message: unknown) => {
   if (!isObject(message)) return
   if (message.type === 'shutdown') {
-    await shutdown()
-    process.disconnect()
+    const requestId = parseControlRequestId(message)
+    if (requestId === undefined) return
+    try {
+      await shutdown()
+      await sendToParentAndWait({ type: 'shutdown-result', requestId, ok: true })
+    } catch (error) {
+      await sendToParentAndWait({
+        type: 'shutdown-result', requestId, ok: false, error: authorityHostCleanupFailurePayload(error),
+      })
+    } finally {
+      if (process.connected) process.disconnect()
+    }
     return
   }
   if (message.type === 'enroll-identity' || message.type === 'open-approval-session') {
@@ -79,13 +71,21 @@ process.on('message', async (message: unknown) => {
     return
   }
   if (message.type === 'finalize-approval') {
-    await handleFinalizeApproval(message)
+    await serializeControl(async () => await handleFinalizeApproval(message))
+    return
+  }
+  if (message.type === 'recover-approval') {
+    await serializeControl(async () => await handleRecoverApproval(message))
+    return
+  }
+  if (message.type === 'activate-grant') {
+    await serializeControl(async () => await handleActivateGrant(message))
     return
   }
   if (message.type !== 'start' || started) return
   started = true
   try {
-    const config = parseConfig(message.config)
+    const config = parseAuthorityExecutionHostConfig(message.config)
     hostConfig = config
     const fixedNow = config.clock.kind === 'fixed-test-only' ? config.clock.now : undefined
     const now = fixedNow === undefined ? () => new Date() : () => new Date(fixedNow)
@@ -131,16 +131,39 @@ process.on('message', async (message: unknown) => {
     httpHandle = await startAuthenticatedRpcLoopbackServer(rpc)
     sendToParent({ type: 'ready', endpoint: httpHandle.endpoint, verifierMaterial: rpc.verifierMaterial })
   } catch (error) {
-    sendToParent({ type: 'error', code: safeCode(error) })
-    try { await shutdown() } catch { /* parent 已收到原始 startup error；资源错误已聚合且进程仍须退出 */ }
-    finally { process.disconnect() }
+    let cleanup: { ok: true } | {
+      ok: false
+      error: ReturnType<typeof authorityHostCleanupFailurePayload>
+    }
+    try { await shutdown(); cleanup = { ok: true } }
+    catch (cleanupError) {
+      cleanup = { ok: false, error: authorityHostCleanupFailurePayload(cleanupError) }
+    }
+    try {
+      await sendToParentAndWait({ type: 'startup-error', code: safeCode(error), cleanup })
+    } finally {
+      if (process.connected) process.disconnect()
+    }
   }
 })
 
-process.once('disconnect', () => { void shutdown().catch(() => undefined) })
-process.once('SIGTERM', () => { void shutdown().catch(() => undefined).finally(() => process.exit(0)) })
+process.once('disconnect', () => {
+  void shutdown().catch(() => { process.exitCode = 1 })
+})
+process.once('SIGTERM', () => {
+  void (async () => {
+    try { await shutdown() }
+    catch (error) {
+      process.exitCode = 1
+      await sendToParentAndWait({
+        type: 'terminal-cleanup-error', error: authorityHostCleanupFailurePayload(error),
+      })
+    } finally { process.exit(process.exitCode ?? 0) }
+  })()
+})
 
 async function shutdown(): Promise<void> {
+  await controlTail.catch(() => undefined)
   const servers = [...approvalServers.values()]
   approvalServers.clear()
   approvalControls.clear()
@@ -156,7 +179,6 @@ async function shutdown(): Promise<void> {
   approvalAuthority = undefined
   leaseAuthority = undefined
   executionRpc = undefined
-  registeredApprovalContext = undefined
   webAuthnAuthority = undefined
   hostConfig = undefined
   await closeAuthorityExecutionRpcHostResources(resources)
@@ -214,8 +236,11 @@ async function handleFinalizeApproval(message: Record<string, any>): Promise<voi
   if (requestId === undefined) return
   try {
     if (!isObject(message.input)
-      || Object.keys(message.input).sort().join('\0') !== ['grantSubject', 'sessionId'].join('\0')
-      || typeof message.input.sessionId !== 'string') throw rpcHostError('E2E_APPROVAL_FINALIZE_INPUT_INVALID')
+      || Object.keys(message.input).sort().join('\0')
+        !== ['finalizationId', 'grantSubject', 'requestDigest', 'sessionId'].join('\0')
+      || typeof message.input.sessionId !== 'string'
+      || typeof message.input.finalizationId !== 'string'
+      || typeof message.input.requestDigest !== 'string') throw rpcHostError('E2E_APPROVAL_FINALIZE_INPUT_INVALID')
     const parsedSubject = ApprovalGrantSubjectSchema.safeParse(message.input.grantSubject)
     if (!parsedSubject.success) throw rpcHostError('E2E_APPROVAL_FINALIZE_INPUT_INVALID')
     const subject = parsedSubject.data
@@ -229,45 +254,123 @@ async function handleFinalizeApproval(message: Record<string, any>): Promise<voi
       throw rpcHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
     }
     if (executionRpc === undefined) throw rpcHostError('E2E_RPC_HOST_START_FAILED')
-    const previousRegistration = registeredApprovalContext
-    let registrationChanged = false
-    let grant
-    try {
-      grant = await approvalAuthority.issueGrantFromApprovalSession({
-        subject,
-        approvalSessionRef: message.input.sessionId,
-        ttlMs: Math.min(60_000, hostConfig.userPresence.ttlMs),
-        registerApprovalContext(context) {
-          executionRpc!.updateClientRegistration(hostConfig!.rpc.clientId, { approvalContext: context })
-          registeredApprovalContext = context
-          registrationChanged = true
-        },
-      })
-    } catch (error) {
-      if (registrationChanged) {
-        try {
-          executionRpc.updateClientRegistration(hostConfig.rpc.clientId,
-            previousRegistration === undefined ? null : { approvalContext: previousRegistration })
-          registeredApprovalContext = previousRegistration
-        } catch { /* shutdown 已开始；RPC destroy 会清零 credential */ }
-      }
-      throw error
+    const approvalBinding = {
+      runId: pending.runId, installationDigest: pending.installationDigest,
+      approvalType: pending.approvalType, subjectDigest: pending.subjectDigest,
     }
+    const grant = await approvalAuthority.finalizeApprovalGrant({
+      subject,
+      approvalSessionRef: message.input.sessionId,
+      ttlMs: Math.min(60_000, hostConfig.userPresence.ttlMs),
+      finalizationId: message.input.finalizationId,
+      requestDigest: message.input.requestDigest,
+      approvalBinding,
+    })
+    registerApprovalGrant(executionRpc, hostConfig, grant.approvalContext)
     approvalControls.delete(message.input.sessionId)
-    sendToParent({ type: 'approval-finalized', requestId, result: { grant, approvalBinding: {
-      runId: grant.approvalContext.runId,
-      installationDigest: grant.approvalContext.installationDigest,
-      approvalType: grant.approvalContext.approvalType,
-      subjectDigest: grant.approvalContext.subjectDigest,
-    } } })
+    sendToParent({ type: 'approval-finalized', requestId, result: { grant, approvalBinding } })
   } catch (error) {
     sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
   }
 }
 
+async function handleRecoverApproval(message: Record<string, any>): Promise<void> {
+  const requestId = parseControlRequestId(message)
+  if (requestId === undefined) return
+  try {
+    if (!isObject(message.input)
+      || Object.keys(message.input).sort().join('\0')
+        !== ['approvalBinding', 'finalizationId', 'grantSubject', 'requestDigest'].join('\0')
+      || typeof message.input.finalizationId !== 'string'
+      || typeof message.input.requestDigest !== 'string') throw rpcHostError('E2E_APPROVAL_FINALIZE_INPUT_INVALID')
+    if (!approvalAuthority || !executionRpc || !hostConfig) throw rpcHostError('E2E_RPC_HOST_START_FAILED')
+    const subject = ApprovalGrantSubjectSchema.parse(message.input.grantSubject)
+    const approvalBinding = parseApprovalBinding(message.input.approvalBinding)
+    const recovered = await approvalAuthority.recoverFinalizedGrant({
+      finalizationId: message.input.finalizationId,
+      requestDigest: message.input.requestDigest,
+      subject,
+      approvalBinding,
+    })
+    if (recovered === undefined) {
+      sendToParent({ type: 'approval-recovered', requestId, result: { found: false } })
+      return
+    }
+    const context = await approvalAuthority.activatePersistedGrant({ grant: recovered.grant, approvalBinding })
+    registerApprovalGrant(executionRpc, hostConfig, context)
+    sendToParent({ type: 'approval-recovered', requestId, result: {
+      found: true, grant: recovered.grant, approvalBinding, sessionId: recovered.approvalSessionRef,
+    } })
+  } catch (error) {
+    sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
+  }
+}
+
+async function handleActivateGrant(message: Record<string, any>): Promise<void> {
+  const requestId = parseControlRequestId(message)
+  if (requestId === undefined) return
+  try {
+    if (!isObject(message.input)
+      || Object.keys(message.input).sort().join('\0') !== ['approvalBinding', 'grant'].join('\0')
+      || !approvalAuthority || !executionRpc || !hostConfig) throw rpcHostError('E2E_APPROVAL_GRANT_INVALID')
+    const parsed = SignedGrantSchema.safeParse(message.input.grant)
+    if (!parsed.success) throw rpcHostError('E2E_APPROVAL_GRANT_INVALID')
+    const approvalBinding = parseApprovalBinding(message.input.approvalBinding)
+    const context = await approvalAuthority.activatePersistedGrant({
+      grant: parsed.data as SignedGrant, approvalBinding,
+    })
+    registerApprovalGrant(executionRpc, hostConfig, context)
+    sendToParent({ type: 'grant-activated', requestId, result: { activated: true } })
+  } catch (error) {
+    sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
+  }
+}
+
+async function serializeControl<T>(operation: () => Promise<T>): Promise<T> {
+  const result = controlTail.then(operation, operation)
+  controlTail = result.then(() => undefined, () => undefined)
+  return await result
+}
+
+function parseControlRequestId(message: Record<string, any>): string | undefined {
+  return typeof message.requestId === 'string' && /^[a-f0-9]{32}$/.test(message.requestId)
+    ? message.requestId : undefined
+}
+
+function parseApprovalBinding(value: unknown): TrustedApprovalExecutionBinding {
+  if (!isObject(value)
+    || Object.keys(value).sort().join('\0')
+      !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')
+    || typeof value.runId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.runId)
+    || (value.approvalType !== 'discovery' && value.approvalType !== 'execution')
+    || typeof value.subjectDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.subjectDigest)
+    || typeof value.installationDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.installationDigest)) {
+    throw rpcHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
+  }
+  return structuredClone(value) as TrustedApprovalExecutionBinding
+}
+
+function registerApprovalGrant(
+  rpc: AuthenticatedRpcServer,
+  config: HostConfig,
+  context: CanonicalApprovalContext,
+): void {
+  rpc.updateClientRegistration(config.rpc.clientId, { approvalContext: context })
+}
+
 function sendToParent(message: Record<string, unknown>): void {
   if (!process.connected || process.send === undefined) return
   try { process.send(message, () => undefined) } catch { /* parent 已退出，shutdown 会清理 session */ }
+}
+
+function sendToParentAndWait(message: Record<string, unknown>): Promise<void> {
+  if (!process.connected || process.send === undefined) return Promise.resolve()
+  return new Promise((resolve) => {
+    const timeout = setTimeout(resolve, 250)
+    const finish = () => { clearTimeout(timeout); resolve() }
+    try { process.send!(message, finish) }
+    catch { finish() }
+  })
 }
 
 function parseEnrollmentInput(
@@ -325,14 +428,6 @@ function decodeBounded(value: string, maximum: number): Buffer {
     throw rpcHostError('E2E_APPROVAL_ASSET_INVALID')
   }
   return bytes
-}
-
-function parseConfig(value: unknown): HostConfig {
-  if (!isObject(value) || !isObject(value.rpc) || !isObject(value.approval) || !isObject(value.lease)
-    || !isObject(value.clock) || typeof value.sessionKeyBase64Url !== 'string') {
-    throw rpcHostError('E2E_RPC_HOST_CONFIG_INVALID')
-  }
-  return structuredClone(value) as unknown as HostConfig
 }
 
 function decode32(value: string): Buffer {

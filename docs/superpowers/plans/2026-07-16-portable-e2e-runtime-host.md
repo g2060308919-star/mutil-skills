@@ -799,6 +799,8 @@ git commit -m "feat(e2e): persist runtime runs by project identity"
 
 > **Spec Errata（2026-07-17，Task 5 最终安全审查）**：执行验证必须使用 Host 注册而非 RPC payload 自报的完整 approvalContext，并在 Authority、RPC、Runner、Gateway 四层拒绝跨 Run、跨安装、错类型、错 origin、未来签发和过期回放。`2.0.0/2.1.0` 旧 Grant 因缺少可验证 WebAuthn 上下文，迁移时不得继续授权；先验证旧结构/签名/链，再撤销全部旧 grantId 并清空授权派生状态，要求用户重新审批。WebAuthn/RPC/helper 的原始流 chunk、RPC 长期会话密钥和 PKCS8 明文都必须有可测试的显式清零路径；Authority Host 启动失败后的 child cleanup 若也失败，必须聚合保留两个错误，不能吞掉 cleanup failure。
 
+> **Spec Errata（2026-07-17，Task 5 六次外审）**：五次外审中“ephemeral RPC 注册失败回滚 receipt 与 Grant”的结论撤销。`2.3.0` Authority 必须把 receipt take、SignedGrant 和 finalization outbox 原子持久化，提交后才串行更新 RPC 注册；注册或 Run Store 写入失败时保留 outbox，相同稳定 finalization identity 可跨新 Host 恢复同一 Grant，不再展示 WebAuthn URL。Runtime machine 与直接 CLI 都要在用户在场前持久 reservation，恢复/最终化后在 Run lock 内重验 Run/install/type/subject/project identity；成功 outcome 改变下一次 CLI identity。新 Host 激活还必须验证完整严格 SignedGrant、当前存储态逐字段一致、签名、撤销、过期和四字段 binding。HostConfig 及所有结果/cleanup IPC 使用精确字段并有界传播稳定 cause；secret parser 临时 Buffer 全路径清零。Golden 的 RPC verify/reserve 必须由 Host1 最终化并关闭后启动的 Host2 激活持久 Grant 来提供。
+
 **Files:**
 - Create: `packages/e2e-authority/src/webauthn-user-presence.ts`
 - Create: `packages/e2e-authority/src/webauthn-approval-server.ts`

@@ -39,6 +39,7 @@ test('Runtime Authority adapter can only open and wait for child-owned sessions'
   const approval = await host.requestApproval({
     runId: 'RUN-1', approvalType: 'execution',
     subjectDigest: `sha256:${'b'.repeat(64)}`, installationDigest,
+    finalizationId: 'FINALIZE-ADAPTER-1', requestDigest: `sha256:${'d'.repeat(64)}`,
   })
   await approval.wait()
   expect(processHandle.openApprovalSession).toHaveBeenCalledWith({
@@ -62,6 +63,7 @@ test('Runtime Authority adapter can only open and wait for child-owned sessions'
   await expect(unsafe.requestApproval({
     runId: 'RUN-1', approvalType: 'execution',
     subjectDigest: `sha256:${'b'.repeat(64)}`, installationDigest,
+    finalizationId: 'FINALIZE-UNSAFE-1', requestDigest: `sha256:${'d'.repeat(64)}`,
   })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_REFERENCE_INVALID' })
   await unsafe.close()
 })
@@ -88,6 +90,7 @@ test('Runtime Authority adapter sends only the four provable fields and rejects 
   })
   const session = await host.requestApproval({
     runId: 'RUN-1', approvalType: 'execution', subjectDigest, installationDigest,
+    finalizationId: 'FINALIZE-REBIND-1', requestDigest: `sha256:${'d'.repeat(64)}`,
   })
   expect(openApprovalSession).toHaveBeenCalledWith({
     runId: 'RUN-1', approvalType: 'execution', subjectDigest, installationDigest,
@@ -331,6 +334,168 @@ test('Runtime Host finalizes a Grant and journals the traceable Grant plus four-
   }
 })
 
+test('Runtime Host keeps a finalized request pending when Run Store persistence fails and recovers the same Grant', async () => {
+  const roots = await createRuntimeTestRoots()
+  const runStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+  try {
+    await mkdir(`${roots.project}/.biztest`, { recursive: true })
+    await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-1',
+    }))
+    const identity = await resolveProjectIdentity(roots.project)
+    const snapshot = {
+      ...runSnapshot(), projectIdentityDigest: identity.digest,
+      workflow: {
+        current: 'awaiting-execution-approval' as const, sequence: 8,
+        eventChainDigest: `sha256:${'8'.repeat(64)}`,
+      },
+    }
+    const seedDigest = `sha256:${'6'.repeat(64)}`
+    await runStore.beginRequest('SEED-RECOVER', seedDigest)
+    const seedLock = await runStore.acquireRunLock(identity.digest, snapshot.runId)
+    try { await runStore.createRunOutcome(snapshot, 'SEED-RECOVER', seedDigest, { seeded: true }, seedLock) }
+    finally { await seedLock.close() }
+
+    const grantSubject = executionGrantSubject(snapshot)
+    const subjectDigest = computeRuntimeApprovalSubjectDigest(snapshot, 'execution', grantSubject)
+    const approvalBinding = {
+      runId: snapshot.runId, installationDigest,
+      approvalType: 'execution' as const, subjectDigest,
+    }
+    const signedGrant = {
+      grantId: 'GRANT-RECOVERED', subject: grantSubject, subjectDigest,
+      approvalContext: { ...approvalBinding },
+    }
+    const finalize = vi.fn(async () => ({ grant: signedGrant as never, approvalBinding }))
+    const requestApproval = vi.fn(async () => ({
+      url: 'http://localhost:42010/#approval', sessionId: 'SESSION-RECOVER',
+      wait: vi.fn(async () => undefined), finalize,
+    }))
+    const recoverFirst = vi.fn(async (_input: unknown) => undefined)
+    const recoverSecond = vi.fn(async (_input: unknown) => ({
+      grant: signedGrant as never, approvalBinding, sessionId: 'SESSION-RECOVER',
+    }))
+    const secondRequestApproval = vi.fn()
+    const presentUserPresenceUrl = vi.fn(async () => undefined)
+    const authorityHostFactory = vi.fn()
+      .mockResolvedValueOnce({ requestApproval, recoverApproval: recoverFirst })
+      .mockResolvedValueOnce({ requestApproval: secondRequestApproval, recoverApproval: recoverSecond })
+    const host = new E2ERuntimeHost({
+      installation: runtimeInstallation(), doctor: async () => { throw new Error('not used') },
+      runStore, now: () => new Date('2026-07-17T00:00:00.000Z'), authorityHostFactory,
+      presentUserPresenceUrl,
+    })
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'APPROVE-RECOVER',
+      client: { name: 'test', version: '1.0.0' }, command: 'open-approval',
+      projectRoot: roots.project,
+      payload: { runId: snapshot.runId, approvalType: 'execution', grantSubject },
+    })
+    const originalReadRunOutcome = runStore.readRunOutcome.bind(runStore)
+    vi.spyOn(runStore, 'readRunOutcome')
+      .mockRejectedValueOnce(new Error('simulated Run Store fsync failure'))
+      .mockImplementation(originalReadRunOutcome)
+
+    expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING' },
+    })
+    expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
+      ok: true, result: { signedGrant, approvalBinding },
+    })
+    expect(finalize).toHaveBeenCalledOnce()
+    expect(requestApproval).toHaveBeenCalledOnce()
+    expect(secondRequestApproval).not.toHaveBeenCalled()
+    expect(presentUserPresenceUrl).toHaveBeenCalledOnce()
+    expect(recoverSecond).toHaveBeenCalledOnce()
+  } finally {
+    await runStore.close()
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
+test('Runtime Host rejects a recovered Grant when the Run changes before the locked persistence check', async () => {
+  const roots = await createRuntimeTestRoots()
+  const runStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+  try {
+    await mkdir(`${roots.project}/.biztest`, { recursive: true })
+    await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-1',
+    }))
+    const identity = await resolveProjectIdentity(roots.project)
+    const snapshot = {
+      ...runSnapshot(), projectIdentityDigest: identity.digest,
+      workflow: {
+        current: 'awaiting-execution-approval' as const, sequence: 8,
+        eventChainDigest: `sha256:${'8'.repeat(64)}`,
+      },
+    }
+    const seedDigest = `sha256:${'4'.repeat(64)}`
+    await runStore.beginRequest('SEED-RECOVER-CHANGED', seedDigest)
+    const seedLock = await runStore.acquireRunLock(identity.digest, snapshot.runId)
+    try {
+      await runStore.createRunOutcome(snapshot, 'SEED-RECOVER-CHANGED', seedDigest, { seeded: true }, seedLock)
+    } finally { await seedLock.close() }
+
+    const grantSubject = executionGrantSubject(snapshot)
+    const subjectDigest = computeRuntimeApprovalSubjectDigest(snapshot, 'execution', grantSubject)
+    const approvalBinding = {
+      runId: snapshot.runId, installationDigest,
+      approvalType: 'execution' as const, subjectDigest,
+    }
+    const signedGrant = {
+      grantId: 'GRANT-RECOVERED-CHANGED', subject: grantSubject, subjectDigest,
+      approvalContext: { ...approvalBinding },
+    }
+    const changeDigest = `sha256:${'3'.repeat(64)}`
+    const recoverApproval = vi.fn(async () => {
+      await runStore.beginRequest('CHANGE-RUN-BEFORE-RECOVERY', changeDigest)
+      const changeLock = await runStore.acquireRunLock(identity.digest, snapshot.runId)
+      try {
+        await runStore.updateRunOutcome(
+          identity.digest,
+          snapshot.runId,
+          'CHANGE-RUN-BEFORE-RECOVERY',
+          changeDigest,
+          (current) => ({
+            snapshot: {
+              ...current,
+              runtimeInstallationDigest: `sha256:${'b'.repeat(64)}`,
+            },
+            response: { changed: true },
+          }),
+          'runtime-installation-changed',
+          changeLock,
+        )
+      } finally { await changeLock.close() }
+      return { grant: signedGrant as never, approvalBinding, sessionId: 'SESSION-RECOVER-CHANGED' }
+    })
+    const requestApproval = vi.fn()
+    const readRunOutcome = vi.spyOn(runStore, 'readRunOutcome')
+    const host = new E2ERuntimeHost({
+      installation: runtimeInstallation(), doctor: async () => { throw new Error('not used') },
+      runStore, now: () => new Date('2026-07-17T00:00:00.000Z'),
+      authorityHostFactory: async () => ({ recoverApproval, requestApproval }),
+    })
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'APPROVE-RECOVER-CHANGED',
+      client: { name: 'test', version: '1.0.0' }, command: 'open-approval',
+      projectRoot: roots.project,
+      payload: { runId: snapshot.runId, approvalType: 'execution', grantSubject },
+    })
+
+    expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_APPROVAL_RECOVERY_BINDING_CHANGED' },
+    })
+    expect(requestApproval).not.toHaveBeenCalled()
+    expect(readRunOutcome).not.toHaveBeenCalled()
+    expect((await runStore.getRun(identity.digest, snapshot.runId))
+      ?.requestResponses['APPROVE-RECOVER-CHANGED']).toBeUndefined()
+  } finally {
+    await runStore.close()
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
 test('Runtime Host rejects a replaced physical project root after the user-presence wait', async () => {
   const roots = await createRuntimeTestRoots()
   const runStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
@@ -488,6 +653,117 @@ test.each(['physical', 'logical'] as const)(
     }
   },
 )
+
+test('direct CLI reserves a stable finalization before WebAuthn and recovers after Run Store persistence failure', async () => {
+  const roots = await createRuntimeTestRoots()
+  const firstStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+  try {
+    await mkdir(`${roots.project}/.biztest`, { recursive: true })
+    await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-1',
+    }))
+    const identity = await resolveProjectIdentity(roots.project)
+    const snapshot = {
+      ...runSnapshot(), projectIdentityDigest: identity.digest,
+      workflow: {
+        current: 'awaiting-execution-approval' as const, sequence: 8,
+        eventChainDigest: `sha256:${'8'.repeat(64)}`,
+      },
+    }
+    const seedDigest = `sha256:${'5'.repeat(64)}`
+    await firstStore.beginRequest('SEED-CLI-RECOVER', seedDigest)
+    const seedLock = await firstStore.acquireRunLock(identity.digest, snapshot.runId)
+    try { await firstStore.createRunOutcome(snapshot, 'SEED-CLI-RECOVER', seedDigest, { seeded: true }, seedLock) }
+    finally { await seedLock.close() }
+    const grantSubject = executionGrantSubject(snapshot)
+    await writeFile(`${roots.project}/execution-subject.json`, JSON.stringify(grantSubject))
+    const subjectDigest = computeRuntimeApprovalSubjectDigest(snapshot, 'execution', grantSubject)
+    const approvalBinding = {
+      runId: snapshot.runId, installationDigest,
+      approvalType: 'execution' as const, subjectDigest,
+    }
+    const signedGrant = { grantId: 'GRANT-CLI-RECOVER', subject: grantSubject, subjectDigest }
+    const finalize = vi.fn(async () => ({ grant: signedGrant as never, approvalBinding }))
+    const recoverFirst = vi.fn(async (_input: unknown) => undefined)
+    const recoverSecond = vi.fn(async (_input: unknown) => ({
+      grant: signedGrant as never, approvalBinding, sessionId: 'SESSION-CLI-RECOVER',
+    }))
+    const requestApproval = vi.fn(async () => ({
+      url: `http://localhost:42011/#${'r'.repeat(43)}`, sessionId: 'SESSION-CLI-RECOVER',
+      wait: vi.fn(async () => undefined), finalize,
+    }))
+    const firstAuthority = {
+      recoverApproval: recoverFirst, requestApproval, close: vi.fn(async () => undefined),
+    }
+    const secondRequestApproval = vi.fn()
+    const secondAuthority = {
+      recoverApproval: recoverSecond, requestApproval: secondRequestApproval,
+      close: vi.fn(async () => undefined),
+    }
+    const nextSignedGrant = { ...signedGrant, grantId: 'GRANT-CLI-NEXT' }
+    const nextFinalize = vi.fn(async () => ({ grant: nextSignedGrant as never, approvalBinding }))
+    const recoverThird = vi.fn(async (_input: unknown) => undefined)
+    const thirdRequestApproval = vi.fn(async () => ({
+      url: `http://localhost:42012/#${'s'.repeat(43)}`, sessionId: 'SESSION-CLI-NEXT',
+      wait: vi.fn(async () => undefined), finalize: nextFinalize,
+    }))
+    const thirdAuthority = {
+      recoverApproval: recoverThird, requestApproval: thirdRequestApproval,
+      close: vi.fn(async () => undefined),
+    }
+    const startAuthorityHost = vi.fn()
+      .mockResolvedValueOnce(firstAuthority as never)
+      .mockResolvedValueOnce(secondAuthority as never)
+      .mockResolvedValueOnce(thirdAuthority as never)
+    vi.spyOn(firstStore, 'readRunOutcome')
+      .mockRejectedValueOnce(new Error('simulated direct CLI Run Store fsync failure'))
+    let storeOpenCount = 0
+    const openRunStore = vi.fn(async () => {
+      if (storeOpenCount++ === 0) return firstStore
+      return await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+    })
+    const dependencies = {
+      homeDir: roots.home,
+      installRuntime: async () => { throw new Error('not used') },
+      uninstallRuntime: async () => { throw new Error('not used') },
+      inspectRuntimeInstallation: async () => runtimeInstallation(),
+      startAuthorityHost,
+      openRunStore,
+      currentWorkingDirectory: () => roots.project,
+    }
+    const args = [
+      'approve', '--run-id', 'RUN-1', '--type', 'execution', '--subject-file', 'execution-subject.json',
+    ]
+    const firstStdout = captureWritable()
+    expect(await runCli(args, Readable.from([]), firstStdout.stream, captureWritable().stream, dependencies))
+      .toBe(4)
+    expect(JSON.parse(firstStdout.text())).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING' },
+    })
+    const secondStdout = captureWritable()
+    expect(await runCli(args, Readable.from([]), secondStdout.stream, captureWritable().stream, dependencies))
+      .toBe(0)
+    expect(JSON.parse(secondStdout.text())).toMatchObject({
+      sessionId: 'SESSION-CLI-RECOVER', status: 'verified', signedGrant, approvalBinding,
+    })
+    expect(requestApproval).toHaveBeenCalledOnce()
+    expect(finalize).toHaveBeenCalledOnce()
+    expect(secondRequestApproval).not.toHaveBeenCalled()
+    expect(recoverSecond).toHaveBeenCalledWith(recoverFirst.mock.calls[0]![0])
+
+    const thirdStdout = captureWritable()
+    expect(await runCli(args, Readable.from([]), thirdStdout.stream, captureWritable().stream, dependencies))
+      .toBe(0)
+    expect(JSON.parse(thirdStdout.text())).toMatchObject({
+      sessionId: 'SESSION-CLI-NEXT', status: 'verified', signedGrant: nextSignedGrant,
+    })
+    expect(thirdRequestApproval).toHaveBeenCalledOnce()
+    expect(nextFinalize).toHaveBeenCalledOnce()
+    expect(recoverThird.mock.calls[0]![0]).not.toEqual(recoverSecond.mock.calls[0]![0])
+  } finally {
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
 
 test('default rpc wiring starts Authority only for open-approval, writes URL to stderr, and closes it', async () => {
   const roots = await createRuntimeTestRoots()

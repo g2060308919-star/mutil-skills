@@ -258,3 +258,27 @@ git diff --check                               PASS
 ```
 
 本轮 `npm run e2e:golden` 的沙箱执行共 24 个失败，全部在产品断言前因宿主禁止 loopback `listen`（`EPERM`）或 Chromium MachPort/进程权限（`EPERM`）退出；没有观察到代码断言失败。按任务要求申请的沙箱外 Golden 被安全策略拒绝，因此本轮不能宣称新 production chain 已在该宿主完成 Golden 通过。真实 child 集成测试在相同沙箱中也按既有环境分支 skip；其 production chain 断言仍保留在测试和 Golden 中，等待可监听 loopback、可启动 Chromium 的批准环境复跑。
+
+## 六次外审修复附录
+
+本轮关闭跨 Host 激活、最终化持久幂等、ephemeral 注册顺序、严格 IPC 和直接 CLI reservation 五类问题，并明确覆盖五次外审中“注册失败回滚 Grant”的旧结论：
+
+1. **持久 finalization outbox**：Authority snapshot 提升到 `2.3.0`。receipt take、SignedGrant 与 finalization identity/binding/outbox 在同一 SQLite transaction 内提交；相同请求并发或重试返回同一 Grant，不同 request digest/subject/binding 失败关闭。`2.2.0` 原样保留既有授权并迁移空 outbox；`2.0.0/2.1.0` 继续按旧签名域验证并撤销旧授权。
+2. **跨 Host 激活**：删除 Local Authority 的 RPC 注册 callback。child 在 Authority commit 后才更新 ephemeral client registration，并用同一控制 mutex 串行 finalize/recover/activate。注册失败不补偿持久 outbox；新 Host 可恢复或激活同一 Grant。激活要求完整严格 SignedGrant、当前状态库逐字段一致、签名有效、未撤销、未过期且 Run/install/type/subject digest binding 精确匹配。
+3. **Runtime/CLI 恢复**：machine requestId 与直接 CLI 的内容寻址 identity 都在 WebAuthn 前写入 global reservation。Authority 已 commit 而 Run Store outcome 失败时保持 pending；重试先 recover，不创建新 session、不重复展示 URL。恢复后在 Run lock 内重读并复验项目身份、Run、安装、审批类型与 subject；发生变化不写 outcome。成功记录后，已完成 requestId 进入下一次 CLI identity 的输入，允许新的人工审批。
+4. **严格 IPC 与 cleanup**：HostConfig、full SignedGrant、ready/control/session/shutdown result 均拒绝额外或缺失字段。state/session key 的解析临时 Buffer 在成功和失败路径均 `finally` 清零，重复 roots 不再静默去重。显式 shutdown 返回严格 cleanup 状态；startup/SIGTERM cleanup 有界发送稳定 `E2E_*` cause，父端聚合错误、仍执行 shutdown→TERM→KILL，并避免 child 已完成 cleanup 后二次 shutdown 的 EPIPE 覆盖原始 startup cause。
+5. **Host2 Golden**：可逆写 Golden 现在由 Host1 完成真实 WebAuthn、finalize 和持久化后关闭；全新 Host2 使用新 session key 激活持久 Grant，随后新建 RPC client 执行 verify/reserve。真实 child 集成测试同样覆盖错误 Run、畸形 Grant 与 Host2 激活。
+
+六次外审门禁结果：
+
+```text
+npm run typecheck                              PASS
+npm run lint:architecture                      PASS
+npm run build                                  PASS
+npm test                                       114 files / 841 passed / 14 skipped / 0 failed
+npm pack --dry-run --workspace @mutil-skills/e2e-runtime
+                                                PASS / 92 files / 86.1 kB
+git diff --check                               PASS
+```
+
+14 个常规测试 skip 均为当前 sandbox 禁止 loopback/真实 child/受控浏览器的既有显式分支。`npm run e2e:golden` 在同一 sandbox 的 24 项全部于产品断言前被环境阻断：21 项为 `listen EPERM`，3 项为 Chromium MachPort/进程权限拒绝；未观察到代码断言失败。本轮按要求未申请沙箱外 Golden，也不把这些环境失败记为产品通过。

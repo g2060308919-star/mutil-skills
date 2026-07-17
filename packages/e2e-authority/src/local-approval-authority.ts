@@ -53,6 +53,7 @@ import {
   type ReadCapability,
   type ReversibleWriteCapability,
   type SignedGrant,
+  SignedGrantSchema,
   type SignedDiscoveryGrant,
   type SignedInjectionGrant,
   type SignedSseReadGrant,
@@ -96,7 +97,11 @@ import {
   SqliteSnapshotStore,
   type SqliteStateDirectoryIdentity,
 } from './sqlite-state-store.js'
-import { trustWriteApprovalClient, type TrustedWriteApprovalClient } from './trusted-execution-clients.js'
+import {
+  trustWriteApprovalClient,
+  type TrustedApprovalExecutionBinding,
+  type TrustedWriteApprovalClient,
+} from './trusted-execution-clients.js'
 import type {
   StoredWebAuthnApprovalReceipt,
   StoredWebAuthnCredential,
@@ -141,7 +146,7 @@ interface DecryptedAuthorityPrivateKeys {
 }
 
 interface AuthorityPersistentSnapshot {
-  schemaVersion: '2.2.0'
+  schemaVersion: '2.3.0'
   issuer: string
   keyId: string
   identityDigest: string
@@ -152,12 +157,21 @@ interface AuthorityPersistentSnapshot {
   webAuthnCredentials: EncryptedPrivateKey
   webAuthnReceipts: EncryptedPrivateKey
   grants: Array<[string, SignedGrant]>
+  grantFinalizations: Array<[string, StoredGrantFinalization]>
   revoked: Array<[string, string]>
   uses: Array<[string, number]>
   reservations: Array<[string, CapabilityReservation]>
   completedPreflights: Array<[string, { grantId: string; subject: DiscoveryApprovalSubject; status: DiscoveryPreflightOutcome['status'] }]>
   manualResultIds: string[]
   attemptLogs: Array<[string, { chainDigest: string; events: AttemptEvent[]; lastTimestamp: number }]>
+}
+
+interface StoredGrantFinalization {
+  requestDigest: string
+  grantId: string
+  approvalSessionRef: string
+  subject: ApprovalGrantSubject
+  approvalBinding: TrustedApprovalExecutionBinding
 }
 
 export class LocalApprovalAuthority {
@@ -188,6 +202,7 @@ export class LocalApprovalAuthority {
   readonly #stateContext = new AsyncLocalStorage<boolean>()
   #activeStateTransactions = 0
   readonly #grants = new Map<string, SignedGrant>()
+  readonly #grantFinalizations = new Map<string, StoredGrantFinalization>()
   readonly #revoked = new Map<string, string>()
   readonly #uses = new Map<string, number>()
   readonly #reservations = new Map<string, CapabilityReservation>()
@@ -264,7 +279,7 @@ export class LocalApprovalAuthority {
     const decision = generateKeyPairSync('ed25519')
     const attempt = generateKeyPairSync('ed25519')
     const initial: AuthorityPersistentSnapshot = {
-      schemaVersion: '2.2.0', issuer: options.issuer, keyId: options.keyId,
+      schemaVersion: '2.3.0', issuer: options.issuer, keyId: options.keyId,
       identityDigest: authorityIdentityDigest(options),
       privateKeys: {
         primary: encryptPrivateKey(primary.privateKey, stateEncryptionKey, 'primary'),
@@ -275,7 +290,8 @@ export class LocalApprovalAuthority {
       },
       webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey),
       webAuthnReceipts: encryptWebAuthnReceipts([], stateEncryptionKey),
-      grants: [], revoked: [], uses: [], reservations: [], completedPreflights: [], manualResultIds: [], attemptLogs: [],
+      grants: [], grantFinalizations: [], revoked: [], uses: [], reservations: [], completedPreflights: [],
+      manualResultIds: [], attemptLogs: [],
     }
     store.initialize(canonicalizeJson(initial))
     let loaded: {
@@ -387,11 +403,13 @@ export class LocalApprovalAuthority {
     })
   }
 
-  async issueGrantFromApprovalSession(input: {
+  async finalizeApprovalGrant(input: {
     subject: ApprovalGrantSubject
     approvalSessionRef: string
     ttlMs: number
-    registerApprovalContext(context: CanonicalApprovalContext): void
+    finalizationId: string
+    requestDigest: string
+    approvalBinding: TrustedApprovalExecutionBinding
   }): Promise<SignedGrant> {
     if (!this.#stateStore) {
       throw authorityError(
@@ -400,9 +418,30 @@ export class LocalApprovalAuthority {
       )
     }
     if (!this.#stateContext.getStore()) {
-      return await this.#withStateMutation(() => this.issueGrantFromApprovalSession(input))
+      return await this.#withStateMutation(() => this.finalizeApprovalGrant(input))
     }
     const subject = ApprovalGrantSubjectSchema.parse(immutableSnapshot(input.subject))
+    const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
+    validateFinalizationIdentity(input.finalizationId, input.requestDigest)
+    const expectedFinalization: Omit<StoredGrantFinalization, 'grantId' | 'approvalSessionRef'> = {
+      requestDigest: input.requestDigest,
+      subject,
+      approvalBinding,
+    }
+    const existing = this.#grantFinalizations.get(input.finalizationId)
+    if (existing !== undefined) {
+      if (existing.requestDigest !== expectedFinalization.requestDigest
+        || existing.approvalSessionRef !== input.approvalSessionRef
+        || canonicalizeJson(existing.subject) !== canonicalizeJson(expectedFinalization.subject)
+        || canonicalizeJson(existing.approvalBinding) !== canonicalizeJson(expectedFinalization.approvalBinding)) {
+        throw authorityError('E2E_APPROVAL_FINALIZATION_MISMATCH', 'finalizationId 已绑定不同请求或 Grant subject')
+      }
+      const existingGrant = this.#grants.get(existing.grantId)
+      if (existingGrant === undefined) {
+        throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', 'finalization outbox 引用了不存在的 Grant')
+      }
+      return structuredClone(existingGrant)
+    }
     const common = { approvalSessionRef: input.approvalSessionRef, ttlMs: input.ttlMs }
     const discovery = DiscoveryApprovalSubjectSchema.safeParse(subject)
     const read = ReadApprovalSubjectSchema.safeParse(subject)
@@ -420,8 +459,65 @@ export class LocalApprovalAuthority {
     if (grant === undefined) {
       throw authorityError('E2E_APPROVAL_SUBJECT_INVALID', 'Grant subject 不属于严格 canonical union')
     }
-    input.registerApprovalContext(structuredClone(grant.approvalContext))
+    if (!sameApprovalExecutionBinding(grant.approvalContext, approvalBinding)) {
+      throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'WebAuthn receipt 与 Runtime 可信绑定不一致')
+    }
+    this.#grantFinalizations.set(input.finalizationId, {
+      ...expectedFinalization,
+      grantId: grant.grantId,
+      approvalSessionRef: input.approvalSessionRef,
+    })
     return grant
+  }
+
+  async recoverFinalizedGrant(input: {
+    finalizationId: string
+    requestDigest: string
+    subject: ApprovalGrantSubject
+    approvalBinding: TrustedApprovalExecutionBinding
+  }): Promise<{ grant: SignedGrant; approvalSessionRef: string } | undefined> {
+    if (!this.#stateStore) throw authorityError('E2E_APPROVAL_PERSISTENCE_REQUIRED', '恢复 Grant 需要持久 Authority')
+    return await this.#withStateRead(async () => {
+      validateFinalizationIdentity(input.finalizationId, input.requestDigest)
+      const subject = ApprovalGrantSubjectSchema.parse(immutableSnapshot(input.subject))
+      const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
+      const existing = this.#grantFinalizations.get(input.finalizationId)
+      if (existing === undefined) return undefined
+      if (existing.requestDigest !== input.requestDigest
+        || canonicalizeJson(existing.subject) !== canonicalizeJson(subject)
+        || canonicalizeJson(existing.approvalBinding) !== canonicalizeJson(approvalBinding)) {
+        throw authorityError('E2E_APPROVAL_FINALIZATION_MISMATCH', 'finalization recovery 与既有 outbox 不一致')
+      }
+      const grant = this.#grants.get(existing.grantId)
+      if (grant === undefined) throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', 'outbox Grant 不存在')
+      return { grant: structuredClone(grant), approvalSessionRef: existing.approvalSessionRef }
+    })
+  }
+
+  async activatePersistedGrant(input: {
+    grant: SignedGrant
+    approvalBinding: TrustedApprovalExecutionBinding
+  }): Promise<CanonicalApprovalContext> {
+    if (!this.#stateStore) throw authorityError('E2E_APPROVAL_PERSISTENCE_REQUIRED', '激活 Grant 需要持久 Authority')
+    return await this.#withStateRead(async () => {
+      const parsed = SignedGrantSchema.safeParse(immutableSnapshot(input.grant))
+      if (!parsed.success) throw authorityError('E2E_APPROVAL_GRANT_INVALID', 'SignedGrant 结构无效')
+      const grant = parsed.data as SignedGrant
+      const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
+      if (!sameApprovalExecutionBinding(grant.approvalContext, approvalBinding)) {
+        throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'SignedGrant 与 Runtime 可信绑定不一致')
+      }
+      const stored = this.#grants.get(grant.grantId)
+      if (stored === undefined || canonicalizeJson(stored) !== canonicalizeJson(grant)) {
+        throw authorityError(
+          'E2E_APPROVAL_GRANT_STATE_MISMATCH',
+          'SignedGrant 与当前 Authority 持久存储态不一致',
+        )
+      }
+      const decision = this.#verifyGrant(grant)
+      if (!decision.allowed) throw authorityError(decision.code, decision.reason)
+      return structuredClone(grant.approvalContext)
+    })
   }
 
   #assertCredentialCas(expected: StoredWebAuthnCredential, next: StoredWebAuthnCredential): void {
@@ -1582,7 +1678,7 @@ export class LocalApprovalAuthority {
 
   #persistentSnapshot(): AuthorityPersistentSnapshot {
     return {
-      schemaVersion: '2.2.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
+      schemaVersion: '2.3.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
       privateKeys: {
         primary: encryptPrivateKey(this.#privateKey, this.#stateEncryptionKey!, 'primary'),
         freshness: encryptPrivateKey(this.#freshnessPrivateKey, this.#stateEncryptionKey!, 'freshness'),
@@ -1598,7 +1694,8 @@ export class LocalApprovalAuthority {
         [...this.#webAuthnReceipts.entries()],
         this.#stateEncryptionKey!,
       ),
-      grants: [...this.#grants.entries()], revoked: [...this.#revoked.entries()], uses: [...this.#uses.entries()],
+      grants: [...this.#grants.entries()], grantFinalizations: [...this.#grantFinalizations.entries()],
+      revoked: [...this.#revoked.entries()], uses: [...this.#uses.entries()],
       reservations: [...this.#reservations.entries()], completedPreflights: [...this.#completedPreflights.entries()],
       manualResultIds: [...this.#manualResultIds], attemptLogs: [...this.#attemptLogs.entries()],
     }
@@ -1610,6 +1707,7 @@ export class LocalApprovalAuthority {
       throw authorityError('E2E_AUTHORITY_STATE_IDENTITY_MISMATCH', '持久 Authority snapshot 与当前实例不匹配')
     }
     replaceMap(this.#grants, snapshot.grants)
+    replaceMap(this.#grantFinalizations, snapshot.grantFinalizations)
     replaceMap(this.#revoked, snapshot.revoked)
     replaceMap(this.#uses, snapshot.uses)
     replaceMap(this.#reservations, snapshot.reservations)
@@ -1755,11 +1853,17 @@ function loadAuthoritySnapshot(
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
   const version = parsed.schemaVersion
-  const migrated = version === '2.0.0' || version === '2.1.0'
-  if (!migrated && version !== '2.2.0') {
+  const migrated = version === '2.0.0' || version === '2.1.0' || version === '2.2.0'
+  if (!migrated && version !== '2.3.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 版本未知或旧结构无效')
   }
-  parseAuthoritySnapshotStructure(parsed, version !== '2.0.0', version === '2.2.0', version === '2.2.0')
+  parseAuthoritySnapshotStructure(
+    parsed,
+    version !== '2.0.0',
+    version === '2.2.0' || version === '2.3.0',
+    version === '2.2.0' || version === '2.3.0',
+    version === '2.3.0',
+  )
   const encryptedKeys = parsed.privateKeys as AuthorityPersistentSnapshot['privateKeys']
   let privateKeys: DecryptedAuthorityPrivateKeys
   try {
@@ -1777,14 +1881,24 @@ function loadAuthoritySnapshot(
   if (version !== '2.0.0') {
     decryptWebAuthnCredentials(parsed.webAuthnCredentials as EncryptedPrivateKey, stateEncryptionKey)
   }
-  if (version === '2.2.0') {
+  if (version === '2.2.0' || version === '2.3.0') {
     decryptWebAuthnReceipts(parsed.webAuthnReceipts as EncryptedPrivateKey, stateEncryptionKey)
-    return { snapshot: parsed as unknown as AuthorityPersistentSnapshot, migrated: false, privateKeys }
+    if (version === '2.3.0') {
+      return { snapshot: parsed as unknown as AuthorityPersistentSnapshot, migrated: false, privateKeys }
+    }
+    return {
+      snapshot: parseCurrentAuthoritySnapshot({
+        ...parsed, schemaVersion: '2.3.0', grantFinalizations: [],
+      }),
+      migrated: true,
+      privateKeys,
+    }
   }
   const snapshot = parseCurrentAuthoritySnapshot({
     ...parsed,
-    schemaVersion: '2.2.0',
+    schemaVersion: '2.3.0',
     grants: [],
+    grantFinalizations: [],
     revoked: (parsed.grants as Array<[string, unknown]>).map(([grantId]) =>
       [grantId, 'legacy-approval-context-migration'] as [string, string]),
     uses: [],
@@ -1800,10 +1914,10 @@ function loadAuthoritySnapshot(
 }
 
 function parseCurrentAuthoritySnapshot(parsed: unknown): AuthorityPersistentSnapshot {
-  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.2.0') {
+  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.3.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
-  parseAuthoritySnapshotStructure(parsed, true, true, true)
+  parseAuthoritySnapshotStructure(parsed, true, true, true, true)
   return parsed as unknown as AuthorityPersistentSnapshot
 }
 
@@ -1812,9 +1926,10 @@ function parseAuthoritySnapshotStructure(
   withCredentials: boolean,
   withReceipts: boolean,
   withApprovalContext: boolean,
+  withGrantFinalizations: boolean,
 ): void {
   const privateKeys = candidate.privateKeys as Record<string, unknown> | undefined
-  if (!hasExactSnapshotKeys(candidate, withCredentials, withReceipts)
+  if (!hasExactSnapshotKeys(candidate, withCredentials, withReceipts, withGrantFinalizations)
     || typeof candidate.issuer !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.issuer)
     || typeof candidate.keyId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.keyId)
     || typeof candidate.identityDigest !== 'string' || !isDigest(candidate.identityDigest)
@@ -1833,6 +1948,23 @@ function parseAuthoritySnapshotStructure(
     validateStoredGrantStructure(value, withApprovalContext)
   })
   const grantMap = new Map(grants.map(([key, value]) => [key, value as unknown as SignedGrant]))
+  if (withGrantFinalizations) {
+    parseUniqueTuples(candidate.grantFinalizations as unknown[], 'grant finalization', (key, value) => {
+      if (!/^[A-Za-z0-9._:-]{1,256}$/.test(key) || !isPlainSnapshot(value)
+        || Object.keys(value).sort().join('\0')
+          !== ['approvalBinding', 'approvalSessionRef', 'grantId', 'requestDigest', 'subject'].join('\0')
+        || typeof value.requestDigest !== 'string' || !isDigest(value.requestDigest)
+        || typeof value.grantId !== 'string' || !grantMap.has(value.grantId)
+        || typeof value.approvalSessionRef !== 'string'
+        || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.approvalSessionRef)) corruptSnapshot()
+      const subject = ApprovalGrantSubjectSchema.safeParse(value.subject)
+      if (!subject.success) corruptSnapshot()
+      const binding = parseApprovalExecutionBindingForSnapshot(value.approvalBinding)
+      const grant = grantMap.get(value.grantId as string)!
+      if (canonicalizeJson(subject.data) !== canonicalizeJson(grant.subject)
+        || !sameApprovalExecutionBinding(grant.approvalContext, binding)) corruptSnapshot()
+    })
+  }
   parseUniqueTuples(candidate.revoked, 'revocation', (key, reason) => {
     const migratedTombstone = reason === 'legacy-approval-context-migration'
     if ((!grantMap.has(key) && !migratedTombstone)
@@ -1863,12 +1995,14 @@ function hasExactSnapshotKeys(
   candidate: Record<string, unknown>,
   withCredentials: boolean,
   withReceipts: boolean,
+  withGrantFinalizations: boolean,
 ): boolean {
   const keys = [
     'attemptLogs', 'completedPreflights', 'grants', 'identityDigest', 'issuer', 'keyId', 'manualResultIds',
     'privateKeys', 'reservations', 'revoked', 'schemaVersion', 'uses',
     ...(withCredentials ? ['webAuthnCredentials'] : []),
     ...(withReceipts ? ['webAuthnReceipts'] : []),
+    ...(withGrantFinalizations ? ['grantFinalizations'] : []),
   ].sort()
   return Object.keys(candidate).sort().join('\0') === keys.join('\0')
 }
@@ -2327,6 +2461,39 @@ function replaceMap<K, V>(target: Map<K, V>, entries: Array<[K, V]>): void {
 
 function immutableSnapshot<T>(value: T): T {
   return JSON.parse(canonicalizeJson(value)) as T
+}
+
+function validateFinalizationIdentity(finalizationId: string, requestDigest: string): void {
+  if (!/^[A-Za-z0-9._:-]{1,256}$/.test(finalizationId) || !/^sha256:[a-f0-9]{64}$/.test(requestDigest)) {
+    throw authorityError('E2E_APPROVAL_FINALIZATION_INVALID', 'finalizationId 或 requestDigest 无效')
+  }
+}
+
+function parseApprovalExecutionBinding(value: unknown): TrustedApprovalExecutionBinding {
+  if (!isPlainSnapshot(value)
+    || Object.keys(value).sort().join('\0')
+      !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')
+    || typeof value.runId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.runId)
+    || (value.approvalType !== 'discovery' && value.approvalType !== 'execution')
+    || typeof value.subjectDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.subjectDigest)
+    || typeof value.installationDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.installationDigest)) {
+    throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'Runtime approval binding 结构无效')
+  }
+  return structuredClone(value) as TrustedApprovalExecutionBinding
+}
+
+function parseApprovalExecutionBindingForSnapshot(value: unknown): TrustedApprovalExecutionBinding {
+  try { return parseApprovalExecutionBinding(value) } catch { return corruptSnapshot() }
+}
+
+function sameApprovalExecutionBinding(
+  context: CanonicalApprovalContext,
+  binding: TrustedApprovalExecutionBinding,
+): boolean {
+  return context.runId === binding.runId
+    && context.installationDigest === binding.installationDigest
+    && context.approvalType === binding.approvalType
+    && context.subjectDigest === binding.subjectDigest
 }
 
 function sameExecutionBoundary(discovery: DiscoveryApprovalSubject, execution: {

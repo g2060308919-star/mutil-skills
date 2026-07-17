@@ -234,8 +234,7 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
     const lease = await LocalLeaseAuthority.open({ now, statePath: leasePath, testWorkspaceRoots: [process.cwd()] })
     lease.close()
 
-    try {
-      host = await startAuthorityExecutionRpcHostProcess({
+    const hostOptions: Parameters<typeof startAuthorityExecutionRpcHostProcess>[0] = {
         rpc: { issuer: 'authority-host', keyId: 'rpc-key-1', clientId: 'runner-1' },
         approval: {
           issuer: 'authority', keyId: 'key-1', statePath: approvalPath,
@@ -251,16 +250,21 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
           },
         },
         clock: { kind: 'fixed-test-only', now: fixedNow },
-      })
+    }
+    try {
+      host = await startAuthorityExecutionRpcHostProcess(hostOptions)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EPERM') { skip(); return }
       throw error
     }
     const subjectDigest = canonicalGrantApprovalSubjectDigest(writeSubject)
+    const finalization = {
+      finalizationId: 'FINALIZE-PRODUCTION-1', requestDigest: digest('finalization-request'),
+    }
     const session = await host.openApprovalSession({
       runId: 'RUN-1', approvalType: 'execution', subjectDigest, installationDigest,
     })
-    await expect(host.finalizeApproval({ sessionId: session.sessionId, grantSubject: writeSubject }))
+    await expect(host.finalizeApproval({ sessionId: session.sessionId, grantSubject: writeSubject, ...finalization }))
       .rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_INVALID' })
 
     await completeWebAuthnApproval(session, credential)
@@ -269,16 +273,34 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
       ...writeSubject,
       actions: [{ ...writeSubject.actions[0]!, cleanupPlanDigest: digest('rebound-cleanup') }],
     }
-    await expect(host.finalizeApproval({ sessionId: session.sessionId, grantSubject: reboundSubject }))
+    await expect(host.finalizeApproval({ sessionId: session.sessionId, grantSubject: reboundSubject, ...finalization }))
       .rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' })
 
-    const finalized = await host.finalizeApproval({ sessionId: session.sessionId, grantSubject: writeSubject })
+    const finalized = await host.finalizeApproval({
+      sessionId: session.sessionId, grantSubject: writeSubject, ...finalization,
+    })
     expect(finalized).toMatchObject({
       grant: { subject: writeSubject, subjectDigest, approver },
       approvalBinding: { runId: 'RUN-1', installationDigest, approvalType: 'execution', subjectDigest },
     })
-    await expect(host.finalizeApproval({ sessionId: session.sessionId, grantSubject: writeSubject }))
+    await expect(host.finalizeApproval({ sessionId: session.sessionId, grantSubject: writeSubject, ...finalization }))
       .rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_INVALID' })
+
+    const firstSessionKey = host.credential.sessionKeyBase64Url
+    await host.close()
+    host = await startAuthorityExecutionRpcHostProcess(hostOptions)
+    expect(host.credential.sessionKeyBase64Url).not.toBe(firstSessionKey)
+    await expect(host.activateGrant({
+      grant: finalized.grant,
+      approvalBinding: { ...finalized.approvalBinding, runId: 'RUN-REBOUND' },
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' })
+    await expect(host.activateGrant({
+      grant: { ...finalized.grant, extra: true } as never,
+      approvalBinding: finalized.approvalBinding,
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_GRANT_INVALID' })
+    await expect(host.activateGrant({
+      grant: finalized.grant, approvalBinding: finalized.approvalBinding,
+    })).resolves.toBeUndefined()
 
     const clients = createAuthorityExecutionRpcClients({
       credential: host.credential, approvalBinding: finalized.approvalBinding,

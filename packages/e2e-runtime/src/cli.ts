@@ -31,7 +31,7 @@ import {
 } from './runtime-doctor.js'
 import { isExactRuntimeVersion } from './runtime-manifest.js'
 import { E2ERuntimeHost } from './runtime-host.js'
-import { RuntimeRunStore } from './run-store.js'
+import { RuntimeRunStore, type RuntimeRunSnapshot } from './run-store.js'
 import { assertSameProjectIdentity, resolveProjectIdentity } from './project-identity.js'
 import { SecureProjectFileReader } from './secure-project-files.js'
 import {
@@ -65,6 +65,7 @@ export interface RuntimeCliDependencies {
     subject: string
     approvalSessionTtlMs?: number
   }) => Promise<RuntimeAuthorityHost>
+  openRunStore?: typeof RuntimeRunStore.open
   currentWorkingDirectory?: () => string
   approvalSessionTtlMs?: number
 }
@@ -90,7 +91,7 @@ export async function runCli(
     try {
       const session = await (dependencies.openHumanAuthoritySession?.(arguments_)
         ?? openDefaultHumanAuthoritySession(arguments_, dependencies))
-      await writeText(stderr, `${session.url}\n`)
+      if (session.url !== '') await writeText(stderr, `${session.url}\n`)
       const outcome = await session.wait()
       await responseWriter.write(`${canonicalizeJson(
         outcome ?? { sessionId: session.sessionId, status: 'verified' },
@@ -398,14 +399,14 @@ async function openDefaultHumanAuthoritySession(
 ): Promise<RuntimeAuthoritySession> {
   const inspect = dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault
   const installation = await inspect({ homeDir: dependencies.homeDir })
-  const authority = await (dependencies.startAuthorityHost ?? startRuntimeAuthorityHost)({
-    homeDir: dependencies.homeDir,
-    installation,
-    subject: localAuthoritySubject(),
-    ...(dependencies.approvalSessionTtlMs === undefined
-      ? {} : { approvalSessionTtlMs: dependencies.approvalSessionTtlMs }),
+  const startAuthority = async () => await (dependencies.startAuthorityHost ?? startRuntimeAuthorityHost)({
+    homeDir: dependencies.homeDir, installation, subject: localAuthoritySubject(),
+    ...(dependencies.approvalSessionTtlMs === undefined ? {} : {
+      approvalSessionTtlMs: dependencies.approvalSessionTtlMs,
+    }),
   })
   if (arguments_[0] === 'identity') {
+    const authority = await startAuthority()
     try {
       return closeAuthorityAfterWait(await authority.enroll({ subject: localAuthoritySubject() }), authority)
     } catch (error) {
@@ -416,10 +417,13 @@ async function openDefaultHumanAuthoritySession(
   const projectRoot = (dependencies.currentWorkingDirectory ?? process.cwd)()
   let store: RuntimeRunStore
   try {
-    store = await RuntimeRunStore.open({ homeDir: dependencies.homeDir, projectRoot })
+    store = await (dependencies.openRunStore ?? RuntimeRunStore.open)({
+      homeDir: dependencies.homeDir, projectRoot,
+    })
   } catch (error) {
-    return await closeResourcesAndRethrow(error, [authority])
+    throw error
   }
+  let authority: RuntimeAuthorityHost | undefined
   try {
     const identity = await resolveProjectIdentity(projectRoot)
     const runId = arguments_[2]!
@@ -430,49 +434,102 @@ async function openDefaultHumanAuthoritySession(
     const approvalType = approvalTypeForWorkflow(initial.workflow.current, arguments_[4]!)
     const grantSubject = await readHumanGrantSubject(arguments_, approvalType, identity)
     const subjectDigest = computeRuntimeApprovalSubjectDigest(initial, approvalType, grantSubject)
-    const session = await authority.requestApproval({
-      runId, approvalType, subjectDigest, installationDigest: installation.installationDigest,
+    const stable = stableHumanApprovalRequest(initial, approvalType, subjectDigest)
+    const reservation = grantSubject === undefined
+      ? { kind: 'pending' as const }
+      : await store.beginRequest(stable.requestId, stable.requestDigest)
+    if (reservation.kind === 'replay') {
+      await store.close()
+      return {
+        url: '', sessionId: stable.finalizationId,
+        async wait() { return reservation.response as Awaited<ReturnType<RuntimeAuthoritySession['wait']>> },
+      }
+    }
+    authority = await startAuthority()
+    const approvalBinding = grantSubject === undefined ? undefined : {
+      runId, approvalType: approvalType as 'discovery' | 'execution', subjectDigest,
+      installationDigest: installation.installationDigest,
+    }
+    const recovered = grantSubject === undefined ? undefined : await authority.recoverApproval({
+      finalizationId: stable.finalizationId, requestDigest: stable.requestDigest,
+      grantSubject, approvalBinding: approvalBinding!,
     })
+    const session = recovered === undefined ? await authority.requestApproval({
+      runId, approvalType, subjectDigest, installationDigest: installation.installationDigest,
+      ...(grantSubject === undefined ? {} : {
+        finalizationId: stable.finalizationId, requestDigest: stable.requestDigest,
+      }),
+    }) : undefined
     return {
-      url: session.url,
-      sessionId: session.sessionId,
+      url: session?.url ?? '',
+      sessionId: recovered?.sessionId ?? session!.sessionId,
       async wait() {
         let outcome: Awaited<ReturnType<RuntimeAuthoritySession['wait']>> = undefined
         await runWithResourceCleanup(async () => {
-          await session.wait()
+          await session?.wait()
           const currentIdentity = await resolveProjectIdentity(projectRoot)
           assertSameProjectIdentity(identity, currentIdentity)
-          const current = await readRunWithLease(store, identity.digest, runId)
-          if (computeRuntimeApprovalSubjectDigest(current, approvalType, grantSubject) !== subjectDigest) {
-            throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')
-          }
-          if (grantSubject !== undefined) {
-            if (!session.finalize) throw cliAuthorityError('E2E_APPROVAL_FINALIZE_UNAVAILABLE')
-            const finalized = await session.finalize(grantSubject)
-            const response = {
-              sessionId: session.sessionId,
-              status: 'verified' as const,
-              signedGrant: finalized.grant,
-              approvalBinding: finalized.approvalBinding,
+          const lock = await store.acquireRunLock(identity.digest, runId)
+          try {
+            const current = await store.getRun(identity.digest, runId)
+            if (current === undefined
+              || current.runtimeInstallationDigest !== installation.installationDigest
+              || approvalTypeForWorkflow(current.workflow.current, approvalType) !== approvalType
+              || computeRuntimeApprovalSubjectDigest(current, approvalType, grantSubject) !== subjectDigest
+              || stableHumanApprovalRequest(current, approvalType, subjectDigest).requestId !== stable.requestId) {
+              throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')
             }
-            const requestId = `HUMAN-APPROVAL-${session.sessionId}`
-            const requestDigest = digestText('e2e-runtime-human-approval/v1', canonicalizeJson({
-              runId, approvalType, subjectDigest, sessionId: session.sessionId,
-            }))
-            await store.beginRequest(requestId, requestDigest)
-            const lock = await store.acquireRunLock(identity.digest, runId)
-            try {
-              outcome = await store.readRunOutcome(
-                identity.digest, runId, requestId, requestDigest, () => response, lock,
-              ) as typeof response
-            } finally { await lock.close() }
-          }
-        }, [store, authority])
+            if (grantSubject !== undefined) {
+              if (recovered === undefined && !session?.finalize) {
+                throw cliAuthorityError('E2E_APPROVAL_FINALIZE_UNAVAILABLE')
+              }
+              const finalized = recovered ?? await session!.finalize!(grantSubject)
+              const response = {
+                sessionId: recovered?.sessionId ?? session!.sessionId,
+                status: 'verified' as const,
+                signedGrant: finalized.grant,
+                approvalBinding: finalized.approvalBinding,
+              }
+              try {
+                outcome = await store.readRunOutcome(
+                  identity.digest, runId, stable.requestId, stable.requestDigest, () => response, lock,
+                ) as typeof response
+              } catch (cause) {
+                throw new E2EError({
+                  code: 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING', category: 'safety',
+                  message: 'Authority 已最终化 Grant，但 Run Store outcome 尚未持久化；可用相同命令恢复',
+                  retryable: true, cause,
+                })
+              }
+            }
+          } finally { await lock.close() }
+        }, [store, authority!])
         return outcome
       },
     }
   } catch (error) {
-    return await closeResourcesAndRethrow(error, [store, authority])
+    return await closeResourcesAndRethrow(error, [store, ...(authority === undefined ? [] : [authority])])
+  }
+}
+
+function stableHumanApprovalRequest(
+  snapshot: RuntimeRunSnapshot,
+  approvalType: 'scope' | 'lineage' | 'discovery' | 'execution' | 'privacy',
+  subjectDigest: string,
+): { requestId: string; requestDigest: string; finalizationId: string } {
+  const requestDigest = digestText('e2e-runtime-human-approval/v2', canonicalizeJson({
+    runId: snapshot.runId,
+    approvalType,
+    subjectDigest,
+    workflowSequence: snapshot.workflow.sequence,
+    workflowEventChainDigest: snapshot.workflow.eventChainDigest,
+    recordedRequestIds: Object.keys(snapshot.requestResponses).sort(),
+  }))
+  const suffix = requestDigest.slice('sha256:'.length)
+  return {
+    requestId: `HUMAN-APPROVAL-${suffix}`,
+    requestDigest,
+    finalizationId: `FINALIZE-HUMAN-${suffix}`,
   }
 }
 

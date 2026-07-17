@@ -274,7 +274,7 @@ describe('PRD-driven reversible-write golden path', () => {
       })
       approvalAuthority.close()
       leaseAuthority.close()
-      authorityRpcHandle = await startAuthorityExecutionRpcHostProcess({
+      const authorityRpcHostOptions: Parameters<typeof startAuthorityExecutionRpcHostProcess>[0] = {
         rpc: { issuer: 'golden-authority-host', keyId: 'golden-authority-rpc-key-1',
           clientId: 'golden-write-runner' },
         approval: {
@@ -293,27 +293,33 @@ describe('PRD-driven reversible-write golden path', () => {
           },
         },
         clock: { kind: 'fixed-test-only', now: now().toISOString() },
-      })
+      }
+      authorityRpcHandle = await startAuthorityExecutionRpcHostProcess(authorityRpcHostOptions)
       const grantSubjectDigest = canonicalGrantApprovalSubjectDigest(grantSubject)
+      const grantFinalization = {
+        finalizationId: 'GOLDEN-WRITE-FINALIZATION-1',
+        requestDigest: digestText('golden-write-finalization-request/v1', 'RUN-WRITE-1'),
+      }
       const grantSession = await authorityRpcHandle.openApprovalSession({
         runId: 'RUN-WRITE-1', approvalType: 'execution',
         subjectDigest: grantSubjectDigest,
         installationDigest: digestText('golden-runtime-installation/v1', 'portable-e2e-runtime'),
       })
       await expect(authorityRpcHandle.finalizeApproval({
-        sessionId: grantSession.sessionId, grantSubject,
+        sessionId: grantSession.sessionId, grantSubject, ...grantFinalization,
       })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_INVALID' })
       await completeGoldenWebAuthnApproval(grantSession, authenticator)
       await authorityRpcHandle.waitForSession(grantSession.sessionId)
       await expect(authorityRpcHandle.finalizeApproval({
         sessionId: grantSession.sessionId,
+        ...grantFinalization,
         grantSubject: {
           ...grantSubject,
           actions: [{ ...grantSubject.actions[0], cleanupPlanDigest: digestText('cleanup-plan/v1', 'rebound') }],
         },
       })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' })
       const finalized = await authorityRpcHandle.finalizeApproval({
-        sessionId: grantSession.sessionId, grantSubject,
+        sessionId: grantSession.sessionId, grantSubject, ...grantFinalization,
       })
       const grant = finalized.grant as SignedWriteGrant
       expect(finalized.approvalBinding).toEqual({
@@ -323,8 +329,16 @@ describe('PRD-driven reversible-write golden path', () => {
         subjectDigest: grant.approvalContext.subjectDigest,
       })
       await expect(authorityRpcHandle.finalizeApproval({
-        sessionId: grantSession.sessionId, grantSubject,
+        sessionId: grantSession.sessionId, grantSubject, ...grantFinalization,
       })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_INVALID' })
+      const host1SessionKey = authorityRpcHandle.credential.sessionKeyBase64Url
+      await authorityRpcHandle.close()
+      authorityRpcHandle = await startAuthorityExecutionRpcHostProcess(authorityRpcHostOptions)
+      expect(authorityRpcHandle.credential.sessionKeyBase64Url).not.toBe(host1SessionKey)
+      await authorityRpcHandle.activateGrant({
+        grant,
+        approvalBinding: finalized.approvalBinding,
+      })
       approvalAuthority = await LocalApprovalAuthority.open(authorityOptions)
       leaseAuthority = await LocalLeaseAuthority.open({
         now, statePath: leaseStatePath, testWorkspaceRoots: [process.cwd()],

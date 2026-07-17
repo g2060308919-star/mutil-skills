@@ -86,8 +86,51 @@ const attemptContext = {
 }
 
 describe('SQLite 持久 Authority 状态', () => {
+  test('持久 Grant 激活要求签名内容与当前 Authority 存储态完全一致', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-stored-grant-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const subject = {
+      schemaVersion: '1.0.0' as const,
+      assetId: 'ASSET-STORED-GRANT', prdRevision: digest('stored-prd'), scopeDigest: digest('stored-scope'),
+      environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'operator',
+      expectedPageIdentity: {
+        url: 'https://example.test/orders', title: 'Orders', heading: 'Orders', ariaSignals: ['main'],
+      },
+      bootstrapIntentsDigest: digest('stored-bootstrap'),
+      actions: [{ actionId: 'DISCOVERY-STORED', operation: 'dom-read' as const, maxUses: 1 as const }],
+    }
+    const grant = await authority.issueDiscoveryGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    authority.close()
+
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const snapshot = JSON.parse(row.snapshot) as Record<string, unknown>
+    snapshot.grants = []
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(snapshot))
+    database.close()
+
+    const reopened = await LocalApprovalAuthority.open(options)
+    await expect(reopened.activatePersistedGrant({
+      grant,
+      approvalBinding: {
+        runId: grant.approvalContext.runId,
+        approvalType: grant.approvalContext.approvalType,
+        subjectDigest: grant.approvalContext.subjectDigest,
+        installationDigest: grant.approvalContext.installationDigest,
+      },
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_GRANT_STATE_MISMATCH' })
+    reopened.close()
+  })
+
   test.each(['2.0.0', '2.1.0'] as const)(
-    '将真实 %s snapshot 幂等迁移到 2.2.0，并对未知版本 fail closed', async (legacyVersion) => {
+    '将真实 %s snapshot 幂等迁移到 2.3.0，并对未知版本 fail closed', async (legacyVersion) => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-migration-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')
     const options = {
@@ -108,6 +151,7 @@ describe('SQLite 持久 Authority 状态', () => {
     legacy.schemaVersion = legacyVersion
     if (legacyVersion === '2.0.0') delete legacy.webAuthnCredentials
     delete legacy.webAuthnReceipts
+    delete legacy.grantFinalizations
     convertToRealLegacySnapshot(legacy, stateEncryptionKey)
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
     database.close()
@@ -121,7 +165,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const migratedDatabase = new DatabaseSync(statePath)
     const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
     const persisted = JSON.parse(migratedRow.snapshot) as Record<string, unknown>
-    expect(persisted.schemaVersion).toBe('2.2.0')
+    expect(persisted.schemaVersion).toBe('2.3.0')
     expect(persisted.webAuthnCredentials).toMatchObject({ algorithm: 'aes-256-gcm' })
     expect(persisted).toMatchObject({ grants: [], uses: [], reservations: [], completedPreflights: [], attemptLogs: [] })
     persisted.schemaVersion = '9.9.9'
@@ -133,6 +177,38 @@ describe('SQLite 持久 Authority 状态', () => {
     })
     },
   )
+
+  test('2.2.0 snapshot preserves existing grants while adding an empty 2.3.0 finalization outbox', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-22-migration-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const first = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(first, 'LEASE-MIGRATION-22', 1)
+    const grant = await first.issueWriteGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    first.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const old = JSON.parse(row.snapshot) as Record<string, unknown>
+    old.schemaVersion = '2.2.0'
+    delete old.grantFinalizations
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
+    database.close()
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    await expect(migrated.verify(grant)).resolves.toEqual({ allowed: true })
+    migrated.close()
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({
+      schemaVersion: '2.3.0', grantFinalizations: [],
+    })
+    migratedDatabase.close()
+  })
 
   test('2.0.0 migration validates the supplied key before commit and wrong-key rollback preserves exact bytes', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-wrong-key-migration-'))
@@ -152,6 +228,7 @@ describe('SQLite 持久 Authority 状态', () => {
     legacy.schemaVersion = '2.0.0'
     delete legacy.webAuthnCredentials
     delete legacy.webAuthnReceipts
+    delete legacy.grantFinalizations
     const legacyBytes = JSON.stringify(legacy)
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(legacyBytes)
     const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
@@ -171,7 +248,7 @@ describe('SQLite 持久 Authority 状态', () => {
       revision: number; snapshot: string
     }
     expect(migratedRow.revision).toBe(row.revision + 1)
-    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({ schemaVersion: '2.2.0' })
+    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({ schemaVersion: '2.3.0' })
     migratedDatabase.close()
   })
 
@@ -204,6 +281,7 @@ describe('SQLite 持久 Authority 状态', () => {
       legacy.schemaVersion = '2.0.0'
       delete legacy.webAuthnCredentials
       delete legacy.webAuthnReceipts
+      delete legacy.grantFinalizations
       corrupt(legacy)
       database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
       const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
@@ -252,6 +330,7 @@ describe('SQLite 持久 Authority 状态', () => {
       legacy.schemaVersion = '2.0.0'
       delete legacy.webAuthnCredentials
       delete legacy.webAuthnReceipts
+      delete legacy.grantFinalizations
       const events = legacy.attemptLogs[0][1].events as unknown[]
       if (mutation === 'delete') events.splice(0, 1)
       else events.reverse()
