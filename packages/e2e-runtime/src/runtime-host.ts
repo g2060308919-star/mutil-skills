@@ -36,6 +36,7 @@ import {
   type RuntimeAuthorityHost,
 } from './authority-host.js'
 import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js'
+import type { RuntimeSecretBroker } from './secret-broker.js'
 
 export interface RuntimeHostDependencies {
   installation: RuntimeInstallation
@@ -46,6 +47,7 @@ export interface RuntimeHostDependencies {
   authorityHostFactory?: () => Promise<Pick<RuntimeAuthorityHost, 'requestApproval'>
     & Partial<Pick<RuntimeAuthorityHost, 'recoverApproval' | 'acknowledgeFinalization'>>>
   presentUserPresenceUrl?(url: string): void | Promise<void>
+  secretBroker?: Pick<RuntimeSecretBroker, 'resolve' | 'consume'>
 }
 
 export class E2ERuntimeHost {

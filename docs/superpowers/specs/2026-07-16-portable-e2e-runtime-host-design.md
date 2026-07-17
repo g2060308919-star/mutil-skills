@@ -463,6 +463,8 @@ Browser/Runner 工作目录位于用户级 Run staging，不是项目根。子�
 
 ### 10.3 环境变量与秘密
 
+> **Spec Errata（2026-07-17，Task 6 实施）**：本节“Runtime 内部一次性 handle 可进入子进程 env”的示例不适用于首发实现。子进程 env 保持固定 `HOME/LANG/PATH/TMPDIR`，handle/value 均只经过 RuntimeHost 构造注入的 Broker 和受控 Bridge API。交互秘密跨 CLI 进程持久到用户级 strict `1.0.0` SQLite snapshot：独立 `0600` master key 包装每 Run data key，secret AAD 精确绑定 run/ref/provider，wrapped key 同时认证项目身份。provide 以原子 version 替换；consume 在事务内先删除 ciphertext、提交 consumed tombstone，再返回需立即清零的 Buffer。真实 OS 子进程并发消费最多一个成功。系统 provider 以持久 reservation 保证单次读取，环境变量/`.env` 永不回退。state、key、provider command、TTY、容量、损坏与跨项目边界全部 fail closed；首发未知 Secret schema 不迁移。
+
 Host 启动子进程时从空对象构建 env，只允许固定的无敏感键，例如 locale、受控临时目录和 Runtime 内部一次性 handle。以下内容一律不继承：
 
 - `SSH_*`、`AWS_*`、`GITHUB_*`、`NPM_*`、云凭证、数据库 URL；

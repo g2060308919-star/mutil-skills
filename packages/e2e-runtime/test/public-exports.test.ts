@@ -14,6 +14,7 @@ test('public Runtime package exposes only protocol schemas and version metadata'
   for (const forbidden of [
     'E2ERuntimeHost', 'RuntimeAuthorityHost', 'RuntimeRunStore', 'startRuntimeAuthorityHost',
     'installRuntime', 'uninstallRuntime', 'inspectRuntimeInstallation', 'resolveProjectIdentity',
+    'RuntimeSecretBroker', 'createSystemSecretProvider', 'SecretProvider', 'OneTimeSecretHandle',
   ]) {
     expect(runtimePublicApi).not.toHaveProperty(forbidden)
   }

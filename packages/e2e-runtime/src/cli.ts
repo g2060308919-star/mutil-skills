@@ -35,6 +35,7 @@ import { RuntimeRunStore, type RuntimeRunSnapshot } from './run-store.js'
 import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js'
 import { assertSameProjectIdentity, resolveProjectIdentity } from './project-identity.js'
 import { SecureProjectFileReader } from './secure-project-files.js'
+import { RuntimeSecretBroker } from './secret-broker.js'
 import {
   computeRuntimeApprovalSubjectDigest,
   startRuntimeAuthorityHost,
@@ -50,6 +51,20 @@ import {
 } from './protocol.js'
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
+const SECRET_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+const SECRET_REF = /^[A-Z][A-Z0-9_-]{0,127}$/
+const MAX_INTERACTIVE_SECRET_BYTES = 64 * 1024
+
+export interface SecretTerminalAdapter {
+  readonly isTTY: boolean
+  setRawMode(enabled: boolean): void
+  read(): AsyncIterable<Uint8Array>
+}
+
+interface CliSecretBroker {
+  provide(input: { runId: string; secretRef: string; value: Uint8Array }): Promise<void>
+  close(): Promise<void>
+}
 
 export interface RuntimeCliDependencies {
   homeDir: string
@@ -69,6 +84,13 @@ export interface RuntimeCliDependencies {
   openRunStore?: typeof RuntimeRunStore.open
   currentWorkingDirectory?: () => string
   approvalSessionTtlMs?: number
+  secretTerminal?: SecretTerminalAdapter
+  validateSecretRun?: (runId: string) => Promise<string | undefined>
+  openSecretBroker?: (options: {
+    homeDir: string
+    projectRoot: string
+    projectIdentityDigest?: string
+  }) => Promise<CliSecretBroker>
 }
 
 export async function runCli(
@@ -86,6 +108,10 @@ export async function runCli(
 
   if (arguments_[0] === 'install-runtime' || arguments_[0] === 'uninstall-runtime') {
     return runInstallManagementCommand(arguments_, responseWriter, dependencies)
+  }
+
+  if (arguments_[0] === 'secret') {
+    return await runSecretCommand(arguments_, stdin, responseWriter, dependencies)
   }
 
   if (isHumanAuthorityCommand(arguments_)) {
@@ -232,6 +258,142 @@ export async function runCli(
         })
     return writeErrorResponse(responseWriter, requestIdFromUntrustedJson(json), runtimeError)
   }
+}
+
+async function runSecretCommand(
+  arguments_: string[],
+  stdin: Readable,
+  responseWriter: SingleJsonResponseWriter,
+  dependencies: RuntimeCliDependencies,
+): Promise<number> {
+  if (arguments_.length !== 6 || arguments_[1] !== 'provide'
+    || arguments_[2] !== '--run-id' || !SECRET_RUN_ID.test(arguments_[3]!)
+    || arguments_[4] !== '--ref' || !SECRET_REF.test(arguments_[5]!)) {
+    return writeErrorResponse(responseWriter, 'UNKNOWN', new E2EError({
+      code: 'E2E_RUNTIME_REQUEST_INVALID', category: 'input',
+      message: 'secret provide 只接受 --run-id <safe-id> --ref <SAFE_REF>', retryable: false,
+    }))
+  }
+  const terminal = dependencies.secretTerminal ?? terminalAdapterFor(stdin)
+  if (!terminal.isTTY) {
+    return writeErrorResponse(responseWriter, 'UNKNOWN', new E2EError({
+      code: 'E2E_SECRET_INTERACTIVE_TTY_REQUIRED', category: 'safety',
+      message: '交互秘密只能从真实 TTY 隐藏输入读取', retryable: false,
+    }))
+  }
+  const runId = arguments_[3]!
+  const secretRef = arguments_[5]!
+  const projectRoot = (dependencies.currentWorkingDirectory ?? process.cwd)()
+  let secret: Buffer | undefined
+  let broker: CliSecretBroker | undefined
+  try {
+    const projectIdentityDigest = await (dependencies.validateSecretRun?.(runId)
+      ?? validateDefaultSecretRun(dependencies.homeDir, projectRoot, runId))
+    secret = await readHiddenSecret(terminal)
+    broker = await (dependencies.openSecretBroker ?? RuntimeSecretBroker.open)({
+      homeDir: dependencies.homeDir,
+      projectRoot,
+      ...(projectIdentityDigest === undefined ? {} : { projectIdentityDigest }),
+    })
+    await broker.provide({ runId, secretRef, value: secret })
+    await broker.close()
+    broker = undefined
+    await responseWriter.write(`${canonicalizeJson({ runId, secretRef, status: 'stored' })}\n`)
+    return 0
+  } catch (cause) {
+    if (broker !== undefined) {
+      try { await broker.close() } catch { /* output remains a single sanitized error */ }
+    }
+    const error = cause instanceof E2EError ? cause : new E2EError({
+      code: 'E2E_SECRET_INTERACTIVE_FAILED', category: 'safety',
+      message: '交互秘密未能安全保存', retryable: false,
+    })
+    return writeErrorResponse(responseWriter, 'UNKNOWN', error)
+  } finally { secret?.fill(0) }
+}
+
+async function validateDefaultSecretRun(homeDir: string, projectRoot: string, runId: string): Promise<string> {
+  const store = await RuntimeRunStore.open({ homeDir, projectRoot })
+  try {
+    const identity = await resolveProjectIdentity(projectRoot)
+    if (await store.getRun(identity.digest, runId) === undefined) {
+      throw new E2EError({
+        code: 'E2E_SECRET_RUN_NOT_FOUND', category: 'input',
+        message: 'secret provide 必须绑定当前项目中已存在的 Run', retryable: false,
+      })
+    }
+    return identity.digest
+  } finally { await store.close() }
+}
+
+function terminalAdapterFor(stdin: Readable): SecretTerminalAdapter {
+  const candidate = stdin as Readable & { isTTY?: boolean; setRawMode?(enabled: boolean): void }
+  return {
+    isTTY: candidate.isTTY === true && typeof candidate.setRawMode === 'function',
+    setRawMode(enabled: boolean) {
+      if (typeof candidate.setRawMode !== 'function') throw new Error('TTY raw mode unavailable')
+      candidate.setRawMode(enabled)
+    },
+    read: () => candidate,
+  }
+}
+
+async function readHiddenSecret(terminal: SecretTerminalAdapter): Promise<Buffer> {
+  const bytes: number[] = []
+  let rawMode = false
+  let result: Buffer | undefined
+  let failure: E2EError | undefined
+  try {
+    rawMode = true
+    terminal.setRawMode(true)
+    let completed = false
+    for await (const raw of terminal.read()) {
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength)
+      try {
+        for (const byte of chunk) {
+          if (completed) continue
+          if (byte === 0x03) throw new E2EError({
+            code: 'E2E_SECRET_INTERACTIVE_INTERRUPTED', category: 'safety',
+            message: '交互秘密输入已中断', retryable: false,
+          })
+          if (byte === 0x0a || byte === 0x0d) { completed = true; continue }
+          if (byte === 0x7f || byte === 0x08) { bytes.pop(); continue }
+          bytes.push(byte)
+          if (bytes.length > MAX_INTERACTIVE_SECRET_BYTES) throw new E2EError({
+            code: 'E2E_SECRET_VALUE_TOO_LARGE', category: 'safety',
+            message: '交互秘密超过 64KiB 上限', retryable: false,
+          })
+        }
+      } finally { chunk.fill(0) }
+      if (completed) break
+    }
+    if (bytes.length === 0) throw new E2EError({
+      code: 'E2E_SECRET_INPUT_INVALID', category: 'safety',
+      message: '交互秘密不能为空', retryable: false,
+    })
+    result = Buffer.from(bytes)
+  } catch (cause) {
+    failure = cause instanceof E2EError ? cause : new E2EError({
+      code: 'E2E_SECRET_INTERACTIVE_FAILED', category: 'safety',
+      message: '交互 TTY 读取失败', retryable: false,
+    })
+  } finally {
+    bytes.fill(0)
+    if (rawMode) {
+      try { terminal.setRawMode(false) } catch {
+        result?.fill(0)
+        failure ??= new E2EError({
+          code: 'E2E_SECRET_INTERACTIVE_RESTORE_FAILED', category: 'safety',
+          message: '交互 TTY 状态未能恢复', retryable: false,
+        })
+      }
+    }
+  }
+  if (failure !== undefined) {
+    result?.fill(0)
+    throw failure
+  }
+  return result!
 }
 
 async function runInstallManagementCommand(

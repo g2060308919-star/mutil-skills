@@ -974,6 +974,10 @@ git commit -m "feat(e2e): require user presence for runtime approvals"
 
 ### Task 6: Secret Broker 与一次性秘密注入
 
+> **Spec Errata（2026-07-17，Task 6 实施）**：`repo-e2e secret provide` 是独立短生命周期 CLI，不能使用仅存在于该进程内存的测试 Broker。生产实现固定持久到用户级 `~/.mutil-skills/e2e/state/runtime-secrets.sqlite`，使用独立 current-UID `0600` master key 包装每 Run 32-byte data key；SQLite snapshot 为 strict `1.0.0`、最多 1024 entries/4MiB，并在 `BEGIN IMMEDIATE` 内完成 provide version 替换和 consume tombstone。Secret ciphertext 的 AES-256-GCM AAD 精确绑定 `{ runId, secretRef, providerId }`，wrapped data key 额外认证 Run/项目身份；同 runId 不得跨项目读取或覆盖。`consume()` 先提交 consumed 且删除 ciphertext，再向受控 Bridge 调用方返回需立即清零的 Buffer；因此 crash-after-commit 允许丢失但不能双消费。系统 provider 首次读取前写持久 resolving reservation，成功密封或失败 tombstone 后都不重复读取。opaque handle 只含随机 ID，并只由当前 Broker WeakMap 识别。原示例中的 `createForTest({ encryptionKey })` 与返回字符串不属于生产接口。
+
+> **CLI/Provider Errata（2026-07-17，Task 6 实施）**：隐藏输入必须是真实 TTY raw/no-echo 通道，Ctrl-C、EOF、读取、存储及恢复失败均恢复终端并清零原始 Buffer；stdout 只输出无 secret 的 canonical JSON。系统命令只允许 `/usr/bin/security` 或经 realpath/root-owner/不可修改/前后 inode 复验的 `/usr/bin/secret-tool`，argv 固定、`shell:false`、64KiB 上限、超时 kill、最小固定 env，所有 error/signal/stderr 路径脱敏。普通 Runtime 子进程 env 继续只有 `HOME/LANG/PATH/TMPDIR`，不传 handle 或 value；秘密只通过 RuntimeHost 构造注入的 Broker 与后续受控 Bridge API 传递。首发没有可迁移的旧 Secret schema，未知版本必须 fail closed，不猜测升级。
+
 **Files:**
 - Create: `packages/e2e-runtime/src/secret-broker.ts`
 - Create: `packages/e2e-runtime/src/secret-providers.ts`
