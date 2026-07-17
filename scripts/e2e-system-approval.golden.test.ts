@@ -78,7 +78,8 @@ describe('Spec §29 审批边界系统 E2E', () => {
           caseId: 'CASE-SCENARIO-7', actionId: 'ACTION-WRITE', url: 'http://fixture.test/orders/100',
           buttonName: '批准', beforeText: '待审核', afterText: '已批准',
           expectedIdentity: { title: '订单', heading: '订单 100' },
-          authorization: { grant, currentSubject, authority: authority.createWriteExecutionClient() },
+          authorization: { grant, currentSubject,
+            authority: authority.createWriteExecutionClient(grant.approvalContext) },
           lease: {
             leaseId: activeLease.leaseId, fencingToken: activeLease.fencingToken,
             targetFingerprint: digest('target-v1'), authority: leaseAuthority.createExecutionClient(),

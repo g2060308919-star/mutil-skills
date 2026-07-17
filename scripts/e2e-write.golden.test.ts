@@ -207,6 +207,7 @@ describe('PRD-driven reversible-write golden path', () => {
       issuer: 'golden-write-regression-discovery', keyId: 'golden-write-regression-key',
     })
     let authorityRpcHandle: AuthorityExecutionRpcProcessHandle | undefined
+    let destroyAuthorityRpcClients: (() => void) | undefined
     const browser = await chromium.launch({
       executablePath: resolveChromeExecutablePath(), headless: true,
       proxy: { server: `http://127.0.0.1:${proxyPort}` },
@@ -318,15 +319,23 @@ describe('PRD-driven reversible-write golden path', () => {
         },
         lease: { statePath: leaseStatePath, testWorkspaceRoots: [process.cwd()] },
         clock: { kind: 'fixed-test-only', now: now().toISOString() },
+        testOnlyApprovalContext: grant.approvalContext,
       })
       const authorityRpcMaterial = authorityRpcHandle.verifierMaterial
       const authorityRpcClients = createAuthorityExecutionRpcClients({
         credential: authorityRpcHandle.credential,
+        approvalBinding: {
+          runId: grant.approvalContext.runId,
+          installationDigest: grant.approvalContext.installationDigest,
+          approvalType: grant.approvalContext.approvalType,
+          subjectDigest: grant.approvalContext.subjectDigest,
+        },
         verifierMaterial: authorityRpcMaterial,
         expectedPublicKeyDigest: authorityRpcMaterial.publicKeyDigest,
         transport: createAuthenticatedRpcHttpTransport(authorityRpcHandle.endpoint),
         now,
       })
+      destroyAuthorityRpcClients = authorityRpcClients.destroy
       const executionTrust = await createTrustedCompilerExecutionTrust({
         discoveryAuthority: { material: discoveryAuthority.verifierMaterial,
           expectedPublicKeyDigest: discoveryAuthority.verifierMaterial.publicKeyDigest },
@@ -514,6 +523,7 @@ describe('PRD-driven reversible-write golden path', () => {
       })
     } finally {
       await browser.close()
+      destroyAuthorityRpcClients?.()
       await authorityRpcHandle?.close()
       approvalAuthority.close()
       leaseAuthority.close()
@@ -664,7 +674,8 @@ describe('PRD-driven reversible-write golden path', () => {
         caseId: 'CASE-WRITE-UNKNOWN', actionId: 'ACTION-APPROVE-UNKNOWN',
         url: `${fixtureOrigin}/orders/200`, buttonName: '批准订单', beforeText: '待审核', afterText: '已批准',
         expectedIdentity: { title: '订单审批', heading: '订单 200' },
-        authorization: { grant, currentSubject: grant.subject, authority: authority.createWriteExecutionClient() },
+        authorization: { grant, currentSubject: grant.subject,
+          authority: authority.createWriteExecutionClient(grant.approvalContext) },
         lease: { leaseId: lease.leaseId, fencingToken: lease.fencingToken, targetFingerprint,
           authority: leaseAuthority.createExecutionClient() },
         runtime: createTestWriteRuntimeSession({ sandboxHealthy: true, gatewayConnected: true,

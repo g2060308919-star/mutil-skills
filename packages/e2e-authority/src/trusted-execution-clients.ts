@@ -1,5 +1,6 @@
 import type {
   GrantDecision,
+  CanonicalApprovalContext,
   SignedWriteGrant,
   WriteApprovalSubject,
 } from '@mutil-skills/e2e-contracts'
@@ -12,9 +13,13 @@ export interface TrustedLeaseClient {
   verifyTarget(leaseId: string, fencingToken: number, targetFingerprint: string): Promise<boolean>
 }
 
+export type TrustedApprovalExecutionBinding = Pick<CanonicalApprovalContext,
+  'runId' | 'installationDigest' | 'approvalType' | 'subjectDigest'>
+
 export type TrustedExecutionClientBinding =
-  | { transport: 'in-process-test' }
-  | { transport: 'authenticated-rpc'; authorityPublicKeyDigest: string }
+  | { transport: 'in-process-test'; approvalBinding?: TrustedApprovalExecutionBinding }
+  | { transport: 'authenticated-rpc'; authorityPublicKeyDigest: string;
+      approvalBinding?: TrustedApprovalExecutionBinding }
 
 const trustedWriteApprovalClients = new WeakMap<object, TrustedExecutionClientBinding>()
 const trustedLeaseClients = new WeakMap<object, TrustedExecutionClientBinding>()

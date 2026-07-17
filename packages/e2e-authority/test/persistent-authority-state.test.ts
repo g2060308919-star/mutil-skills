@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
+import { createDecipheriv, createPrivateKey, sign } from 'node:crypto'
 import { canonicalizeJson, digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, LocalLeaseAuthority, SqliteSnapshotStore } from '../src/index.js'
 import { testApprovalReceipt } from './approval-authority.fixture.js'
@@ -17,6 +18,25 @@ const authenticatePersistentApprover = (
   sessionRef: string,
   expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string },
 ) => sessionRef === 'persistent-session' ? testApprovalReceipt(approver.subject, expected) : undefined
+
+function convertToRealLegacySnapshot(snapshot: Record<string, any>, encryptionKey: Buffer): void {
+  const encrypted = snapshot.privateKeys.primary
+  const decipher = createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(encrypted.iv, 'base64'))
+  decipher.setAAD(Buffer.from('e2e-authority-private-key/v1:primary'))
+  decipher.setAuthTag(Buffer.from(encrypted.authTag, 'base64'))
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(encrypted.ciphertext, 'base64')),
+    decipher.final(),
+  ])
+  try {
+    const privateKey = createPrivateKey({ key: plaintext, type: 'pkcs8', format: 'der' })
+    for (const [, grant] of snapshot.grants as Array<[string, Record<string, any>]>) {
+      delete grant.approvalContext
+      const { signature: _signature, ...payload } = grant
+      grant.signature = sign(null, Buffer.from(canonicalizeJson(payload)), privateKey).toString('base64url')
+    }
+  } finally { plaintext.fill(0) }
+}
 
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
@@ -86,12 +106,13 @@ describe('SQLite 持久 Authority 状态', () => {
     legacy.schemaVersion = '2.0.0'
     delete legacy.webAuthnCredentials
     delete legacy.webAuthnReceipts
+    convertToRealLegacySnapshot(legacy, stateEncryptionKey)
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
     database.close()
 
     const migrated = await LocalApprovalAuthority.open(options)
     expect(migrated.artifactVerifierMaterial).toEqual(verifierBefore)
-    expect(await migrated.verify(grant)).toEqual({ allowed: true })
+    expect(await migrated.verify(grant)).toMatchObject({ allowed: false, code: 'E2E_APPROVAL_REVOKED' })
     await expect(migrated.createWebAuthnCredentialRepository().list()).resolves.toEqual([])
     migrated.close()
 
@@ -100,6 +121,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const persisted = JSON.parse(migratedRow.snapshot) as Record<string, unknown>
     expect(persisted.schemaVersion).toBe('2.2.0')
     expect(persisted.webAuthnCredentials).toMatchObject({ algorithm: 'aes-256-gcm' })
+    expect(persisted).toMatchObject({ grants: [], uses: [], reservations: [], completedPreflights: [], attemptLogs: [] })
     persisted.schemaVersion = '9.9.9'
     migratedDatabase.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(persisted))
     migratedDatabase.close()

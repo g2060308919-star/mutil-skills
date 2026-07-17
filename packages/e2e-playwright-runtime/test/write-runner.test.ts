@@ -98,7 +98,8 @@ async function trustedContext(input: { authorizationAllowed: boolean; leaseAllow
   })
   if (!input.authorizationAllowed) await authority.revoke(grant.grantId, 'test revocation')
   if (!input.leaseAllowed) await leaseAuthority.quarantine(active.leaseId, 'test quarantine')
-  return { authorization: { grant, currentSubject: grant.subject, authority: authority.createWriteExecutionClient() },
+  return { authorization: { grant, currentSubject: grant.subject,
+      authority: authority.createWriteExecutionClient(grant.approvalContext) },
     lease: { leaseId: active.leaseId, fencingToken: active.fencingToken, targetFingerprint,
       authority: leaseAuthority.createExecutionClient() } }
 }
@@ -108,13 +109,21 @@ async function rpcTrustedContext(): Promise<Awaited<ReturnType<typeof trustedCon
 }> {
   const trusted = await trustedContext({ authorizationAllowed: true, leaseAllowed: true })
   const rpc = AuthenticatedRpcServer.create({ issuer: 'authority-host', keyId: 'rpc-key-1', now })
-  const credential = rpc.registerClient('runner-process', Buffer.alloc(32, 11))
+  const credential = rpc.registerClient('runner-process', Buffer.alloc(32, 11), {
+    approvalContext: trusted.authorization.grant.approvalContext,
+  })
   registerAuthorityExecutionRpcOperations(rpc, {
     writeAuthority: trusted.authorization.authority,
     leaseAuthority: trusted.lease.authority,
   })
   const material = rpc.verifierMaterial
   const clients = createAuthorityExecutionRpcClients({ credential, verifierMaterial: material,
+    approvalBinding: {
+      runId: trusted.authorization.grant.approvalContext.runId,
+      installationDigest: trusted.authorization.grant.approvalContext.installationDigest,
+      approvalType: trusted.authorization.grant.approvalContext.approvalType,
+      subjectDigest: trusted.authorization.grant.approvalContext.subjectDigest,
+    },
     expectedPublicKeyDigest: material.publicKeyDigest, transport: (request) => rpc.handle(request), now })
   return {
     authorization: { ...trusted.authorization, authority: clients.writeApproval },

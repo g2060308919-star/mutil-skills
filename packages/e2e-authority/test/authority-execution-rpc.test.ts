@@ -16,6 +16,10 @@ import {
 
 const NOW = new Date('2026-07-14T10:00:00.000Z')
 const digest = digestText('authority-execution-rpc-test/v1', 'value')
+const binding = (context: SignedWriteGrant['approvalContext']) => ({
+  runId: context.runId, installationDigest: context.installationDigest,
+  approvalType: context.approvalType, subjectDigest: context.subjectDigest,
+})
 
 function writeGrant(): { grant: SignedWriteGrant; subject: WriteApprovalSubject } {
   const subject: WriteApprovalSubject = {
@@ -47,14 +51,67 @@ function writeGrant(): { grant: SignedWriteGrant; subject: WriteApprovalSubject 
 
 function setup() {
   const rpc = AuthenticatedRpcServer.create({ issuer: 'authority-host', keyId: 'rpc-key-1', now: () => NOW })
-  const credential = rpc.registerClient('runner-process', Buffer.alloc(32, 9))
+  const credential = rpc.registerClient('runner-process', Buffer.alloc(32, 9), {
+    approvalContext: writeGrant().grant.approvalContext,
+  })
   const verifierMaterial = rpc.verifierMaterial
-  return { rpc, credential, verifierMaterial }
+  return { rpc, credential, verifierMaterial, approvalContext: writeGrant().grant.approvalContext }
 }
+
+test('服务端使用注册时的可信上下文拒绝跨 Run、跨安装、错类型、错 origin 与过期回放', async () => {
+  const base = writeGrant().grant.approvalContext
+  const mutations = [
+    { ...base, runId: 'RUN-2' },
+    { ...base, installationDigest: digestText('authority-execution-rpc-test/v1', 'other-install') },
+    { ...base, approvalType: 'discovery' as const },
+    { ...base, origin: 'http://127.0.0.1:43211' },
+    { ...base, issuedAt: new Date(NOW.getTime() + 1_000).toISOString(), expiresAt: new Date(NOW.getTime() + 2_000).toISOString() },
+    { ...base, issuedAt: new Date(NOW.getTime() - 10_000).toISOString(), expiresAt: NOW.toISOString() },
+  ]
+  for (const approvalContext of mutations) {
+    const rpc = AuthenticatedRpcServer.create({ issuer: 'authority-host', keyId: 'rpc-key-1', now: () => NOW })
+    const credential = rpc.registerClient('runner-process', Buffer.alloc(32, 9), { approvalContext })
+    registerAuthorityExecutionRpcOperations(rpc, {
+      writeAuthority: { async verifyForSubject() { return { allowed: true } } },
+      leaseAuthority: { async verifyTarget() { return true } },
+    })
+    const verifierMaterial = rpc.verifierMaterial
+    const clients = createAuthorityExecutionRpcClients({ credential, verifierMaterial,
+      approvalBinding: binding(base),
+      expectedPublicKeyDigest: verifierMaterial.publicKeyDigest,
+      transport: (request) => rpc.handle(request), now: () => NOW })
+    const { grant, subject } = writeGrant()
+    await expect(clients.writeApproval.verifyForSubject(grant, subject)).resolves.toMatchObject({
+      allowed: false,
+      code: 'E2E_APPROVAL_CONTEXT_MISMATCH',
+    })
+  }
+})
+
+test('生产式 Host 在消费 WebAuthn receipt 后可用父进程已知的非秘密绑定创建执行客户端', async () => {
+  const { grant, subject } = writeGrant()
+  const rpc = AuthenticatedRpcServer.create({ issuer: 'authority-host', keyId: 'rpc-key-1', now: () => NOW })
+  const credential = rpc.registerClient('runner-process', Buffer.alloc(32, 9))
+  registerAuthorityExecutionRpcOperations(rpc, {
+    writeAuthority: { async verifyForSubject() { return { allowed: true } } },
+    leaseAuthority: { async verifyTarget() { return true } },
+  })
+  const verifierMaterial = rpc.verifierMaterial
+  const clients = createAuthorityExecutionRpcClients({ credential, verifierMaterial,
+    approvalBinding: binding(grant.approvalContext),
+    expectedPublicKeyDigest: verifierMaterial.publicKeyDigest,
+    transport: (request) => rpc.handle(request), now: () => NOW })
+
+  await expect(clients.writeApproval.verifyForSubject(grant, subject)).resolves.toMatchObject({
+    allowed: false, code: 'E2E_APPROVAL_CONTEXT_MISMATCH',
+  })
+  rpc.updateClientRegistration('runner-process', { approvalContext: grant.approvalContext })
+  await expect(clients.writeApproval.verifyForSubject(grant, subject)).resolves.toEqual({ allowed: true })
+})
 
 describe('Authority execution RPC clients', () => {
   test('只暴露固定的 Write/Lease operation，并登记为绑定公钥摘要的跨进程可信客户端', async () => {
-    const { rpc, credential, verifierMaterial } = setup()
+    const { rpc, credential, verifierMaterial, approvalContext } = setup()
     const calls: string[] = []
     registerAuthorityExecutionRpcOperations(rpc, {
       writeAuthority: { async verifyForSubject() { calls.push('write'); return { allowed: true } } },
@@ -71,6 +128,7 @@ describe('Authority execution RPC clients', () => {
       },
     })
     const clients = createAuthorityExecutionRpcClients({ credential, verifierMaterial,
+      approvalBinding: binding(approvalContext),
       expectedPublicKeyDigest: verifierMaterial.publicKeyDigest, transport: (request) => rpc.handle(request), now: () => NOW })
     const { grant, subject } = writeGrant()
 
@@ -90,9 +148,11 @@ describe('Authority execution RPC clients', () => {
     expect(isTrustedLeaseClient(clients.lease)).toBe(true)
     expect(getTrustedExecutionClientBinding(clients.writeApproval)).toEqual({
       transport: 'authenticated-rpc', authorityPublicKeyDigest: verifierMaterial.publicKeyDigest,
+      approvalBinding: binding(approvalContext),
     })
     expect(getTrustedExecutionClientBinding(clients.lease)).toEqual({
       transport: 'authenticated-rpc', authorityPublicKeyDigest: verifierMaterial.publicKeyDigest,
+      approvalBinding: binding(approvalContext),
     })
   })
 
@@ -103,6 +163,7 @@ describe('Authority execution RPC clients', () => {
       leaseAuthority: { async verifyTarget() { return true } },
     })
     const firstClients = createAuthorityExecutionRpcClients({ credential: first.credential,
+      approvalBinding: binding(first.approvalContext),
       verifierMaterial: first.verifierMaterial, expectedPublicKeyDigest: first.verifierMaterial.publicKeyDigest,
       transport: (request) => first.rpc.handle(request), now: () => NOW })
     await expect(firstClients.lease.verifyTarget('', 0, 'bad-digest')).rejects.toMatchObject({
@@ -113,6 +174,7 @@ describe('Authority execution RPC clients', () => {
     second.rpc.registerOperation('write.verifyForSubject.v1', async () => ({ allowed: 'yes' }))
     second.rpc.registerOperation('lease.verifyTarget.v1', async () => ({ verified: 'yes' }))
     const secondClients = createAuthorityExecutionRpcClients({ credential: second.credential,
+      approvalBinding: binding(second.approvalContext),
       verifierMaterial: second.verifierMaterial, expectedPublicKeyDigest: second.verifierMaterial.publicKeyDigest,
       transport: (request) => second.rpc.handle(request), now: () => NOW })
     const { grant, subject } = writeGrant()
@@ -138,6 +200,7 @@ describe('Authority execution RPC clients', () => {
       status: 'reserved', reservedAt: NOW.toISOString(),
     }))
     const reservationClients = createAuthorityExecutionRpcClients({ credential: reservationServer.credential,
+      approvalBinding: binding(reservationServer.approvalContext),
       verifierMaterial: reservationServer.verifierMaterial,
       expectedPublicKeyDigest: reservationServer.verifierMaterial.publicKeyDigest,
       transport: (request) => reservationServer.rpc.handle(request), now: () => NOW })
@@ -149,6 +212,7 @@ describe('Authority execution RPC clients', () => {
     const ackServer = setup()
     ackServer.rpc.registerOperation('gateway.write.complete.v1', async () => ({ completed: false }))
     const ackClients = createAuthorityExecutionRpcClients({ credential: ackServer.credential,
+      approvalBinding: binding(ackServer.approvalContext),
       verifierMaterial: ackServer.verifierMaterial, expectedPublicKeyDigest: ackServer.verifierMaterial.publicKeyDigest,
       transport: (request) => ackServer.rpc.handle(request), now: () => NOW })
     await expect(ackClients.gatewayAuthority.complete('RESERVATION-1', digest)).rejects.toMatchObject({

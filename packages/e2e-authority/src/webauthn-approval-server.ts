@@ -291,13 +291,18 @@ async function readBoundedBody(request: IncomingMessage): Promise<Buffer> {
   let size = 0
   try {
     for await (const chunk of request) {
+      const source = Buffer.isBuffer(chunk) ? chunk : undefined
       const bytes = Buffer.from(chunk)
-      size += bytes.byteLength
-      if (size > MAX_BODY_BYTES) {
-        bytes.fill(0)
-        throw approvalServerError('E2E_APPROVAL_BODY_TOO_LARGE')
+      try {
+        size += bytes.byteLength
+        if (size > MAX_BODY_BYTES) {
+          bytes.fill(0)
+          throw approvalServerError('E2E_APPROVAL_BODY_TOO_LARGE')
+        }
+        chunks.push(bytes)
+      } finally {
+        source?.fill(0)
       }
-      chunks.push(bytes)
     }
     return Buffer.concat(chunks)
   } finally {

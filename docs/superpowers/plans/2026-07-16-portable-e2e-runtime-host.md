@@ -797,6 +797,8 @@ git commit -m "feat(e2e): persist runtime runs by project identity"
 
 > **Spec Errata（2026-07-17，Task 5 二次外审）**：旧 snapshot 迁移在 commit 前必须完成严格嵌套解析、全部私钥解密和既有签名校验，错误密钥保持数据库 bytes/revision 不变。六种 Grant 签发入口移除调用方 receipt binding，由已验证的真实 subject 内部派生三字段 binding 并原子消费 receipt。RPC 和人类审批复用完整项目身份断言。Authority 仅在 global replay miss 的新 `open-approval` 中惰性启动；cleanup 独立尝试关闭所有资源并在任何 stdout bytes 写出前决定唯一 response。请求结果已持久化而 cleanup 失败时，本次只返回 cleanup error，后续重放返回持久 success 且仍不启动 Authority；stdout 一旦开始写入，后续写失败不得再写第二 JSON。Authority 状态使用 Runtime 自包含 Python `openat` helper 安全创建目录/密钥，父进程固定只读 final-dir fd，子进程继承 fd 后 `fchdir+exec`，SQLite 用相对 basename 并在打开前后验证目录身份。`@mutil-skills/e2e-runtime` 根导出仅保留协议 Schema、类型和版本。
 
+> **Spec Errata（2026-07-17，Task 5 最终安全审查）**：执行验证必须使用 Host 注册而非 RPC payload 自报的完整 approvalContext，并在 Authority、RPC、Runner、Gateway 四层拒绝跨 Run、跨安装、错类型、错 origin、未来签发和过期回放。`2.0.0/2.1.0` 旧 Grant 因缺少可验证 WebAuthn 上下文，迁移时不得继续授权；先验证旧结构/签名/链，再撤销全部旧 grantId 并清空授权派生状态，要求用户重新审批。WebAuthn/RPC/helper 的原始流 chunk、RPC 长期会话密钥和 PKCS8 明文都必须有可测试的显式清零路径；Authority Host 启动失败后的 child cleanup 若也失败，必须聚合保留两个错误，不能吞掉 cleanup failure。
+
 **Files:**
 - Create: `packages/e2e-authority/src/webauthn-user-presence.ts`
 - Create: `packages/e2e-authority/src/webauthn-approval-server.ts`

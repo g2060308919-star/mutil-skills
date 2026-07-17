@@ -15,10 +15,12 @@ import {
   type AuthenticatedRpcServer,
   type AuthenticatedRpcTransport,
   type AuthenticatedRpcVerifierMaterial,
+  type AuthenticatedRpcOperationContext,
 } from './authenticated-rpc.js'
 import {
   trustLeaseClient,
   trustWriteApprovalClient,
+  type TrustedApprovalExecutionBinding,
   type TrustedLeaseClient,
   type TrustedWriteApprovalClient,
 } from './trusted-execution-clients.js'
@@ -63,14 +65,17 @@ export interface AuthorityExecutionRpcClientOptions {
   transport: AuthenticatedRpcTransport
   now?: () => Date
   ttlMs?: number
+  approvalBinding: TrustedApprovalExecutionBinding
 }
 
 export function registerAuthorityExecutionRpcOperations(
   rpc: AuthenticatedRpcServer,
   dependencies: AuthorityExecutionRpcHostDependencies,
 ): void {
-  rpc.registerOperation(WRITE_VERIFY_OPERATION, async (payload) => {
+  rpc.registerOperation(WRITE_VERIFY_OPERATION, async (payload, rpcContext) => {
     const input = parseWriteVerifyInput(payload)
+    const contextDecision = verifyRegisteredApprovalContext(input.grant, rpcContext)
+    if (contextDecision) return contextDecision
     return parseGrantDecision(await dependencies.writeAuthority.verifyForSubject(input.grant, input.currentSubject))
   })
   rpc.registerOperation(LEASE_VERIFY_OPERATION, async (payload) => {
@@ -82,13 +87,17 @@ export function registerAuthorityExecutionRpcOperations(
     return { verified }
   })
   if (dependencies.gatewayAuthority) {
-    rpc.registerOperation(GATEWAY_VERIFY_OPERATION, async (payload) => {
+    rpc.registerOperation(GATEWAY_VERIFY_OPERATION, async (payload, rpcContext) => {
       const input = parseWriteVerifyInput(payload)
+      const contextDecision = verifyRegisteredApprovalContext(input.grant, rpcContext)
+      if (contextDecision) return contextDecision
       return parseGrantDecision(await dependencies.gatewayAuthority!
         .verifyForSubject(input.grant, input.currentSubject))
     })
-    rpc.registerOperation(GATEWAY_RESERVE_OPERATION, async (payload) => {
+    rpc.registerOperation(GATEWAY_RESERVE_OPERATION, async (payload, rpcContext) => {
       const input = parseGatewayReserveInput(payload)
+      const contextDecision = verifyRegisteredApprovalContext(input.grant, rpcContext)
+      if (contextDecision) throw executionRpcError(contextDecision.code)
       return parseCapabilityReservation(await dependencies.gatewayAuthority!.reserveForSubject(input), input)
     })
     rpc.registerOperation(GATEWAY_COMPLETE_OPERATION, async (payload) => {
@@ -104,15 +113,41 @@ export function registerAuthorityExecutionRpcOperations(
   }
 }
 
+function verifyRegisteredApprovalContext(
+  grant: SignedWriteGrant,
+  rpcContext: AuthenticatedRpcOperationContext,
+): Extract<GrantDecision, { allowed: false }> | undefined {
+  const registration = rpcContext.registration
+  const candidate = isPlainObject(registration) && hasExactKeys(registration, ['approvalContext'])
+    ? CanonicalApprovalContextSchema.safeParse(registration.approvalContext)
+    : undefined
+  const current = candidate?.success ? candidate.data : undefined
+  const now = Date.parse(rpcContext.now)
+  if (!current || current.approvalType !== 'execution'
+    || canonicalizeJson(current) !== canonicalizeJson(grant.approvalContext)
+    || current.subjectDigest !== grant.subjectDigest
+    || current.subject !== grant.approver.subject
+    || !Number.isFinite(now)
+    || Date.parse(current.issuedAt) > now
+    || Date.parse(current.expiresAt) <= now) {
+    return { allowed: false, code: 'E2E_APPROVAL_CONTEXT_MISMATCH',
+      reason: 'Grant approvalContext 与 RPC Host 注册的当前可信执行上下文不一致或已失效' }
+  }
+  return undefined
+}
+
 export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRpcClientOptions): {
   writeApproval: TrustedWriteApprovalClient
   lease: TrustedLeaseClient
   gatewayAuthority: GatewayWriteAuthorityRpcClient
+  destroy(): void
 } {
+  const approvalBinding = parseApprovalExecutionBinding(options.approvalBinding)
   const rpc = AuthenticatedRpcClient.create(options)
   const binding = {
     transport: 'authenticated-rpc' as const,
     authorityPublicKeyDigest: rpc.authorityPublicKeyDigest,
+    approvalBinding,
   }
   const writeApproval = trustWriteApprovalClient(Object.freeze({
     async verifyForSubject(grant: SignedWriteGrant, currentSubject: WriteApprovalSubject): Promise<GrantDecision> {
@@ -147,7 +182,19 @@ export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRp
         'E2E_RPC_GATEWAY_UNKNOWN_RESULT_INVALID')
     },
   })
-  return { writeApproval, lease, gatewayAuthority }
+  return { writeApproval, lease, gatewayAuthority, destroy: () => rpc.destroy() }
+}
+
+function parseApprovalExecutionBinding(value: unknown): TrustedApprovalExecutionBinding {
+  if (!isPlainObject(value)
+    || !hasExactKeys(value, ['approvalType', 'installationDigest', 'runId', 'subjectDigest'])
+    || typeof value.runId !== 'string' || !SAFE_ID.test(value.runId)
+    || value.approvalType !== 'execution'
+    || typeof value.installationDigest !== 'string' || !DIGEST.test(value.installationDigest)
+    || typeof value.subjectDigest !== 'string' || !DIGEST.test(value.subjectDigest)) {
+    throw executionRpcError('E2E_RPC_APPROVAL_BINDING_INVALID')
+  }
+  return structuredClone(value) as TrustedApprovalExecutionBinding
 }
 
 function parseWriteVerifyInput(value: unknown): {

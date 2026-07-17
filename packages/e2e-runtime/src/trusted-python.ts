@@ -104,10 +104,12 @@ async function probePython(executable: string): Promise<{ version: string }> {
   let size = 0
   let overflow = false
   child.stdout.on('data', (chunk: Buffer) => {
-    const copy = Buffer.from(chunk)
-    size += copy.byteLength
-    if (size > MAX_PROBE_BYTES) { copy.fill(0); overflow = true; child.kill('SIGKILL') }
-    else chunks.push(copy)
+    try {
+      const copy = Buffer.from(chunk)
+      size += copy.byteLength
+      if (size > MAX_PROBE_BYTES) { copy.fill(0); overflow = true; child.kill('SIGKILL') }
+      else chunks.push(copy)
+    } finally { chunk.fill(0) }
   })
   const exitCode = await new Promise<number | null>((resolve, reject) => {
     const timeout = setTimeout(() => { overflow = true; child.kill('SIGKILL') }, 5_000)

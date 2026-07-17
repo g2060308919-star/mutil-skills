@@ -325,8 +325,10 @@ async function runStateHelper(
   let stderrBytes = 0
   let overflow = false
   child.stdout.on('data', (chunk: Buffer) => {
-    stdoutBytes += chunk.byteLength
-    if (stdoutBytes > 8192) { overflow = true; child.kill('SIGKILL') } else stdout.push(Buffer.from(chunk))
+    try {
+      stdoutBytes += chunk.byteLength
+      if (stdoutBytes > 8192) { overflow = true; child.kill('SIGKILL') } else stdout.push(Buffer.from(chunk))
+    } finally { chunk.fill(0) }
   })
   child.stderr.on('data', (chunk: Buffer) => {
     stderrBytes += chunk.byteLength

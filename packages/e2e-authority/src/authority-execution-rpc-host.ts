@@ -3,7 +3,11 @@ import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { ApproverIdentity } from '@mutil-skills/e2e-contracts'
+import {
+  CanonicalApprovalContextSchema,
+  type ApproverIdentity,
+  type CanonicalApprovalContext,
+} from '@mutil-skills/e2e-contracts'
 import type { WebAuthnApprovalAssets } from './webauthn-approval-server.js'
 import type { WebAuthnApprovalType } from './webauthn-user-presence.js'
 import type { SqliteStateDirectoryIdentity } from './sqlite-state-store.js'
@@ -42,6 +46,8 @@ export interface AuthorityExecutionRpcHostOptions {
     ttlMs?: number
   }
   clock?: { kind: 'system' } | { kind: 'fixed-test-only'; now: string }
+  /** 仅限固定时钟测试/Golden：生产环境的绑定必须由 WebAuthn 完成事件建立。 */
+  testOnlyApprovalContext?: CanonicalApprovalContext
   process?: {
     cwd: string
     env: Record<string, string>
@@ -127,6 +133,8 @@ export async function startAuthorityExecutionRpcHostProcess(
           },
         }),
         clock: options.clock ?? { kind: 'system' },
+        ...(options.testOnlyApprovalContext === undefined
+          ? {} : { testOnlyApprovalContext: options.testOnlyApprovalContext }),
         sessionKeyBase64Url: sessionKey.toString('base64url'),
       },
     })
@@ -227,10 +235,25 @@ export async function startAuthorityExecutionRpcHostProcess(
       },
     }
   } catch (error) {
-    await stopChild(child).catch(() => undefined)
-    sessionKey.fill(0)
-    throw error
+    try {
+      return await aggregateStartupAndCleanupFailure(error, async () => await stopChild(child))
+    } finally { sessionKey.fill(0) }
   }
+}
+
+async function aggregateStartupAndCleanupFailure(
+  startupError: unknown,
+  cleanup: () => Promise<void>,
+): Promise<never> {
+  try {
+    await cleanup()
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [startupError, cleanupError],
+      'E2E_RPC_HOST_START_AND_CLEANUP_FAILED',
+    )
+  }
+  throw startupError
 }
 
 interface HostReadyMessage {
@@ -363,6 +386,10 @@ function validateOptions(options: AuthorityExecutionRpcHostOptions): void {
     || !options.approval.statePath || !options.lease.statePath
     || options.approval.testWorkspaceRoots.length === 0 || options.lease.testWorkspaceRoots.length === 0
     || (options.clock?.kind === 'fixed-test-only' && !isCanonicalInstant(options.clock.now))
+    || (options.testOnlyApprovalContext !== undefined && (
+      options.clock?.kind !== 'fixed-test-only'
+      || !CanonicalApprovalContextSchema.safeParse(options.testOnlyApprovalContext).success
+    ))
     || (options.userPresence !== undefined && (
       !/^sha256:[a-f0-9]{64}$/.test(options.userPresence.installationDigest)
       || (options.userPresence.ttlMs !== undefined && (

@@ -40,6 +40,15 @@ describe('Authenticated Authority RPC', () => {
     expect(client.authorityIdentity).toEqual({ issuer: 'local-authority', keyId: 'authority-rpc-1' })
   })
 
+  test('显式销毁 Server/Client 后拒绝继续使用长期会话密钥', async () => {
+    const { server, client } = setup()
+    server.registerOperation('echo.read', async (payload) => payload)
+    client.destroy()
+    await expect(client.call('echo.read', {})).rejects.toMatchObject({ code: 'E2E_RPC_DESTROYED' })
+    server.destroy()
+    await expect(server.handle({})).rejects.toMatchObject({ code: 'E2E_RPC_DESTROYED' })
+  })
+
   test('拒绝未知客户端、payload 篡改、非法 nonce 与相同请求重放', async () => {
     const { server, credential, material } = setup()
     server.registerOperation('echo.read', async (payload) => payload)

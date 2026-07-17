@@ -12,6 +12,7 @@ import {
   type WebAuthnUserPresenceAuthority,
 } from './webauthn-user-presence.js'
 import type { SqliteStateDirectoryIdentity } from './sqlite-state-store.js'
+import type { CanonicalApprovalContext } from '@mutil-skills/e2e-contracts'
 
 interface HostConfig {
   rpc: { issuer: string; keyId: string; clientId: string }
@@ -37,6 +38,7 @@ interface HostConfig {
     }
   }
   clock: { kind: 'system' } | { kind: 'fixed-test-only'; now: string }
+  testOnlyApprovalContext?: CanonicalApprovalContext
   sessionKeyBase64Url: string
 }
 
@@ -45,6 +47,7 @@ type EncodedApprovalAssets = NonNullable<HostConfig['userPresence']>['assets']
 let approvalAuthority: LocalApprovalAuthority | undefined
 let leaseAuthority: LocalLeaseAuthority | undefined
 let httpHandle: Awaited<ReturnType<typeof startAuthenticatedRpcLoopbackServer>> | undefined
+let executionRpc: AuthenticatedRpcServer | undefined
 let webAuthnAuthority: WebAuthnUserPresenceAuthority | undefined
 const approvalServers = new Map<string, WebAuthnApprovalServerHandle>()
 let hostConfig: HostConfig | undefined
@@ -80,8 +83,16 @@ process.on('message', async (message: unknown) => {
         testWorkspaceRoots: config.approval.testWorkspaceRoots,
         approvalIdentities: config.approval.approvalIdentities,
         manualIdentities: config.approval.manualIdentities,
-        authenticateApproverSession: (sessionId, _expected) =>
-          webAuthnAuthority?.authenticateSession(sessionId),
+        authenticateApproverSession: async (sessionId, _expected) => {
+          const receipt = await webAuthnAuthority?.authenticateSession(sessionId)
+          if (receipt !== undefined) {
+            if (executionRpc === undefined) throw rpcHostError('E2E_RPC_HOST_START_FAILED')
+            executionRpc.updateClientRegistration(config.rpc.clientId, {
+              approvalContext: { schemaVersion: '1.0.0', ...receipt },
+            })
+          }
+          return receipt
+        },
       })
     } finally { stateEncryptionKey.fill(0) }
     leaseAuthority = await LocalLeaseAuthority.open({
@@ -96,12 +107,14 @@ process.on('message', async (message: unknown) => {
       })
     }
     const rpc = AuthenticatedRpcServer.create({ issuer: config.rpc.issuer, keyId: config.rpc.keyId, now })
+    executionRpc = rpc
     const sessionKey = decode32(config.sessionKeyBase64Url)
     config.sessionKeyBase64Url = ''
-    rpc.registerClient(config.rpc.clientId, sessionKey)
+    rpc.registerClient(config.rpc.clientId, sessionKey, config.testOnlyApprovalContext === undefined
+      ? null : { approvalContext: config.testOnlyApprovalContext })
     sessionKey.fill(0)
     registerAuthorityExecutionRpcOperations(rpc, {
-      writeAuthority: approvalAuthority.createWriteExecutionClient(),
+      writeAuthority: approvalAuthority,
       leaseAuthority: leaseAuthority.createExecutionClient(),
       gatewayAuthority: approvalAuthority,
     })
@@ -129,6 +142,7 @@ async function shutdown(): Promise<void> {
   leaseAuthority?.close()
   approvalAuthority = undefined
   leaseAuthority = undefined
+  executionRpc = undefined
   webAuthnAuthority = undefined
   hostConfig = undefined
 }

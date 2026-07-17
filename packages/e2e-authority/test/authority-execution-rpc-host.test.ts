@@ -12,6 +12,16 @@ import {
   startAuthorityExecutionRpcHostProcess,
 } from '../src/index.js'
 
+const approvalContext = {
+  schemaVersion: '1.0.0' as const, subject: 'local:user', runId: 'RUN-1', approvalType: 'execution' as const,
+  subjectDigest: `sha256:${'b'.repeat(64)}`, installationDigest: `sha256:${'a'.repeat(64)}`,
+  origin: 'http://127.0.0.1:43210', issuedAt: '2026-07-14T10:00:00.000Z', expiresAt: '2026-07-14T10:01:00.000Z',
+}
+const approvalBinding = {
+  runId: approvalContext.runId, installationDigest: approvalContext.installationDigest,
+  approvalType: approvalContext.approvalType, subjectDigest: approvalContext.subjectDigest,
+}
+
 test('Authority/Lease Host 在独立 OS 进程打开持久状态并提供认证 RPC', async ({ skip }) => {
   const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-rpc-host-'))
   const approvalPath = join(directory, 'approval.sqlite')
@@ -45,6 +55,7 @@ test('Authority/Lease Host 在独立 OS 进程打开持久状态并提供认证 
     }
     expect(host.pid).not.toBe(process.pid)
     const clients = createAuthorityExecutionRpcClients({ credential: host.credential,
+      approvalBinding,
       verifierMaterial: host.verifierMaterial,
       expectedPublicKeyDigest: host.verifierMaterial.publicKeyDigest,
       transport: createAuthenticatedRpcHttpTransport(host.endpoint), now })

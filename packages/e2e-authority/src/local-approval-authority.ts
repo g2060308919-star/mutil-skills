@@ -323,12 +323,19 @@ export class LocalApprovalAuthority {
     this.#stateEncryptionKey?.fill(0)
   }
 
-  createWriteExecutionClient(): TrustedWriteApprovalClient {
+  createWriteExecutionClient(approvalContext: CanonicalApprovalContext): TrustedWriteApprovalClient {
+    const trustedContext = CanonicalApprovalContextSchema.parse(approvalContext)
     const client: TrustedWriteApprovalClient = Object.freeze({
-      verifyForSubject: (grant: SignedWriteGrant, currentSubject: WriteApprovalSubject) =>
-        this.verifyForSubject(grant, currentSubject),
+      verifyForSubject: async (grant: SignedWriteGrant, currentSubject: WriteApprovalSubject) => {
+        const mismatch = approvalContextMismatch(grant, trustedContext, this.#now())
+        return mismatch ?? await this.verifyForSubject(grant, currentSubject)
+      },
     })
-    return trustWriteApprovalClient(client, { transport: 'in-process-test' })
+    return trustWriteApprovalClient(client, { transport: 'in-process-test',
+      approvalBinding: {
+        runId: trustedContext.runId, installationDigest: trustedContext.installationDigest,
+        approvalType: trustedContext.approvalType, subjectDigest: trustedContext.subjectDigest,
+      } })
   }
 
   createWebAuthnCredentialRepository(): WebAuthnCredentialRepository {
@@ -748,6 +755,18 @@ export class LocalApprovalAuthority {
     }
     const grantDecision = await this.verify(grant)
     if (!grantDecision.allowed) return grantDecision
+    const context = CanonicalApprovalContextSchema.safeParse(grant.approvalContext)
+    const now = this.#now().getTime()
+    if (!context.success
+      || context.data.approvalType !== canonicalGrantApprovalType(grant.subject)
+      || context.data.subject !== grant.approver.subject
+      || context.data.subjectDigest !== grant.subjectDigest
+      || Date.parse(context.data.issuedAt) > now
+      || Date.parse(context.data.expiresAt) <= now
+      || Date.parse(grant.issuedAt) < Date.parse(context.data.issuedAt)
+      || Date.parse(grant.expiresAt) > Date.parse(context.data.expiresAt)) {
+      return denied('E2E_APPROVAL_CONTEXT_MISMATCH', 'Grant approvalContext 无效、错绑或已超出有效时间边界')
+    }
     let currentDigest: string
     try {
       const parsed = ApprovalGrantSubjectSchema.parse(currentSubject)
@@ -1612,6 +1631,23 @@ function authorityIdentityDigest(options: LocalApprovalAuthorityOptions): string
   }))
 }
 
+function approvalContextMismatch(
+  grant: SignedGrant,
+  current: CanonicalApprovalContext,
+  now: Date,
+): Extract<GrantDecision, { allowed: false }> | undefined {
+  if (current.approvalType !== canonicalGrantApprovalType(grant.subject)
+    || canonicalizeJson(current) !== canonicalizeJson(grant.approvalContext)
+    || current.subject !== grant.approver.subject
+    || current.subjectDigest !== grant.subjectDigest
+    || Date.parse(current.issuedAt) > now.getTime()
+    || Date.parse(current.expiresAt) <= now.getTime()) {
+    return { allowed: false, code: 'E2E_APPROVAL_CONTEXT_MISMATCH',
+      reason: 'Grant approvalContext 与当前可信执行上下文不一致或已失效' }
+  }
+  return undefined
+}
+
 function encryptPrivateKey(
   key: KeyObject,
   encryptionKey: Buffer,
@@ -1621,9 +1657,11 @@ function encryptPrivateKey(
   const cipher = createCipheriv('aes-256-gcm', encryptionKey, iv)
   cipher.setAAD(Buffer.from(`e2e-authority-private-key/v1:${keyName}`))
   const plaintext = key.export({ type: 'pkcs8', format: 'der' })
-  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
-  return { algorithm: 'aes-256-gcm', iv: iv.toString('base64'), ciphertext: ciphertext.toString('base64'),
-    authTag: cipher.getAuthTag().toString('base64') }
+  try {
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
+    return { algorithm: 'aes-256-gcm', iv: iv.toString('base64'), ciphertext: ciphertext.toString('base64'),
+      authTag: cipher.getAuthTag().toString('base64') }
+  } finally { plaintext.fill(0) }
 }
 
 function decryptPrivateKey(value: EncryptedPrivateKey, encryptionKey: Buffer, keyName: string): KeyObject {
@@ -1669,7 +1707,7 @@ function loadAuthoritySnapshot(
   if (!migrated && version !== '2.2.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 版本未知或旧结构无效')
   }
-  parseAuthoritySnapshotStructure(parsed, version !== '2.0.0', version === '2.2.0')
+  parseAuthoritySnapshotStructure(parsed, version !== '2.0.0', version === '2.2.0', version === '2.2.0')
   const encryptedKeys = parsed.privateKeys as AuthorityPersistentSnapshot['privateKeys']
   let privateKeys: DecryptedAuthorityPrivateKeys
   try {
@@ -1694,6 +1732,13 @@ function loadAuthoritySnapshot(
   const snapshot = parseCurrentAuthoritySnapshot({
     ...parsed,
     schemaVersion: '2.2.0',
+    grants: [],
+    revoked: (parsed.grants as Array<[string, unknown]>).map(([grantId]) =>
+      [grantId, 'legacy-approval-context-migration'] as [string, string]),
+    uses: [],
+    reservations: [],
+    completedPreflights: [],
+    attemptLogs: [],
     ...(version === '2.0.0'
       ? { webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey) }
       : {}),
@@ -1706,7 +1751,7 @@ function parseCurrentAuthoritySnapshot(parsed: unknown): AuthorityPersistentSnap
   if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.2.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
-  parseAuthoritySnapshotStructure(parsed, true, true)
+  parseAuthoritySnapshotStructure(parsed, true, true, true)
   return parsed as unknown as AuthorityPersistentSnapshot
 }
 
@@ -1714,6 +1759,7 @@ function parseAuthoritySnapshotStructure(
   candidate: Record<string, unknown>,
   withCredentials: boolean,
   withReceipts: boolean,
+  withApprovalContext: boolean,
 ): void {
   const privateKeys = candidate.privateKeys as Record<string, unknown> | undefined
   if (!hasExactSnapshotKeys(candidate, withCredentials, withReceipts)
@@ -1732,11 +1778,13 @@ function parseAuthoritySnapshotStructure(
   }
   const grants = parseUniqueTuples(candidate.grants, 'grant', (key, value) => {
     if (!isPlainSnapshot(value) || value.grantId !== key) corruptSnapshot()
-    validateStoredGrantStructure(value)
+    validateStoredGrantStructure(value, withApprovalContext)
   })
   const grantMap = new Map(grants.map(([key, value]) => [key, value as unknown as SignedGrant]))
   parseUniqueTuples(candidate.revoked, 'revocation', (key, reason) => {
-    if (!grantMap.has(key) || typeof reason !== 'string' || reason.length === 0 || reason.length > 16 * 1024) {
+    const migratedTombstone = reason === 'legacy-approval-context-migration'
+    if ((!grantMap.has(key) && !migratedTombstone)
+      || typeof reason !== 'string' || reason.length === 0 || reason.length > 16 * 1024) {
       corruptSnapshot()
     }
   })
@@ -1797,9 +1845,10 @@ function parseUniqueTuples(
 
 type StoredGrantKind = 'discovery' | 'read' | 'write' | 'injection' | 'websocket' | 'sse'
 
-function validateStoredGrantStructure(grant: Record<string, unknown>): void {
+function validateStoredGrantStructure(grant: Record<string, unknown>, withApprovalContext: boolean): void {
   requireExactKeys(grant, [
-    'approvalContext', 'approver', 'capabilities', 'expiresAt', 'grantId', 'issuedAt', 'issuer', 'keyId', 'proofScope',
+    ...(withApprovalContext ? ['approvalContext'] : []),
+    'approver', 'capabilities', 'expiresAt', 'grantId', 'issuedAt', 'issuer', 'keyId', 'proofScope',
     'revocationSequence', 'signature', 'subject', 'subjectDigest',
   ])
   if (typeof grant.grantId !== 'string' || typeof grant.issuer !== 'string' || typeof grant.keyId !== 'string'
@@ -1815,10 +1864,10 @@ function validateStoredGrantStructure(grant: Record<string, unknown>): void {
     || grant.approver.roles.some((role) => typeof role !== 'string')
     || new Set(grant.approver.roles).size !== grant.approver.roles.length) corruptSnapshot()
   const kind = validateStoredGrantSubject(grant.subject)
-  const context = CanonicalApprovalContextSchema.safeParse(grant.approvalContext)
-  if (!context.success || context.data.subject !== grant.approver.subject
+  const context = withApprovalContext ? CanonicalApprovalContextSchema.safeParse(grant.approvalContext) : undefined
+  if ((withApprovalContext && (!context?.success || context.data.subject !== grant.approver.subject
     || context.data.approvalType !== (kind === 'discovery' ? 'discovery' : 'execution')
-    || context.data.subjectDigest !== grant.subjectDigest
+    || context.data.subjectDigest !== grant.subjectDigest))
     || canonicalGrantApprovalSubjectDigest(grant.subject as ApprovalGrantSubject) !== grant.subjectDigest
     || !Array.isArray(grant.capabilities) || grant.capabilities.length === 0) corruptSnapshot()
   const keySets: Record<StoredGrantKind, string[]> = {

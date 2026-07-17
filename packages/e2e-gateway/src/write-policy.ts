@@ -95,6 +95,11 @@ export class ReversibleWriteGateway {
     if (!isTrustedGatewayPublicationAuditRecorder(input.recorder)) {
       throw gatewayError('E2E_GATEWAY_TRUSTED_AUDIT_RECORDER_REQUIRED', '可恢复写必须绑定 Gateway 签名发布审计 recorder')
     }
+    if (input.attemptContext.runId !== input.grant.approvalContext.runId
+      || input.grant.approvalContext.approvalType !== 'execution') {
+      throw gatewayError('E2E_APPROVAL_CONTEXT_MISMATCH',
+        'Gateway AttemptContext 与签名 Grant 的审批执行上下文不一致')
+    }
     if (input.outcomeSigner && !input.outcomeSigner.ownsRecorder(input.recorder)) {
       throw gatewayError(
         'E2E_GATEWAY_OUTCOME_SIGNER_MISMATCH',
