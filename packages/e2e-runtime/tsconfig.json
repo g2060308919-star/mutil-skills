@@ -9,7 +9,8 @@
   "references": [
     { "path": "../e2e-contracts" },
     { "path": "../e2e-engine" },
-    { "path": "../e2e-authority" }
+    { "path": "../e2e-authority" },
+    { "path": "../e2e-gateway" }
   ],
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

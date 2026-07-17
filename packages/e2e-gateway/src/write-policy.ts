@@ -283,6 +283,11 @@ export class ReversibleWriteGateway {
     return this.#reservation ? { ...this.#reservation } : undefined
   }
 
+  /** Transport Host 用于避免在多步已批准请求序列完成前开放 outcome finalization。 */
+  isRequestSequenceComplete(): boolean {
+    return this.#requestIndex === this.#requests.length
+  }
+
   private block(code: string, reason: string, request?: GatewayDecision extends { request?: infer T } ? T : never): GatewayDecision {
     this.#audit.blocked += 1
     if (request) this.#recorder.recordReadDecision({

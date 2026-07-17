@@ -409,6 +409,10 @@ npm exec --yes --package=@mutil-skills/e2e-runtime@<exact-version> -- repo-e2e i
 
 ## 9. Gateway Proxy Host
 
+> **Spec Errata（2026-07-17，Task 7 实施与外审收口）**：强制代理证明的允许/拒绝 canary 必须使用专用内部一次性规则、独立计数与独立 policy digest，并把真实 Browser measurement 和本次 Gateway session measurement 绑定到 proof；不得复用或消耗业务规则。代理收到 HTTP response 仅记录 transport observed，cleanup 与 effect observation 完整后才允许 Runtime 提交 signed execution outcome；abort、断连及未最终化关闭必须 mark unknown。CA generation 目录由逐级 `openat`/`O_NOFOLLOW` helper 以 `0700/0600` 原子创建并固定 dirfd，子进程 `fchdir` 后只使用相对 key/cert basename；WebSocket 的 opaque correlation 通过 hop-by-hop `Proxy-Authorization` 传递且不得到达上游。Mockttp 无转发前 frame hook，Task 7 因而对全部 WebSocket behavior 固定 501；Task 9 必须以受控逐帧 bridge 取代。Injection session 禁止任何 pass-through，projected rule 必须在 reserve 前与签名 capability 的 request、response、顺序和次数逐项一致，完成 reservation 必须进入 signed Gateway audit。Browser correlation 绑定 `ruleId + stepOrdinal + bodyDigest`；请求体最多 1 MiB，拒绝 chunked、无长度非空 body 和超限 `Content-Length`。Gateway child 的 session key 由父进程随机创建并只经继承匿名 pipe 交付；因为该 OS IPC 无网络重连和独立服务端身份，双向 HMAC、strict monotonic sequence（等价 nonce/重放窗）、requestId、direction 与 exact result schema 构成 §8.2 网络 RPC 的等价边界，不再重复增加 wall-clock window 或第二层服务端签名。Task 7 提供 Authority-backed policy object 的装配 seam，但 Injection/WebSocket/SSE 生产 RPC、逐帧 WebSocket bridge与写 outcome crash recovery 属于 Task 9，在完成前不得宣称生产授权闭环。
+
+> **Task 7 最终安全审查 Errata（2026-07-17，覆盖上段 WebSocket 透传表述）**：Mockttp 的 WebSocket 消息事件只能事后观察，无法证明 client/inbound frame 在转发前经过 `ProtocolGuard`；因此 Task 7 对正确 token/capability 的 WebSocket 也 fail closed，返回 `E2E_GATEWAY_WEBSOCKET_BRIDGE_UNAVAILABLE`，不连接上游且不创建 reservation。支持 WebSocket 必须等待受控逐帧 bridge 能在转发前拒绝 client frame、执行 inbound 消息/字节上限并在 close 时 complete。Gateway audit finalize 必须先冻结接入、drain in-flight 并等待 child terminal/write settlement；write complete/unknown/close/child-exit 在首个 await 前原子 claim 单一终态，多步 request sequence 未全部 transport observed 与 policy-complete 时不得 finalize。
+
 ### 9.1 职责
 
 `@mutil-skills/e2e-gateway` 继续提供 policy、canonical request、effect 和审计逻辑；新增 Runtime 内的 `gateway-proxy-host.ts` 只负责生产传输：

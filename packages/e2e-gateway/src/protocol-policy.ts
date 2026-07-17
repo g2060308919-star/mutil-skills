@@ -76,6 +76,14 @@ export class ProtocolGuard {
   }
   readonly #connections = new Map<string, WebSocketConnection>()
 
+  static denyForbiddenChannelForHost(
+    channel: ForbiddenChannel,
+    correlationId: string,
+  ): ProtocolDecision {
+    if (!correlationId) return block('E2E_GATEWAY_CORRELATION_ID_REQUIRED', '所有浏览器网络事件必须携带 correlation ID')
+    return block('E2E_GATEWAY_PROTOCOL_FORBIDDEN', `通道 ${channel} 在首期永久拒绝`)
+  }
+
   constructor(input: {
     downstream: HttpGatewayDelegate
     sse: { grant: SignedSseReadGrant; capabilityId: string; authority: SseAuthorityClient }
