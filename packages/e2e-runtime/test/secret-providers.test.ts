@@ -2,9 +2,20 @@ import { EventEmitter } from 'node:events'
 import { spawn as spawnChild } from 'node:child_process'
 import { PassThrough } from 'node:stream'
 import { describe, expect, test, vi } from 'vitest'
-import { createSystemSecretProvider, type SecretProviderChild } from '../src/secret-providers.js'
+import { E2EError } from '@mutil-skills/e2e-contracts'
+import {
+  createDefaultSystemSecretProviders,
+  createSystemSecretProvider,
+  type SecretProviderChild,
+} from '../src/secret-providers.js'
 
 describe('系统 Secret Provider', () => {
+  test('生产默认只按宿主平台装配单一系统 provider，未知平台不回退 env', () => {
+    expect(createDefaultSystemSecretProviders('darwin').map(({ id }) => id)).toEqual(['macos-keychain'])
+    expect(createDefaultSystemSecretProviders('linux').map(({ id }) => id)).toEqual(['linux-secret-service'])
+    expect(createDefaultSystemSecretProviders('win32').map(({ id }) => id)).toEqual([])
+  })
+
   test.each([
     ['macos-keychain', 'darwin', '/usr/bin/security', ['find-generic-password', '-w', '-s', 'mutil-skills-e2e', '-a', 'LOGIN-PASSWORD']],
     ['linux-secret-service', 'linux', '/usr/bin/secret-tool', ['lookup', 'service', 'mutil-skills-e2e', 'account', 'LOGIN-PASSWORD']],
@@ -33,6 +44,7 @@ describe('系统 Secret Provider', () => {
       env: platform === 'linux'
         ? {
           LANG: 'C.UTF-8', PATH: '/usr/bin:/bin',
+          XDG_RUNTIME_DIR: '/run/user/501',
           DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/501/bus',
         }
         : { LANG: 'C.UTF-8', PATH: '/usr/bin:/bin' },
@@ -61,6 +73,7 @@ describe('系统 Secret Provider', () => {
       shell: false, stdio: ['ignore', 'pipe', 'pipe'],
       env: {
         LANG: 'C.UTF-8', PATH: '/usr/bin:/bin',
+        XDG_RUNTIME_DIR: '/run/user/501',
         DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/501/bus',
       },
     })
@@ -142,6 +155,102 @@ describe('系统 Secret Provider', () => {
       },
     })
     await expect(provider.resolve('TOKEN')).rejects.toMatchObject({ code: 'E2E_SECRET_PROVIDER_EXECUTABLE_REPLACED' })
+  })
+
+  test('child 已成功 fulfilled 后 post-spawn 复验失败仍清零所有已产出的明文 Buffer', async () => {
+    const child = fakeChild()
+    const canary = Buffer.from('fulfilled-postcheck-secret')
+    const captured: Buffer[] = []
+    const originalFrom = Buffer.from
+    const fromSpy = vi.spyOn(Buffer, 'from').mockImplementation(((...arguments_: unknown[]) => {
+      const result = Reflect.apply(originalFrom, Buffer, arguments_) as Buffer
+      if (result.toString('utf8') === 'fulfilled-postcheck-secret') captured.push(result)
+      return result
+    }) as typeof Buffer.from)
+    let inspection = 0
+    let releasePostcheck!: () => void
+    const postcheck = new Promise<void>((resolve) => { releasePostcheck = resolve })
+    const provider = createSystemSecretProvider({
+      id: 'macos-keychain', platform: 'darwin',
+      inspectExecutable: async () => {
+        if (inspection++ === 0) return { device: '1', inode: '2' }
+        await postcheck
+        return { device: '1', inode: '3' }
+      },
+      spawn: () => {
+        queueMicrotask(() => {
+          child.stdout.end(canary)
+          child.emit('close', 0, null)
+          queueMicrotask(releasePostcheck)
+        })
+        return child
+      },
+    })
+    try {
+      await expect(provider.resolve('TOKEN')).rejects.toMatchObject({
+        code: 'E2E_SECRET_PROVIDER_EXECUTABLE_REPLACED',
+      })
+      expect(captured.length).toBeGreaterThan(0)
+      for (const plaintext of captured) {
+        expect([...plaintext]).toEqual(new Array(plaintext.length).fill(0))
+      }
+    } finally {
+      fromSpy.mockRestore()
+      canary.fill(0)
+      for (const plaintext of captured) plaintext.fill(0)
+    }
+  })
+
+  test('post-spawn inspector 抛 E2EError 也统一 abort，并清零已 fulfilled 明文', async () => {
+    const child = fakeChild()
+    const canary = Buffer.from('inspector-e2eerror-secret')
+    const captured: Buffer[] = []
+    const originalFrom = Buffer.from
+    const fromSpy = vi.spyOn(Buffer, 'from').mockImplementation(((...arguments_: unknown[]) => {
+      const result = Reflect.apply(originalFrom, Buffer, arguments_) as Buffer
+      if (result.toString('utf8') === 'inspector-e2eerror-secret') captured.push(result)
+      return result
+    }) as typeof Buffer.from)
+    let inspection = 0
+    let releasePostcheck!: () => void
+    const postcheck = new Promise<void>((resolve) => { releasePostcheck = resolve })
+    let closed = false
+    const provider = createSystemSecretProvider({
+      id: 'macos-keychain', platform: 'darwin',
+      inspectExecutable: async () => {
+        if (inspection++ === 0) return { device: '1', inode: '2' }
+        await postcheck
+        throw new E2EError({
+          code: 'E2E_INSPECTOR_INTERNAL_CANARY', category: 'safety',
+          message: 'inspector must not escape', retryable: false,
+        })
+      },
+      spawn: () => {
+        queueMicrotask(() => {
+          child.stdout.end(canary)
+          closed = true
+          child.emit('close', 0, null)
+          queueMicrotask(releasePostcheck)
+        })
+        return child
+      },
+    })
+    try {
+      await expect(provider.resolve('TOKEN')).rejects.toMatchObject({
+        code: 'E2E_SECRET_PROVIDER_EXECUTABLE_INVALID',
+      })
+      expect(closed).toBe(true)
+      expect(captured.length).toBeGreaterThan(0)
+      for (const plaintext of captured) {
+        expect([...plaintext]).toEqual(new Array(plaintext.length).fill(0))
+      }
+      expect(child.listenerCount('close')).toBe(0)
+      expect(child.stdout.listenerCount('data')).toBe(0)
+    } finally {
+      fromSpy.mockRestore()
+      canary.fill(0)
+      for (const plaintext of captured) plaintext.fill(0)
+    }
   })
 
   test('平台与 provider 不匹配或系统路径不存在时稳定阻塞', async () => {

@@ -16,23 +16,28 @@ import {
   decryptSecret,
   encryptSecret,
   initialSecretState,
+  isRetiredSecretRun,
   parseSecretState,
   secretRunKey,
   serializeSecretState,
   unwrapRunDataKey,
   wrapRunDataKey,
   type PersistedSecretEntry,
-  type SecretRunState,
+  type ActiveSecretRunState,
   type SecretStatePayload,
 } from './secret-state.js'
 import { assertSameProjectIdentity, resolveProjectIdentity, type ProjectIdentity } from './project-identity.js'
 import {
   consumeRuntimeSecretRetirementCapability,
   ensureSecureUserStateRoot,
+  RuntimeRunStore,
   type RuntimeSecretRetirementCapability,
 } from './run-store.js'
 import { runtimeLayout } from './runtime-layout.js'
-import type { SecretProvider } from './secret-providers.js'
+import {
+  createDefaultSystemSecretProviders,
+  type SecretProvider,
+} from './secret-providers.js'
 
 const STATE_FILE = 'runtime-secrets.sqlite'
 const STATE_NAMESPACE = 'e2e-runtime-secrets/v1'
@@ -57,6 +62,16 @@ export interface RuntimeSecretBrokerOpenOptions {
   providers?: SecretProvider[]
   now?: () => Date
   reservationTtlMs?: number
+  /** 源码测试 seam；npm 根入口不导出。生产省略时固定打开 RuntimeRunStore。 */
+  runAccess?: SecretRunAccess
+}
+
+export interface SecretRunAccess {
+  withActiveSecretRun<T>(
+    projectIdentityDigest: string,
+    runId: string,
+    operation: () => Promise<T>,
+  ): Promise<T>
 }
 
 /** Runtime 内部秘密边界；故意不从包根导出。 */
@@ -70,6 +85,8 @@ export class RuntimeSecretBroker {
   readonly #projectRoot: string
   readonly #now: () => Date
   readonly #reservationTtlMs: number
+  readonly #runAccess: SecretRunAccess
+  readonly #ownedRunStore: RuntimeRunStore | undefined
   #closed = false
 
   private constructor(input: {
@@ -80,6 +97,8 @@ export class RuntimeSecretBroker {
     projectRoot: string
     now: () => Date
     reservationTtlMs: number
+    runAccess: SecretRunAccess
+    ownedRunStore?: RuntimeRunStore
   }) {
     this.#store = input.store
     this.#keys = input.keys
@@ -88,6 +107,8 @@ export class RuntimeSecretBroker {
     this.#projectRoot = input.projectRoot
     this.#now = input.now
     this.#reservationTtlMs = input.reservationTtlMs
+    this.#runAccess = input.runAccess
+    this.#ownedRunStore = input.ownedRunStore
   }
 
   static async open(options: RuntimeSecretBrokerOpenOptions): Promise<RuntimeSecretBroker> {
@@ -95,11 +116,17 @@ export class RuntimeSecretBroker {
     const stateRoot = runtimeLayout(options.homeDir).state
     assertOutsideProject(stateRoot, options.projectRoot)
     const projectIdentity = await resolveProjectIdentity(options.projectRoot)
-    const providers = validateProviders(options.providers ?? [])
-    const expectedStateDirectory = await ensureSecureUserStateRoot(options.homeDir, stateRoot)
-    const keys = await deriveRuntimeSecretStateKeys(options.homeDir)
+    const providers = validateProviders(options.providers ?? createDefaultSystemSecretProviders())
+    let ownedRunStore: RuntimeRunStore | undefined
+    let keys: RuntimeSecretStateKeys | undefined
     let store: SqliteSnapshotStore | undefined
     try {
+      ownedRunStore = options.runAccess === undefined
+        ? await RuntimeRunStore.open({ homeDir: options.homeDir, projectRoot: options.projectRoot })
+        : undefined
+      const runAccess = options.runAccess ?? ownedRunStore!
+      const expectedStateDirectory = await ensureSecureUserStateRoot(options.homeDir, stateRoot)
+      keys = await deriveRuntimeSecretStateKeys(options.homeDir)
       store = new SqliteSnapshotStore(join(stateRoot, STATE_FILE), STATE_NAMESPACE, {
         forbiddenRoots: ['/dev', projectIdentity.realRoot],
         expectedStateDirectory,
@@ -113,13 +140,16 @@ export class RuntimeSecretBroker {
         projectRoot: options.projectRoot,
         now: options.now ?? (() => new Date()),
         reservationTtlMs: options.reservationTtlMs ?? DEFAULT_RESERVATION_TTL_MS,
+        runAccess,
+        ...(ownedRunStore === undefined ? {} : { ownedRunStore }),
       })
       await broker.#readVerifiedState()
       return broker
     } catch (cause) {
       const cleanupErrors: unknown[] = []
       try { store?.close() } catch (error) { cleanupErrors.push(error) }
-      keys.clear()
+      try { await ownedRunStore?.close() } catch (error) { cleanupErrors.push(error) }
+      keys?.clear()
       if (cleanupErrors.length > 0) {
         throw new AggregateError([cause, ...cleanupErrors], 'E2E_SECRET_OPEN_CLEANUP_FAILED')
       }
@@ -144,7 +174,7 @@ export class RuntimeSecretBroker {
     }
     const plaintext = Buffer.from(input.value)
     try {
-      await this.#mutate((state) => {
+      await this.#withActiveRun(input.runId, async () => await this.#mutate((state) => {
         const run = this.#getOrCreateRun(state, input.runId)
         const previous = run.entries[input.secretRef]
         if (previous === undefined && countSecretEntries(state) >= MAX_SECRET_ENTRIES) {
@@ -168,7 +198,7 @@ export class RuntimeSecretBroker {
             encrypted: encryptSecret(dataKey, plaintext, input.runId, input.secretRef, providerId),
           }
         } finally { dataKey.fill(0) }
-      })
+      }))
     } finally { plaintext.fill(0) }
   }
 
@@ -183,8 +213,9 @@ export class RuntimeSecretBroker {
     assertSecretBinding(input.runId, input.secretRef, providerId)
     const now = this.#now()
     const attemptId = randomUUID()
-    const reservation = await this.#mutate((state) => {
+    const reservation = await this.#withActiveRun(input.runId, async () => await this.#mutate((state) => {
       const run = state.runs[secretRunKey(this.#projectIdentity.digest, input.runId)]
+      if (run !== undefined && isRetiredSecretRun(run)) throw retiredRunFailure()
       let existing = run?.entries[input.secretRef]
       if (existing?.status === 'resolving' && Date.parse(existing.expiresAt) <= now.getTime()) {
         run!.entries[input.secretRef] = {
@@ -215,7 +246,7 @@ export class RuntimeSecretBroker {
       }
       targetRun.entries[input.secretRef] = resolving
       return { kind: 'reserved' as const, entry: resolving, provider }
-    })
+    }))
 
     let entry: PersistedSecretEntry | undefined = reservation.entry
     if (reservation.kind === 'reserved') {
@@ -233,11 +264,18 @@ export class RuntimeSecretBroker {
           await this.#finishReservation(input.runId, input.secretRef, attemptId, undefined)
           throw secretFailure('E2E_SECRET_NOT_PROVIDED', '系统 provider 未返回可用值')
         }
-        await this.#finishReservation(input.runId, input.secretRef, attemptId, providerValue)
+        try {
+          entry = await this.#withActiveRun(input.runId, async () => await this.#finishReservation(
+            input.runId, input.secretRef, attemptId, providerValue,
+          ))
+        } catch (cause) {
+          if (isTerminalRunFailure(cause)) {
+            await this.#finishReservation(input.runId, input.secretRef, attemptId, undefined)
+              .catch(() => undefined)
+          }
+          throw cause
+        }
       } finally { providerValue?.fill(0) }
-      entry = await this.#read((state) => state.runs[
-        secretRunKey(this.#projectIdentity.digest, input.runId)
-      ]?.entries[input.secretRef])
     }
 
     if (entry?.status === 'resolving') {
@@ -269,8 +307,9 @@ export class RuntimeSecretBroker {
     let plaintext: Buffer | undefined
     let consumedExternally = false
     try {
-      await this.#mutate((state) => {
+      await this.#withActiveRun(binding.runId, async () => await this.#mutate((state) => {
         const run = state.runs[secretRunKey(this.#projectIdentity.digest, binding.runId)]
+        if (run !== undefined && isRetiredSecretRun(run)) throw retiredRunFailure()
         const entry = run?.entries[binding.secretRef]
         if (entry === undefined || entry.status === 'consumed' || entry.status === 'abandoned') {
           consumedExternally = true
@@ -299,7 +338,7 @@ export class RuntimeSecretBroker {
             terminalAt: this.#now().toISOString(),
           }
         } finally { dataKey.fill(0) }
-      })
+      }))
       this.#bindings.delete(handle)
       this.#consumedHandles.add(handle)
       if (consumedExternally) {
@@ -315,19 +354,32 @@ export class RuntimeSecretBroker {
   async retireRunSecrets(capability: RuntimeSecretRetirementCapability): Promise<void> {
     this.#requireOpen()
     await this.#assertCurrentProjectIdentity()
-    const binding = await consumeRuntimeSecretRetirementCapability(
+    await consumeRuntimeSecretRetirementCapability(
       capability,
       this.#projectIdentity.digest,
+      async (binding) => await this.#mutate((state) => {
+        const key = secretRunKey(binding.projectIdentityDigest, binding.runId)
+        const existing = state.runs[key]
+        if (existing !== undefined && isRetiredSecretRun(existing)) return
+        state.runs[key] = {
+          projectIdentityDigest: binding.projectIdentityDigest,
+          runId: binding.runId,
+          status: 'retired',
+          terminalAt: this.#now().toISOString(),
+        }
+      }),
     )
-    await this.#mutate((state) => {
-      delete state.runs[secretRunKey(binding.projectIdentityDigest, binding.runId)]
-    })
   }
 
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
-    try { this.#store.close() } finally { this.#keys.clear() }
+    const errors: unknown[] = []
+    try { this.#store.close() } catch (error) { errors.push(error) }
+    try { await this.#ownedRunStore?.close() } catch (error) { errors.push(error) }
+    this.#keys.clear()
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors, 'E2E_SECRET_CLOSE_FAILED')
   }
 
   async #finishReservation(
@@ -335,21 +387,23 @@ export class RuntimeSecretBroker {
     secretRef: string,
     attemptId: string,
     value: Buffer | undefined,
-  ): Promise<void> {
+  ): Promise<PersistedSecretEntry> {
     await this.#assertCurrentProjectIdentity()
-    await this.#mutate((state) => {
+    return await this.#mutate((state) => {
       const run = state.runs[secretRunKey(this.#projectIdentity.digest, runId)]
+      if (run !== undefined && isRetiredSecretRun(run)) throw retiredRunFailure()
       const entry = run?.entries[secretRef]
       if (entry?.status !== 'resolving' || entry.attemptId !== attemptId) {
         throw secretFailure('E2E_SECRET_PROVIDER_RESERVATION_LOST', '系统 provider reservation 已改变')
       }
       if (value === undefined) {
-        run!.entries[secretRef] = {
+        const abandoned: PersistedSecretEntry = {
           ...entry,
           status: 'abandoned',
           terminalAt: this.#now().toISOString(),
         }
-        return
+        run!.entries[secretRef] = abandoned
+        return abandoned
       }
       const dataKey = unwrapRunDataKey(
         this.#keys.wrappingKey,
@@ -358,23 +412,26 @@ export class RuntimeSecretBroker {
         runId,
       )
       try {
-        run!.entries[secretRef] = {
+        const available: PersistedSecretEntry = {
           version: entry.version,
           providerId: entry.providerId,
           status: 'available',
           encrypted: encryptSecret(dataKey, value, runId, secretRef, entry.providerId),
         }
+        run!.entries[secretRef] = available
+        return available
       } finally { dataKey.fill(0) }
     })
   }
 
-  #getOrCreateRun(state: SecretStatePayload, runId: string): SecretRunState {
+  #getOrCreateRun(state: SecretStatePayload, runId: string): ActiveSecretRunState {
     const key = secretRunKey(this.#projectIdentity.digest, runId)
     const existing = state.runs[key]
+    if (existing !== undefined && isRetiredSecretRun(existing)) throw retiredRunFailure()
     if (existing !== undefined) return existing
     const dataKey = randomBytes(32)
     try {
-      const run: SecretRunState = {
+      const run: ActiveSecretRunState = {
         projectIdentityDigest: this.#projectIdentity.digest,
         runId,
         wrappedDataKey: wrapRunDataKey(
@@ -435,6 +492,14 @@ export class RuntimeSecretBroker {
     assertSameProjectIdentity(this.#projectIdentity, await resolveProjectIdentity(this.#projectRoot))
   }
 
+  async #withActiveRun<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    return await this.#runAccess.withActiveSecretRun(
+      this.#projectIdentity.digest,
+      runId,
+      operation,
+    )
+  }
+
   #requireOpen(): void {
     if (this.#closed) throw secretFailure('E2E_SECRET_BROKER_CLOSED', 'Secret Broker 已关闭')
   }
@@ -470,6 +535,15 @@ function normalizeStateError(cause: unknown): E2EError {
   return cause instanceof E2EError
     ? cause
     : secretFailure('E2E_SECRET_STATE_INTEGRITY_FAILED', 'Secret state schema 或认证失败', cause)
+}
+
+function retiredRunFailure(): E2EError {
+  return secretFailure('E2E_SECRET_RUN_RETIRED', 'Run 的 Secret 已退役，禁止重建或读取')
+}
+
+function isTerminalRunFailure(error: unknown): boolean {
+  return error instanceof E2EError
+    && (error.code === 'E2E_SECRET_RUN_TERMINAL' || error.code === 'E2E_SECRET_RUN_NOT_FOUND')
 }
 
 function assertOutsideProject(stateRoot: string, projectRoot: string): void {

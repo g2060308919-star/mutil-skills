@@ -5,9 +5,12 @@ import { DatabaseSync } from 'node:sqlite'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { RuntimeSecretBroker } from '../src/secret-broker.js'
+import { RuntimeRunStore, type RuntimeRunSnapshot } from '../src/run-store.js'
 import type { SecretProvider } from '../src/secret-providers.js'
+import { createWorkflow } from '@mutil-skills/e2e-engine'
+import { resolveProjectIdentity } from '../src/project-identity.js'
 import { createRuntimeTestRoots as createBareRuntimeTestRoots } from './fixtures.js'
 
 const cleanup: string[] = []
@@ -18,6 +21,19 @@ async function createRuntimeTestRoots() {
   await mkdir(join(roots.project, '.biztest'))
   await writeFile(join(roots.project, '.biztest/project.json'), JSON.stringify({
     schemaVersion: '1.0.0', projectId: `secret-tests-${roots.root.split('-').at(-1)}`,
+  }))
+  await seedActiveRuns(roots.home, roots.project, [
+    'RUN-1', 'RUN-SAME', 'RUN-OS', 'RUN-CRASH', 'RUN-IDENTITY', 'RUN-INTEGRITY',
+    'RUN-CAP', 'RUN-NONCE',
+  ])
+  return roots
+}
+
+async function createUnseededRuntimeTestRoots() {
+  const roots = await createBareRuntimeTestRoots()
+  await mkdir(join(roots.project, '.biztest'))
+  await writeFile(join(roots.project, '.biztest/project.json'), JSON.stringify({
+    schemaVersion: '1.0.0', projectId: `secret-boundary-${roots.root.split('-').at(-1)}`,
   }))
   return roots
 }
@@ -71,6 +87,7 @@ describe('RuntimeSecretBroker 持久一次性语义', () => {
     await writeFile(join(otherProject, '.biztest/project.json'), JSON.stringify({
       schemaVersion: '1.0.0', projectId: 'other-secret-project',
     }))
+    await seedActiveRuns(roots.home, otherProject, ['RUN-SAME'])
     const owner = await RuntimeSecretBroker.open({ homeDir: roots.home, projectRoot: roots.project })
     const secret = Buffer.from('project-bound-canary')
     await owner.provide({ runId: 'RUN-SAME', secretRef: 'PASSWORD', value: secret }); secret.fill(0)
@@ -403,9 +420,49 @@ function removeSecretCommitAbort(homeDir: string): void {
   finally { database.close() }
 }
 
+async function seedActiveRuns(homeDir: string, projectRoot: string, runIds: string[]): Promise<void> {
+  const identity = await resolveProjectIdentity(projectRoot)
+  const store = await RuntimeRunStore.open({ homeDir, projectRoot })
+  try {
+    for (const [index, runId] of runIds.entries()) {
+      const requestId = `SEED-${identity.digest.slice(-8)}-${runId}`
+      const requestDigest = `sha256:${(index + 1).toString(16).padStart(64, '0')}`
+      await store.beginRequest(requestId, requestDigest)
+      const lock = await store.acquireRunLock(identity.digest, runId)
+      const snapshot: RuntimeRunSnapshot = {
+        schemaVersion: '1.0.0', runId, assetId: `ASSET-${runId}`,
+        projectIdentityDigest: identity.digest,
+        runtimeInstallationDigest: `sha256:${'d'.repeat(64)}`,
+        workflow: createWorkflow(), artifactDigests: { 'prd-source': `sha256:${'e'.repeat(64)}` },
+        requestResponses: {}, createdAt: '2026-07-17T00:00:00.000Z',
+        updatedAt: '2026-07-17T00:00:00.000Z',
+      }
+      await store.createRunOutcome(snapshot, requestId, requestDigest, { seeded: true }, lock)
+      await lock.close()
+    }
+  } finally { await store.close() }
+}
+
 describe('Secret Broker 用户级文件边界', () => {
+  test('Broker.open 在 key 派生中途失败会关闭已打开的 owned RunStore', async () => {
+    const roots = await createUnseededRuntimeTestRoots(); cleanup.push(roots.root)
+    const authorityRoot = join(roots.home, '.mutil-skills/e2e/authority')
+    await mkdir(authorityRoot, { recursive: true, mode: 0o700 })
+    await chmod(join(roots.home, '.mutil-skills'), 0o700)
+    await chmod(join(roots.home, '.mutil-skills/e2e'), 0o700)
+    const key = join(authorityRoot, 'state.key')
+    await writeFile(key, Buffer.alloc(32, 4), { mode: 0o644 })
+    await chmod(key, 0o644)
+    const close = vi.spyOn(RuntimeRunStore.prototype, 'close')
+    try {
+      await expect(RuntimeSecretBroker.open({ homeDir: roots.home, projectRoot: roots.project }))
+        .rejects.toThrow(/E2E_APPROVAL_STATE_(?:KEY|DIRECTORY)_INVALID/)
+      expect(close).toHaveBeenCalledTimes(1)
+    } finally { close.mockRestore() }
+  })
+
   test('state root、Authority key 与 sqlite 固定为私有权限且 state 内没有旁路 key', async () => {
-    const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    const roots = await createUnseededRuntimeTestRoots(); cleanup.push(roots.root)
     const broker = await RuntimeSecretBroker.open({ homeDir: roots.home, projectRoot: roots.project })
     await broker.close()
     const stateRoot = join(roots.home, '.mutil-skills/e2e/state')
@@ -417,7 +474,7 @@ describe('Secret Broker 用户级文件边界', () => {
   })
 
   test.each(['symlink', 'hardlink', 'mode'] as const)('拒绝 %s Authority state key', async (kind) => {
-    const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    const roots = await createUnseededRuntimeTestRoots(); cleanup.push(roots.root)
     const authorityRoot = join(roots.home, '.mutil-skills/e2e/authority')
     await mkdir(authorityRoot, { recursive: true, mode: 0o700 })
     await chmod(join(roots.home, '.mutil-skills'), 0o700)
@@ -433,14 +490,14 @@ describe('Secret Broker 用户级文件边界', () => {
   })
 
   test('拒绝 projectRoot 指向固定 state 路径', async () => {
-    const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    const roots = await createUnseededRuntimeTestRoots(); cleanup.push(roots.root)
     const stateRoot = join(roots.home, '.mutil-skills/e2e/state')
     await expect(RuntimeSecretBroker.open({ homeDir: roots.home, projectRoot: stateRoot }))
       .rejects.toThrow(/E2E_SECRET_STATE_INSIDE_PROJECT/)
   })
 
   test.each(['symlink', 'mode'] as const)('拒绝 %s state 父目录', async (kind) => {
-    const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    const roots = await createUnseededRuntimeTestRoots(); cleanup.push(roots.root)
     const product = join(roots.home, '.mutil-skills')
     if (kind === 'symlink') {
       const outside = join(roots.source, 'outside-product')

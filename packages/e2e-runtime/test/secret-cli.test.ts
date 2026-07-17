@@ -18,12 +18,15 @@ describe('repo-e2e secret provide', () => {
   test('真实 TTY adapter 关闭 echo/raw 后只输出无秘密的严格 JSON，且新 Broker 可消费', async () => {
     const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
     await writeProjectIdentity(roots.project, 'PROJECT-SECRET-CLI-REAL')
+    await seedActiveCliRun(roots.home, roots.project, 'RUN-1')
     const stdout = captureWritable(); const stderr = captureWritable()
     const terminal = terminalWith([Buffer.from('interactive-secret-canary'), Buffer.from('\n')])
+    const deps = dependencies(roots.home, terminal, async () => undefined, roots.project)
+    delete deps.openSecretBroker
     const exitCode = await runCli(
       ['secret', 'provide', '--run-id', 'RUN-1', '--ref', 'LOGIN-PASSWORD'],
       Readable.from([]), stdout.stream, stderr.stream,
-      dependencies(roots.home, terminal, async () => undefined, roots.project),
+      deps,
     )
     expect(exitCode).toBe(0)
     expect(terminal.setRawMode).toHaveBeenNthCalledWith(1, true)
@@ -147,13 +150,16 @@ describe('repo-e2e secret provide', () => {
   test('EOF 可结束一次输入并将 terminal adapter 提供的原始 Buffer 清零', async () => {
     const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
     await writeProjectIdentity(roots.project, 'PROJECT-SECRET-CLI-EOF')
+    await seedActiveCliRun(roots.home, roots.project, 'RUN-1')
     const raw = Buffer.from('eof-secret-canary')
     const terminal = terminalWith([raw])
     const stdout = captureWritable(); const stderr = captureWritable()
+    const deps = dependencies(roots.home, terminal, async () => undefined, roots.project)
+    delete deps.openSecretBroker
     const exitCode = await runCli(
       ['secret', 'provide', '--run-id', 'RUN-1', '--ref', 'PASSWORD'],
       Readable.from([]), stdout.stream, stderr.stream,
-      dependencies(roots.home, terminal, async () => undefined, roots.project),
+      deps,
     )
     expect(exitCode).toBe(0)
     expect([...raw]).toEqual(new Array(raw.length).fill(0))
@@ -175,6 +181,42 @@ describe('repo-e2e secret provide', () => {
     )).toBe(0)
     expect(terminal.setRawMode).toHaveBeenLastCalledWith(true)
     expect([...chunk]).toEqual(new Array(chunk.length).fill(0))
+  })
+
+  test('provide 返回后立即清零明文，broker close 与 stdout 写入阶段只看到零值', async () => {
+    const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    let provided: Uint8Array | undefined
+    const phases: string[] = []
+    const terminal: SecretTerminalAdapter = {
+      isTTY: true,
+      setRawMode() {},
+      async *read() { phases.push('read'); yield Buffer.from('clear-before-close-canary\n') },
+    }
+    const deps = dependencies(roots.home, terminal, async () => undefined, roots.project)
+    deps.openSecretBroker = async () => {
+      phases.push('open')
+      return {
+        async provide(input) { phases.push('provide'); provided = input.value },
+        async close() {
+          phases.push('close')
+          expect(provided).toBeDefined()
+          expect([...provided!]).toEqual(new Array(provided!.byteLength).fill(0))
+        },
+      }
+    }
+    const stdout = new Writable({
+      write(_chunk, _encoding, callback) {
+        phases.push('write')
+        expect([...provided!]).toEqual(new Array(provided!.byteLength).fill(0))
+        callback()
+      },
+    })
+    const exitCode = await runCli(
+      ['secret', 'provide', '--run-id', 'RUN-1', '--ref', 'PASSWORD'],
+      Readable.from([]), stdout, captureWritable().stream, deps,
+    )
+    expect(exitCode).toBe(0)
+    expect(phases).toEqual(['open', 'read', 'provide', 'close', 'write'])
   })
 
   test('进入前 raw 已开启时，中断失败也恢复为 raw 开启状态', async () => {
@@ -268,12 +310,51 @@ describe('repo-e2e secret provide', () => {
       homeDir: roots.home, projectRoot: roots.project,
     })
   })
+
+  test('预检查后 Run 进入终态时，生产 Broker 在持锁 provide 边界拒绝 TOCTOU', async () => {
+    const roots = await createRuntimeTestRoots(); cleanup.push(roots.root)
+    await writeProjectIdentity(roots.project, 'PROJECT-SECRET-CLI-RACE')
+    await seedActiveCliRun(roots.home, roots.project, 'RUN-RACE')
+    const identity = await resolveProjectIdentity(roots.project)
+    const store = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+    const lock = await store.acquireRunLock(identity.digest, 'RUN-RACE')
+    const deps = dependencies(
+      roots.home,
+      terminalWith([Buffer.from('terminal-race-secret\n')]),
+      async () => {
+        const requestDigest = digest('4')
+        await store.beginRequest('TERMINATE-RUN-RACE', requestDigest)
+        await store.updateRunOutcome(
+          identity.digest, 'RUN-RACE', 'TERMINATE-RUN-RACE', requestDigest,
+          (snapshot) => ({
+            snapshot: {
+              ...snapshot,
+              workflow: { ...snapshot.workflow, current: 'accepted', sequence: snapshot.workflow.sequence + 1 },
+            },
+            response: { terminal: true },
+          }),
+          'terminal-race', lock,
+        )
+      },
+      roots.project,
+    )
+    delete deps.openSecretBroker
+    const stdout = captureWritable(); const stderr = captureWritable()
+    try {
+      expect(await runCli(
+        ['secret', 'provide', '--run-id', 'RUN-RACE', '--ref', 'PASSWORD'],
+        Readable.from([]), stdout.stream, stderr.stream, deps,
+      )).toBe(4)
+      expect(JSON.parse(stdout.text())).toMatchObject({ error: { code: 'E2E_SECRET_RUN_TERMINAL' } })
+      expect(`${stdout.text()}${stderr.text()}`).not.toContain('terminal-race-secret')
+    } finally { await lock.close(); await store.close() }
+  })
 })
 
 function dependencies(
   homeDir: string,
   secretTerminal: SecretTerminalAdapter,
-  validateSecretRun: (runId: string) => Promise<string | undefined>,
+  validateSecretRun: (runId: string) => Promise<void>,
   projectRoot: string,
 ): RuntimeCliDependencies {
   return {
@@ -283,6 +364,10 @@ function dependencies(
     secretTerminal,
     validateSecretRun,
     currentWorkingDirectory: () => projectRoot,
+    openSecretBroker: async () => ({
+      provide: async () => undefined,
+      close: async () => undefined,
+    }),
   }
 }
 
@@ -321,4 +406,21 @@ async function writeProjectIdentity(projectRoot: string, projectId: string): Pro
   await writeFile(`${projectRoot}/.biztest/project.json`, JSON.stringify({
     schemaVersion: '1.0.0', projectId,
   }))
+}
+
+async function seedActiveCliRun(homeDir: string, projectRoot: string, runId: string): Promise<void> {
+  const identity = await resolveProjectIdentity(projectRoot)
+  const store = await RuntimeRunStore.open({ homeDir, projectRoot })
+  const requestDigest = digest('7')
+  const lock = await store.acquireRunLock(identity.digest, runId)
+  try {
+    await store.beginRequest(`SEED-${runId}`, requestDigest)
+    await store.createRunOutcome({
+      schemaVersion: '1.0.0', runId, assetId: `ASSET-${runId}`,
+      projectIdentityDigest: identity.digest, runtimeInstallationDigest: digest('6'),
+      workflow: createWorkflow(), artifactDigests: { 'prd-source': digest('5') },
+      requestResponses: {}, createdAt: '2026-07-17T00:00:00.000Z',
+      updatedAt: '2026-07-17T00:00:00.000Z',
+    }, `SEED-${runId}`, requestDigest, { seeded: true }, lock)
+  } finally { await lock.close(); await store.close() }
 }

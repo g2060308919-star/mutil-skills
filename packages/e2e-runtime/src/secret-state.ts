@@ -64,12 +64,21 @@ export interface ResolvingSecretEntry {
 export type PersistedSecretEntry = AvailableSecretEntry | ConsumedSecretEntry
   | AbandonedSecretEntry | ResolvingSecretEntry
 
-export interface SecretRunState {
+export interface ActiveSecretRunState {
   projectIdentityDigest: string
   runId: string
   wrappedDataKey: EncryptedSecretValue
   entries: Record<string, PersistedSecretEntry>
 }
+
+export interface RetiredSecretRunState {
+  projectIdentityDigest: string
+  runId: string
+  status: 'retired'
+  terminalAt: string
+}
+
+export type SecretRunState = ActiveSecretRunState | RetiredSecretRunState
 
 export interface SecretStatePayload {
   capacity: { maxEntries: number; maxSnapshotBytes: number }
@@ -183,7 +192,10 @@ export function decryptSecret(
 }
 
 export function countSecretEntries(payload: SecretStatePayload): number {
-  return Object.values(payload.runs).reduce((sum, run) => sum + Object.keys(run.entries).length, 0)
+  return Object.values(payload.runs).reduce(
+    (sum, run) => sum + (isRetiredSecretRun(run) ? 0 : Object.keys(run.entries).length),
+    0,
+  )
 }
 
 function parsePayload(value: Record<string, unknown>): SecretStatePayload {
@@ -191,13 +203,20 @@ function parsePayload(value: Record<string, unknown>): SecretStatePayload {
     || !exact(value.capacity, ['maxEntries', 'maxSnapshotBytes'])
     || value.capacity.maxEntries !== MAX_SECRET_ENTRIES
     || value.capacity.maxSnapshotBytes !== MAX_SECRET_SNAPSHOT_BYTES
-    || !record(value.runs) || Object.keys(value.runs).length > MAX_SECRET_ENTRIES) throw integrityFailure()
+    || !record(value.runs)) throw integrityFailure()
   let total = 0
   for (const [composite, rawRun] of Object.entries(value.runs)) {
-    if (!record(rawRun) || !exact(rawRun, ['entries', 'projectIdentityDigest', 'runId', 'wrappedDataKey'])
+    if (!record(rawRun)
       || typeof rawRun.projectIdentityDigest !== 'string' || !SECRET_DIGEST_PATTERN.test(rawRun.projectIdentityDigest)
       || typeof rawRun.runId !== 'string' || !SECRET_RUN_ID_PATTERN.test(rawRun.runId)
-      || composite !== secretRunKey(rawRun.projectIdentityDigest, rawRun.runId)
+      || composite !== secretRunKey(rawRun.projectIdentityDigest, rawRun.runId)) throw integrityFailure()
+    if (rawRun.status === 'retired') {
+      if (!exact(rawRun, ['projectIdentityDigest', 'runId', 'status', 'terminalAt'])
+        || !timestamp(rawRun.terminalAt)) throw integrityFailure()
+      continue
+    }
+    if ('status' in rawRun
+      || !exact(rawRun, ['entries', 'projectIdentityDigest', 'runId', 'wrappedDataKey'])
       || !validEncrypted(rawRun.wrappedDataKey, 32) || !record(rawRun.entries)) throw integrityFailure()
     for (const [secretRef, rawEntry] of Object.entries(rawRun.entries)) {
       total += 1
@@ -228,6 +247,7 @@ function parsePayload(value: Record<string, unknown>): SecretStatePayload {
 
 function verifyPayloadCryptography(payload: SecretStatePayload, wrappingKey: Buffer): void {
   for (const run of Object.values(payload.runs)) {
+    if (isRetiredSecretRun(run)) continue
     const dataKey = unwrapRunDataKey(
       wrappingKey, run.wrappedDataKey, run.projectIdentityDigest, run.runId,
     )
@@ -331,6 +351,10 @@ function dataKeyAad(projectIdentityDigest: string, runId: string): Buffer {
 function timestamp(value: unknown): boolean {
   return typeof value === 'string' && Number.isFinite(Date.parse(value))
     && new Date(value).toISOString() === value
+}
+
+export function isRetiredSecretRun(run: SecretRunState): run is RetiredSecretRunState {
+  return 'status' in run && run.status === 'retired'
 }
 
 function record(value: unknown): value is Record<string, unknown> {

@@ -32,8 +32,8 @@ export interface RuntimeSecretRetirementCapability {
 interface RetirementCapabilityRecord {
   projectIdentityDigest: string
   runId: string
-  used: boolean
-  verify(): Promise<void>
+  state: 'available' | 'in-progress' | 'used'
+  execute<T>(operation: () => Promise<T>): Promise<T>
 }
 
 const retirementCapabilities = new WeakMap<object, RetirementCapabilityRecord>()
@@ -396,12 +396,44 @@ export class RuntimeRunStore {
     retirementCapabilities.set(capability, {
       projectIdentityDigest,
       runId,
-      used: false,
-      verify: async () => await this.#verifySecretRetirementCapability({
+      state: 'available',
+      execute: async <T>(operation: () => Promise<T>) => await this.#executeSecretRetirement({
         projectIdentityDigest, runId, key, lock, revision, snapshotDigest,
-      }),
+      }, operation),
     })
     return capability
+  }
+
+  /**
+   * 固定以 RunStore→SecretStore 锁序执行秘密操作。BEGIN IMMEDIATE 在 callback 完成前
+   * 阻止 Run 进入终态；两个 SQLite 库不是同一事务，callback 必须自身原子且失败回滚。
+   */
+  async withActiveSecretRun<T>(
+    projectIdentityDigest: string,
+    runId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const key = runKey(projectIdentityDigest, runId)
+    return await this.#snapshotStore.runExclusive(async () => {
+      const transaction = this.#snapshotStore.beginVersioned()
+      try {
+        const snapshot = parseStoreSnapshot(transaction.snapshot)
+        verifyStoreSnapshot(snapshot)
+        const run = snapshot.runs[key]
+        if (run === undefined) {
+          throw runtimeStoreError('E2E_SECRET_RUN_NOT_FOUND', 'Secret 操作必须绑定已存在的 Run')
+        }
+        if (TERMINAL_SECRET_RETIREMENT_STATES.has(run.workflow.current)) {
+          throw runtimeStoreError('E2E_SECRET_RUN_TERMINAL', '终态 Run 禁止写入或读取 Secret')
+        }
+        const result = await operation()
+        this.#snapshotStore.rollback()
+        return result
+      } catch (error) {
+        this.#snapshotStore.rollback()
+        throw error
+      }
+    })
   }
 
   #requireCurrentLease(snapshot: RunStoreSnapshot, key: string, lock: RuntimeRunLock): void {
@@ -423,15 +455,15 @@ export class RuntimeRunStore {
     }
   }
 
-  async #verifySecretRetirementCapability(input: {
+  async #executeSecretRetirement<T>(input: {
     projectIdentityDigest: string
     runId: string
     key: string
     lock: RuntimeRunLock
     revision: number
     snapshotDigest: string
-  }): Promise<void> {
-    await this.#snapshotStore.runExclusive(async () => {
+  }, operation: () => Promise<T>): Promise<T> {
+    return await this.#snapshotStore.runExclusive(async () => {
       const transaction = this.#snapshotStore.beginVersioned()
       try {
         if (transaction.revision !== input.revision) {
@@ -454,7 +486,9 @@ export class RuntimeRunStore {
             'Run 终态或 snapshot 已改变，必须重新授权退役',
           )
         }
+        const result = await operation()
         this.#snapshotStore.rollback()
+        return result
       } catch (error) {
         this.#snapshotStore.rollback()
         throw error
@@ -501,20 +535,26 @@ export class RuntimeRunStore {
 export async function consumeRuntimeSecretRetirementCapability(
   capability: RuntimeSecretRetirementCapability,
   expectedProjectIdentityDigest: string,
-): Promise<{ projectIdentityDigest: string; runId: string }> {
+  operation: (binding: { projectIdentityDigest: string; runId: string }) => Promise<void>,
+): Promise<void> {
   const record = retirementCapabilities.get(capability)
-  if (record === undefined || record.used
+  if (record === undefined || record.state !== 'available'
     || record.projectIdentityDigest !== expectedProjectIdentityDigest) {
     throw runtimeStoreError(
       'E2E_SECRET_RETIREMENT_CAPABILITY_INVALID',
       'Secret 退役 capability 伪造、跨项目或已消费',
     )
   }
-  record.used = true
-  await record.verify()
-  return {
-    projectIdentityDigest: record.projectIdentityDigest,
-    runId: record.runId,
+  record.state = 'in-progress'
+  try {
+    await record.execute(async () => await operation({
+      projectIdentityDigest: record.projectIdentityDigest,
+      runId: record.runId,
+    }))
+    record.state = 'used'
+  } catch (error) {
+    record.state = 'available'
+    throw error
   }
 }
 

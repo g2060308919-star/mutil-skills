@@ -20,7 +20,7 @@ const dependencies: RuntimeCliDependencies = {
   }),
   uninstallRuntime: async () => ({ version: '0.0.0' }),
   currentWorkingDirectory: () => '/pty-helper-project',
-  validateSecretRun: async () => `sha256:${'1'.repeat(64)}`,
+  validateSecretRun: async () => undefined,
   openSecretBroker: async () => ({
     async provide(input) {
       const digest = `sha256:${createHash('sha256').update(input.value).digest('hex')}`

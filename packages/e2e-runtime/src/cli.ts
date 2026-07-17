@@ -90,7 +90,7 @@ export interface RuntimeCliDependencies {
   currentWorkingDirectory?: () => string
   approvalSessionTtlMs?: number
   secretTerminal?: SecretTerminalAdapter
-  validateSecretRun?: (runId: string) => Promise<string | undefined>
+  validateSecretRun?: (runId: string) => Promise<void>
   openSecretBroker?: (options: {
     homeDir: string
     projectRoot: string
@@ -293,12 +293,17 @@ async function runSecretCommand(
   try {
     await (dependencies.validateSecretRun?.(runId)
       ?? validateDefaultSecretRun(dependencies.homeDir, projectRoot, runId))
-    secret = await readHiddenSecret(terminal)
     broker = await (dependencies.openSecretBroker ?? RuntimeSecretBroker.open)({
       homeDir: dependencies.homeDir,
       projectRoot,
     })
-    await broker.provide({ runId, secretRef, value: secret })
+    secret = await readHiddenSecret(terminal)
+    try {
+      await broker.provide({ runId, secretRef, value: secret })
+    } finally {
+      secret.fill(0)
+      secret = undefined
+    }
     await broker.close()
     broker = undefined
     await responseWriter.write(`${canonicalizeJson({ runId, secretRef, status: 'stored' })}\n`)

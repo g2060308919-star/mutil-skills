@@ -39,6 +39,7 @@ type SpawnEnvironment =
   | {
     LANG: 'C.UTF-8'
     PATH: '/usr/bin:/bin'
+    XDG_RUNTIME_DIR: string
     DBUS_SESSION_BUS_ADDRESS: string
   }
 
@@ -57,6 +58,15 @@ export interface SystemSecretProviderOptions {
   spawn?: (command: string, arguments_: string[], options: SpawnOptions) => SecretProviderChild
   timeoutMs?: number
   shutdownTimeoutMs?: number
+}
+
+/** 生产默认只选择当前 OS 的显式系统安全存储；未知平台保持空集合并 fail closed。 */
+export function createDefaultSystemSecretProviders(
+  platform: NodeJS.Platform = process.platform,
+): SecretProvider[] {
+  if (platform === 'darwin') return [createSystemSecretProvider({ id: 'macos-keychain', platform })]
+  if (platform === 'linux') return [createSystemSecretProvider({ id: 'linux-secret-service', platform })]
+  return []
 }
 
 export function createSystemSecretProvider(options: SystemSecretProviderOptions): SecretProvider {
@@ -109,6 +119,7 @@ export function createSystemSecretProvider(options: SystemSecretProviderOptions)
         environment = {
           LANG: 'C.UTF-8',
           PATH: '/usr/bin:/bin',
+          XDG_RUNTIME_DIR: `/run/user/${uid}`,
           DBUS_SESSION_BUS_ADDRESS: `unix:path=${expectedBusPath}`,
         }
       }
@@ -124,20 +135,21 @@ export function createSystemSecretProvider(options: SystemSecretProviderOptions)
         throw providerError('E2E_SECRET_PROVIDER_UNAVAILABLE', '系统 Secret provider 无法启动')
       }
       const supervisor = superviseSecretProviderChild(child, timeoutMs, shutdownTimeoutMs)
-      void supervisor.completion.catch(() => undefined)
+      // 同时登记 success/rejection handler，避免派生的成功链继续持有 fulfilled 明文 Buffer。
+      void supervisor.completion.then(() => undefined, () => undefined)
+      let after: ExecutableIdentity
       try {
-        const after = await inspectExecutable(executable)
-        if (before.device !== after.device || before.inode !== after.inode) {
-          return await supervisor.abort(providerError(
-            'E2E_SECRET_PROVIDER_EXECUTABLE_REPLACED',
-            'provider 可执行文件身份在启动边界发生变化',
-          ))
-        }
-      } catch (cause) {
-        if (cause instanceof E2EError) throw cause
+        after = await inspectExecutable(executable)
+      } catch {
         return await supervisor.abort(providerError(
           'E2E_SECRET_PROVIDER_EXECUTABLE_INVALID',
           '固定 provider 可执行文件复验失败',
+        ))
+      }
+      if (before.device !== after.device || before.inode !== after.inode) {
+        return await supervisor.abort(providerError(
+          'E2E_SECRET_PROVIDER_EXECUTABLE_REPLACED',
+          'provider 可执行文件身份在启动边界发生变化',
         ))
       }
       if (linuxBusBefore !== undefined && linuxUid !== undefined) {
@@ -217,6 +229,7 @@ function superviseSecretProviderChild(
   let finalized = false
   let killRequested = false
   let shutdownFailed = false
+  let fulfilledOutput: Buffer | undefined
   let operationTimer: NodeJS.Timeout | undefined
   let shutdownTimer: NodeJS.Timeout | undefined
   let resolveCompletion!: (value: Buffer | undefined) => void
@@ -268,7 +281,12 @@ function superviseSecretProviderChild(
     try {
       if (output.byteLength === 0) { resolveCompletion(undefined); return }
       const length = output.at(-1) === 0x0a ? output.byteLength - 1 : output.byteLength
-      resolveCompletion(length === 0 ? undefined : Buffer.from(output.subarray(0, length)))
+      if (length === 0) {
+        resolveCompletion(undefined)
+      } else {
+        fulfilledOutput = Buffer.from(output.subarray(0, length))
+        resolveCompletion(fulfilledOutput)
+      }
     } finally { output.fill(0) }
   }
   const scheduleClosedFinish = (code: number | null, signal: NodeJS.Signals | null) => {
@@ -341,7 +359,11 @@ function superviseSecretProviderChild(
   return {
     completion,
     async abort(error: E2EError): Promise<never> {
-      if (finalized) throw error
+      if (finalized) {
+        fulfilledOutput?.fill(0)
+        fulfilledOutput = undefined
+        throw error
+      }
       fail(error)
       await completion
       throw error
