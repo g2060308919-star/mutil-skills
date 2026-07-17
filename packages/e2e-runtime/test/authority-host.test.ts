@@ -413,7 +413,7 @@ test('Runtime Host keeps a finalized request pending when Run Store persistence 
   }
 })
 
-test('Runtime Host rejects a recovered Grant when the Run changes before the locked persistence check', async () => {
+test('Runtime Host holds the Run lock across recover registration and outcome persistence', async () => {
   const roots = await createRuntimeTestRoots()
   const runStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
   try {
@@ -447,26 +447,12 @@ test('Runtime Host rejects a recovered Grant when the Run changes before the loc
       approvalContext: { ...approvalBinding },
     }
     const changeDigest = `sha256:${'3'.repeat(64)}`
+    let interleavingError: unknown
     const recoverApproval = vi.fn(async () => {
       await runStore.beginRequest('CHANGE-RUN-BEFORE-RECOVERY', changeDigest)
-      const changeLock = await runStore.acquireRunLock(identity.digest, snapshot.runId)
       try {
-        await runStore.updateRunOutcome(
-          identity.digest,
-          snapshot.runId,
-          'CHANGE-RUN-BEFORE-RECOVERY',
-          changeDigest,
-          (current) => ({
-            snapshot: {
-              ...current,
-              runtimeInstallationDigest: `sha256:${'b'.repeat(64)}`,
-            },
-            response: { changed: true },
-          }),
-          'runtime-installation-changed',
-          changeLock,
-        )
-      } finally { await changeLock.close() }
+        await runStore.acquireRunLock(identity.digest, snapshot.runId)
+      } catch (error) { interleavingError = error }
       return { grant: signedGrant as never, approvalBinding, sessionId: 'SESSION-RECOVER-CHANGED' }
     })
     const requestApproval = vi.fn()
@@ -484,12 +470,13 @@ test('Runtime Host rejects a recovered Grant when the Run changes before the loc
     })
 
     expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
-      ok: false, error: { code: 'E2E_RUNTIME_APPROVAL_RECOVERY_BINDING_CHANGED' },
+      ok: true, result: { signedGrant, approvalBinding },
     })
+    expect(interleavingError).toMatchObject({ code: 'E2E_RUNTIME_RUN_LOCKED' })
     expect(requestApproval).not.toHaveBeenCalled()
-    expect(readRunOutcome).not.toHaveBeenCalled()
+    expect(readRunOutcome).toHaveBeenCalledOnce()
     expect((await runStore.getRun(identity.digest, snapshot.runId))
-      ?.requestResponses['APPROVE-RECOVER-CHANGED']).toBeUndefined()
+      ?.requestResponses['APPROVE-RECOVER-CHANGED']).toBeDefined()
   } finally {
     await runStore.close()
     await rm(roots.root, { recursive: true, force: true })
@@ -997,7 +984,7 @@ test('default rpc production wiring starts a real Authority child and closes it 
         },
       )
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EPERM') { skip(); return }
+      if ((error as NodeJS.ErrnoException).code === 'E2E_APPROVAL_PLATFORM_PERMISSION_DENIED') { skip(); return }
       throw error
     }
     url = stderr.text().trim()

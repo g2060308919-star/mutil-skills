@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import { createDecipheriv, createPrivateKey, sign } from 'node:crypto'
-import { canonicalizeJson, digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
+import {
+  canonicalGrantApprovalSubjectDigest,
+  canonicalizeJson,
+  digestText,
+  type WriteApprovalSubject,
+} from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, LocalLeaseAuthority, SqliteSnapshotStore } from '../src/index.js'
 import { testApprovalReceipt } from './approval-authority.fixture.js'
 
@@ -86,6 +91,133 @@ const attemptContext = {
 }
 
 describe('SQLite 持久 Authority 状态', () => {
+  test('current snapshot rejects a finalization outbox larger than the production cap', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-finalization-oversized-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const snapshot = JSON.parse(row.snapshot) as Record<string, any>
+    snapshot.grantFinalizations = Array.from({ length: 1_025 }, (_, index) => [`FINALIZE-${index}`, {}])
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(snapshot))
+    database.close()
+
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_CORRUPT',
+    })
+  })
+
+  test('a full finalization outbox rejects a new entry without committing its newly issued Grant', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-finalization-capacity-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const subject = {
+      schemaVersion: '1.0.0' as const, assetId: 'ASSET-CAPACITY', prdRevision: digest('capacity-prd'),
+      scopeDigest: digest('capacity-scope'), environment: 'test' as const,
+      baseOrigin: 'https://example.test', actor: 'operator',
+      expectedPageIdentity: {
+        url: 'https://example.test/orders', title: 'Orders', heading: 'Orders', ariaSignals: ['main'],
+      },
+      bootstrapIntentsDigest: digest('capacity-bootstrap'),
+      actions: [{ actionId: 'DISCOVERY-CAPACITY', operation: 'dom-read' as const, maxUses: 1 as const }],
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const grant = await authority.issueDiscoveryGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    const snapshot = JSON.parse(row.snapshot) as Record<string, any>
+    const stored = {
+      requestDigest: digest('capacity-request'), subject,
+      approvalBinding: {
+        runId: grant.approvalContext.runId,
+        approvalType: grant.approvalContext.approvalType,
+        subjectDigest: grant.approvalContext.subjectDigest,
+        installationDigest: grant.approvalContext.installationDigest,
+      },
+      grantId: grant.grantId, approvalSessionRef: 'persistent-session',
+    }
+    snapshot.grantFinalizations = Array.from(
+      { length: 1_024 }, (_, index) => [`FINALIZE-CAPACITY-${index}`, stored],
+    )
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(snapshot))
+    database.close()
+
+    const full = await LocalApprovalAuthority.open(options)
+    await expect(full.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+      finalizationId: 'FINALIZE-CAPACITY-NEW', requestDigest: digest('capacity-new-request'),
+      approvalBinding: stored.approvalBinding,
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_CAPACITY_EXCEEDED' })
+    full.close()
+    const after = new DatabaseSync(statePath)
+    const committed = after.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    expect(committed.revision).toBe(row.revision)
+    expect((JSON.parse(committed.snapshot) as Record<string, any>).grants).toHaveLength(1)
+    after.close()
+  })
+
+  test('an unacknowledged expired finalization is pruned and a new user-presence session can issue a new Grant', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-finalization-expiry-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    let current = now()
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now: () => current,
+      statePath, stateEncryptionKey, testWorkspaceRoots, approvalIdentities: [approver],
+      authenticateApproverSession: (_sessionRef: string, expected: {
+        approvalType: 'discovery' | 'execution'; subjectDigest: string
+      }) => testApprovalReceipt(approver.subject, expected),
+    }
+    const subject = {
+      schemaVersion: '1.0.0' as const, assetId: 'ASSET-EXPIRY', prdRevision: digest('expiry-prd'),
+      scopeDigest: digest('expiry-scope'), environment: 'test' as const,
+      baseOrigin: 'https://example.test', actor: 'operator',
+      expectedPageIdentity: {
+        url: 'https://example.test/orders', title: 'Orders', heading: 'Orders', ariaSignals: ['main'],
+      },
+      bootstrapIntentsDigest: digest('expiry-bootstrap'),
+      actions: [{ actionId: 'DISCOVERY-EXPIRY', operation: 'dom-read' as const, maxUses: 1 as const }],
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const approvalBinding = {
+      runId: 'RUN-TEST', approvalType: 'discovery' as const,
+      subjectDigest: canonicalGrantApprovalSubjectDigest(subject),
+      installationDigest: `sha256:${'a'.repeat(64)}`,
+    }
+    const first = await authority.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'USER-PRESENCE-1', ttlMs: 1_000,
+      finalizationId: 'FINALIZE-EXPIRY-1', requestDigest: digest('expiry-request-1'), approvalBinding,
+    })
+    current = new Date(current.getTime() + 2_000)
+    await expect(authority.recoverFinalizedGrant({
+      finalizationId: 'FINALIZE-EXPIRY-1', requestDigest: digest('expiry-request-1'),
+      subject, approvalBinding,
+    })).resolves.toBeUndefined()
+    const second = await authority.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'USER-PRESENCE-2', ttlMs: 1_000,
+      finalizationId: 'FINALIZE-EXPIRY-2', requestDigest: digest('expiry-request-2'), approvalBinding,
+    })
+    expect(second.grantId).not.toBe(first.grantId)
+    authority.close()
+  })
+
   test('持久 Grant 激活要求签名内容与当前 Authority 存储态完全一致', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-stored-grant-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')

@@ -1,5 +1,9 @@
 import { expect, test } from 'vitest'
-import { SignedGrantSchema } from '../src/index.js'
+import {
+  SignedGrantSchema,
+  canonicalGrantApprovalSubjectDigest,
+  digestInjectionResponseBody,
+} from '../src/index.js'
 
 const digest = (character: string) => `sha256:${character.repeat(64)}`
 const subjectDigest = 'sha256:3191dfcc27615dab80a790da4d5b0ad97135447a29813f6298548a31bf940953'
@@ -36,4 +40,108 @@ test('SignedGrantSchema accepts one complete discriminator and rejects extra or 
   expect(() => SignedGrantSchema.parse({ ...grant, injected: true })).toThrow()
   expect(() => SignedGrantSchema.parse({ ...grant, capabilities: [{ ...grant.capabilities[0], maxUses: 0 }] }))
     .toThrow()
+  expect(() => SignedGrantSchema.parse({ ...grant, capabilities: [{ ...grant.capabilities[0], maxUses: 2 }] }))
+    .toThrow()
+})
+
+test('SignedGrantSchema enforces production injection and streaming bounds', () => {
+  const body = 'temporary failure'
+  const subject = {
+    schemaVersion: '1.0.0', assetId: 'ASSET-1', prdRevision: digest('3'), executionDigest: digest('4'),
+    environment: 'test', baseOrigin: 'https://test.example.com', actions: [{
+      actionId: 'ACTION-1', caseId: 'CASE-1', runId: 'RUN-1', attemptSlot: 1,
+      request: {
+        intentId: 'INTENT-1', method: 'GET', canonicalOrigin: 'https://test.example.com',
+        exactPath: '/orders', query: [], payload: { kind: 'no-body' },
+        targetFingerprint: 'not-applicable', maxRequests: 1, expectedOrder: 1,
+      },
+      response: {
+        kind: 'http-response', status: 503,
+        headers: [{ name: 'retry-after', value: '1' }],
+        body: { kind: 'utf8', value: body, digest: digestInjectionResponseBody(body) }, delayMs: 30_000,
+      },
+      expectedMatches: 1, expectedOrder: 1, upstreamForwarding: 'forbidden',
+    }],
+  } as const
+  const injectionDigest = canonicalGrantApprovalSubjectDigest(subject)
+  const injectionGrant = {
+    ...grant,
+    approvalContext: { ...grant.approvalContext, approvalType: 'execution', subjectDigest: injectionDigest },
+    subject, subjectDigest: injectionDigest,
+    capabilities: [{
+      capabilityId: 'CAP-1', nonce: 'a'.repeat(64), transport: 'gateway-injection',
+      actionId: 'ACTION-1', caseId: 'CASE-1', runId: 'RUN-1', attemptSlot: 1,
+      request: subject.actions[0].request, response: subject.actions[0].response,
+      expectedMatches: 1, expectedOrder: 1, upstreamForwarding: 'forbidden', maxUses: 1,
+    }],
+  }
+  expect(SignedGrantSchema.safeParse(injectionGrant).success).toBe(true)
+  expect(SignedGrantSchema.safeParse({
+    ...injectionGrant,
+    capabilities: [{ ...injectionGrant.capabilities[0], response: {
+      ...injectionGrant.capabilities[0].response, status: 99,
+    } }],
+  }).success).toBe(false)
+  expect(SignedGrantSchema.safeParse({
+    ...injectionGrant,
+    capabilities: [{ ...injectionGrant.capabilities[0], response: {
+      ...injectionGrant.capabilities[0].response,
+      headers: [{ name: 'set-cookie', value: 'unsafe' }],
+    } }],
+  }).success).toBe(false)
+  expect(SignedGrantSchema.safeParse({
+    ...injectionGrant,
+    capabilities: [{ ...injectionGrant.capabilities[0], response: {
+      ...injectionGrant.capabilities[0].response,
+      body: { ...injectionGrant.capabilities[0].response.body, digest: digest('f') },
+    } }],
+  }).success).toBe(false)
+
+  const webSocketSubject = {
+    schemaVersion: '1.0.0', assetId: 'ASSET-1', prdRevision: digest('3'), executionDigest: digest('4'),
+    environment: 'test', baseOrigin: 'https://test.example.com', actions: [{
+      actionId: 'ACTION-WS', origin: 'https://test.example.com', path: '/events',
+      maxInboundMessages: 1_000, maxBytes: 10 * 1024 * 1024,
+    }],
+  } as const
+  const webSocketDigest = canonicalGrantApprovalSubjectDigest(webSocketSubject)
+  const webSocketGrant = {
+    ...grant,
+    approvalContext: { ...grant.approvalContext, approvalType: 'execution', subjectDigest: webSocketDigest },
+    subject: webSocketSubject, subjectDigest: webSocketDigest,
+    capabilities: [{
+      capabilityId: 'CAP-WS', nonce: 'b'.repeat(64), transport: 'websocket', effect: 'read',
+      actionId: 'ACTION-WS', origin: 'https://test.example.com', path: '/events',
+      maxInboundMessages: 1_000, maxBytes: 10 * 1024 * 1024, maxUses: 1,
+    }],
+  }
+  expect(SignedGrantSchema.safeParse(webSocketGrant).success).toBe(true)
+  expect(SignedGrantSchema.safeParse({
+    ...webSocketGrant,
+    capabilities: [{ ...webSocketGrant.capabilities[0], maxBytes: 10 * 1024 * 1024 + 1 }],
+  }).success).toBe(false)
+
+  const sseSubject = {
+    schemaVersion: '1.0.0', assetId: 'ASSET-1', prdRevision: digest('3'), executionDigest: digest('4'),
+    environment: 'test', baseOrigin: 'https://test.example.com', actions: [{
+      actionId: 'ACTION-SSE', origin: 'https://test.example.com', exactPath: '/events',
+      query: [], maxReconnects: 100,
+    }],
+  } as const
+  const sseDigest = canonicalGrantApprovalSubjectDigest(sseSubject)
+  const sseGrant = {
+    ...grant,
+    approvalContext: { ...grant.approvalContext, approvalType: 'execution', subjectDigest: sseDigest },
+    subject: sseSubject, subjectDigest: sseDigest,
+    capabilities: [{
+      capabilityId: 'CAP-SSE', nonce: 'c'.repeat(64), transport: 'sse', effect: 'read',
+      actionId: 'ACTION-SSE', origin: 'https://test.example.com', exactPath: '/events', query: [],
+      maxReconnects: 100, maxUses: 100,
+    }],
+  }
+  expect(SignedGrantSchema.safeParse(sseGrant).success).toBe(true)
+  expect(SignedGrantSchema.safeParse({
+    ...sseGrant,
+    capabilities: [{ ...sseGrant.capabilities[0], maxReconnects: 101 }],
+  }).success).toBe(false)
 })

@@ -1,5 +1,8 @@
 import { expect, test, vi } from 'vitest'
-import { parseAuthorityExecutionHostConfig } from '../src/authority-execution-rpc-host-ipc.js'
+import {
+  parseAuthorityExecutionHostConfig,
+  parseAuthorityExecutionIncomingEnvelope,
+} from '../src/authority-execution-rpc-host-ipc.js'
 
 const key = Buffer.alloc(32, 7).toString('base64url')
 const asset = Buffer.from('asset').toString('base64url')
@@ -47,6 +50,25 @@ test('Authority child config parser accepts only the complete strict IPC shape',
     ...config,
     approval: { ...config.approval, testWorkspaceRoots: ['/runtime', '/runtime'] },
   })).toThrow()
+})
+
+test('Authority child accepts only exact incoming IPC envelopes', () => {
+  const requestId = 'a'.repeat(32)
+  expect(parseAuthorityExecutionIncomingEnvelope({
+    type: 'recover-approval', requestId, input: {},
+  })).toBeDefined()
+  expect(parseAuthorityExecutionIncomingEnvelope({
+    type: 'recover-approval', requestId, input: {}, extra: true,
+  })).toBeUndefined()
+  expect(parseAuthorityExecutionIncomingEnvelope({
+    type: 'shutdown', requestId, input: {},
+  })).toBeUndefined()
+  expect(parseAuthorityExecutionIncomingEnvelope({
+    type: 'start', config, requestId,
+  })).toBeUndefined()
+  expect(parseAuthorityExecutionIncomingEnvelope({
+    type: 'unknown-control', requestId, input: {},
+  })).toBeUndefined()
 })
 
 test('Authority child config parser zeroizes every temporary secret-key Buffer', () => {

@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, expect, test, vi } from 'vitest'
 
-let childMode: 'startup-hang' | 'ready-cleanup-failure' | 'ready-cleanup-failure-hang' = 'startup-hang'
+let childMode: 'startup-hang' | 'ready-cleanup-failure' | 'ready-cleanup-failure-hang'
+  | 'ready-cleanup-success' | 'ready-terminal-cleanup' | 'ready-organic-disconnect' = 'startup-hang'
+let lastChild: NonTerminatingChild | undefined
 
 class NonTerminatingChild extends EventEmitter {
   pid = 4242
@@ -46,21 +48,73 @@ class NonTerminatingChild extends EventEmitter {
           this.emit('exit', 1, null)
         }
       }
+      if ((message as { type?: unknown })?.type === 'shutdown' && childMode === 'ready-cleanup-success') {
+        const requestId = (message as { requestId: string }).requestId
+        this.emit('message', { type: 'shutdown-result', requestId, ok: true })
+        this.connected = false
+        this.exitCode = 0
+        this.emit('disconnect')
+        this.emit('exit', 0, null)
+      }
     })
     return true
   }
 
-  kill(): boolean { return true }
+  kill(signal?: NodeJS.Signals | number): boolean {
+    if (childMode === 'ready-terminal-cleanup' && signal === 'SIGTERM') {
+      queueMicrotask(() => {
+        this.emit('message', {
+          type: 'terminal-cleanup-error',
+          error: {
+            code: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED',
+            causes: ['E2E_RPC_HOST_SIGTERM_CLEANUP_CAUSE'],
+          },
+        })
+        this.connected = false
+        this.exitCode = 1
+        this.emit('disconnect')
+        this.emit('exit', 1, 'SIGTERM')
+      })
+    }
+    return true
+  }
+
+  organicFailure(): void {
+    this.connected = false
+    this.emit('disconnect')
+    queueMicrotask(() => {
+      this.exitCode = 1
+      this.emit('exit', 1, null)
+    })
+  }
 }
 
 vi.mock('node:child_process', () => ({
-  fork: vi.fn(() => new NonTerminatingChild()),
-  spawn: vi.fn(() => new NonTerminatingChild()),
+  fork: vi.fn(() => (lastChild = new NonTerminatingChild())),
+  spawn: vi.fn(() => (lastChild = new NonTerminatingChild())),
 }))
 
 import { startAuthorityExecutionRpcHostProcess } from '../src/authority-execution-rpc-host.js'
 
-afterEach(() => { vi.useRealTimers(); childMode = 'startup-hang' })
+afterEach(() => { vi.useRealTimers(); childMode = 'startup-hang'; lastChild = undefined; vi.restoreAllMocks() })
+
+test('parent zeroizes its temporary state-key serialization buffer without mutating caller memory', async () => {
+  childMode = 'ready-cleanup-success'
+  const stateEncryptionKey = new Uint8Array(32).fill(7)
+  const fill = vi.spyOn(Buffer.prototype, 'fill')
+  const host = await startAuthorityExecutionRpcHostProcess({
+    rpc: { issuer: 'authority-host', keyId: 'rpc-key', clientId: 'runner' },
+    approval: { issuer: 'authority', keyId: 'approval-key', statePath: 'approval.sqlite',
+      stateEncryptionKey, testWorkspaceRoots: [process.cwd()] },
+    lease: { statePath: 'lease.sqlite', testWorkspaceRoots: [process.cwd()] },
+    clock: { kind: 'fixed-test-only', now: '2026-07-17T00:00:00.000Z' },
+  })
+
+  expect([...stateEncryptionKey]).toEqual(new Array(32).fill(7))
+  expect(fill.mock.instances.some((buffer) =>
+    buffer.byteLength === 32 && [...buffer].every((byte) => byte === 0))).toBe(true)
+  await host.close()
+})
 
 test('真实启动失败路径在 child 有界清理也失败时聚合保留两个错误', async () => {
   vi.useFakeTimers()
@@ -119,5 +173,48 @@ test('cleanup 已失败且 child 仍无法回收时同时保留 cleanup 与 stop
       expect.objectContaining({ message: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED' }),
       expect.objectContaining({ code: 'E2E_RPC_HOST_STOP_TIMEOUT' }),
     ],
+  })
+})
+
+test('SIGTERM terminal cleanup envelope preserves child causes alongside the stop failure', async () => {
+  vi.useFakeTimers()
+  childMode = 'ready-terminal-cleanup'
+  const host = await startAuthorityExecutionRpcHostProcess({
+    rpc: { issuer: 'authority-host', keyId: 'rpc-key', clientId: 'runner' },
+    approval: { issuer: 'authority', keyId: 'approval-key', statePath: 'approval.sqlite',
+      stateEncryptionKey: Buffer.alloc(32, 7), testWorkspaceRoots: [process.cwd()] },
+    lease: { statePath: 'lease.sqlite', testWorkspaceRoots: [process.cwd()] },
+    clock: { kind: 'fixed-test-only', now: '2026-07-17T00:00:00.000Z' },
+  })
+  const closing = host.close().catch((error: unknown) => error)
+  await vi.runAllTimersAsync()
+
+  expect(await closing).toMatchObject({
+    message: 'E2E_RPC_HOST_CLEANUP_AND_STOP_FAILED',
+    errors: [
+      {
+        message: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED',
+        errors: [expect.objectContaining({ code: 'E2E_RPC_HOST_SIGTERM_CLEANUP_CAUSE' })],
+      },
+      expect.objectContaining({ code: 'E2E_RPC_HOST_SHUTDOWN_RESULT_MISSING' }),
+    ],
+  })
+})
+
+test('organic disconnect waits for a nonzero exit and reports stable cleanup failure', async () => {
+  childMode = 'ready-organic-disconnect'
+  const host = await startAuthorityExecutionRpcHostProcess({
+    rpc: { issuer: 'authority-host', keyId: 'rpc-key', clientId: 'runner' },
+    approval: { issuer: 'authority', keyId: 'approval-key', statePath: 'approval.sqlite',
+      stateEncryptionKey: Buffer.alloc(32, 7), testWorkspaceRoots: [process.cwd()] },
+    lease: { statePath: 'lease.sqlite', testWorkspaceRoots: [process.cwd()] },
+    clock: { kind: 'fixed-test-only', now: '2026-07-17T00:00:00.000Z' },
+  })
+  lastChild!.organicFailure()
+  await new Promise<void>((resolve) => setImmediate(resolve))
+
+  await expect(host.close()).rejects.toMatchObject({
+    message: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED',
+    errors: [expect.objectContaining({ code: 'E2E_RPC_HOST_RESOURCE_CLEANUP_CAUSE' })],
   })
 })

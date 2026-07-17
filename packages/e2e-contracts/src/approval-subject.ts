@@ -2,19 +2,23 @@ import { z } from 'zod'
 import { AssetIdSchema, canonicalizeJson, digestCanonicalGrantApprovalSubject, digestText } from './common.js'
 import { ReadApprovalSubjectSchema, WriteApprovalSubjectV2Schema } from './approval-freshness.js'
 import type { CanonicalApprovalContext } from './approval.js'
+import { digestInjectionResponseBody } from './approval.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const EnvironmentSchema = z.enum(['local', 'test', 'staging', 'production'])
-const LimitedTextSchema = z.string().min(1).max(16 * 1024)
-const CanonicalOriginSchema = z.string().url().refine((value) => {
+const BoundedStringSchema = (minimum: number, maximumBytes: number) => z.string().min(minimum)
+  .refine((value) => Buffer.byteLength(value, 'utf8') <= maximumBytes)
+const LimitedTextSchema = BoundedStringSchema(1, 16 * 1024)
+const CanonicalOriginSchema = BoundedStringSchema(1, 8 * 1024).refine((value) => {
   try { return new URL(value).origin === value } catch { return false }
 }, 'origin must be canonical')
-const AbsoluteUrlSchema = z.string().url().refine((value) => {
+const AbsoluteUrlSchema = BoundedStringSchema(1, 16 * 1024).refine((value) => {
   try { return new URL(value).href === value } catch { return false }
 }, 'URL must be canonical')
-const ExactPathSchema = z.string().min(1).max(8 * 1024).regex(/^\//)
-const QuerySchema = z.array(z.tuple([z.string().max(8 * 1024), z.string().max(8 * 1024)])).max(1_000)
+const ExactPathSchema = BoundedStringSchema(1, 8 * 1024).refine((value) => value.startsWith('/'))
+const QueryPartSchema = BoundedStringSchema(0, 8 * 1024)
+const QuerySchema = z.array(z.tuple([QueryPartSchema, QueryPartSchema])).max(1_000)
 
 const ReadActionSchema = z.object({
   actionId: SafeIdSchema,
@@ -58,28 +62,31 @@ const HttpIntentSchema = z.object({
   expectedOrder: z.number().int().nonnegative().max(100_000),
 }).strict()
 
-const InjectionResponseBodySchema = z.discriminatedUnion('kind', [
+const InjectionResponseBodySchema = z.union([
   z.object({ kind: z.literal('no-body') }).strict(),
-  z.object({ kind: z.literal('utf8'), value: z.string(), digest: DigestSchema }).strict(),
+  z.object({ kind: z.literal('utf8'), value: z.string(), digest: DigestSchema }).strict()
+    .refine((body) => Buffer.byteLength(body.value, 'utf8') <= 64 * 1024
+      && body.digest === digestInjectionResponseBody(body.value)),
 ])
 
-const CanonicalInjectionResponseSchema = z.discriminatedUnion('kind', [
+const CanonicalInjectionResponseSchema = z.union([
   z.object({
     kind: z.literal('http-response'),
-    status: z.number().int(),
+    status: z.number().int().min(100).max(599),
     headers: z.array(z.object({
-      name: z.string().min(1).max(256).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/),
-      value: z.string(),
-    }).strict()).max(1_000),
+      name: z.enum(['content-type', 'retry-after', 'cache-control']),
+      value: z.string().refine((value) => Buffer.byteLength(value, 'utf8') <= 8 * 1024
+        && !/[\r\n\0]/.test(value)),
+    }).strict()).max(3).refine((headers) => new Set(headers.map((header) => header.name)).size === headers.length),
     body: InjectionResponseBodySchema,
-    delayMs: z.number().int(),
+    delayMs: z.number().int().min(0).max(30_000),
   }).strict(),
   z.object({
     kind: z.enum(['connection-reset', 'timeout']),
     status: z.literal('not-applicable'),
     headers: z.tuple([]),
     body: z.object({ kind: z.literal('no-body') }).strict(),
-    delayMs: z.number().int(),
+    delayMs: z.number().int().min(0).max(30_000),
   }).strict(),
 ])
 
@@ -152,8 +159,8 @@ export const CanonicalApprovalContextSchema = z.object({
   subjectDigest: DigestSchema,
   installationDigest: DigestSchema,
   origin: CanonicalOriginSchema,
-  issuedAt: z.string().datetime(),
-  expiresAt: z.string().datetime(),
+  issuedAt: z.string().datetime().max(64),
+  expiresAt: z.string().datetime().max(64),
 }).strict().superRefine((value, context) => {
   if (Date.parse(value.expiresAt) <= Date.parse(value.issuedAt)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'approval context expiry must follow issue time' })

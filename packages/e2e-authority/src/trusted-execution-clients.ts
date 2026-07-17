@@ -1,8 +1,9 @@
-import type {
-  GrantDecision,
-  CanonicalApprovalContext,
-  SignedWriteGrant,
-  WriteApprovalSubject,
+import {
+  E2EError,
+  type CanonicalApprovalContext,
+  type GrantDecision,
+  type SignedWriteGrant,
+  type WriteApprovalSubject,
 } from '@mutil-skills/e2e-contracts'
 
 export interface TrustedWriteApprovalClient {
@@ -15,6 +16,28 @@ export interface TrustedLeaseClient {
 
 export type TrustedApprovalExecutionBinding = Pick<CanonicalApprovalContext,
   'runId' | 'installationDigest' | 'approvalType' | 'subjectDigest'>
+
+/** @internal Strictly parses the four-field execution binding; this does not confer client trust. */
+export function parseTrustedApprovalExecutionBinding(value: unknown): TrustedApprovalExecutionBinding {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) bindingInvalid()
+  const candidate = value as Record<string, unknown>
+  if (Object.keys(candidate).sort().join('\0')
+      !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')
+    || typeof candidate.runId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.runId)
+    || (candidate.approvalType !== 'discovery' && candidate.approvalType !== 'execution')
+    || typeof candidate.subjectDigest !== 'string'
+    || !/^sha256:[a-f0-9]{64}$/.test(candidate.subjectDigest)
+    || typeof candidate.installationDigest !== 'string'
+    || !/^sha256:[a-f0-9]{64}$/.test(candidate.installationDigest)) bindingInvalid()
+  return structuredClone(candidate) as TrustedApprovalExecutionBinding
+}
+
+function bindingInvalid(): never {
+  throw new E2EError({
+    code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH', category: 'safety',
+    message: 'Runtime approval binding 必须是严格的四字段结构', retryable: false,
+  })
+}
 
 export type TrustedExecutionClientBinding =
   | { transport: 'in-process-test'; approvalBinding?: TrustedApprovalExecutionBinding }

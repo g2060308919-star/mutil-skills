@@ -98,6 +98,7 @@ import {
   type SqliteStateDirectoryIdentity,
 } from './sqlite-state-store.js'
 import {
+  parseTrustedApprovalExecutionBinding,
   trustWriteApprovalClient,
   type TrustedApprovalExecutionBinding,
   type TrustedWriteApprovalClient,
@@ -173,6 +174,8 @@ interface StoredGrantFinalization {
   subject: ApprovalGrantSubject
   approvalBinding: TrustedApprovalExecutionBinding
 }
+
+const MAX_GRANT_FINALIZATIONS = 1_024
 
 export class LocalApprovalAuthority {
   readonly #issuer: string
@@ -421,8 +424,9 @@ export class LocalApprovalAuthority {
       return await this.#withStateMutation(() => this.finalizeApprovalGrant(input))
     }
     const subject = ApprovalGrantSubjectSchema.parse(immutableSnapshot(input.subject))
-    const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
+    const approvalBinding = parseTrustedApprovalExecutionBinding(input.approvalBinding)
     validateFinalizationIdentity(input.finalizationId, input.requestDigest)
+    this.#pruneExpiredGrantFinalizations()
     const expectedFinalization: Omit<StoredGrantFinalization, 'grantId' | 'approvalSessionRef'> = {
       requestDigest: input.requestDigest,
       subject,
@@ -462,6 +466,12 @@ export class LocalApprovalAuthority {
     if (!sameApprovalExecutionBinding(grant.approvalContext, approvalBinding)) {
       throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'WebAuthn receipt 与 Runtime 可信绑定不一致')
     }
+    if (this.#grantFinalizations.size >= MAX_GRANT_FINALIZATIONS) {
+      throw authorityError(
+        'E2E_APPROVAL_FINALIZATION_CAPACITY_EXCEEDED',
+        'finalization outbox 已达到安全上限',
+      )
+    }
     this.#grantFinalizations.set(input.finalizationId, {
       ...expectedFinalization,
       grantId: grant.grantId,
@@ -477,10 +487,11 @@ export class LocalApprovalAuthority {
     approvalBinding: TrustedApprovalExecutionBinding
   }): Promise<{ grant: SignedGrant; approvalSessionRef: string } | undefined> {
     if (!this.#stateStore) throw authorityError('E2E_APPROVAL_PERSISTENCE_REQUIRED', '恢复 Grant 需要持久 Authority')
-    return await this.#withStateRead(async () => {
+    return await this.#withStateMutation(async () => {
       validateFinalizationIdentity(input.finalizationId, input.requestDigest)
+      this.#pruneExpiredGrantFinalizations()
       const subject = ApprovalGrantSubjectSchema.parse(immutableSnapshot(input.subject))
-      const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
+      const approvalBinding = parseTrustedApprovalExecutionBinding(input.approvalBinding)
       const existing = this.#grantFinalizations.get(input.finalizationId)
       if (existing === undefined) return undefined
       if (existing.requestDigest !== input.requestDigest
@@ -494,6 +505,41 @@ export class LocalApprovalAuthority {
     })
   }
 
+  async acknowledgeFinalizedGrant(input: {
+    finalizationId: string
+    requestDigest: string
+    grantId: string
+    approvalBinding: TrustedApprovalExecutionBinding
+  }): Promise<void> {
+    if (!this.#stateStore) throw authorityError('E2E_APPROVAL_PERSISTENCE_REQUIRED', '确认 Grant 需要持久 Authority')
+    await this.#withStateMutation(async () => {
+      validateFinalizationIdentity(input.finalizationId, input.requestDigest)
+      if (!/^[A-Za-z0-9._:-]{1,256}$/.test(input.grantId)) {
+        throw authorityError('E2E_APPROVAL_FINALIZATION_INVALID', 'grantId 无效')
+      }
+      const approvalBinding = parseTrustedApprovalExecutionBinding(input.approvalBinding)
+      this.#pruneExpiredGrantFinalizations()
+      const existing = this.#grantFinalizations.get(input.finalizationId)
+      if (existing === undefined) return
+      if (existing.requestDigest !== input.requestDigest || existing.grantId !== input.grantId
+        || canonicalizeJson(existing.approvalBinding) !== canonicalizeJson(approvalBinding)) {
+        throw authorityError('E2E_APPROVAL_FINALIZATION_MISMATCH', 'finalization ack 与 outbox 不一致')
+      }
+      this.#grantFinalizations.delete(input.finalizationId)
+    })
+  }
+
+  #pruneExpiredGrantFinalizations(): void {
+    const now = this.#now().getTime()
+    for (const [finalizationId, entry] of this.#grantFinalizations) {
+      const grant = this.#grants.get(entry.grantId)
+      if (grant === undefined || Date.parse(grant.expiresAt) <= now) {
+        this.#grantFinalizations.delete(finalizationId)
+      }
+    }
+  }
+
+  /** Verifies the persisted signed Grant and binding before returning context for ephemeral RPC activation. */
   async activatePersistedGrant(input: {
     grant: SignedGrant
     approvalBinding: TrustedApprovalExecutionBinding
@@ -503,7 +549,7 @@ export class LocalApprovalAuthority {
       const parsed = SignedGrantSchema.safeParse(immutableSnapshot(input.grant))
       if (!parsed.success) throw authorityError('E2E_APPROVAL_GRANT_INVALID', 'SignedGrant 结构无效')
       const grant = parsed.data as SignedGrant
-      const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
+      const approvalBinding = parseTrustedApprovalExecutionBinding(input.approvalBinding)
       if (!sameApprovalExecutionBinding(grant.approvalContext, approvalBinding)) {
         throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'SignedGrant 与 Runtime 可信绑定不一致')
       }
@@ -717,6 +763,7 @@ export class LocalApprovalAuthority {
       return await this.#withStateMutation(() => this.issueInjectionGrant(input))
     }
     const request = immutableSnapshot(input)
+    validateRawInjectionResponses(request.subject)
     const parsedSubject = InjectionApprovalSubjectSchema.safeParse(request.subject)
     if (!parsedSubject.success) {
       throw authorityError('E2E_APPROVAL_INJECTION_SCOPE_INVALID', 'Injection subject 必须满足严格 canonical contract')
@@ -1949,6 +1996,8 @@ function parseAuthoritySnapshotStructure(
   })
   const grantMap = new Map(grants.map(([key, value]) => [key, value as unknown as SignedGrant]))
   if (withGrantFinalizations) {
+    if (!Array.isArray(candidate.grantFinalizations)
+      || candidate.grantFinalizations.length > MAX_GRANT_FINALIZATIONS) corruptSnapshot()
     parseUniqueTuples(candidate.grantFinalizations as unknown[], 'grant finalization', (key, value) => {
       if (!/^[A-Za-z0-9._:-]{1,256}$/.test(key) || !isPlainSnapshot(value)
         || Object.keys(value).sort().join('\0')
@@ -1959,7 +2008,9 @@ function parseAuthoritySnapshotStructure(
         || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.approvalSessionRef)) corruptSnapshot()
       const subject = ApprovalGrantSubjectSchema.safeParse(value.subject)
       if (!subject.success) corruptSnapshot()
-      const binding = parseApprovalExecutionBindingForSnapshot(value.approvalBinding)
+      let binding: TrustedApprovalExecutionBinding
+      try { binding = parseTrustedApprovalExecutionBinding(value.approvalBinding) }
+      catch { return corruptSnapshot() }
       const grant = grantMap.get(value.grantId as string)!
       if (canonicalizeJson(subject.data) !== canonicalizeJson(grant.subject)
         || !sameApprovalExecutionBinding(grant.approvalContext, binding)) corruptSnapshot()
@@ -2469,23 +2520,6 @@ function validateFinalizationIdentity(finalizationId: string, requestDigest: str
   }
 }
 
-function parseApprovalExecutionBinding(value: unknown): TrustedApprovalExecutionBinding {
-  if (!isPlainSnapshot(value)
-    || Object.keys(value).sort().join('\0')
-      !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')
-    || typeof value.runId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.runId)
-    || (value.approvalType !== 'discovery' && value.approvalType !== 'execution')
-    || typeof value.subjectDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.subjectDigest)
-    || typeof value.installationDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.installationDigest)) {
-    throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'Runtime approval binding 结构无效')
-  }
-  return structuredClone(value) as TrustedApprovalExecutionBinding
-}
-
-function parseApprovalExecutionBindingForSnapshot(value: unknown): TrustedApprovalExecutionBinding {
-  try { return parseApprovalExecutionBinding(value) } catch { return corruptSnapshot() }
-}
-
 function sameApprovalExecutionBinding(
   context: CanonicalApprovalContext,
   binding: TrustedApprovalExecutionBinding,
@@ -2763,6 +2797,31 @@ function validateInjectionSubject(subject: InjectionApprovalSubject): void {
     }
     validateInjectionResponse(action.response)
   }
+}
+
+function validateRawInjectionResponses(subject: unknown): void {
+  if (!isPlainSnapshot(subject) || !Array.isArray(subject.actions)) return
+  for (const action of subject.actions) {
+    if (!isPlainSnapshot(action) || !isPlainSnapshot(action.response)) continue
+    const response = action.response
+    if (!Number.isSafeInteger(response.delayMs)) invalidInjectionResponse()
+    if (response.kind === 'http-response') {
+      if (!Number.isSafeInteger(response.status) || !Array.isArray(response.headers)
+        || !isPlainSnapshot(response.body)
+        || (response.body.kind !== 'no-body'
+          && (response.body.kind !== 'utf8' || typeof response.body.value !== 'string'
+            || typeof response.body.digest !== 'string'))) invalidInjectionResponse()
+    } else {
+      if ((response.kind !== 'connection-reset' && response.kind !== 'timeout')
+        || response.status !== 'not-applicable' || !Array.isArray(response.headers)
+        || !isPlainSnapshot(response.body)) invalidInjectionResponse()
+    }
+    validateInjectionResponse(response as unknown as CanonicalInjectionResponse)
+  }
+}
+
+function invalidInjectionResponse(): never {
+  throw authorityError('E2E_APPROVAL_INJECTION_RESPONSE_INVALID', '注入响应结构或生产边界无效')
 }
 
 function validateInjectionResponse(response: CanonicalInjectionResponse): void {

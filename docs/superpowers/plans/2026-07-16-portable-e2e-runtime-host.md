@@ -801,6 +801,8 @@ git commit -m "feat(e2e): persist runtime runs by project identity"
 
 > **Spec Errata（2026-07-17，Task 5 六次外审）**：五次外审中“ephemeral RPC 注册失败回滚 receipt 与 Grant”的结论撤销。`2.3.0` Authority 必须把 receipt take、SignedGrant 和 finalization outbox 原子持久化，提交后才串行更新 RPC 注册；注册或 Run Store 写入失败时保留 outbox，相同稳定 finalization identity 可跨新 Host 恢复同一 Grant，不再展示 WebAuthn URL。Runtime machine 与直接 CLI 都要在用户在场前持久 reservation，恢复/最终化后在 Run lock 内重验 Run/install/type/subject/project identity；成功 outcome 改变下一次 CLI identity。新 Host 激活还必须验证完整严格 SignedGrant、当前存储态逐字段一致、签名、撤销、过期和四字段 binding。HostConfig 及所有结果/cleanup IPC 使用精确字段并有界传播稳定 cause；secret parser 临时 Buffer 全路径清零。Golden 的 RPC verify/reserve 必须由 Host1 最终化并关闭后启动的 Host2 激活持久 Grant 来提供。
 
+> **Spec Errata（2026-07-17，Task 5 七次外审）**：commit 后 ephemeral 注册失败使用专用可恢复错误，machine/CLI 保持稳定 reservation pending；recover/注册/outcome 同处 Run lock。outcome 成功后 best-effort ack finalization outbox，ack 失败不覆盖成功；outbox 按 Grant expiry 裁剪、容量 1024、超限事务回滚、oversized snapshot 拒绝。child incoming IPC 全层 exact，错误码仅允许严格 `E2E_*`，SignedGrant/subject 的字符串、数组、数值以及 injection/WS/SSE 字段均有生产上界。parent state-key 序列化临时 Buffer 清零。parent 识别 terminal cleanup envelope、保留 Aggregate cause，并等待 exit code 区分普通退出和稳定 cleanup failure。四字段 binding 使用唯一内部 parser，但 parser 不构成 WeakMap trust 登记。真实 child 回归必须覆盖 commit-after-registration recovery 和并发 control 中“先成功、后失败、再重试”不污染先前注册。
+
 **Files:**
 - Create: `packages/e2e-authority/src/webauthn-user-presence.ts`
 - Create: `packages/e2e-authority/src/webauthn-approval-server.ts`

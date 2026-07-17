@@ -56,7 +56,7 @@ test('Authority/Lease Host 在独立 OS 进程打开持久状态并提供认证 
         clock: { kind: 'fixed-test-only', now: fixedNow },
       })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EPERM') { skip(); return }
+      if ((error as NodeJS.ErrnoException).code === 'E2E_APPROVAL_PLATFORM_PERMISSION_DENIED') { skip(); return }
       throw error
     }
     expect(host.pid).not.toBe(process.pid)
@@ -118,7 +118,7 @@ test('Authority child opens WebAuthn sessions while the parent receives only URL
         },
       })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EPERM') { skip(); return }
+      if ((error as NodeJS.ErrnoException).code === 'E2E_APPROVAL_PLATFORM_PERMISSION_DENIED') { skip(); return }
       throw error
     }
     await expect(host.enrollIdentity({ subject: 'local:unregistered' }))
@@ -254,7 +254,7 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
     try {
       host = await startAuthorityExecutionRpcHostProcess(hostOptions)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EPERM') { skip(); return }
+      if ((error as NodeJS.ErrnoException).code === 'E2E_APPROVAL_PLATFORM_PERMISSION_DENIED') { skip(); return }
       throw error
     }
     const subjectDigest = canonicalGrantApprovalSubjectDigest(writeSubject)
@@ -298,6 +298,17 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
       grant: { ...finalized.grant, extra: true } as never,
       approvalBinding: finalized.approvalBinding,
     })).rejects.toMatchObject({ code: 'E2E_APPROVAL_GRANT_INVALID' })
+    const concurrentControls = await Promise.allSettled([
+      host.activateGrant({ grant: finalized.grant, approvalBinding: finalized.approvalBinding }),
+      host.activateGrant({
+        grant: finalized.grant,
+        approvalBinding: { ...finalized.approvalBinding, runId: 'RUN-CONCURRENT-REBOUND' },
+      }),
+    ])
+    expect(concurrentControls[0]).toEqual({ status: 'fulfilled', value: undefined })
+    expect(concurrentControls[1]).toMatchObject({
+      status: 'rejected', reason: { code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' },
+    })
     await expect(host.activateGrant({
       grant: finalized.grant, approvalBinding: finalized.approvalBinding,
     })).resolves.toBeUndefined()

@@ -469,6 +469,18 @@ describe('WebAuthn user presence authority', () => {
       await expect(third.activatePersistedGrant({
         grant: { ...grant, injected: true } as never, approvalBinding,
       })).rejects.toMatchObject({ code: 'E2E_APPROVAL_GRANT_INVALID' })
+      await expect(third.acknowledgeFinalizedGrant({
+        finalizationId, requestDigest, grantId: 'GRANT-REBOUND', approvalBinding,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_MISMATCH' })
+      await expect(third.acknowledgeFinalizedGrant({
+        finalizationId, requestDigest, grantId: grant.grantId, approvalBinding,
+      })).resolves.toBeUndefined()
+      await expect(third.acknowledgeFinalizedGrant({
+        finalizationId, requestDigest, grantId: grant.grantId, approvalBinding,
+      })).resolves.toBeUndefined()
+      await expect(third.recoverFinalizedGrant({
+        finalizationId, requestDigest, subject: grantSubject, approvalBinding,
+      })).resolves.toBeUndefined()
       authorityNow = new Date(fixedNow.getTime() + 120_000)
       await expect(third.activatePersistedGrant({ grant, approvalBinding }))
         .rejects.toMatchObject({ code: 'E2E_APPROVAL_EXPIRED' })

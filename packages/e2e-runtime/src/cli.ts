@@ -450,42 +450,95 @@ async function openDefaultHumanAuthoritySession(
       runId, approvalType: approvalType as 'discovery' | 'execution', subjectDigest,
       installationDigest: installation.installationDigest,
     }
-    const recovered = grantSubject === undefined ? undefined : await authority.recoverApproval({
-      finalizationId: stable.finalizationId, requestDigest: stable.requestDigest,
-      grantSubject, approvalBinding: approvalBinding!,
-    })
-    const session = recovered === undefined ? await authority.requestApproval({
+    const assertCurrentApprovalSubject = async () => {
+      const current = await store.getRun(identity.digest, runId)
+      if (current === undefined
+        || current.runtimeInstallationDigest !== installation.installationDigest
+        || approvalTypeForWorkflow(current.workflow.current, approvalType) !== approvalType
+        || computeRuntimeApprovalSubjectDigest(current, approvalType, grantSubject) !== subjectDigest
+        || stableHumanApprovalRequest(current, approvalType, subjectDigest).requestId !== stable.requestId) {
+        throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')
+      }
+      return current
+    }
+    let recoveredSessionId: string | undefined
+    let recoveredOutcome: Awaited<ReturnType<RuntimeAuthoritySession['wait']>>
+    if (grantSubject !== undefined) {
+      const currentIdentity = await resolveProjectIdentity(projectRoot)
+      assertSameProjectIdentity(identity, currentIdentity)
+      const lock = await store.acquireRunLock(identity.digest, runId)
+      try {
+        assertSameProjectIdentity(identity, await resolveProjectIdentity(projectRoot))
+        await assertCurrentApprovalSubject()
+        const recovered = await authority.recoverApproval({
+          finalizationId: stable.finalizationId, requestDigest: stable.requestDigest,
+          grantSubject, approvalBinding: approvalBinding!,
+        })
+        if (recovered !== undefined) {
+          assertSameProjectIdentity(identity, await resolveProjectIdentity(projectRoot))
+          const response = {
+            sessionId: recovered.sessionId,
+            status: 'verified' as const,
+            signedGrant: recovered.grant,
+            approvalBinding: recovered.approvalBinding,
+          }
+          try {
+            recoveredOutcome = await store.readRunOutcome(
+              identity.digest, runId, stable.requestId, stable.requestDigest, () => response, lock,
+            ) as typeof response
+            try {
+              await authority.acknowledgeFinalization({
+                finalizationId: stable.finalizationId,
+                requestDigest: stable.requestDigest,
+                grantId: recovered.grant.grantId,
+                approvalBinding: recovered.approvalBinding,
+              })
+            } catch { /* outcome 已持久化；outbox 由后续幂等 ack 或 expiry prune 回收 */ }
+          } catch (cause) {
+            throw new E2EError({
+              code: 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING', category: 'safety',
+              message: 'Authority 已恢复 Grant，但 Run Store outcome 尚未持久化；可用相同命令重试',
+              retryable: true, cause,
+            })
+          }
+          recoveredSessionId = recovered.sessionId
+        }
+      } finally { await lock.close() }
+    }
+    if (recoveredSessionId !== undefined) {
+      await runWithResourceCleanup(async () => undefined, [store, authority])
+      return {
+        url: '', sessionId: recoveredSessionId,
+        async wait() { return recoveredOutcome },
+      }
+    }
+    const session = await authority.requestApproval({
       runId, approvalType, subjectDigest, installationDigest: installation.installationDigest,
       ...(grantSubject === undefined ? {} : {
         finalizationId: stable.finalizationId, requestDigest: stable.requestDigest,
       }),
-    }) : undefined
+    })
     return {
-      url: session?.url ?? '',
-      sessionId: recovered?.sessionId ?? session!.sessionId,
+      url: session.url,
+      sessionId: session.sessionId,
       async wait() {
         let outcome: Awaited<ReturnType<RuntimeAuthoritySession['wait']>> = undefined
         await runWithResourceCleanup(async () => {
-          await session?.wait()
+          await session.wait()
           const currentIdentity = await resolveProjectIdentity(projectRoot)
           assertSameProjectIdentity(identity, currentIdentity)
           const lock = await store.acquireRunLock(identity.digest, runId)
           try {
-            const current = await store.getRun(identity.digest, runId)
-            if (current === undefined
-              || current.runtimeInstallationDigest !== installation.installationDigest
-              || approvalTypeForWorkflow(current.workflow.current, approvalType) !== approvalType
-              || computeRuntimeApprovalSubjectDigest(current, approvalType, grantSubject) !== subjectDigest
-              || stableHumanApprovalRequest(current, approvalType, subjectDigest).requestId !== stable.requestId) {
-              throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')
-            }
+            assertSameProjectIdentity(identity, await resolveProjectIdentity(projectRoot))
+            await assertCurrentApprovalSubject()
             if (grantSubject !== undefined) {
-              if (recovered === undefined && !session?.finalize) {
+              if (!session.finalize) {
                 throw cliAuthorityError('E2E_APPROVAL_FINALIZE_UNAVAILABLE')
               }
-              const finalized = recovered ?? await session!.finalize!(grantSubject)
+              const finalized = await session.finalize(grantSubject)
+              assertSameProjectIdentity(identity, await resolveProjectIdentity(projectRoot))
               const response = {
-                sessionId: recovered?.sessionId ?? session!.sessionId,
+                sessionId: session.sessionId,
                 status: 'verified' as const,
                 signedGrant: finalized.grant,
                 approvalBinding: finalized.approvalBinding,
@@ -494,6 +547,14 @@ async function openDefaultHumanAuthoritySession(
                 outcome = await store.readRunOutcome(
                   identity.digest, runId, stable.requestId, stable.requestDigest, () => response, lock,
                 ) as typeof response
+                try {
+                  await authority!.acknowledgeFinalization({
+                    finalizationId: stable.finalizationId,
+                    requestDigest: stable.requestDigest,
+                    grantId: finalized.grant.grantId,
+                    approvalBinding: finalized.approvalBinding,
+                  })
+                } catch { /* outcome 已持久化；outbox 由后续幂等 ack 或 expiry prune 回收 */ }
               } catch (cause) {
                 throw new E2EError({
                   code: 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING', category: 'safety',

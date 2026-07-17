@@ -38,7 +38,7 @@ const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 type RuntimeAuthorityProcess = Pick<AuthorityExecutionRpcProcessHandle,
   'enrollIdentity' | 'openApprovalSession' | 'waitForSession' | 'close'> &
   Partial<Pick<AuthorityExecutionRpcProcessHandle,
-    'finalizeApproval' | 'recoverApproval' | 'activateGrant'
+    'finalizeApproval' | 'recoverApproval' | 'activateGrant' | 'acknowledgeFinalization'
     | 'endpoint' | 'credential' | 'verifierMaterial'>>
 
 export interface RuntimeAuthoritySession {
@@ -145,6 +145,18 @@ export class RuntimeAuthorityHost {
       throw authorityHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
     }
     try { await this.#process.activateGrant(input) }
+    catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
+  }
+
+  async acknowledgeFinalization(input: {
+    finalizationId: string
+    requestDigest: string
+    grantId: string
+    approvalBinding: TrustedApprovalExecutionBinding
+  }): Promise<void> {
+    this.#requireOpen()
+    if (!this.#process.acknowledgeFinalization) return
+    try { await this.#process.acknowledgeFinalization(input) }
     catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
   }
 

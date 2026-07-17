@@ -18,6 +18,7 @@ import {
   type AuthenticatedRpcOperationContext,
 } from './authenticated-rpc.js'
 import {
+  parseTrustedApprovalExecutionBinding,
   trustLeaseClient,
   trustWriteApprovalClient,
   type TrustedApprovalExecutionBinding,
@@ -142,7 +143,7 @@ export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRp
   gatewayAuthority: GatewayWriteAuthorityRpcClient
   destroy(): void
 } {
-  const approvalBinding = parseApprovalExecutionBinding(options.approvalBinding)
+  const approvalBinding = parseExecutionRpcApprovalBinding(options.approvalBinding)
   const rpc = AuthenticatedRpcClient.create(options)
   const binding = {
     transport: 'authenticated-rpc' as const,
@@ -185,16 +186,12 @@ export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRp
   return { writeApproval, lease, gatewayAuthority, destroy: () => rpc.destroy() }
 }
 
-function parseApprovalExecutionBinding(value: unknown): TrustedApprovalExecutionBinding {
-  if (!isPlainObject(value)
-    || !hasExactKeys(value, ['approvalType', 'installationDigest', 'runId', 'subjectDigest'])
-    || typeof value.runId !== 'string' || !SAFE_ID.test(value.runId)
-    || value.approvalType !== 'execution'
-    || typeof value.installationDigest !== 'string' || !DIGEST.test(value.installationDigest)
-    || typeof value.subjectDigest !== 'string' || !DIGEST.test(value.subjectDigest)) {
-    throw executionRpcError('E2E_RPC_APPROVAL_BINDING_INVALID')
-  }
-  return structuredClone(value) as TrustedApprovalExecutionBinding
+function parseExecutionRpcApprovalBinding(value: unknown): TrustedApprovalExecutionBinding {
+  try {
+    const binding = parseTrustedApprovalExecutionBinding(value)
+    if (binding.approvalType !== 'execution') throw new Error('execution binding required')
+    return binding
+  } catch { throw executionRpcError('E2E_RPC_APPROVAL_BINDING_INVALID') }
 }
 
 function parseWriteVerifyInput(value: unknown): {

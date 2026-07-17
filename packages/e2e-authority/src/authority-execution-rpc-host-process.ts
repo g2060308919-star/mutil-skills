@@ -15,7 +15,9 @@ import {
   authorityHostCleanupFailurePayload,
   closeAuthorityExecutionRpcHostResources,
 } from './authority-execution-rpc-host-lifecycle.js'
+import { AuthorityExecutionControlQueue } from './authority-execution-control-queue.js'
 import {
+  parseAuthorityExecutionIncomingEnvelope,
   parseAuthorityExecutionHostConfig,
   type AuthorityExecutionHostConfig as HostConfig,
 } from './authority-execution-rpc-host-ipc.js'
@@ -28,7 +30,10 @@ import {
   type CanonicalApprovalContext,
   type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
-import type { TrustedApprovalExecutionBinding } from './trusted-execution-clients.js'
+import {
+  parseTrustedApprovalExecutionBinding,
+  type TrustedApprovalExecutionBinding,
+} from './trusted-execution-clients.js'
 
 type EncodedApprovalAssets = NonNullable<HostConfig['userPresence']>['assets']
 
@@ -47,10 +52,11 @@ const approvalControls = new Map<string, {
 }>()
 let hostConfig: HostConfig | undefined
 let started = false
-let controlTail = Promise.resolve()
+const controlQueue = new AuthorityExecutionControlQueue()
 
-process.on('message', async (message: unknown) => {
-  if (!isObject(message)) return
+process.on('message', async (incoming: unknown) => {
+  const message = parseAuthorityExecutionIncomingEnvelope(incoming)
+  if (message === undefined) return
   if (message.type === 'shutdown') {
     const requestId = parseControlRequestId(message)
     if (requestId === undefined) return
@@ -71,15 +77,19 @@ process.on('message', async (message: unknown) => {
     return
   }
   if (message.type === 'finalize-approval') {
-    await serializeControl(async () => await handleFinalizeApproval(message))
+    await controlQueue.run(async () => await handleFinalizeApproval(message))
     return
   }
   if (message.type === 'recover-approval') {
-    await serializeControl(async () => await handleRecoverApproval(message))
+    await controlQueue.run(async () => await handleRecoverApproval(message))
     return
   }
   if (message.type === 'activate-grant') {
-    await serializeControl(async () => await handleActivateGrant(message))
+    await controlQueue.run(async () => await handleActivateGrant(message))
+    return
+  }
+  if (message.type === 'ack-finalization') {
+    await controlQueue.run(async () => await handleAcknowledgeFinalization(message))
     return
   }
   if (message.type !== 'start' || started) return
@@ -163,7 +173,7 @@ process.once('SIGTERM', () => {
 })
 
 async function shutdown(): Promise<void> {
-  await controlTail.catch(() => undefined)
+  await controlQueue.drain()
   const servers = [...approvalServers.values()]
   approvalServers.clear()
   approvalControls.clear()
@@ -266,7 +276,10 @@ async function handleFinalizeApproval(message: Record<string, any>): Promise<voi
       requestDigest: message.input.requestDigest,
       approvalBinding,
     })
-    registerApprovalGrant(executionRpc, hostConfig, grant.approvalContext)
+    try { registerApprovalGrant(executionRpc, hostConfig, grant.approvalContext) }
+    catch {
+      throw rpcHostError('E2E_APPROVAL_FINALIZATION_RECOVERY_REQUIRED')
+    }
     approvalControls.delete(message.input.sessionId)
     sendToParent({ type: 'approval-finalized', requestId, result: { grant, approvalBinding } })
   } catch (error) {
@@ -285,7 +298,7 @@ async function handleRecoverApproval(message: Record<string, any>): Promise<void
       || typeof message.input.requestDigest !== 'string') throw rpcHostError('E2E_APPROVAL_FINALIZE_INPUT_INVALID')
     if (!approvalAuthority || !executionRpc || !hostConfig) throw rpcHostError('E2E_RPC_HOST_START_FAILED')
     const subject = ApprovalGrantSubjectSchema.parse(message.input.grantSubject)
-    const approvalBinding = parseApprovalBinding(message.input.approvalBinding)
+    const approvalBinding = parseTrustedApprovalExecutionBinding(message.input.approvalBinding)
     const recovered = await approvalAuthority.recoverFinalizedGrant({
       finalizationId: message.input.finalizationId,
       requestDigest: message.input.requestDigest,
@@ -297,7 +310,10 @@ async function handleRecoverApproval(message: Record<string, any>): Promise<void
       return
     }
     const context = await approvalAuthority.activatePersistedGrant({ grant: recovered.grant, approvalBinding })
-    registerApprovalGrant(executionRpc, hostConfig, context)
+    try { registerApprovalGrant(executionRpc, hostConfig, context) }
+    catch {
+      throw rpcHostError('E2E_APPROVAL_FINALIZATION_RECOVERY_REQUIRED')
+    }
     sendToParent({ type: 'approval-recovered', requestId, result: {
       found: true, grant: recovered.grant, approvalBinding, sessionId: recovered.approvalSessionRef,
     } })
@@ -315,7 +331,7 @@ async function handleActivateGrant(message: Record<string, any>): Promise<void> 
       || !approvalAuthority || !executionRpc || !hostConfig) throw rpcHostError('E2E_APPROVAL_GRANT_INVALID')
     const parsed = SignedGrantSchema.safeParse(message.input.grant)
     if (!parsed.success) throw rpcHostError('E2E_APPROVAL_GRANT_INVALID')
-    const approvalBinding = parseApprovalBinding(message.input.approvalBinding)
+    const approvalBinding = parseTrustedApprovalExecutionBinding(message.input.approvalBinding)
     const context = await approvalAuthority.activatePersistedGrant({
       grant: parsed.data as SignedGrant, approvalBinding,
     })
@@ -326,28 +342,32 @@ async function handleActivateGrant(message: Record<string, any>): Promise<void> 
   }
 }
 
-async function serializeControl<T>(operation: () => Promise<T>): Promise<T> {
-  const result = controlTail.then(operation, operation)
-  controlTail = result.then(() => undefined, () => undefined)
-  return await result
+async function handleAcknowledgeFinalization(message: Record<string, any>): Promise<void> {
+  const requestId = parseControlRequestId(message)
+  if (requestId === undefined) return
+  try {
+    if (!isObject(message.input)
+      || Object.keys(message.input).sort().join('\0')
+        !== ['approvalBinding', 'finalizationId', 'grantId', 'requestDigest'].join('\0')
+      || typeof message.input.finalizationId !== 'string'
+      || typeof message.input.requestDigest !== 'string'
+      || typeof message.input.grantId !== 'string'
+      || !approvalAuthority) throw rpcHostError('E2E_APPROVAL_FINALIZATION_INVALID')
+    await approvalAuthority.acknowledgeFinalizedGrant({
+      finalizationId: message.input.finalizationId,
+      requestDigest: message.input.requestDigest,
+      grantId: message.input.grantId,
+      approvalBinding: parseTrustedApprovalExecutionBinding(message.input.approvalBinding),
+    })
+    sendToParent({ type: 'finalization-acknowledged', requestId, result: { acknowledged: true } })
+  } catch (error) {
+    sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
+  }
 }
 
 function parseControlRequestId(message: Record<string, any>): string | undefined {
   return typeof message.requestId === 'string' && /^[a-f0-9]{32}$/.test(message.requestId)
     ? message.requestId : undefined
-}
-
-function parseApprovalBinding(value: unknown): TrustedApprovalExecutionBinding {
-  if (!isObject(value)
-    || Object.keys(value).sort().join('\0')
-      !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')
-    || typeof value.runId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.runId)
-    || (value.approvalType !== 'discovery' && value.approvalType !== 'execution')
-    || typeof value.subjectDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.subjectDigest)
-    || typeof value.installationDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.installationDigest)) {
-    throw rpcHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
-  }
-  return structuredClone(value) as TrustedApprovalExecutionBinding
 }
 
 function registerApprovalGrant(
@@ -439,7 +459,10 @@ function decode32(value: string): Buffer {
 }
 
 function safeCode(error: unknown): string {
-  if (isObject(error) && typeof error.code === 'string' && /^[A-Za-z0-9._:-]{1,256}$/.test(error.code)) {
+  if (isObject(error) && (error.code === 'EPERM' || error.code === 'EACCES')) {
+    return 'E2E_APPROVAL_PLATFORM_PERMISSION_DENIED'
+  }
+  if (isObject(error) && typeof error.code === 'string' && /^E2E_[A-Z0-9_]{1,252}$/.test(error.code)) {
     return error.code
   }
   return 'E2E_RPC_HOST_START_FAILED'

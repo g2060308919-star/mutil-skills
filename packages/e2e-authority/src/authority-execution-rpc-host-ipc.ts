@@ -32,6 +32,31 @@ export interface AuthorityExecutionHostConfig {
   sessionKeyBase64Url: string
 }
 
+const CONTROL_TYPES = new Set([
+  'enroll-identity', 'open-approval-session', 'finalize-approval', 'recover-approval',
+  'activate-grant', 'ack-finalization',
+])
+
+export function parseAuthorityExecutionIncomingEnvelope(
+  value: unknown,
+): (Record<string, any> & { type: string }) | undefined {
+  if (!isRecord(value) || typeof value.type !== 'string') return undefined
+  if (value.type === 'start') {
+    if (Object.keys(value).sort().join('\0') !== ['config', 'type'].join('\0')) return undefined
+    return value as Record<string, any> & { type: string }
+  }
+  if (value.type === 'shutdown') {
+    if (Object.keys(value).sort().join('\0') !== ['requestId', 'type'].join('\0')
+      || typeof value.requestId !== 'string' || !/^[a-f0-9]{32}$/.test(value.requestId)) return undefined
+    return value as Record<string, any> & { type: string }
+  }
+  if (!CONTROL_TYPES.has(value.type)
+    || Object.keys(value).sort().join('\0') !== ['input', 'requestId', 'type'].join('\0')
+    || typeof value.requestId !== 'string' || !/^[a-f0-9]{32}$/.test(value.requestId)
+    || !isRecord(value.input)) return undefined
+  return value as Record<string, any> & { type: string }
+}
+
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 

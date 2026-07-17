@@ -8,6 +8,13 @@ import {
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
+const BoundedStringSchema = (maximumBytes: number) => z.string()
+  .refine((value) => Buffer.byteLength(value, 'utf8') <= maximumBytes)
+const CanonicalOriginSchema = BoundedStringSchema(8 * 1024).refine((value) => {
+  try { return new URL(value).origin === value } catch { return false }
+})
+const ExactPathSchema = BoundedStringSchema(8 * 1024).refine((value) => value.startsWith('/'))
+const QueryPartSchema = BoundedStringSchema(8 * 1024)
 
 export const ReadApprovalSubjectSchema = z.object({
   schemaVersion: z.literal('2.0.0'),
@@ -23,14 +30,14 @@ export const ReadApprovalSubjectSchema = z.object({
   executionContractDigest: DigestSchema,
   runBundleProjectionDigest: DigestSchema,
   environment: z.enum(['local', 'test', 'staging', 'production']),
-  baseOrigin: z.string().url(),
+  baseOrigin: CanonicalOriginSchema,
   actor: SafeIdSchema,
   discoveryGrantId: SafeIdSchema,
   preflightDigest: DigestSchema,
   actions: z.array(z.object({
     actionId: SafeIdSchema,
     operation: z.enum(['dom-read', 'screenshot', 'local-navigation']),
-    maxUses: z.number().int().positive(),
+    maxUses: z.number().int().positive().max(100_000),
   }).strict()).min(1).max(100_000),
 }).strict().superRefine((subject, context) => {
   const ids = subject.actions.map((action) => `${action.actionId}\0${action.operation}`)
@@ -46,10 +53,12 @@ const CanonicalPayloadSchema = z.discriminatedUnion('kind', [
 ])
 
 const HttpIntentSchema = z.object({
-  intentId: SafeIdSchema, method: z.string().min(1).max(32), canonicalOrigin: z.string().url(),
-  exactPath: z.string().startsWith('/'), query: z.array(z.tuple([z.string(), z.string()])).max(1_000),
-  payload: CanonicalPayloadSchema, targetFingerprint: DigestSchema, maxRequests: z.number().int().positive(),
-  expectedOrder: z.number().int().positive(),
+  intentId: SafeIdSchema, method: z.string().min(1).max(32), canonicalOrigin: CanonicalOriginSchema,
+  exactPath: ExactPathSchema,
+  query: z.array(z.tuple([QueryPartSchema, QueryPartSchema])).max(1_000),
+  payload: CanonicalPayloadSchema, targetFingerprint: DigestSchema,
+  maxRequests: z.number().int().positive().max(1_000),
+  expectedOrder: z.number().int().positive().max(100_000),
 }).strict()
 
 export const WriteApprovalSubjectV2Schema = z.object({
@@ -58,10 +67,11 @@ export const WriteApprovalSubjectV2Schema = z.object({
   coveragePolicyDigest: DigestSchema, universeDigest: DigestSchema, caseDigest: DigestSchema,
   actionMapDigest: DigestSchema, policyDigest: DigestSchema, executionContractDigest: DigestSchema,
   runBundleProjectionDigest: DigestSchema, environment: z.enum(['local', 'test', 'staging']),
-  baseOrigin: z.string().url(), actor: SafeIdSchema, discoveryGrantId: SafeIdSchema, preflightDigest: DigestSchema,
+  baseOrigin: CanonicalOriginSchema, actor: SafeIdSchema,
+  discoveryGrantId: SafeIdSchema, preflightDigest: DigestSchema,
   actions: z.array(z.object({
     actionId: SafeIdSchema, effect: z.literal('reversible-write'), dataLeaseId: SafeIdSchema,
-    fencingToken: z.number().int().positive(), cleanupPlanDigest: DigestSchema,
+    fencingToken: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), cleanupPlanDigest: DigestSchema,
     requests: z.array(HttpIntentSchema).min(1).max(1_000),
   }).strict()).min(1).max(100_000),
 }).strict()
@@ -71,7 +81,7 @@ const ReadCapabilityRecordSchema = z.object({
   actionId: SafeIdSchema,
   operation: z.enum(['dom-read', 'screenshot', 'local-navigation']),
   effect: z.literal('read'),
-  maxUses: z.number().int().positive(),
+  maxUses: z.number().int().positive().max(100_000),
   digest: DigestSchema,
 }).strict()
 
@@ -92,9 +102,9 @@ const CommonReceiptBody = {
   browserPreflightArtifactDigest: DigestSchema,
   capabilities: z.array(ApprovalCapabilityRecordSchema).min(1).max(100_000),
   capabilitySetDigest: DigestSchema,
-  expiresAt: z.string().datetime(),
-  checkedAt: z.string().datetime(),
-  revocationSequence: z.number().int().nonnegative(),
+  expiresAt: z.string().datetime().max(64),
+  checkedAt: z.string().datetime().max(64),
+  revocationSequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   status: z.enum(['valid', 'expired', 'revoked', 'denied']),
   reasonCodes: z.array(SafeIdSchema).max(100),
 }

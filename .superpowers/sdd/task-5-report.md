@@ -282,3 +282,27 @@ git diff --check                               PASS
 ```
 
 14 个常规测试 skip 均为当前 sandbox 禁止 loopback/真实 child/受控浏览器的既有显式分支。`npm run e2e:golden` 在同一 sandbox 的 24 项全部于产品断言前被环境阻断：21 项为 `listen EPERM`，3 项为 Chromium MachPort/进程权限拒绝；未观察到代码断言失败。本轮按要求未申请沙箱外 Golden，也不把这些环境失败记为产品通过。
+
+## 七次外审修复附录
+
+本轮关闭 commit 后注册失败、终止清理、严格生产边界、secret 临时副本和 outbox 生命周期五类问题：
+
+1. **commit-after-registration recovery**：child 在 Authority 已提交、ephemeral RPC registration 失败时返回专用 `E2E_APPROVAL_FINALIZATION_RECOVERY_REQUIRED`。machine global reservation 与直接 CLI stable reservation 都保持 pending；fake child→process handle→Runtime 集成测试证明第二次请求 recover 同一 Grant，WebAuthn session/finalize 各只发生一次。recover/注册/outcome 在同一 Run lock 中完成，竞争 writer 得到稳定 locked 错误。
+2. **finalization ack 与资源上限**：Run outcome 成功后使用 finalization identity、request digest、grantId 和四字段 binding best-effort ack；ack 失败不覆盖已持久化成功。Authority 对现存 outbox 精确匹配、重复 ack 幂等；按 Grant expiry 裁剪，容量固定 1024，超限签发整事务回滚，1025 项 snapshot 拒绝加载。lost ack 过期后，新 user-presence session 可签发新 Grant。
+3. **严格 IPC、Grant 与 binding**：child 全部 incoming envelope 和 nested control payload exact；错误码只透传严格 `^E2E_[A-Z0-9_]+$`，已知平台权限错误映射为稳定 E2E code。SignedGrant 与 subject 对 origin/path/query/body/header/date、所有计数以及 injection/WS/SSE 上界实施生产限制，注入正文 digest 必须复算。四字段 binding 使用唯一内部 parser；parser 只做结构验证，不登记 trusted client。
+4. **生命周期与密钥清零**：parent 严格解析 `terminal-cleanup-error` 并保留 child Aggregate cause；disconnect 等待 exit，非零 exit 映射稳定 cleanup failure，close 同时保留 cleanup 与 stop failure。session/control waiter 共享 terminal signal。parent 校验 state key 不再制造临时副本，序列化所需副本在 base64 生成后立即清零且不修改调用方 memory。
+5. **串行控制回归**：finalize/recover/activate/ack 使用不被失败 poison 的单一 control queue。可跑 queue 单测和真实 child 测试共同覆盖“第一个注册成功、并发第二个 binding 失败、正确 retry 继续成功”；Host1→Host2 持久 Grant 激活 Golden 仍保留。
+
+七次外审最终门禁：
+
+```text
+npm run typecheck                              PASS
+npm run lint:architecture                      PASS
+npm run build                                  PASS
+npm test                                       116 files / 851 passed / 14 skipped / 0 failed
+npm pack --dry-run --workspace @mutil-skills/e2e-runtime
+                                                PASS / 92 files / 87.3 kB
+git diff --check                               PASS
+```
+
+`npm run e2e:golden` 未申请 elevated：24 项均在产品断言前被当前 sandbox 阻断，其中 21 项为 loopback `listen EPERM`，3 项为 Chromium MachPort/进程权限拒绝。该结果只记录环境阻塞，不宣称 Golden 产品通过，也没有观察到进入产品断言后的失败。
