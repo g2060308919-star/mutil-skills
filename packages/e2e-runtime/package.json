@@ -28,6 +28,7 @@
     "@mutil-skills/e2e-gateway": "0.0.0",
     "@mutil-skills/e2e-playwright-runtime": "0.0.0",
     "@mutil-skills/e2e-report": "0.0.0",
-    "mockttp": "4.4.2"
+    "mockttp": "4.4.2",
+    "playwright": "1.61.1"
   }
 }

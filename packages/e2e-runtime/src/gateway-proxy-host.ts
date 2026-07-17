@@ -128,7 +128,15 @@ export interface GatewayBrowserBinding {
     browserMeasurementDigest: string
     executeThroughControlledBrowser(request: {
       url: string
-      correlation?: { actionId: string; capabilityId: string }
+      correlation?: {
+        ruleId: string
+        stepOrdinal: number
+        method: string
+        channel: 'http' | 'beacon' | 'websocket'
+        bodyDigest: string
+        actionId: string
+        capabilityId: string
+      }
     }): Promise<{ status: number }>
   }): Promise<{ approved: true; denied: true; proofDigest: string }>
 }
@@ -447,7 +455,12 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
         const before = { ...canaryCounters }
         const approved = await input.executeThroughControlledBrowser({
           url: canaryApprovedUrl,
-          correlation: { actionId: canaryRule.actionId, capabilityId: canaryRule.capabilityId },
+          correlation: {
+            ruleId: canaryRule.ruleId, stepOrdinal: canaryRule.stepOrdinal,
+            method: canaryRule.method, channel: canaryRule.channel,
+            bodyDigest: canaryRule.bodyDigest,
+            actionId: canaryRule.actionId, capabilityId: canaryRule.capabilityId,
+          },
         })
         const afterApproved = { ...canaryCounters }
         const denied = await input.executeThroughControlledBrowser({ url: canaryDeniedUrl })

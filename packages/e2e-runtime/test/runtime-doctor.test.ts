@@ -46,16 +46,17 @@ describe('Runtime doctor', () => {
   })
 
   test('runs the fixed registry without claiming later capabilities are installed', async () => {
-    const report = await runRuntimeDoctor({ installation })
+    const report = await runRuntimeDoctor({ installation, homeDir: '/safe/home' })
 
     expect(Object.keys(report.probes)).toEqual(RUNTIME_DOCTOR_PROBE_NAMES)
     expect(report.probes.installation?.status).toBe('passed')
     expect(report.probes['version-closure']?.status).toBe('passed')
     expect(report.probes['source-independence']?.status).toBe('passed')
     for (const name of RUNTIME_DOCTOR_PROBE_NAMES.slice(3)
-      .filter((name) => name !== 'authority' && name !== 'artifact-fs')) {
+      .filter((name) => !['authority', 'artifact-fs', 'chromium'].includes(name))) {
       expect(report.probes[name]).toMatchObject({ status: 'not-installed' })
     }
+    expect(['not-installed', 'blocked']).toContain(report.probes.chromium?.status)
     for (const name of ['authority', 'artifact-fs'] as const) {
       expect(['passed', 'blocked']).toContain(report.probes[name]?.status)
       if (report.probes[name]?.status === 'passed') {
@@ -81,7 +82,7 @@ describe('Runtime doctor', () => {
       },
     ])) as Record<RuntimeDoctorProbeName, RuntimeProbe>
 
-    const report = await runRuntimeDoctor({ installation, probes })
+    const report = await runRuntimeDoctor({ installation, homeDir: '/safe/home', probes })
 
     expect(RuntimeDoctorReportSchema.parse(report)).toEqual(report)
     expect(calls).toEqual(RUNTIME_DOCTOR_PROBE_NAMES)
@@ -93,6 +94,7 @@ describe('Runtime doctor', () => {
 
     const report = await runRuntimeDoctor({
       installation,
+      homeDir: '/safe/home',
       probes: {
         authority: async () => {
           throw new Error('secret=/Users/person/.ssh/id_ed25519')
@@ -153,7 +155,7 @@ describe('Runtime doctor', () => {
     expect(RuntimeDoctorReportSchema.parse(JSON.parse(stdout.text()))).toEqual(report)
     expect(stdout.text()).toBe(`${canonicalizeJson(report)}\n`)
     expect(stderr.text()).toBe('')
-    expect(calls).toEqual([{ homeDir: '/safe/home' }, { installation }])
+    expect(calls).toEqual([{ homeDir: '/safe/home' }, { installation, homeDir: '/safe/home' }])
   })
 
   test('doctor report serialization rejects values outside the protocol schema', async () => {
@@ -170,7 +172,7 @@ describe('Runtime doctor', () => {
   })
 
   test('human doctor keeps stdout empty and prints a Chinese probe table to stderr', async () => {
-    const report = await runRuntimeDoctor({ installation })
+    const report = await runRuntimeDoctor({ installation, homeDir: '/safe/home' })
     const stdout = captureWritable()
     const stderr = captureWritable()
 
@@ -353,7 +355,7 @@ async function allPassedReport() {
       remediation: '无需处理',
     })
   }
-  return runRuntimeDoctor({ installation, probes })
+  return runRuntimeDoctor({ installation, homeDir: '/safe/home', probes })
 }
 
 function captureWritable(): { stream: Writable; text: () => string } {

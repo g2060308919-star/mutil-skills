@@ -14,6 +14,7 @@ import {
   type ApprovalGrantSubject,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
+  type SignedGrant,
   type WorkflowNode,
 } from '@mutil-skills/e2e-contracts'
 import {
@@ -27,6 +28,7 @@ import type { RuntimeInstallation } from './runtime-discovery.js'
 import type { RuntimeDoctorReport } from './runtime-doctor.js'
 import {
   RuntimeRunStore,
+  type RuntimeExecutionOwner,
   type RuntimeRunLock,
   type RuntimeRunSnapshot,
 } from './run-store.js'
@@ -36,6 +38,24 @@ import {
   type RuntimeAuthorityHost,
 } from './authority-host.js'
 import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js'
+import {
+  assertRuntimeReadSnapshotReady,
+  executeRuntimeRead,
+  type RuntimeReadExecutorCapability,
+} from './trusted-action-runner.js'
+import {
+  finalizeRuntimePreflight,
+  prepareRuntimePreflight,
+  runtimePreflightAttemptId,
+  RuntimePreflightPreparationSchema,
+  type RuntimePreflightCapability,
+} from './runtime-preflight.js'
+
+const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
+  'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
+  'requirement-model', 'interaction-flow', 'coverage-universe', 'test-cases', 'design-audit',
+  'execution-contract', 'browser-action-map', 'regression-manifest',
+])
 
 export interface RuntimeHostDependencies {
   installation: RuntimeInstallation
@@ -46,6 +66,8 @@ export interface RuntimeHostDependencies {
   authorityHostFactory?: () => Promise<Pick<RuntimeAuthorityHost, 'requestApproval'>
     & Partial<Pick<RuntimeAuthorityHost, 'recoverApproval' | 'acknowledgeFinalization'>>>
   presentUserPresenceUrl?(url: string): void | Promise<void>
+  readExecutor?: RuntimeReadExecutorCapability
+  preflightExecutor?: RuntimePreflightCapability
 }
 
 export class E2ERuntimeHost {
@@ -56,6 +78,7 @@ export class E2ERuntimeHost {
     requestBytes: string | Uint8Array,
   ): Promise<RuntimeResponseEnvelope> {
     let requestDigest: string
+    let requestWasPending = false
     try {
       requestDigest = runtimeRequestDigest(request, requestBytes)
     } catch (error) {
@@ -66,6 +89,21 @@ export class E2ERuntimeHost {
       const reservation = await this.dependencies.runStore.beginRequest(request.requestId, requestDigest)
       if (reservation.kind === 'replay') {
         return RuntimeResponseEnvelopeSchema.parse(reservation.response)
+      }
+      requestWasPending = reservation.kind === 'pending'
+      // open-approval 的 pending 状态有独立的 Authority finalization recovery
+      // 协议，必须重新进入该协议以取回已经持久化的同一 Grant；其他命令
+      // 不得把 pending 当成首次请求重放。execute-run 尤其只能显式 resume。
+      if (reservation.kind === 'pending'
+        && request.command !== 'open-approval'
+        && request.command !== 'run-preflight'
+        && request.command !== 'execute-run'
+        && request.command !== 'resume-run') {
+        return this.errorResponse(request.requestId, runtimeHostError(
+          'E2E_RUNTIME_REQUEST_PENDING',
+          'safety',
+          '同一请求仍处于 pending，Runtime 拒绝重复执行',
+        ))
       }
     } catch (error) {
       return this.errorResponse(request.requestId, asRuntimeError(error))
@@ -80,6 +118,13 @@ export class E2ERuntimeHost {
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
       if (request.command === 'open-approval') return await this.openApproval(request, requestDigest)
+      if (request.command === 'run-preflight') {
+        return await this.runPreflight(request, requestDigest, requestWasPending)
+      }
+      if (request.command === 'execute-run') {
+        return await this.executeRun(request, requestDigest, requestWasPending)
+      }
+      if (request.command === 'resume-run') return await this.resumeRun(request, requestDigest)
       throw blockedError('E2E_RUNTIME_COMMAND_NOT_READY')
     } catch (error) {
       const response = this.errorResponse(request.requestId, asRuntimeError(error))
@@ -87,6 +132,10 @@ export class E2ERuntimeHost {
         error.code === 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING'
         || error.code === 'E2E_APPROVAL_FINALIZATION_RECOVERY_REQUIRED'
         || error.code === 'E2E_RUNTIME_APPROVAL_RECOVERY_BINDING_CHANGED'
+        || error.code === 'E2E_RUNTIME_READ_EXECUTION_CRASHED'
+        || error.code === 'E2E_RUNTIME_PREFLIGHT_RECOVERY_REQUIRED'
+        || error.code === 'E2E_RUNTIME_EXECUTION_RECOVERY_REQUIRED'
+        || error.code === 'E2E_RUNTIME_EXECUTION_PENDING_STATE_INVALID'
       )) {
         return response
       }
@@ -136,16 +185,19 @@ export class E2ERuntimeHost {
     }).prdRevision
     const timestamp = this.dependencies.now().toISOString()
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.0.0',
+      schemaVersion: '1.1.0',
       runId,
       assetId: request.payload.assetId,
       projectIdentityDigest: identity.digest,
       runtimeInstallationDigest: this.dependencies.installation.installationDigest,
+      runRevision: 0,
       workflow: createWorkflow(),
       artifactDigests: {
         'prd-source': prdRevision,
         'project-policy-source': digestBytes('e2e-project-policy-source/v1', projectPolicyBytes),
       },
+      frozenArtifacts: {},
+      trustedExecutionFacts: {},
       requestResponses: {},
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -188,6 +240,13 @@ export class E2ERuntimeHost {
     request: Extract<RuntimeRequestEnvelope, { command: 'submit-candidate' }>,
     requestDigest: string,
   ): Promise<RuntimeResponseEnvelope> {
+    if (!EXTERNAL_SEMANTIC_ARTIFACT_TYPES.has(request.payload.artifactType)) {
+      throw runtimeHostError(
+        'E2E_RUNTIME_TRUSTED_FACT_EXTERNAL_WRITE_FORBIDDEN',
+        'safety',
+        'browser-preflight、执行结果、审计、证据、清理与报告只能由 Runtime 内部可信能力写入',
+      )
+    }
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
       const outcome = await this.dependencies.runStore.updateRunOutcome(
@@ -228,23 +287,37 @@ export class E2ERuntimeHost {
           }
 
           const next = nextWorkflowNode(snapshot.workflow.current, request.payload.artifactType)
-          if (next === undefined) {
+          const bindingAsset = snapshot.workflow.current === 'binding-draft'
+            && (request.payload.artifactType === 'test-cases'
+              || request.payload.artifactType === 'execution-contract')
+          if (next === undefined && !bindingAsset) {
             throw blockedError(missingCapabilityCode(snapshot.workflow.current))
           }
-          const transition = transitionWorkflow({
-            state: snapshot.workflow,
-            next,
-            reason: `accepted candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
-            timestamp: this.dependencies.now().toISOString(),
-            engineVersion: this.dependencies.installation.version,
-          })
+          const frozenArtifacts = {
+            ...snapshot.frozenArtifacts,
+            [request.payload.artifactType]: candidate,
+          }
+          const nextAfterBinding = bindingAsset
+            && frozenArtifacts['test-cases'] !== undefined
+            && frozenArtifacts['execution-contract'] !== undefined
+            ? 'awaiting-execution-approval' as const : undefined
+          const workflow = next === undefined && nextAfterBinding === undefined
+            ? snapshot.workflow
+            : transitionWorkflow({
+                state: snapshot.workflow,
+                next: next ?? nextAfterBinding!,
+                reason: `accepted candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
+                timestamp: this.dependencies.now().toISOString(),
+                engineVersion: this.dependencies.installation.version,
+              }).state
           const updated: RuntimeRunSnapshot = {
             ...snapshot,
-            workflow: transition.state,
+            workflow,
             artifactDigests: {
               ...snapshot.artifactDigests,
               [request.payload.artifactType]: candidate.contentDigest,
             },
+            frozenArtifacts,
             updatedAt: this.dependencies.now().toISOString(),
           }
           return {
@@ -308,7 +381,7 @@ export class E2ERuntimeHost {
       lock: RuntimeRunLock,
       sessionId: string,
       finalized?: {
-        grant: { grantId: string }
+        grant: SignedGrant
         approvalBinding: { runId: string; approvalType: 'discovery' | 'execution'; subjectDigest: string; installationDigest: string }
       },
     ): Promise<RuntimeResponseEnvelope> => {
@@ -318,11 +391,58 @@ export class E2ERuntimeHost {
           signedGrant: finalized.grant, approvalBinding: finalized.approvalBinding,
         }),
       })
-      const persist = async () => RuntimeResponseEnvelopeSchema.parse(
-        await this.dependencies.runStore.readRunOutcome(
-          identity.digest, current.runId, request.requestId, requestDigest, () => response, lock,
-        ),
-      )
+      const persist = async () => {
+        if (finalized === undefined) {
+          if (request.payload.approvalType !== 'scope') return RuntimeResponseEnvelopeSchema.parse(
+            await this.dependencies.runStore.readRunOutcome(
+              identity.digest, current.runId, request.requestId, requestDigest, () => response, lock,
+            ),
+          )
+          return RuntimeResponseEnvelopeSchema.parse(
+            await this.dependencies.runStore.updateRunOutcome(
+              identity.digest, current.runId, request.requestId, requestDigest,
+              (snapshot) => ({
+                snapshot: {
+                  ...snapshot,
+                  workflow: transitionWorkflow({
+                    state: snapshot.workflow, next: 'scope-approved',
+                    reason: 'scope user-presence approval completed',
+                    timestamp: this.dependencies.now().toISOString(),
+                    engineVersion: this.dependencies.installation.version,
+                  }).state,
+                  updatedAt: this.dependencies.now().toISOString(),
+                },
+                response,
+              }),
+              'scope-approval-completed', lock,
+            ),
+          )
+        }
+        const factType = request.payload.approvalType === 'discovery'
+          ? 'signed-discovery-grant' as const
+          : 'signed-execution-grant' as const
+        const capability = await this.dependencies.runStore.authorizeTrustedFactWrite(
+          identity.digest, current.runId, lock,
+        )
+        return RuntimeResponseEnvelopeSchema.parse(
+          await this.dependencies.runStore.writeTrustedFactOutcome({
+            capability, requestId: request.requestId, requestDigest,
+            factType, fact: finalized.grant, response,
+            update: (snapshot) => ({
+              ...snapshot,
+              workflow: transitionWorkflow({
+                state: snapshot.workflow,
+                next: factType === 'signed-discovery-grant' ? 'discovery-approved' : 'execution-approved',
+                reason: `${request.payload.approvalType} grant finalized`,
+                timestamp: this.dependencies.now().toISOString(),
+                engineVersion: this.dependencies.installation.version,
+                ...(factType === 'signed-execution-grant' ? { executionGrantValid: true } : {}),
+              }).state,
+              updatedAt: this.dependencies.now().toISOString(),
+            }),
+          }),
+        )
+      }
       if (finalized === undefined) return await persist()
       return await persistFinalizedApprovalOutcome({
         persist,
@@ -407,6 +527,281 @@ export class E2ERuntimeHost {
         await resolveProjectIdentity(request.projectRoot, this.projectFileReader()),
       )
       return await persistFinalized(current, lock, session.sessionId, finalized)
+    })
+  }
+
+  private async runPreflight(
+    request: Extract<RuntimeRequestEnvelope, { command: 'run-preflight' }>,
+    requestDigest: string,
+    _requestWasPending: boolean,
+  ): Promise<RuntimeResponseEnvelope> {
+    const executor = this.dependencies.preflightExecutor
+    if (executor === undefined) throw blockedError('E2E_RUNTIME_PREFLIGHT_EXECUTOR_NOT_READY')
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    let initial = await this.readLockedRun(identity.digest, request.payload.runId)
+    this.requireInstallation(initial)
+    if (initial.workflow.current !== 'discovery-approved') throw runtimeHostError(
+      'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH', 'input', 'run-preflight 仅允许 discovery-approved Run',
+    )
+    let durablePreparation = initial.preflightAttempt !== undefined
+    let result: Awaited<ReturnType<typeof finalizeRuntimePreflight>>
+    if (initial.preflightAttempt !== undefined) {
+      if (initial.preflightAttempt.requestId !== request.requestId
+        || initial.preflightAttempt.requestDigest !== requestDigest) throw runtimeHostError(
+        'E2E_RUNTIME_PREFLIGHT_ATTEMPT_MISMATCH', 'safety',
+        '持久 preflight preparation 不属于当前请求，拒绝恢复',
+      )
+      const preparation = RuntimePreflightPreparationSchema.parse(initial.preflightAttempt.preparation)
+      try {
+        result = await finalizeRuntimePreflight(executor, initial, preparation)
+      } catch (cause) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_PREFLIGHT_RECOVERY_REQUIRED', 'safety',
+          '持久 preflight preparation 尚未完成；请用相同请求重试恢复', cause,
+        )
+      }
+    } else {
+      const prepared = await prepareRuntimePreflight(executor, initial, runtimePreflightAttemptId({
+        runId: initial.runId, requestId: request.requestId, requestDigest,
+      }))
+      if (prepared.kind === 'completed') {
+        result = prepared.result
+      } else {
+        try {
+          initial = await this.withRunLock(identity.digest, initial.runId, async (lock) =>
+            await this.dependencies.runStore.recordPreflightPreparation({
+              projectIdentityDigest: identity.digest,
+              runId: initial.runId,
+              requestId: request.requestId,
+              requestDigest,
+              startedAt: this.dependencies.now().toISOString(),
+              preparation: prepared.preparation,
+              expectedRevision: initial.runRevision ?? 0,
+              expectedWorkflowDigest: initial.workflow.eventChainDigest,
+              lock,
+            }))
+        } catch (cause) {
+          throw runtimeHostError(
+            'E2E_RUNTIME_PREFLIGHT_RECOVERY_REQUIRED', 'safety',
+            'Discovery reservation 可能已创建但 preparation 尚未落盘；请用相同请求恢复', cause,
+          )
+        }
+        durablePreparation = true
+        try {
+          result = await finalizeRuntimePreflight(executor, initial, prepared.preparation)
+        } catch (cause) {
+          throw runtimeHostError(
+            'E2E_RUNTIME_PREFLIGHT_RECOVERY_REQUIRED', 'safety',
+            'preflight preparation 已持久化但 Authority 尚未完成；请用相同请求重试恢复', cause,
+          )
+        }
+      }
+    }
+
+    try {
+      return await this.withRunLock(identity.digest, initial.runId, async (lock) => {
+        const current = await this.dependencies.runStore.getRun(identity.digest, initial.runId)
+        if (current === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+        if (durablePreparation) {
+          if (current.preflightAttempt?.requestId !== request.requestId
+            || current.preflightAttempt.requestDigest !== requestDigest
+            || current.preflightAttempt.revision !== current.runRevision) throw runtimeHostError(
+            'E2E_RUNTIME_PREFLIGHT_FENCED', 'safety', '持久 preflight preparation 已改变，拒绝落入陈旧结果',
+          )
+        } else if ((current.runRevision ?? 0) !== (initial.runRevision ?? 0)
+          || current.workflow.eventChainDigest !== initial.workflow.eventChainDigest) throw runtimeHostError(
+          'E2E_RUNTIME_PREFLIGHT_FENCED', 'safety', '预检期间 Run revision 已改变，拒绝落入陈旧结果',
+        )
+        const entered = transitionWorkflow({
+          state: current.workflow, next: 'preflight-readonly', reason: `browser preflight ${result.output.status}`,
+          timestamp: this.dependencies.now().toISOString(),
+          engineVersion: this.dependencies.installation.version,
+        }).state
+        const finalWorkflow = result.output.status === 'ready' ? entered : transitionWorkflow({
+          state: entered,
+          next: result.output.status,
+          reason: result.output.reasonCode ?? 'browser preflight blocked',
+          timestamp: this.dependencies.now().toISOString(),
+          engineVersion: this.dependencies.installation.version,
+        }).state
+        const response = this.successResponse(request.requestId, {
+          runId: current.runId, status: result.output.status,
+          ...(result.output.reasonCode === undefined ? {} : { reasonCode: result.output.reasonCode }),
+          workflow: finalWorkflow,
+          ...(result.fact === undefined ? {} : { preflightFact: result.fact }),
+        })
+        if (result.fact !== undefined) {
+          const capability = await this.dependencies.runStore.authorizeTrustedFactWrite(
+            identity.digest, current.runId, lock,
+          )
+          return RuntimeResponseEnvelopeSchema.parse(
+            await this.dependencies.runStore.writeTrustedFactOutcome({
+              capability, requestId: request.requestId, requestDigest,
+              factType: 'browser-preflight', fact: result.fact, response,
+              update: (snapshot) => {
+                const { preflightAttempt: _completedPreflight, ...withoutPreflight } = snapshot
+                return {
+                  ...withoutPreflight, workflow: finalWorkflow,
+                  updatedAt: this.dependencies.now().toISOString(),
+                }
+              },
+            }),
+          )
+        }
+        return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+          identity.digest, current.runId, request.requestId, requestDigest,
+          (snapshot) => {
+            const { preflightAttempt: _completedPreflight, ...withoutPreflight } = snapshot
+            return {
+              snapshot: {
+                ...withoutPreflight, runRevision: (snapshot.runRevision ?? 0) + 1,
+                workflow: finalWorkflow, updatedAt: this.dependencies.now().toISOString(),
+              },
+              response,
+            }
+          },
+          'trusted-browser-preflight-blocked', lock,
+        ))
+      })
+    } catch (cause) {
+      if (!durablePreparation) throw cause
+      throw runtimeHostError(
+        'E2E_RUNTIME_PREFLIGHT_RECOVERY_REQUIRED', 'safety',
+        'Authority preflight 已完成但可信事实尚未原子落盘；请用相同请求恢复', cause,
+      )
+    }
+  }
+
+  private async executeRun(
+    request: Extract<RuntimeRequestEnvelope, { command: 'execute-run' }>,
+    requestDigest: string,
+    requestWasPending: boolean,
+  ): Promise<RuntimeResponseEnvelope> {
+    const executor = this.dependencies.readExecutor
+    if (executor === undefined) throw blockedError('E2E_RUNTIME_READ_EXECUTOR_NOT_READY')
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    const startLock = await this.dependencies.runStore.acquireRunLock(identity.digest, request.payload.runId)
+    let started: Awaited<ReturnType<RuntimeRunStore['beginExecutionAttempt']>> | undefined
+    let startError: unknown
+    try {
+      const current = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (current === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(current)
+      if (requestWasPending && current.workflow.current === 'running-real'
+        && current.executionAttempt?.requestId === request.requestId) throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTION_RECOVERY_REQUIRED', 'safety',
+        '原 execute-run 已持久化 running attempt；必须显式 resume-run reconcile，禁止自动重放',
+      )
+      if (requestWasPending && (current.workflow.current !== 'compiled'
+        || current.executionAttempt !== undefined)) throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTION_PENDING_STATE_INVALID', 'safety',
+        'pending execute-run 与 Run workflow/attempt 不闭合，Runtime 拒绝推测或重放',
+      )
+      if (current.workflow.current !== 'compiled') throw runtimeHostError(
+        'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH', 'input', 'execute-run 仅允许 compiled Run',
+      )
+      assertRuntimeReadSnapshotReady(current)
+      started = await this.dependencies.runStore.beginExecutionAttempt({
+        projectIdentityDigest: identity.digest, runId: current.runId,
+        requestId: request.requestId, requestDigest,
+        startedAt: this.dependencies.now().toISOString(), lock: startLock,
+        toRunning: (snapshot) => ({
+          ...snapshot,
+          workflow: transitionWorkflow({
+            state: snapshot.workflow, next: 'running-real', reason: 'trusted read execution started',
+            timestamp: this.dependencies.now().toISOString(),
+            engineVersion: this.dependencies.installation.version,
+          }).state,
+          updatedAt: this.dependencies.now().toISOString(),
+        }),
+      })
+    } catch (error) { startError = error }
+    let releaseError: unknown
+    try { await startLock.close() } catch (error) { releaseError = error }
+    if (startError !== undefined) {
+      if (releaseError !== undefined) throw new AggregateError([startError, releaseError])
+      throw startError
+    }
+    if (started === undefined) throw runtimeHostError(
+      'E2E_RUNTIME_EXECUTION_START_MISSING', 'internal', 'execution attempt 启动结果缺失',
+    )
+    if (releaseError !== undefined) {
+      let ownerReleaseError: unknown
+      try { await started.owner.release() } catch (error) { ownerReleaseError = error }
+      throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTION_RECOVERY_REQUIRED', 'safety',
+        'execution attempt 已持久化，但 mutation lease 释放失败；必须显式 resume-run reconcile',
+        ownerReleaseError === undefined ? releaseError : new AggregateError([releaseError, ownerReleaseError]),
+      )
+    }
+
+    let execution
+    try {
+      execution = await executeWithOwnerHeartbeat(started.owner, async () => await executeRuntimeRead(executor, {
+        snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
+      }))
+    } catch (cause) {
+      let releaseCause: unknown
+      try { await started.owner.release() } catch (error) { releaseCause = error }
+      throw runtimeHostError(
+        'E2E_RUNTIME_READ_EXECUTION_CRASHED', 'safety',
+        '可信只读执行器异常退出；Run 保持 running-real fenced attempt 等待显式恢复',
+        releaseCause === undefined ? cause : new AggregateError([cause, releaseCause]),
+      )
+    }
+    const next = execution.status === 'environment-blocked' ? 'environment-blocked'
+      : execution.status === 'safety-blocked' ? 'safety-blocked' : 'diagnosing'
+    const finalWorkflow = transitionWorkflow({
+      state: started.snapshot.workflow, next,
+      reason: `trusted read execution ${execution.status}`,
+      timestamp: this.dependencies.now().toISOString(),
+      engineVersion: this.dependencies.installation.version,
+    }).state
+    const response = this.successResponse(request.requestId, {
+      runId: started.snapshot.runId, status: execution.status, result: execution.result,
+      gatewayAudit: execution.gatewayAudit,
+      gatewayAuditDigest: execution.gatewayAuditDigest,
+      ...(execution.evidence === undefined ? {} : {
+        evidence: {
+          screenshot: {
+            byteLength: execution.evidence.screenshot.byteLength,
+            digest: digestBytes('runtime-evidence/screenshot/v1', execution.evidence.screenshot),
+          },
+          dom: {
+            byteLength: execution.evidence.dom.byteLength,
+            digest: digestBytes('runtime-evidence/dom-bytes/v1', execution.evidence.dom),
+          },
+        },
+      }),
+      loadedGeneratedSourceFiles: [], workflow: finalWorkflow,
+    })
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) =>
+      RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.completeExecutionAttempt({
+        projectIdentityDigest: identity.digest, runId: started.snapshot.runId,
+        requestId: request.requestId, requestDigest, attempt: started.attempt, owner: started.owner,
+        response, lock,
+        complete: (snapshot) => ({
+          ...snapshot, workflow: finalWorkflow, updatedAt: this.dependencies.now().toISOString(),
+        }),
+      })))
+  }
+
+  private async resumeRun(
+    request: Extract<RuntimeRequestEnvelope, { command: 'resume-run' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const decision = parseReadReconcileDecision(request.payload.decision)
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const reconciled = await this.dependencies.runStore.reconcileExecutionAttempt({
+        projectIdentityDigest: identity.digest, runId: request.payload.runId,
+        expectedAttemptId: decision.expectedAttemptId,
+        reconcileRequestId: request.requestId, reconcileRequestDigest: requestDigest,
+        runtimeVersion: this.dependencies.installation.version,
+        installationDigest: this.dependencies.installation.installationDigest,
+        lock,
+      })
+      return RuntimeResponseEnvelopeSchema.parse(reconciled.response)
     })
   }
 
@@ -504,6 +899,24 @@ function parseCandidate(artifactType: ArtifactType, input: unknown): ArtifactDoc
   return parsed.data as ArtifactDocument
 }
 
+function parseReadReconcileDecision(input: unknown): {
+  kind: 'reconcile-stale-read'
+  expectedAttemptId: string
+} {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)
+    || Object.getPrototypeOf(input) !== Object.prototype) throw runtimeHostError(
+    'E2E_RUNTIME_RESUME_DECISION_INVALID', 'input', 'resume-run 需要严格 reconcile-stale-read 决定',
+  )
+  const record = input as Record<string, unknown>
+  if (Object.keys(record).sort().join('\0') !== ['expectedAttemptId', 'kind'].join('\0')
+    || record.kind !== 'reconcile-stale-read'
+    || typeof record.expectedAttemptId !== 'string'
+    || !/^ATTEMPT-[a-f0-9-]{36}$/.test(record.expectedAttemptId)) throw runtimeHostError(
+    'E2E_RUNTIME_RESUME_DECISION_INVALID', 'input', 'resume-run 决定字段或 expectedAttemptId 非法',
+  )
+  return { kind: record.kind, expectedAttemptId: record.expectedAttemptId }
+}
+
 function nextWorkflowNode(current: WorkflowNode, artifactType: ArtifactType): WorkflowNode | undefined {
   const edge = CANDIDATE_EDGES[current]
   return edge?.artifactType === artifactType ? edge.next : undefined
@@ -514,11 +927,8 @@ const CANDIDATE_EDGES: Partial<Record<WorkflowNode, { artifactType: ArtifactType
   'source-frozen': { artifactType: 'acceptance-scope', next: 'awaiting-scope-approval' },
   'scope-approved': { artifactType: 'requirement-model', next: 'modeled' },
   modeled: { artifactType: 'coverage-universe', next: 'coverage-audited' },
-  'discovery-approved': { artifactType: 'browser-preflight', next: 'preflight-readonly' },
   'preflight-readonly': { artifactType: 'browser-action-map', next: 'binding-draft' },
   'execution-approved': { artifactType: 'regression-manifest', next: 'compiled' },
-  diagnosing: { artifactType: 'diagnosis', next: 'finalizing' },
-  finalizing: { artifactType: 'generation-manifest', next: 'publication-ready' },
 }
 
 function missingCapabilityCode(current: WorkflowNode): string {
@@ -651,6 +1061,27 @@ function runtimeIdentity(installation: RuntimeInstallation): RuntimeResponseEnve
     version: installation.version,
     installationDigest: installation.installationDigest,
   }
+}
+
+async function executeWithOwnerHeartbeat<T>(
+  owner: RuntimeExecutionOwner,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let heartbeatError: unknown
+  let pendingHeartbeat = Promise.resolve()
+  const timer = setInterval(() => {
+    pendingHeartbeat = pendingHeartbeat.then(async () => {
+      if (heartbeatError !== undefined) return
+      try { await owner.renew() } catch (error) { heartbeatError = error }
+    })
+  }, owner.heartbeatIntervalMs)
+  timer.unref?.()
+  try {
+    const result = await operation()
+    await pendingHeartbeat
+    if (heartbeatError !== undefined) throw heartbeatError
+    return result
+  } finally { clearInterval(timer) }
 }
 
 function asRuntimeError(error: unknown): E2EError {

@@ -10,7 +10,8 @@
     { "path": "../e2e-contracts" },
     { "path": "../e2e-engine" },
     { "path": "../e2e-authority" },
-    { "path": "../e2e-gateway" }
+    { "path": "../e2e-gateway" },
+    { "path": "../e2e-playwright-runtime" }
   ],
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

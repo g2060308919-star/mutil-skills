@@ -2,11 +2,14 @@ import { describe, expect, test } from 'vitest'
 import {
   canonicalGrantApprovalSubjectDigest,
   digestText,
+  type ReadApprovalSubject,
+  type SignedReadGrant,
   type SignedWriteGrant,
   type WriteApprovalSubject,
 } from '@mutil-skills/e2e-contracts'
 import {
   AuthenticatedRpcServer,
+  createAuthorityReadRpcClient,
   createAuthorityExecutionRpcClients,
   getTrustedExecutionClientBinding,
   isTrustedLeaseClient,
@@ -45,7 +48,33 @@ function writeGrant(): { grant: SignedWriteGrant; subject: WriteApprovalSubject 
     capabilities: [{ capabilityId: 'CAP-1', nonce: 'nonce', transport: 'http', effect: 'reversible-write',
       operation: 'http-request', actionId: 'ACTION-1', dataLeaseId: 'LEASE-1', fencingToken: 1,
       cleanupPlanDigest: digest, requests: subject.actions[0]!.requests, maxUses: 1 }],
-    revocationSequence: 0, signature: 'signature',
+    revocationSequence: 0, signature: 'A'.repeat(86),
+  } }
+}
+
+function readGrant(): { grant: SignedReadGrant; subject: ReadApprovalSubject } {
+  const subject: ReadApprovalSubject = {
+    schemaVersion: '2.0.0', assetId: 'ASSET-1', prdRevision: digest, scopeDigest: digest,
+    requirementModelDigest: digest, coveragePolicyDigest: digest, universeDigest: digest,
+    caseDigest: digest, actionMapDigest: digest, policyDigest: digest,
+    executionContractDigest: digest, runBundleProjectionDigest: digest,
+    environment: 'test', baseOrigin: 'https://test.example.com', actor: 'runner',
+    discoveryGrantId: 'DISCOVERY-1', preflightDigest: digest,
+    actions: [{ actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1 }],
+  }
+  const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+  return { subject, grant: {
+    grantId: 'READ-1', issuer: 'AUTHORITY', keyId: 'KEY-1', proofScope: 'local-os-user',
+    approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, subject, subjectDigest,
+    approvalContext: { schemaVersion: '1.0.0', subject: 'os-user:qa', runId: 'RUN-1',
+      approvalType: 'execution', subjectDigest, installationDigest: digest,
+      origin: 'http://127.0.0.1:43210', issuedAt: NOW.toISOString(),
+      expiresAt: new Date(NOW.getTime() + 5_000).toISOString() },
+    issuedAt: NOW.toISOString(), expiresAt: new Date(NOW.getTime() + 5_000).toISOString(),
+    capabilities: [{ capabilityId: 'CAP-READ-1', nonce: '1'.repeat(64),
+      transport: 'browser-local', effect: 'read', operation: 'dom-read',
+      actionId: 'ACTION-1', maxUses: 1 }],
+    revocationSequence: 0, signature: 'A'.repeat(86),
   } }
 }
 
@@ -107,6 +136,56 @@ test('生产式 Host 在消费 WebAuthn receipt 后可用父进程已知的非�
   })
   rpc.updateClientRegistration('runner-process', { approvalContext: grant.approvalContext })
   await expect(clients.writeApproval.verifyForSubject(grant, subject)).resolves.toEqual({ allowed: true })
+})
+
+test('read complete 必须使用创建 reservation 时完全相同的已认证审批上下文', async () => {
+  const { grant, subject } = readGrant()
+  const rpc = AuthenticatedRpcServer.create({ issuer: 'authority-host', keyId: 'rpc-key-1', now: () => NOW })
+  const credential = rpc.registerClient('runner-process', Buffer.alloc(32, 9), {
+    approvalContext: grant.approvalContext,
+  })
+  const completed: string[] = []
+  const unknown: string[] = []
+  registerAuthorityExecutionRpcOperations(rpc, {
+    writeAuthority: { async verifyForSubject() {
+      return { allowed: false, code: 'E2E_UNUSED', reason: 'unused' }
+    } },
+    leaseAuthority: { async verifyTarget() { return false } },
+    readAuthority: {
+      async reserveForSubject(input) { return {
+        reservationId: 'RESERVATION-READ-1', grantId: input.grant.grantId,
+        capabilityId: input.capabilityId, actionId: input.actionId, attemptId: input.attemptId,
+        status: 'reserved', reservedAt: NOW.toISOString(),
+      } },
+      async complete(reservationId) { completed.push(reservationId) },
+      async markUnknown(reservationId) { unknown.push(reservationId) },
+    },
+  })
+  const verifierMaterial = rpc.verifierMaterial
+  const client = createAuthorityReadRpcClient({
+    credential, verifierMaterial, approvalBinding: binding(grant.approvalContext),
+    expectedPublicKeyDigest: verifierMaterial.publicKeyDigest,
+    transport: (request) => rpc.handle(request), now: () => NOW,
+  })
+  const reservation = await client.reserveForSubject({
+    grant, currentSubject: subject, capabilityId: 'CAP-READ-1',
+    actionId: 'ACTION-1', attemptId: 'ATTEMPT-READ-1',
+  })
+  rpc.updateClientRegistration('runner-process', {
+    approvalContext: { ...grant.approvalContext, runId: 'RUN-OTHER' },
+  })
+  await expect(client.complete(reservation.reservationId, digest)).rejects.toMatchObject({
+    code: 'E2E_RPC_RESERVATION_CONTEXT_MISMATCH',
+  })
+  await expect(client.markUnknown(reservation.reservationId, 'cross-run')).rejects.toMatchObject({
+    code: 'E2E_RPC_RESERVATION_CONTEXT_MISMATCH',
+  })
+  expect(completed).toEqual([])
+  expect(unknown).toEqual([])
+
+  rpc.updateClientRegistration('runner-process', { approvalContext: grant.approvalContext })
+  await client.complete(reservation.reservationId, digest)
+  expect(completed).toEqual(['RESERVATION-READ-1'])
 })
 
 describe('Authority execution RPC clients', () => {

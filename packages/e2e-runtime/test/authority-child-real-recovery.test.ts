@@ -41,13 +41,14 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
     }))
     const identity = await resolveProjectIdentity(roots.project)
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.0.0', runId: 'RUN-REAL-RECOVERY', assetId: 'ASSET-REAL-RECOVERY',
+      schemaVersion: '1.1.0', runId: 'RUN-REAL-RECOVERY', assetId: 'ASSET-REAL-RECOVERY',
       projectIdentityDigest: identity.digest, runtimeInstallationDigest: installationDigest,
       workflow: {
         current: 'awaiting-execution-approval', sequence: 8,
         eventChainDigest: `sha256:${'8'.repeat(64)}`,
       },
       artifactDigests: { 'prd-source': digest('prd'), scope: digest('scope') },
+      frozenArtifacts: {}, trustedExecutionFacts: {},
       requestResponses: {}, createdAt: fixedNow, updatedAt: fixedNow,
     }
     const seedRequestDigest = digest('seed-request')

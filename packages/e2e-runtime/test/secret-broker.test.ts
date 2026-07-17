@@ -430,10 +430,11 @@ async function seedActiveRuns(homeDir: string, projectRoot: string, runIds: stri
       await store.beginRequest(requestId, requestDigest)
       const lock = await store.acquireRunLock(identity.digest, runId)
       const snapshot: RuntimeRunSnapshot = {
-        schemaVersion: '1.0.0', runId, assetId: `ASSET-${runId}`,
+        schemaVersion: '1.1.0', runId, assetId: `ASSET-${runId}`,
         projectIdentityDigest: identity.digest,
         runtimeInstallationDigest: `sha256:${'d'.repeat(64)}`,
         workflow: createWorkflow(), artifactDigests: { 'prd-source': `sha256:${'e'.repeat(64)}` },
+        frozenArtifacts: {}, trustedExecutionFacts: {},
         requestResponses: {}, createdAt: '2026-07-17T00:00:00.000Z',
         updatedAt: '2026-07-17T00:00:00.000Z',
       }

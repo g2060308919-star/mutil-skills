@@ -1208,6 +1208,12 @@ git commit -m "feat(e2e): enforce browser traffic through local gateway"
 
 ### Task 8: Chromium 安装、Browser Host 与最小只读纵向闭环
 
+> **Task 8 实施 Errata（2026-07-17）**：Runtime 不执行生成的 Playwright 源码，而是从 RunStore 冻结的 `test-cases`、`execution-contract`、`browser-action-map` 与内部持久化的 discovery/preflight/execution 事实投影唯一 `TrustedReadAction`。`run-preflight` 与 `execute-run` 只接受模块私有 WeakMap capability；CLI 惰性启动 Authority，使用 authenticated RPC 完成 discovery/read reservation，再组装 Gateway child、固定 Chromium persistent context 和 Trusted Runner。执行开始先原子持久化 `running-real + attemptId + fencingToken + revision` 并释放 Run 锁，完成时重新加锁核对，崩溃不得回到 compiled。Browser/Gateway 成功会话写入 installation-bound capability proof；Doctor 只读验证该 proof，不启动 Browser/Gateway。为打破 fresh install 与 Doctor proof 的循环依赖，`install-browser` 安装后必须执行空业务规则 Gateway + ControlledBrowserHost canary bootstrap，只有 finalize、Browser/Gateway/Authority 清理全部成功后才写首份 proof，失败不得写 proof。真实 Golden 自建临时 HOME/project/Run/HTTP fixture/Authority RPC，唯一外部输入是已经 `install-browser` 的 HOME；受限环境必须明确 skip，不计为通过。
+
+> **Task 8 最终审查 Errata（2026-07-17）**：真实 Golden 必须从复制并复验后的已安装 Runtime 动态加载 `dist/src/cli.js`，全部命令经 `runCli(['rpc'])`，从公共 `create-run` 开始，不得预置 Run/事实或直调 RunStore/RuntimeHost。`execute-run` 的 request reservation 与 attempt 持久化之间若崩溃，同 request 只能在 `compiled` 且无 attempt 时继续；已进入 `running-real` 必须返回 recovery-required。`resume-run` 可按完全相同 request/Run/attempt/lease 幂等重入。Capability proof 只有在 Browser/Gateway/Authority 全部清理成功后写入。Chromium 必须固定 host-resolver rule，并从 CDP 实际 command line 证明参数唯一存在。SPA/API 多请求 allowlist 不在 Task 8 以宽松规则放行，作为 Task 9 第 0 切片同步升级全部签名合同。
+
+> **Task 8 崩溃恢复 Errata（2026-07-17）**：`running-real` attempt 必须在 mutation lease 之外持有独立 heartbeat execution-owner；owner 活跃时 `resume-run reconcile` 固定拒绝。Preflight 改为 Browser prepare→RunStore preparation→Authority finalize→fact/replay 原子提交；相同 reservation/outcome 的 Authority complete 精确幂等，fact 提交失败后的 pending retry 从 preparation 恢复，不重复 Browser 或 capability use。reserve 后、preparation 前崩溃使用请求绑定的稳定 attemptId 恢复同一 Discovery reservation；该特例不得扩展到 read/write。
+
 **Files:**
 - Create: `packages/e2e-runtime/src/browser-installer.ts`
 - Create: `packages/e2e-runtime/src/browser-host.ts`

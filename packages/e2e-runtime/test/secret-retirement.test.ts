@@ -316,13 +316,13 @@ function runSnapshot(
     ? { ...createWorkflow(), current: 'accepted' as const, sequence: 1 }
     : createWorkflow()
   return {
-    schemaVersion: '1.0.0',
+    schemaVersion: '1.1.0',
     runId,
     assetId: `ASSET-${runId}`,
     projectIdentityDigest,
     runtimeInstallationDigest: digest('d'),
     workflow,
-    artifactDigests: { 'prd-source': digest('f') },
+    artifactDigests: { 'prd-source': digest('f') }, frozenArtifacts: {}, trustedExecutionFacts: {},
     requestResponses: {},
     createdAt: '2026-07-17T00:00:00.000Z',
     updatedAt: '2026-07-17T00:00:00.000Z',

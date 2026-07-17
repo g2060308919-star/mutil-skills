@@ -11,6 +11,7 @@ export interface RuntimeLayout {
   quarantine: string
   logs: string
   browsers: string
+  browserInstallLock: string
 }
 
 export function runtimeLayout(homeDir: string): RuntimeLayout {
@@ -27,5 +28,6 @@ export function runtimeLayout(homeDir: string): RuntimeLayout {
     quarantine: join(productRoot, 'e2e', 'quarantine'),
     logs: join(productRoot, 'e2e', 'logs'),
     browsers: join(runtimeRoot, 'browsers'),
+    browserInstallLock: join(runtimeRoot, 'browser-install.lock'),
   }
 }

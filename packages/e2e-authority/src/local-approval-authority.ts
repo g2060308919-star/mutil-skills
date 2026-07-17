@@ -191,6 +191,25 @@ interface StoredAcknowledgedFinalization {
 
 const MAX_GRANT_FINALIZATIONS = 1_024
 
+/**
+ * Discovery preflight receipt 的 canonical digest。Runtime 只能用它预计算待提交
+ * receipt；最终是否完成仍以 Authority 持久状态为准。
+ */
+export function computeDiscoveryPreflightDigest(input: {
+  grant: SignedDiscoveryGrant
+  capabilityId: string
+  reservationId: string
+  outcome: DiscoveryPreflightOutcome
+}): string {
+  return digestText('browser-preflight-result/v1', canonicalizeJson({
+    grantId: input.grant.grantId,
+    subjectDigest: input.grant.subjectDigest,
+    capabilityId: input.capabilityId,
+    ...immutableSnapshot(input.outcome),
+    reservationId: input.reservationId,
+  }))
+}
+
 export class LocalApprovalAuthority {
   readonly #issuer: string
   readonly #keyId: string
@@ -1189,6 +1208,33 @@ export class LocalApprovalAuthority {
     }
     const grant = immutableSnapshot<SignedGrant>(input.grant)
     const currentSubject = immutableSnapshot<SignedGrant['subject']>(input.currentSubject)
+    if (canonicalGrantApprovalType(grant.subject) === 'discovery') {
+      const prior = [...this.#reservations.values()].filter((reservation) => {
+        if (reservation.attemptId !== input.attemptId) return false
+        const priorGrant = this.#grants.get(reservation.grantId)
+        return priorGrant !== undefined && canonicalGrantApprovalType(priorGrant.subject) === 'discovery'
+      })
+      if (prior.length > 1) throw authorityError(
+        'E2E_APPROVAL_DISCOVERY_RESERVATION_AMBIGUOUS',
+        'Discovery attemptId 已绑定多个 reservation，拒绝推测恢复',
+      )
+      const existing = prior[0]
+      if (existing !== undefined) {
+        const storedGrant = this.#grants.get(existing.grantId)
+        if (existing.grantId !== grant.grantId
+          || existing.capabilityId !== input.capabilityId
+          || existing.actionId !== input.actionId
+          || storedGrant === undefined
+          || canonicalizeJson(storedGrant) !== canonicalizeJson(grant)
+          || canonicalizeJson(grant.subject) !== canonicalizeJson(currentSubject)) {
+          throw authorityError(
+            'E2E_APPROVAL_DISCOVERY_RESERVATION_REPLAY_MISMATCH',
+            'Discovery reservation 重试与原 grant/capability/action/subject 绑定不一致',
+          )
+        }
+        return immutableSnapshot(existing)
+      }
+    }
     const decision = await this.verifyForSubject(grant, currentSubject)
     if (!decision.allowed) throw authorityError(decision.code, decision.reason)
     return await this.#reserveVerified({
@@ -1213,11 +1259,9 @@ export class LocalApprovalAuthority {
     const grant = immutableSnapshot<SignedDiscoveryGrant>(input.grant)
     const currentSubject = immutableSnapshot<DiscoveryApprovalSubject>(input.currentSubject)
     const outcome = immutableSnapshot<DiscoveryPreflightOutcome>(input.outcome)
-    const decision = await this.verifyForSubject(grant, currentSubject)
-    if (!decision.allowed) throw authorityError(decision.code, decision.reason)
     const reservation = this.#reservations.get(input.reservationId)
     if (!reservation || reservation.grantId !== grant.grantId
-      || reservation.capabilityId !== input.capabilityId || reservation.status !== 'reserved') {
+      || reservation.capabilityId !== input.capabilityId) {
       throw authorityError('E2E_APPROVAL_PREFLIGHT_RESERVATION_INVALID', 'Discovery preflight reservation 无效')
     }
     const capability = grant.capabilities.find((candidate) =>
@@ -1228,10 +1272,25 @@ export class LocalApprovalAuthority {
     if (outcome.status === 'ready' && !matchesReadyPreflight(currentSubject, outcome)) {
       throw authorityError('E2E_APPROVAL_PREFLIGHT_RESULT_INVALID', 'ready preflight 与批准页面身份不一致')
     }
-    const preflightDigest = digestText('browser-preflight-result/v1', canonicalizeJson({
-      grantId: grant.grantId, subjectDigest: grant.subjectDigest, capabilityId: capability.capabilityId,
-      ...outcome, reservationId: reservation.reservationId,
-    }))
+    const preflightDigest = computeDiscoveryPreflightDigest({
+      grant, capabilityId: capability.capabilityId, reservationId: reservation.reservationId, outcome,
+    })
+    const completed = this.#completedPreflights.get(preflightDigest)
+    const storedGrant = this.#grants.get(grant.grantId)
+    if (reservation.status === 'completed'
+      && reservation.outcomeDigest === preflightDigest
+      && completed?.grantId === grant.grantId
+      && completed.status === outcome.status
+      && canonicalizeJson(completed.subject) === canonicalizeJson(currentSubject)
+      && storedGrant !== undefined
+      && canonicalizeJson(storedGrant) === canonicalizeJson(grant)) {
+      return preflightDigest
+    }
+    const decision = await this.verifyForSubject(grant, currentSubject)
+    if (!decision.allowed) throw authorityError(decision.code, decision.reason)
+    if (reservation.status !== 'reserved') {
+      throw authorityError('E2E_APPROVAL_PREFLIGHT_RESERVATION_INVALID', 'Discovery preflight reservation 无效')
+    }
     await this.complete(reservation.reservationId, preflightDigest)
     this.#completedPreflights.set(preflightDigest, {
       grantId: grant.grantId, subject: currentSubject, status: outcome.status,

@@ -6,9 +6,11 @@ import {
   canonicalizeJson,
   digestText,
   E2EError,
+  RuntimeResponseEnvelopeSchema,
+  type ArtifactDocument,
   type WorkflowState,
 } from '@mutil-skills/e2e-contracts'
-import type { PendingWorkflowDecision } from '@mutil-skills/e2e-engine'
+import { transitionWorkflow, type PendingWorkflowDecision } from '@mutil-skills/e2e-engine'
 import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, realpath } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -37,19 +39,70 @@ interface RetirementCapabilityRecord {
 }
 
 const retirementCapabilities = new WeakMap<object, RetirementCapabilityRecord>()
+const trustedFactCapabilities = new WeakMap<object, {
+  store: RuntimeRunStore
+  projectIdentityDigest: string
+  runId: string
+  lock: RuntimeRunLock
+  runRevision: number
+  snapshotDigest: string
+  used: boolean
+}>()
+const executionOwnerClaims = new WeakMap<object, {
+  store: RuntimeRunStore
+  key: string
+  ownerNonce: string
+  fencingToken: number
+  released: boolean
+}>()
+
+declare const runtimeTrustedFactCapabilityBrand: unique symbol
+export interface RuntimeTrustedFactCapability {
+  readonly [runtimeTrustedFactCapabilityBrand]: true
+}
 
 export interface RuntimeRunSnapshot {
-  schemaVersion: '1.0.0'
+  schemaVersion: '1.1.0'
   runId: string
   assetId: string
   projectIdentityDigest: string
   runtimeInstallationDigest: string
+  /** 每次持久化执行边界单调递增，用于拒绝陈旧 execution completion。 */
+  runRevision?: number
+  executionAttempt?: RuntimeExecutionAttempt
+  preflightAttempt?: RuntimePreflightAttempt
   workflow: WorkflowState
   pendingDecision?: PendingWorkflowDecision
   artifactDigests: Record<string, string>
+  /** 通过 Artifact registry 严格解析后保存的 canonical Candidate；不得保存源文件路径或可执行源码。 */
+  frozenArtifacts: Record<string, ArtifactDocument>
+  /** 仅 Runtime 内部可信执行链产生；外部 submit-candidate 永远不能写入。 */
+  trustedExecutionFacts: Record<string, unknown>
   requestResponses: Record<string, { requestDigest: string; response: unknown }>
   createdAt: string
   updatedAt: string
+}
+
+export interface RuntimeExecutionAttempt {
+  attemptId: string
+  requestId: string
+  fencingToken: number
+  revision: number
+  startedAt: string
+}
+
+export interface RuntimePreflightAttempt {
+  requestId: string
+  requestDigest: string
+  revision: number
+  startedAt: string
+  preparation: unknown
+}
+
+export interface RuntimeExecutionOwner {
+  readonly heartbeatIntervalMs: number
+  renew(): Promise<void>
+  release(): Promise<void>
 }
 
 export interface RuntimeRunLock {
@@ -65,6 +118,7 @@ export interface RuntimeRunStoreOptions {
 }
 
 export type RuntimeRequestReservation =
+  | { kind: 'reserved' }
   | { kind: 'pending' }
   | { kind: 'replay'; response: unknown }
 
@@ -164,6 +218,7 @@ export class RuntimeRunStore {
       options.leaseMilliseconds ?? LEASE_MILLISECONDS,
     )
     try {
+      await store.#migratePersistedState()
       await store.#verifyPersistedState()
       return store
     } catch (error) {
@@ -187,7 +242,7 @@ export class RuntimeRunStore {
         requestId,
         requestDigest,
       })
-      return { kind: 'pending' }
+      return { kind: 'reserved' }
     })
   }
 
@@ -319,6 +374,231 @@ export class RuntimeRunStore {
       const run = snapshot.runs[runKey(projectIdentityDigest, runId)]
       return run === undefined ? undefined : migrateRuntimeRunSnapshot(run)
     })
+  }
+
+  async recordPreflightPreparation(input: {
+    projectIdentityDigest: string
+    runId: string
+    requestId: string
+    requestDigest: string
+    startedAt: string
+    preparation: unknown
+    expectedRevision: number
+    expectedWorkflowDigest: string
+    lock: RuntimeRunLock
+  }): Promise<RuntimeRunSnapshot> {
+    return await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      requirePendingRequest(store, input.requestId, input.requestDigest)
+      const existing = store.runs[key]
+      if (existing === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+      const current = migrateRuntimeRunSnapshot(existing)
+      if (current.preflightAttempt !== undefined) throw runtimeStoreError(
+        'E2E_RUNTIME_PREFLIGHT_ALREADY_PREPARED', 'Run 已有持久化 preflight preparation',
+      )
+      if ((current.runRevision ?? 0) !== input.expectedRevision
+        || current.workflow.eventChainDigest !== input.expectedWorkflowDigest
+        || current.workflow.current !== 'discovery-approved') throw runtimeStoreError(
+        'E2E_RUNTIME_PREFLIGHT_FENCED', 'preflight preparation 已陈旧，拒绝持久化',
+      )
+      const revision = (current.runRevision ?? 0) + 1
+      const prepared = migrateRuntimeRunSnapshot({
+        ...current,
+        runRevision: revision,
+        preflightAttempt: {
+          requestId: input.requestId,
+          requestDigest: input.requestDigest,
+          revision,
+          startedAt: input.startedAt,
+          preparation: structuredClone(input.preparation),
+        },
+        updatedAt: input.startedAt,
+      })
+      store.runs[key] = prepared
+      appendRunSnapshotJournal(store, key, 'trusted-browser-preflight-prepared', input.requestId)
+      return structuredClone(prepared)
+    })
+  }
+
+  async beginExecutionAttempt(input: {
+    projectIdentityDigest: string
+    runId: string
+    requestId: string
+    requestDigest: string
+    startedAt: string
+    toRunning(snapshot: RuntimeRunSnapshot): RuntimeRunSnapshot
+    lock: RuntimeRunLock
+  }): Promise<{ snapshot: RuntimeRunSnapshot; attempt: RuntimeExecutionAttempt; owner: RuntimeExecutionOwner }> {
+    let ownerClaim!: { key: string; ownerNonce: string; fencingToken: number }
+    const started = await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      requirePendingRequest(store, input.requestId, input.requestDigest)
+      const existing = store.runs[key]
+      if (existing === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+      const current = migrateRuntimeRunSnapshot(existing)
+      if (current.executionAttempt !== undefined) throw runtimeStoreError(
+        'E2E_RUNTIME_EXECUTION_ALREADY_STARTED', 'Run 已有持久化 execution attempt，禁止重复执行',
+      )
+      const claim = this.#lockClaims.get(input.lock)!
+      const ownerKey = executionOwnerKey(key)
+      const existingOwner = store.leases[ownerKey]
+      const now = this.#now()
+      if (existingOwner !== undefined && Date.parse(existingOwner.expiresAt) > now.getTime()) {
+        throw runtimeStoreError('E2E_RUNTIME_EXECUTION_OWNER_ACTIVE', 'Run 已有活跃 execution owner')
+      }
+      ownerClaim = {
+        key: ownerKey,
+        ownerNonce: `${this.#processNonce}:execution:${randomUUID()}`,
+        fencingToken: (existingOwner?.fencingToken ?? 0) + 1,
+      }
+      store.leases[ownerKey] = {
+        ownerNonce: ownerClaim.ownerNonce,
+        fencingToken: ownerClaim.fencingToken,
+        expiresAt: new Date(now.getTime() + this.#leaseMilliseconds).toISOString(),
+      }
+      const revision = (current.runRevision ?? 0) + 1
+      const attempt: RuntimeExecutionAttempt = {
+        attemptId: `ATTEMPT-${randomUUID()}`,
+        requestId: input.requestId,
+        fencingToken: claim.fencingToken,
+        revision,
+        startedAt: input.startedAt,
+      }
+      const running = migrateRuntimeRunSnapshot({
+        ...input.toRunning(current), runRevision: revision, executionAttempt: attempt,
+      })
+      if (running.workflow.current !== 'running-real') throw runtimeStoreError(
+        'E2E_RUNTIME_EXECUTION_START_STATE_INVALID', '执行开始必须原子进入 running-real',
+      )
+      store.runs[key] = running
+      appendRunSnapshotJournal(store, key, 'trusted-read-execution-started', input.requestId)
+      return { snapshot: structuredClone(running), attempt: structuredClone(attempt) }
+    })
+    const owner = Object.freeze({
+      heartbeatIntervalMs: Math.max(10, Math.floor(this.#leaseMilliseconds / 3)),
+      renew: async () => await this.#renewExecutionOwner(owner),
+      release: async () => await this.#releaseExecutionOwner(owner),
+    }) as RuntimeExecutionOwner
+    executionOwnerClaims.set(owner, { store: this, ...ownerClaim, released: false })
+    return { ...started, owner }
+  }
+
+  async completeExecutionAttempt(input: {
+    projectIdentityDigest: string
+    runId: string
+    requestId: string
+    requestDigest: string
+    attempt: RuntimeExecutionAttempt
+    owner: RuntimeExecutionOwner
+    response: unknown
+    complete(snapshot: RuntimeRunSnapshot): RuntimeRunSnapshot
+    lock: RuntimeRunLock
+  }): Promise<unknown> {
+    const response = await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      this.#requireExecutionOwner(store, executionOwnerKey(key), input.owner)
+      const replay = completedReplay(store, input.requestId, input.requestDigest)
+      if (replay.found) return replay.response
+      requirePendingRequest(store, input.requestId, input.requestDigest)
+      const existing = store.runs[key]
+      if (existing === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+      const current = migrateRuntimeRunSnapshot(existing)
+      if (canonicalizeJson(current.executionAttempt) !== canonicalizeJson(input.attempt)
+        || (current.runRevision ?? 0) !== input.attempt.revision
+        || current.workflow.current !== 'running-real') throw runtimeStoreError(
+        'E2E_RUNTIME_EXECUTION_ATTEMPT_FENCED', 'execution attempt/revision 已改变，拒绝陈旧结果',
+      )
+      const completion = input.complete(current)
+      const { executionAttempt: _completedAttempt, ...withoutAttempt } = completion
+      const completed = migrateRuntimeRunSnapshot({
+        ...withoutAttempt,
+        runRevision: (current.runRevision ?? 0) + 1,
+        requestResponses: {
+          ...current.requestResponses,
+          [input.requestId]: { requestDigest: input.requestDigest, response: input.response },
+        },
+      })
+      if (completed.workflow.current === 'running-real') throw runtimeStoreError(
+        'E2E_RUNTIME_EXECUTION_COMPLETION_STATE_INVALID', '执行完成不得停留 running-real',
+      )
+      store.runs[key] = completed
+      const runOutcome = appendRunSnapshotJournal(
+        store, key, 'trusted-read-execution-completed', input.requestId,
+      )
+      completeGlobalLedger(
+        store.globalLedger, input.requestId, input.requestDigest, input.response, runOutcome,
+      )
+      delete store.leases[executionOwnerKey(key)]
+      return structuredClone(input.response)
+    })
+    const ownerClaim = executionOwnerClaims.get(input.owner)
+    if (ownerClaim?.store === this) ownerClaim.released = true
+    return response
+  }
+
+  async authorizeTrustedFactWrite(
+    projectIdentityDigest: string,
+    runId: string,
+    lock: RuntimeRunLock,
+  ): Promise<RuntimeTrustedFactCapability> {
+    const snapshot = await this.getRun(projectIdentityDigest, runId)
+    if (snapshot === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+    const capability = Object.freeze({}) as RuntimeTrustedFactCapability
+    trustedFactCapabilities.set(capability, {
+      store: this, projectIdentityDigest, runId, lock,
+      runRevision: snapshot.runRevision ?? 0,
+      snapshotDigest: runtimeRunSnapshotDigest(snapshot),
+      used: false,
+    })
+    return capability
+  }
+
+  async writeTrustedFactOutcome(input: {
+    capability: RuntimeTrustedFactCapability
+    requestId: string
+    requestDigest: string
+    factType: 'signed-discovery-grant' | 'signed-execution-grant' | 'browser-preflight'
+    fact: unknown
+    response: unknown
+    update?(snapshot: RuntimeRunSnapshot): RuntimeRunSnapshot
+  }): Promise<unknown> {
+    const record = trustedFactCapabilities.get(input.capability)
+    if (!record || record.store !== this || record.used) throw runtimeStoreError(
+      'E2E_RUNTIME_TRUSTED_FACT_CAPABILITY_INVALID', '可信事实 capability 伪造、跨 Store 或已消费',
+    )
+    record.used = true
+    try {
+      return await this.updateRunOutcome(
+        record.projectIdentityDigest, record.runId, input.requestId, input.requestDigest,
+        (snapshot) => {
+          if ((snapshot.runRevision ?? 0) !== record.runRevision
+            || runtimeRunSnapshotDigest(snapshot) !== record.snapshotDigest) throw runtimeStoreError(
+            'E2E_RUNTIME_TRUSTED_FACT_CAPABILITY_STALE',
+            '可信事实 capability 的 Run revision/snapshot 已改变',
+          )
+          const updated = input.update?.(snapshot) ?? snapshot
+          return { snapshot: {
+            ...updated,
+            runRevision: (snapshot.runRevision ?? 0) + 1,
+            trustedExecutionFacts: {
+              ...updated.trustedExecutionFacts,
+              [input.factType]: structuredClone(input.fact),
+            },
+          },
+          response: input.response }
+        },
+        'trusted-execution-fact-recorded', record.lock,
+      )
+    } catch (error) {
+      record.used = false
+      throw error
+    }
   }
 
   async acquireRunLock(projectIdentityDigest: string, runId: string): Promise<RuntimeRunLock> {
@@ -455,6 +735,41 @@ export class RuntimeRunStore {
     }
   }
 
+  #requireExecutionOwner(snapshot: RunStoreSnapshot, key: string, owner: RuntimeExecutionOwner): void {
+    const claim = executionOwnerClaims.get(owner)
+    const persisted = snapshot.leases[key]
+    if (claim?.store !== this || claim.key !== key || claim.released
+      || persisted?.ownerNonce !== claim.ownerNonce
+      || persisted.fencingToken !== claim.fencingToken
+      || Date.parse(persisted.expiresAt) <= this.#now().getTime()) {
+      throw runtimeStoreError('E2E_RUNTIME_EXECUTION_OWNER_FENCED', 'execution owner lease 已失效')
+    }
+  }
+
+  async #renewExecutionOwner(owner: RuntimeExecutionOwner): Promise<void> {
+    await this.#mutate((snapshot) => {
+      const claim = executionOwnerClaims.get(owner)
+      if (claim?.store !== this) throw runtimeStoreError(
+        'E2E_RUNTIME_EXECUTION_OWNER_FENCED', 'execution owner capability 无效',
+      )
+      this.#requireExecutionOwner(snapshot, claim.key, owner)
+      snapshot.leases[claim.key]!.expiresAt = new Date(
+        this.#now().getTime() + this.#leaseMilliseconds,
+      ).toISOString()
+    })
+  }
+
+  async #releaseExecutionOwner(owner: RuntimeExecutionOwner): Promise<void> {
+    const claim = executionOwnerClaims.get(owner)
+    if (claim?.store !== this || claim.released) return
+    await this.#mutate((snapshot) => {
+      const persisted = snapshot.leases[claim.key]
+      if (persisted?.ownerNonce === claim.ownerNonce
+        && persisted.fencingToken === claim.fencingToken) delete snapshot.leases[claim.key]
+    })
+    claim.released = true
+  }
+
   async #executeSecretRetirement<T>(input: {
     projectIdentityDigest: string
     runId: string
@@ -498,6 +813,164 @@ export class RuntimeRunStore {
 
   async #verifyPersistedState(): Promise<void> {
     await this.#read((snapshot) => { verifyStoreSnapshot(snapshot) })
+  }
+
+  async #migratePersistedState(): Promise<void> {
+    await this.#snapshotStore.runExclusive(async () => {
+      const serialized = this.#snapshotStore.begin()
+      try {
+        const snapshot = parseStoreSnapshot(serialized)
+        let changed = false
+        for (const [key, raw] of Object.entries(snapshot.runs)) {
+          if (isPlainRecord(raw) && raw.schemaVersion === '1.1.0') continue
+          const rows = snapshot.journals[key]
+          if (!Array.isArray(rows) || rows.length === 0) {
+            throw journalIntegrityError('legacy Run 缺少可验证 journal，拒绝迁移')
+          }
+          verifyJournalRows(rows)
+          const legacyDigest = runtimeRunSnapshotDigest(raw)
+          if (rows.at(-1)?.event.digest !== legacyDigest) {
+            throw journalIntegrityError('legacy Run snapshot 与迁移前 journal tail 不闭合')
+          }
+          const migrated = migrateRuntimeRunSnapshot(raw)
+          if (key !== runKey(migrated.projectIdentityDigest, migrated.runId)) {
+            throw journalIntegrityError('legacy Run snapshot key 与持久身份不一致')
+          }
+          snapshot.runs[key] = migrated
+          appendJournalRow(rows, {
+            kind: 'runtime-state-migrated',
+            fromSchemaVersion: isPlainRecord(raw) && typeof raw.schemaVersion === 'string'
+              ? raw.schemaVersion : 'missing',
+            toSchemaVersion: migrated.schemaVersion,
+            digest: runtimeRunSnapshotDigest(migrated),
+          })
+          changed = true
+        }
+        if (!changed) {
+          this.#snapshotStore.rollback()
+          return
+        }
+        verifyStoreSnapshot(snapshot)
+        this.#snapshotStore.commit(canonicalizeJson(snapshot))
+      } catch (error) {
+        this.#snapshotStore.rollback()
+        throw error
+      }
+    })
+  }
+
+  async reconcileExecutionAttempt(input: {
+    projectIdentityDigest: string
+    runId: string
+    expectedAttemptId: string
+    reconcileRequestId: string
+    reconcileRequestDigest: string
+    runtimeVersion: string
+    installationDigest: string
+    lock: RuntimeRunLock
+  }): Promise<{ attemptId: string; response: unknown }> {
+    return await this.#snapshotStore.runExclusive(async () => {
+      const serialized = this.#snapshotStore.begin()
+      try {
+        const snapshot = parseStoreSnapshot(serialized)
+        verifyStoreSnapshot(snapshot)
+        const now = this.#now()
+        const key = runKey(input.projectIdentityDigest, input.runId)
+        this.#requireCurrentLease(snapshot, key, input.lock)
+        const replay = completedReplay(
+          snapshot, input.reconcileRequestId, input.reconcileRequestDigest,
+        )
+        if (replay.found) {
+          const response = requireExecutionReconcileReplay(replay.response, input)
+          this.#snapshotStore.rollback()
+          return { attemptId: input.expectedAttemptId, response }
+        }
+        const executionOwner = snapshot.leases[executionOwnerKey(key)]
+        if (executionOwner !== undefined && Date.parse(executionOwner.expiresAt) > now.getTime()) {
+          throw runtimeStoreError(
+            'E2E_RUNTIME_EXECUTION_OWNER_ACTIVE',
+            '活跃 execution owner 仍在执行，拒绝提前 reconcile',
+          )
+        }
+        delete snapshot.leases[executionOwnerKey(key)]
+        const current = snapshot.runs[key]
+        const attempt = current?.executionAttempt
+        if (current === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+        if (current.workflow.current !== 'running-real' || attempt === undefined
+          || attempt.attemptId !== input.expectedAttemptId) throw runtimeStoreError(
+          'E2E_RUNTIME_EXECUTION_RECONCILE_MISMATCH',
+          '只允许显式关闭目标 Run 当前完全匹配的 running-real attempt',
+        )
+        if (current.runtimeInstallationDigest !== input.installationDigest) throw runtimeStoreError(
+          'E2E_RUNTIME_INSTALLATION_BINDING_MISMATCH', '恢复 Host 与 Run installation 不一致',
+        )
+        const requestDigest = requirePendingRequestDigest(snapshot, attempt.requestId)
+        requirePendingRequest(snapshot, input.reconcileRequestId, input.reconcileRequestDigest)
+        const executionResponse = {
+          schemaVersion: '1.0.0', requestId: attempt.requestId,
+          runtime: { version: input.runtimeVersion, installationDigest: input.installationDigest },
+          ok: false,
+          error: {
+            code: 'E2E_RUNTIME_EXECUTION_ATTEMPT_STALE', category: 'safety',
+            terminalState: 'safety-blocked',
+            message: '上次只读执行在完成前中断；Runtime 已禁止自动重试并关闭该 attempt',
+            retryable: false, resumeState: 'safety-blocked',
+            details: {
+              attemptId: attempt.attemptId, fencingToken: attempt.fencingToken,
+              revision: attempt.revision, startedAt: attempt.startedAt, reconciledAt: now.toISOString(),
+            },
+          },
+        }
+        const reconcileResponse = {
+          schemaVersion: '1.0.0', requestId: input.reconcileRequestId,
+          runtime: { version: input.runtimeVersion, installationDigest: input.installationDigest },
+          ok: true,
+          result: { runId: input.runId, reconciledAttemptId: attempt.attemptId, status: 'safety-blocked' },
+        }
+        const { executionAttempt: _staleAttempt, ...withoutAttempt } = current
+        const recovered = migrateRuntimeRunSnapshot({
+          ...withoutAttempt,
+          runRevision: (current.runRevision ?? 0) + 1,
+          workflow: transitionWorkflow({
+            state: current.workflow, next: 'safety-blocked',
+            reason: `stale execution attempt reconciled:${attempt.attemptId}`,
+            timestamp: now.toISOString(), engineVersion: 'runtime-store-recovery/1',
+          }).state,
+          updatedAt: now.toISOString(),
+          requestResponses: {
+            ...current.requestResponses,
+            [attempt.requestId]: {
+              requestDigest,
+              response: executionResponse,
+            },
+            [input.reconcileRequestId]: {
+              requestDigest: input.reconcileRequestDigest,
+              response: reconcileResponse,
+            },
+          },
+        })
+        snapshot.runs[key] = recovered
+        const executionRunOutcome = appendRunSnapshotJournal(
+          snapshot, key, 'stale-execution-attempt-reconciled', attempt.requestId,
+        )
+        const reconcileRunOutcome = appendRunSnapshotJournal(
+          snapshot, key, 'execution-reconcile-request-completed', input.reconcileRequestId,
+        )
+        completeGlobalLedger(
+          snapshot.globalLedger, attempt.requestId, requestDigest, executionResponse, executionRunOutcome,
+        )
+        completeGlobalLedger(
+          snapshot.globalLedger, input.reconcileRequestId, input.reconcileRequestDigest,
+          reconcileResponse, reconcileRunOutcome,
+        )
+        verifyStoreSnapshot(snapshot)
+        this.#snapshotStore.commit(canonicalizeJson(snapshot))
+        return { attemptId: attempt.attemptId, response: structuredClone(reconcileResponse) }
+      } catch (error) {
+        this.#snapshotStore.rollback()
+        throw error
+      }
+    })
   }
 
   async #read<T>(operation: (snapshot: RunStoreSnapshot) => T): Promise<T> {
@@ -809,6 +1282,30 @@ function completedReplay(
     : { found: false }
 }
 
+function requireExecutionReconcileReplay(response: unknown, expected: {
+  runId: string
+  expectedAttemptId: string
+  reconcileRequestId: string
+  runtimeVersion: string
+  installationDigest: string
+}): unknown {
+  const parsed = RuntimeResponseEnvelopeSchema.safeParse(response)
+  const result = parsed.success && parsed.data.ok ? parsed.data.result : undefined
+  if (!parsed.success || !parsed.data.ok || parsed.data.requestId !== expected.reconcileRequestId
+    || parsed.data.runtime.version !== expected.runtimeVersion
+    || parsed.data.runtime.installationDigest !== expected.installationDigest
+    || !isPlainRecord(result)
+    || result.runId !== expected.runId
+    || result.reconciledAttemptId !== expected.expectedAttemptId
+    || result.status !== 'safety-blocked') {
+    throw runtimeStoreError(
+      'E2E_RUNTIME_EXECUTION_RECONCILE_REPLAY_INVALID',
+      '已完成 resume-run outcome 与显式 reconcile identity 不一致',
+    )
+  }
+  return structuredClone(parsed.data)
+}
+
 function requirePendingRequest(
   snapshot: RunStoreSnapshot,
   requestId: string,
@@ -822,6 +1319,15 @@ function requirePendingRequest(
   if (entry.status !== 'pending') {
     throw runtimeStoreError('E2E_RUNTIME_REQUEST_ALREADY_COMPLETED', 'request outcome 已完成')
   }
+}
+
+function requirePendingRequestDigest(snapshot: RunStoreSnapshot, requestId: string): string {
+  const entry = snapshot.globalLedger.entries[requestId]
+  if (entry?.status !== 'pending') throw runtimeStoreError(
+    'E2E_RUNTIME_EXECUTION_RECONCILE_REQUEST_INVALID',
+    'stale execution attempt 必须绑定仍为 pending 的原始请求',
+  )
+  return entry.requestDigest
 }
 
 function completeGlobalLedger(
@@ -884,7 +1390,11 @@ function runKey(projectIdentityDigest: string, runId: string): string {
   return `${projectIdentityDigest}\u0000${runId}`
 }
 
-function runtimeRunSnapshotDigest(snapshot: RuntimeRunSnapshot): string {
+function executionOwnerKey(key: string): string {
+  return `execution-owner\u0000${key}`
+}
+
+function runtimeRunSnapshotDigest(snapshot: unknown): string {
   return digestText('e2e-runtime-run-snapshot/v1', canonicalizeJson(snapshot))
 }
 

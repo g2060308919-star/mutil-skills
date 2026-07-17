@@ -90,10 +90,14 @@ class RecoveryChild extends EventEmitter {
   kill(): boolean { return true }
 }
 
-vi.mock('node:child_process', () => ({
-  fork: vi.fn(() => (lastChild = new RecoveryChild())),
-  spawn: vi.fn(() => (lastChild = new RecoveryChild())),
-}))
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return {
+    ...actual,
+    fork: vi.fn(() => (lastChild = new RecoveryChild())),
+    spawn: vi.fn(() => (lastChild = new RecoveryChild())),
+  }
+})
 
 import { startAuthorityExecutionRpcHostProcess } from '@mutil-skills/e2e-authority'
 import { RuntimeAuthorityHost, computeRuntimeApprovalSubjectDigest } from '../src/authority-host.js'
@@ -116,13 +120,14 @@ test('child commit-after-registration failure stays pending and Runtime recovers
     }))
     const identity = await resolveProjectIdentity(roots.project)
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.0.0', runId: 'RUN-1', assetId: 'ASSET-1',
+      schemaVersion: '1.1.0', runId: 'RUN-1', assetId: 'ASSET-1',
       projectIdentityDigest: identity.digest, runtimeInstallationDigest: installationDigest,
       workflow: {
         current: 'awaiting-execution-approval', sequence: 8,
         eventChainDigest: `sha256:${'8'.repeat(64)}`,
       },
       artifactDigests: { 'prd-source': `sha256:${'3'.repeat(64)}`, scope: `sha256:${'4'.repeat(64)}` },
+      frozenArtifacts: {}, trustedExecutionFacts: {},
       requestResponses: {}, createdAt: '2026-07-16T00:00:00.000Z', updatedAt: '2026-07-16T00:00:00.000Z',
     }
     const seedDigest = `sha256:${'6'.repeat(64)}`

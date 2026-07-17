@@ -483,6 +483,10 @@ Host 启动子进程时从空对象构建 env，只允许固定的无敏感键�
 
 ### 10.4 Chromium 安装
 
+> **Spec Errata（2026-07-17，Task 8 实施）**：Browser closure manifest 必须闭合 Runtime installation、精确 Playwright/Chromium、CLI/executable bytes 与全部内部 file/symlink；inspect 只读且拒绝 symlink、owner/mode、digest 或 binding 篡改。Runtime 通过持久 profile、最小 env、固定 proxy/SPKI/bypass/禁 QUIC/WebRTC 非代理 UDP 参数启动 Chromium，并用 CDP 实际 command line、Gateway approved/denied canary 与 measurement digest 证明约束生效。Discovery preflight 事实必须同时绑定 Run、Grant、reservation/outcome receipt、观察身份、Browser closure/executable、Gateway policy/session/signed audit 与 canary。Doctor 不以“代码已安装”冒充能力通过，只读取成功受控会话原子写入的 installation-bound capability proof；无 proof 为 not-installed，损坏/错绑定为 blocked。首份 proof 由 `install-browser` 后的显式无业务 Run bootstrap 产生：空业务 Gateway rules 仍执行独立 approved/denied canary，Browser/Gateway finalize 与清理全部成功后才写 proof；bootstrap 或清理失败时安装命令失败且 proof 保持缺失。
+
+> **Spec Errata（2026-07-17，Task 8 崩溃恢复收口）**：只读执行除 mutation lease 外还必须持有独立、可续租的 execution-owner lease；owner 未释放时任何 reconcile 都必须失败，防止长执行被过期 mutation lease 误判为陈旧。Preflight 必须拆成 Browser `prepare`、RunStore 持久 preparation、Authority `finalize`、可信事实与 replay 原子提交四步；Authority 只允许同 reservation、同 subject、同 outcome digest 的精确幂等完成。Authority 已完成而 fact 提交失败时，相同 pending 请求只能从持久 preparation 恢复，不得再次启动 Browser 或消耗 capability。为覆盖 reserve 到 preparation 的前置窗口，Host 还必须从 `{runId, requestId, requestDigest}` 派生稳定 attemptId；Discovery Authority 仅对同 grant/capability/action/attempt/subject 精确返回原 reservation，普通 read/write reservation 不得获得此幂等特例。
+
 `repo-e2e install-browser` 使用当前已安装 Runtime 内 Playwright 的绝对 CLI，下载到版本化用户级 browser root，并记录 browser executable bytes digest、Playwright version 和平台。`doctor` 只探测，不下载。Runtime 升级后若 Playwright revision 不兼容，明确返回恢复命令。
 
 ## 11. Authority 与人工审批

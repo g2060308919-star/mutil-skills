@@ -36,6 +36,11 @@ import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js
 import { assertSameProjectIdentity, resolveProjectIdentity } from './project-identity.js'
 import { SecureProjectFileReader } from './secure-project-files.js'
 import { RuntimeSecretBroker } from './secret-broker.js'
+import { installChromium as installChromiumDefault, type InstallChromiumOptions } from './browser-installer.js'
+import {
+  bootstrapInstalledBrowserRuntime,
+  createProductionBrowserCapabilities,
+} from './runtime-browser-wiring.js'
 import {
   MAX_SECRET_BYTES,
   SECRET_REF_PATTERN,
@@ -95,6 +100,8 @@ export interface RuntimeCliDependencies {
     homeDir: string
     projectRoot: string
   }) => Promise<CliSecretBroker>
+  installChromium?: (options: InstallChromiumOptions) => Promise<unknown>
+  bootstrapBrowserRuntime?: typeof bootstrapInstalledBrowserRuntime
 }
 
 export async function runCli(
@@ -112,6 +119,41 @@ export async function runCli(
 
   if (arguments_[0] === 'install-runtime' || arguments_[0] === 'uninstall-runtime') {
     return runInstallManagementCommand(arguments_, responseWriter, dependencies)
+  }
+
+  if (arguments_.length === 1 && arguments_[0] === 'install-browser') {
+    try {
+      const installation = await (dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault)({
+        homeDir: dependencies.homeDir,
+      })
+      const result = await (dependencies.installChromium ?? installChromiumDefault)({
+        homeDir: dependencies.homeDir,
+        runtimeVersion: installation.version,
+        runtimeInstallationDigest: installation.installationDigest,
+      })
+      await (dependencies.bootstrapBrowserRuntime ?? bootstrapInstalledBrowserRuntime)({
+        homeDir: dependencies.homeDir, installation,
+        browserInstallation: result as Awaited<ReturnType<typeof installChromiumDefault>>,
+        prepareAuthorityRoot: async () => {
+          const authority = await (dependencies.startAuthorityHost ?? startRuntimeAuthorityHost)({
+            homeDir: dependencies.homeDir, installation, subject: localAuthoritySubject(),
+            ...(dependencies.approvalSessionTtlMs === undefined
+              ? {} : { approvalSessionTtlMs: dependencies.approvalSessionTtlMs }),
+          })
+          await authority.close()
+        },
+      })
+      await responseWriter.write(`${canonicalizeJson({
+        ok: true,
+        result: publicBrowserInstallResult(result, installation),
+      })}\n`)
+      return 0
+    } catch (error) {
+      return writeErrorResponse(responseWriter, 'INSTALL-BROWSER', error instanceof E2EError ? error : new E2EError({
+        code: 'E2E_CHROMIUM_INSTALL_FAILED', category: 'environment',
+        message: '固定 Chromium 安装失败', retryable: false, cause: error,
+      }))
+    }
   }
 
   if (arguments_[0] === 'secret') {
@@ -147,7 +189,9 @@ export async function runCli(
       const installation = await (dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault)({
         homeDir: dependencies.homeDir,
       })
-      report = await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({ installation })
+      report = await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({
+        installation, homeDir: dependencies.homeDir,
+      })
     } catch {
       report = runtimeDoctorFailureReport(RUNTIME_PACKAGE_VERSION)
     }
@@ -208,22 +252,33 @@ export async function runCli(
     let response: Awaited<ReturnType<E2ERuntimeHost['handle']>> | undefined
     let processingError: unknown
     try {
+      const needsBrowserExecution = request.command === 'run-preflight' || request.command === 'execute-run'
+      const getAuthorityHost = async () => {
+        if (authorityHost !== undefined) return authorityHost
+        authorityHost = await (dependencies.startAuthorityHost ?? startRuntimeAuthorityHost)({
+          homeDir: dependencies.homeDir, installation, subject: localAuthoritySubject(),
+          ...(dependencies.approvalSessionTtlMs === undefined
+            ? {} : { approvalSessionTtlMs: dependencies.approvalSessionTtlMs }),
+        })
+        return authorityHost
+      }
+      const browserCapabilities = !needsBrowserExecution ? undefined : createProductionBrowserCapabilities({
+        homeDir: dependencies.homeDir, installation, authorityHost: getAuthorityHost,
+      })
       const host = new E2ERuntimeHost({
         installation,
-        doctor: async () => await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({ installation }),
+        doctor: async () => await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({
+          installation, homeDir: dependencies.homeDir,
+        }),
         runStore,
         now: () => new Date(),
+        ...(browserCapabilities === undefined ? {} : {
+          preflightExecutor: browserCapabilities.preflight,
+          readExecutor: browserCapabilities.read,
+        }),
         ...(request.command !== 'open-approval' ? {} : {
           authorityHostFactory: async () => {
-            if (authorityHost !== undefined) return authorityHost
-            authorityHost = await (dependencies.startAuthorityHost ?? startRuntimeAuthorityHost)({
-              homeDir: dependencies.homeDir,
-              installation,
-              subject: localAuthoritySubject(),
-              ...(dependencies.approvalSessionTtlMs === undefined
-                ? {} : { approvalSessionTtlMs: dependencies.approvalSessionTtlMs }),
-            })
-            return authorityHost
+            return await getAuthorityHost()
           },
           presentUserPresenceUrl: async (url: string) => await writeText(stderr, `${url}\n`),
         }),
@@ -243,7 +298,9 @@ export async function runCli(
         category: 'internal',
         message: 'Runtime 单请求资源未能完整关闭',
         retryable: false,
-        cause: new AggregateError(cleanupErrors),
+        cause: new AggregateError(
+          processingError === undefined ? cleanupErrors : [processingError, ...cleanupErrors],
+        ),
       })
     }
     if (processingError !== undefined) throw processingError
@@ -262,6 +319,27 @@ export async function runCli(
         })
     return writeErrorResponse(responseWriter, requestIdFromUntrustedJson(json), runtimeError)
   }
+}
+
+function publicBrowserInstallResult(result: unknown, installation: RuntimeInstallation): Record<string, unknown> {
+  const output: Record<string, unknown> = {
+    installed: true,
+    runtimeVersion: installation.version,
+    runtimeInstallationDigest: installation.installationDigest,
+  }
+  if (!isRecord(result) || !isRecord(result.manifest)) return output
+  const manifest = result.manifest
+  if (manifest.playwrightVersion === '1.61.1') output.playwrightVersion = manifest.playwrightVersion
+  if (typeof manifest.revision === 'string' && /^\d+$/.test(manifest.revision)) {
+    output.chromiumRevision = manifest.revision
+  }
+  if (typeof manifest.closureDigest === 'string' && /^sha256:[a-f0-9]{64}$/.test(manifest.closureDigest)) {
+    output.browserClosureDigest = manifest.closureDigest
+  }
+  if (typeof manifest.executableDigest === 'string' && /^sha256:[a-f0-9]{64}$/.test(manifest.executableDigest)) {
+    output.browserExecutableDigest = manifest.executableDigest
+  }
+  return output
 }
 
 async function runSecretCommand(

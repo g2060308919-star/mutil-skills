@@ -4,6 +4,8 @@ import {
 } from '@mutil-skills/e2e-contracts'
 import type { RuntimeInstallation } from './runtime-discovery.js'
 import { discoverTrustedPython } from './trusted-python.js'
+import { inspectChromiumInstallation } from './browser-installer.js'
+import { inspectRuntimeCapabilityProof } from './runtime-capability-proof.js'
 
 export const RUNTIME_DOCTOR_PROBE_NAMES = [
   'installation',
@@ -25,12 +27,14 @@ export type RuntimeDoctorReport = ReturnType<typeof RuntimeDoctorReportSchema.pa
 
 export interface RuntimeProbeContext {
   installation: RuntimeInstallation
+  homeDir: string
 }
 
 export type RuntimeProbe = (context: RuntimeProbeContext) => Promise<RuntimeDoctorProbe>
 
 export interface RunRuntimeDoctorOptions {
   installation: RuntimeInstallation
+  homeDir: string
   probes?: Partial<Record<RuntimeDoctorProbeName, RuntimeProbe>>
 }
 
@@ -50,7 +54,7 @@ export function aggregateDoctorReport(input: AggregateDoctorReportInput): Runtim
 }
 
 export async function runRuntimeDoctor(options: RunRuntimeDoctorOptions): Promise<RuntimeDoctorReport> {
-  const context: RuntimeProbeContext = { installation: options.installation }
+  const context: RuntimeProbeContext = { installation: options.installation, homeDir: options.homeDir }
   const probes: Record<string, RuntimeDoctorProbe> = {}
   for (const name of RUNTIME_DOCTOR_PROBE_NAMES) {
     try {
@@ -104,9 +108,29 @@ const DEFAULT_RUNTIME_PROBES: Record<RuntimeDoctorProbeName, RuntimeProbe> = {
     'E2E_APPROVAL_PRESENCE_NOT_INSTALLED',
     '初始化需要用户在场的审批能力',
   ),
-  gateway: notInstalledProbe('E2E_GATEWAY_NOT_INSTALLED', '安装 Gateway Runtime'),
-  chromium: notInstalledProbe('E2E_CHROMIUM_NOT_INSTALLED', '使用 repo-e2e install-browser 安装固定 Chromium'),
-  isolation: notInstalledProbe('E2E_RUNTIME_ISOLATION_NOT_INSTALLED', '安装 Runtime 隔离后端'),
+  gateway: capabilityProofProbe('gateway'),
+  chromium: async ({ homeDir, installation }) => {
+    try {
+      const browser = await inspectChromiumInstallation({
+        homeDir, runtimeVersion: installation.version,
+        runtimeInstallationDigest: installation.installationDigest,
+      })
+      return {
+        status: 'passed', reasonCode: 'E2E_CHROMIUM_INSTALLATION_OK',
+        proofDigest: browser.manifest.closureDigest, remediation: '无需处理',
+      }
+    } catch (error) {
+      const code = error instanceof Error && 'code' in error && typeof error.code === 'string'
+        ? error.code : 'E2E_CHROMIUM_INSPECTION_FAILED'
+      return {
+        status: code === 'E2E_CHROMIUM_NOT_INSTALLED' ? 'not-installed' : 'blocked', reasonCode: code,
+        remediation: code === 'E2E_CHROMIUM_NOT_INSTALLED'
+          ? '使用 repo-e2e install-browser 安装固定 Chromium'
+          : 'Chromium 安装完整性验证失败；保留现场并重新安装 Runtime 与固定 Chromium',
+      }
+    }
+  },
+  isolation: capabilityProofProbe('isolation'),
   'artifact-fs': trustedPythonProbe('E2E_ARTIFACT_FS_TRUSTED_PYTHON_OK'),
   quarantine: notInstalledProbe('E2E_QUARANTINE_NOT_INSTALLED', '初始化加密 quarantine 存储'),
   report: notInstalledProbe('E2E_REPORT_NOT_INSTALLED', '安装 Report Runtime'),
@@ -139,6 +163,42 @@ function trustedPythonProbe(reasonCode: string): RuntimeProbe {
       return {
         status: 'blocked', reasonCode: code,
         remediation: '安装由 root 管理、不可被普通用户修改且支持 dir_fd 的 Python 3.9+',
+      }
+    }
+  }
+}
+
+function capabilityProofProbe(kind: 'gateway' | 'isolation'): RuntimeProbe {
+  return async ({ homeDir, installation }) => {
+    try {
+      const proof = await inspectRuntimeCapabilityProof({
+        homeDir, runtimeInstallationDigest: installation.installationDigest,
+      })
+      const browser = await inspectChromiumInstallation({
+        homeDir, runtimeVersion: installation.version,
+        runtimeInstallationDigest: installation.installationDigest,
+      })
+      if (proof.isolation.browserClosureDigest !== browser.manifest.closureDigest
+        || proof.isolation.browserExecutableDigest !== browser.manifest.executableDigest) {
+        const mismatch = new Error('E2E_RUNTIME_CAPABILITY_PROOF_BROWSER_MISMATCH') as Error & { code: string }
+        mismatch.code = 'E2E_RUNTIME_CAPABILITY_PROOF_BROWSER_MISMATCH'
+        throw mismatch
+      }
+      return {
+        status: 'passed',
+        reasonCode: kind === 'gateway' ? 'E2E_GATEWAY_CAPABILITY_PROOF_OK' : 'E2E_ISOLATION_CAPABILITY_PROOF_OK',
+        proofDigest: proof.proofDigest,
+        remediation: '无需处理',
+      }
+    } catch (error) {
+      const code = error instanceof Error && 'code' in error && typeof error.code === 'string'
+        ? error.code : 'E2E_RUNTIME_CAPABILITY_PROOF_INVALID'
+      return {
+        status: code === 'E2E_RUNTIME_CAPABILITY_PROOF_NOT_INSTALLED' ? 'not-installed' : 'blocked',
+        reasonCode: code,
+        remediation: code === 'E2E_RUNTIME_CAPABILITY_PROOF_NOT_INSTALLED'
+          ? '先完成一次真实 Gateway/固定 Chromium 受控会话以生成 capability proof'
+          : 'Capability proof 已损坏或与当前 Runtime 不匹配；保留现场并重新运行真实受控会话',
       }
     }
   }

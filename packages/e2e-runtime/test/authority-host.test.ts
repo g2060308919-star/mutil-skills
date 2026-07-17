@@ -342,7 +342,7 @@ test('Runtime Host finalizes a Grant and journals the traceable Grant plus four-
       runId: snapshot.runId, installationDigest,
       approvalType: 'execution' as const, subjectDigest,
     }
-    const signedGrant = { grantId: 'GRANT-1', subject: grantSubject, subjectDigest }
+    const signedGrant = signedExecutionGrant('GRANT-1', grantSubject, subjectDigest, approvalBinding)
     const finalize = vi.fn(async () => ({ grant: signedGrant as never, approvalBinding }))
     const requestApproval = vi.fn(async () => ({
       url: 'http://localhost:42009/#approval', sessionId: 'SESSION-FINALIZE',
@@ -402,10 +402,9 @@ test('Runtime Host keeps a finalized request pending when Run Store persistence 
       runId: snapshot.runId, installationDigest,
       approvalType: 'execution' as const, subjectDigest,
     }
-    const signedGrant = {
-      grantId: 'GRANT-RECOVERED', subject: grantSubject, subjectDigest,
-      approvalContext: { ...approvalBinding },
-    }
+    const signedGrant = signedExecutionGrant(
+      'GRANT-RECOVERED', grantSubject, subjectDigest, approvalBinding,
+    )
     const finalize = vi.fn(async () => ({ grant: signedGrant as never, approvalBinding }))
     const requestApproval = vi.fn(async () => ({
       url: 'http://localhost:42010/#approval', sessionId: 'SESSION-RECOVER',
@@ -431,10 +430,10 @@ test('Runtime Host keeps a finalized request pending when Run Store persistence 
       projectRoot: roots.project,
       payload: { runId: snapshot.runId, approvalType: 'execution', grantSubject },
     })
-    const originalReadRunOutcome = runStore.readRunOutcome.bind(runStore)
-    vi.spyOn(runStore, 'readRunOutcome')
+    const originalWriteTrustedFactOutcome = runStore.writeTrustedFactOutcome.bind(runStore)
+    vi.spyOn(runStore, 'writeTrustedFactOutcome')
       .mockRejectedValueOnce(new Error('simulated Run Store fsync failure'))
-      .mockImplementation(originalReadRunOutcome)
+      .mockImplementation(originalWriteTrustedFactOutcome)
 
     expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
       ok: false, error: { code: 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING' },
@@ -482,10 +481,9 @@ test('Runtime Host holds the Run lock across recover registration and outcome pe
       runId: snapshot.runId, installationDigest,
       approvalType: 'execution' as const, subjectDigest,
     }
-    const signedGrant = {
-      grantId: 'GRANT-RECOVERED-CHANGED', subject: grantSubject, subjectDigest,
-      approvalContext: { ...approvalBinding },
-    }
+    const signedGrant = signedExecutionGrant(
+      'GRANT-RECOVERED-CHANGED', grantSubject, subjectDigest, approvalBinding,
+    )
     const changeDigest = `sha256:${'3'.repeat(64)}`
     let interleavingError: unknown
     const recoverApproval = vi.fn(async () => {
@@ -496,7 +494,7 @@ test('Runtime Host holds the Run lock across recover registration and outcome pe
       return { grant: signedGrant as never, approvalBinding, sessionId: 'SESSION-RECOVER-CHANGED' }
     })
     const requestApproval = vi.fn()
-    const readRunOutcome = vi.spyOn(runStore, 'readRunOutcome')
+    const writeTrustedFactOutcome = vi.spyOn(runStore, 'writeTrustedFactOutcome')
     const host = new E2ERuntimeHost({
       installation: runtimeInstallation(), doctor: async () => { throw new Error('not used') },
       runStore, now: () => new Date('2026-07-17T00:00:00.000Z'),
@@ -514,7 +512,7 @@ test('Runtime Host holds the Run lock across recover registration and outcome pe
     })
     expect(interleavingError).toMatchObject({ code: 'E2E_RUNTIME_RUN_LOCKED' })
     expect(requestApproval).not.toHaveBeenCalled()
-    expect(readRunOutcome).toHaveBeenCalledOnce()
+    expect(writeTrustedFactOutcome).toHaveBeenCalledOnce()
     expect((await runStore.getRun(identity.digest, snapshot.runId))
       ?.requestResponses['APPROVE-RECOVER-CHANGED']).toBeDefined()
   } finally {
@@ -709,7 +707,9 @@ test('direct CLI reserves a stable finalization before WebAuthn and recovers aft
       runId: snapshot.runId, installationDigest,
       approvalType: 'execution' as const, subjectDigest,
     }
-    const signedGrant = { grantId: 'GRANT-CLI-RECOVER', subject: grantSubject, subjectDigest }
+    const signedGrant = signedExecutionGrant(
+      'GRANT-CLI-RECOVER', grantSubject, subjectDigest, approvalBinding,
+    )
     const finalize = vi.fn(async () => ({ grant: signedGrant as never, approvalBinding }))
     const recoverFirst = vi.fn(async (_input: unknown) => undefined)
     const recoverSecond = vi.fn(async (_input: unknown) => ({
@@ -792,7 +792,7 @@ test('direct CLI reserves a stable finalization before WebAuthn and recovers aft
   }
 })
 
-test('default rpc wiring starts Authority only for open-approval, writes URL to stderr, and closes it', async () => {
+test('default rpc wiring lazily starts Authority only after Host validation, writes URL to stderr, and closes it', async () => {
   const roots = await createRuntimeTestRoots()
   const store = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
   try {
@@ -807,6 +807,19 @@ test('default rpc wiring starts Authority only for open-approval, writes URL to 
     const lock = await store.acquireRunLock(identity.digest, snapshot.runId)
     try { await store.createRunOutcome(snapshot, 'SEED-CLI', seedDigest, { seeded: true }, lock) }
     finally { await lock.close() }
+    for (const [index, runId] of [
+      'RUN-CLEANUP-AUTHORITY', 'RUN-CLEANUP-BOTH', 'RUN-PARTIAL-STDOUT',
+    ].entries()) {
+      const cleanupSeedId = `SEED-CLI-CLEANUP-${index + 1}`
+      const cleanupSeedDigest = `sha256:${String(index + 1).repeat(64)}`
+      await store.beginRequest(cleanupSeedId, cleanupSeedDigest)
+      const cleanupLock = await store.acquireRunLock(identity.digest, runId)
+      try {
+        await store.createRunOutcome(
+          { ...snapshot, runId }, cleanupSeedId, cleanupSeedDigest, { seeded: true }, cleanupLock,
+        )
+      } finally { await cleanupLock.close() }
+    }
   } finally { await store.close() }
 
   const close = vi.fn(async () => undefined)
@@ -882,6 +895,28 @@ test('default rpc wiring starts Authority only for open-approval, writes URL to 
     )).toBe(0)
     expect(startAuthorityHost).not.toHaveBeenCalled()
 
+    const invalidExecuteStdout = captureWritable()
+    const invalidExecuteRequest = {
+      schemaVersion: '1.0.0', requestId: 'EXECUTE-INVALID-WORKFLOW',
+      client: { name: 'test', version: '1.0.0' }, command: 'execute-run',
+      projectRoot: roots.project, payload: { runId: 'RUN-1' },
+    }
+    expect(await runCli(
+      ['rpc'], Readable.from([JSON.stringify(invalidExecuteRequest)]),
+      invalidExecuteStdout.stream, captureWritable().stream,
+      {
+        homeDir: roots.home,
+        installRuntime: async () => { throw new Error('not used') },
+        uninstallRuntime: async () => { throw new Error('not used') },
+        inspectRuntimeInstallation: async () => runtimeInstallation(),
+        startAuthorityHost,
+      },
+    )).toBe(2)
+    expect(JSON.parse(invalidExecuteStdout.text())).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH' },
+    })
+    expect(startAuthorityHost).not.toHaveBeenCalled()
+
     for (const runStoreAlsoThrows of [false, true]) {
       const originalRunStoreClose = RuntimeRunStore.prototype.close
       const runStoreClose = vi.spyOn(RuntimeRunStore.prototype, 'close').mockImplementation(async function (this: RuntimeRunStore) {
@@ -893,6 +928,10 @@ test('default rpc wiring starts Authority only for open-approval, writes URL to 
       const cleanupRequest = {
         ...request,
         requestId: runStoreAlsoThrows ? 'APPROVE-CLEANUP-BOTH' : 'APPROVE-CLEANUP-AUTHORITY',
+        payload: {
+          ...request.payload,
+          runId: runStoreAlsoThrows ? 'RUN-CLEANUP-BOTH' : 'RUN-CLEANUP-AUTHORITY',
+        },
       }
       try {
         expect(await runCli(
@@ -946,7 +985,11 @@ test('default rpc wiring starts Authority only for open-approval, writes URL to 
     })
     partiallyRejectingStdout.on('error', () => undefined)
     expect(await runCli(
-      ['rpc'], Readable.from([JSON.stringify({ ...request, requestId: 'APPROVE-PARTIAL-STDOUT' })]),
+      ['rpc'], Readable.from([JSON.stringify({
+        ...request,
+        requestId: 'APPROVE-PARTIAL-STDOUT',
+        payload: { ...request.payload, runId: 'RUN-PARTIAL-STDOUT' },
+      })]),
       partiallyRejectingStdout, captureWritable().stream,
       {
         homeDir: roots.home,
@@ -1049,11 +1092,12 @@ test('default rpc production wiring starts a real Authority child and closes it 
 
 function runSnapshot(): RuntimeRunSnapshot {
   return {
-    schemaVersion: '1.0.0', runId: 'RUN-1', assetId: 'ASSET-1',
+    schemaVersion: '1.1.0', runId: 'RUN-1', assetId: 'ASSET-1',
     projectIdentityDigest: `sha256:${'1'.repeat(64)}`,
     runtimeInstallationDigest: installationDigest,
     workflow: { current: 'awaiting-scope-approval', sequence: 2, eventChainDigest: `sha256:${'2'.repeat(64)}` },
     artifactDigests: { 'prd-source': `sha256:${'3'.repeat(64)}`, scope: `sha256:${'4'.repeat(64)}` },
+    frozenArtifacts: {}, trustedExecutionFacts: {},
     requestResponses: {}, createdAt: '2026-07-16T00:00:00.000Z', updatedAt: '2026-07-16T00:00:00.000Z',
   }
 }
@@ -1070,6 +1114,56 @@ function executionGrantSubject(snapshot: RuntimeRunSnapshot) {
       actionId: 'ACTION-WS-1', origin: 'https://test.example.com', path: '/events',
       maxInboundMessages: 1, maxBytes: 1024,
     }],
+  }
+}
+
+function signedExecutionGrant(
+  grantId: string,
+  subject: ReturnType<typeof executionGrantSubject>,
+  subjectDigest: string,
+  binding: {
+    runId: string
+    installationDigest: string
+    approvalType: 'execution'
+    subjectDigest: string
+  },
+) {
+  const issuedAt = '2026-07-17T00:00:00.000Z'
+  const expiresAt = '2026-07-17T00:05:00.000Z'
+  const approverSubject = 'os-user:runtime-test'
+  const action = subject.actions[0]!
+  return {
+    grantId,
+    issuer: 'runtime-test-authority',
+    keyId: 'runtime-test-key',
+    proofScope: 'local-os-user' as const,
+    approver: { subject: approverSubject, roles: ['e2e-approver'] },
+    approvalContext: {
+      schemaVersion: '1.0.0' as const,
+      subject: approverSubject,
+      ...binding,
+      origin: 'http://localhost:42009',
+      issuedAt,
+      expiresAt,
+    },
+    subject,
+    subjectDigest,
+    issuedAt,
+    expiresAt,
+    capabilities: [{
+      capabilityId: `CAP-${grantId}`,
+      nonce: 'c'.repeat(64),
+      transport: 'websocket' as const,
+      effect: 'read' as const,
+      actionId: action.actionId,
+      origin: action.origin,
+      path: action.path,
+      maxInboundMessages: action.maxInboundMessages,
+      maxBytes: action.maxBytes,
+      maxUses: 1 as const,
+    }],
+    revocationSequence: 0,
+    signature: 's'.repeat(86),
   }
 }
 

@@ -50,6 +50,19 @@ export function mutateRunStoreSnapshotForTest(
   }
 }
 
+export function readRunStoreSnapshotForTest(homeDir: string): Record<string, unknown> {
+  const database = openRunStoreDatabase(homeDir)
+  try {
+    const row = database.prepare(
+      'SELECT snapshot FROM authority_snapshots WHERE namespace = ?',
+    ).get('e2e-runtime-runs/v1') as { snapshot?: unknown } | undefined
+    if (typeof row?.snapshot !== 'string') throw new Error('missing runtime snapshot')
+    return JSON.parse(row.snapshot) as Record<string, unknown>
+  } finally {
+    database.close()
+  }
+}
+
 function openRunStoreDatabase(homeDir: string): DatabaseSync {
   return new DatabaseSync(join(runtimeLayout(homeDir).state, 'runtime-runs.sqlite'))
 }

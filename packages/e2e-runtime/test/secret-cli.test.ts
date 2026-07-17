@@ -283,9 +283,9 @@ describe('repo-e2e secret provide', () => {
     await store.beginRequest('REQUEST-SEED', requestDigest)
     const lock = await store.acquireRunLock(identity.digest, 'RUN-BOUND')
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.0.0', runId: 'RUN-BOUND', assetId: 'ASSET-1',
+      schemaVersion: '1.1.0', runId: 'RUN-BOUND', assetId: 'ASSET-1',
       projectIdentityDigest: identity.digest, runtimeInstallationDigest: digest('b'),
-      workflow: createWorkflow(), artifactDigests: { 'prd-source': digest('c') },
+      workflow: createWorkflow(), artifactDigests: { 'prd-source': digest('c') }, frozenArtifacts: {}, trustedExecutionFacts: {},
       requestResponses: {}, createdAt: '2026-07-17T00:00:00.000Z',
       updatedAt: '2026-07-17T00:00:00.000Z',
     }
@@ -416,9 +416,9 @@ async function seedActiveCliRun(homeDir: string, projectRoot: string, runId: str
   try {
     await store.beginRequest(`SEED-${runId}`, requestDigest)
     await store.createRunOutcome({
-      schemaVersion: '1.0.0', runId, assetId: `ASSET-${runId}`,
+      schemaVersion: '1.1.0', runId, assetId: `ASSET-${runId}`,
       projectIdentityDigest: identity.digest, runtimeInstallationDigest: digest('6'),
-      workflow: createWorkflow(), artifactDigests: { 'prd-source': digest('5') },
+      workflow: createWorkflow(), artifactDigests: { 'prd-source': digest('5') }, frozenArtifacts: {}, trustedExecutionFacts: {},
       requestResponses: {}, createdAt: '2026-07-17T00:00:00.000Z',
       updatedAt: '2026-07-17T00:00:00.000Z',
     }, `SEED-${runId}`, requestDigest, { seeded: true }, lock)

@@ -136,6 +136,8 @@ process.on('message', async (incoming: unknown) => {
       writeAuthority: approvalAuthority,
       leaseAuthority: leaseAuthority.createExecutionClient(),
       gatewayAuthority: approvalAuthority,
+      readAuthority: approvalAuthority,
+      discoveryAuthority: approvalAuthority,
     })
     httpHandle = await startAuthenticatedRpcLoopbackServer(rpc)
     sendToParent({ type: 'ready', endpoint: httpHandle.endpoint, verifierMaterial: rpc.verifierMaterial })

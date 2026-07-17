@@ -65,6 +65,18 @@ describe('LocalApprovalAuthority discovery grants', () => {
       actionId: 'ACTION-PREFLIGHT', attemptId: 'ATTEMPT-PREFLIGHT',
     })
     expect(reservation).toMatchObject({ status: 'reserved', actionId: 'ACTION-PREFLIGHT' })
+    await expect(authority.reserveForSubject({
+      grant, currentSubject: subject(), capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: 'ACTION-PREFLIGHT', attemptId: 'ATTEMPT-PREFLIGHT',
+    })).resolves.toEqual(reservation)
+    await expect(authority.reserveForSubject({
+      grant, currentSubject: subject(), capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: 'ACTION-CHANGED', attemptId: 'ATTEMPT-PREFLIGHT',
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_DISCOVERY_RESERVATION_REPLAY_MISMATCH' })
+    await expect(authority.reserveForSubject({
+      grant, currentSubject: subject(), capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: 'ACTION-PREFLIGHT', attemptId: 'ATTEMPT-NEW',
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_CAPABILITY_EXHAUSTED' })
   })
 
   test('签发入口只读取一次 subject，Getter 不能在校验后换 target', async () => {
@@ -161,6 +173,21 @@ describe('LocalApprovalAuthority discovery grants', () => {
         role: 'auditor', ariaSignals: ['main:订单列表'],
       } },
     })
+    await expect(authority.completeDiscoveryPreflight({
+      grant: readyGrant, currentSubject: discovery,
+      reservationId: readyReservation.reservationId,
+      capabilityId: readyCapability.capabilityId,
+      outcome: { status: 'ready', observedIdentity: {
+        url: discovery.expectedPageIdentity.url, title: '订单', headings: ['订单列表'],
+        role: 'auditor', ariaSignals: ['main:订单列表'],
+      } },
+    })).resolves.toBe(readyDigest)
+    await expect(authority.completeDiscoveryPreflight({
+      grant: readyGrant, currentSubject: discovery,
+      reservationId: readyReservation.reservationId,
+      capabilityId: readyCapability.capabilityId,
+      outcome: { status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH' },
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_PREFLIGHT_RESERVATION_INVALID' })
     await expect(authority.issueReadGrant({
       subject: { ...readSubject(discovery, readyGrant.grantId, readyDigest), prdRevision: digest('changed-prd') },
       approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
@@ -185,5 +212,32 @@ describe('LocalApprovalAuthority discovery grants', () => {
       subject: changingRead, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
     })
     expect(readGrant.subject.prdRevision).toBe(discovery.prdRevision)
+  })
+
+  test('已完成 preflight 的精确恢复不受随后 grant 过期影响', async () => {
+    let now = new Date('2026-07-12T10:00:00.000Z')
+    const authority = LocalApprovalAuthority.create({
+      issuer: 'local-authority', keyId: 'discovery-key', now: () => now,
+    })
+    const discovery = subject()
+    const grant = await authority.issueDiscoveryGrant({
+      subject: discovery, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
+    })
+    const capability = grant.capabilities[0]!
+    const reservation = await authority.reserveForSubject({
+      grant, currentSubject: discovery, capabilityId: capability.capabilityId,
+      actionId: capability.actionId, attemptId: 'ATTEMPT-EXPIRY-RECOVERY',
+    })
+    const input = {
+      grant, currentSubject: discovery, reservationId: reservation.reservationId,
+      capabilityId: capability.capabilityId,
+      outcome: { status: 'ready' as const, observedIdentity: {
+        url: discovery.expectedPageIdentity.url, title: '订单', headings: ['订单列表'],
+        role: 'auditor', ariaSignals: ['main:订单列表'],
+      } },
+    }
+    const digest = await authority.completeDiscoveryPreflight(input)
+    now = new Date('2026-07-12T10:02:00.000Z')
+    await expect(authority.completeDiscoveryPreflight(input)).resolves.toBe(digest)
   })
 })

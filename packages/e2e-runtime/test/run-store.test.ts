@@ -1,4 +1,5 @@
-import { createWorkflow } from '@mutil-skills/e2e-engine'
+import { createWorkflow, transitionWorkflow } from '@mutil-skills/e2e-engine'
+import { canonicalizeJson, digestText } from '@mutil-skills/e2e-contracts'
 import { chmod, mkdir, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
@@ -6,6 +7,7 @@ import { createRuntimeTestRoots } from './fixtures.js'
 import {
   installRunStoreCommitAbortForTest,
   mutateRunStoreSnapshotForTest,
+  readRunStoreSnapshotForTest,
   removeRunStoreCommitAbortForTest,
 } from './run-store-harness.js'
 import {
@@ -64,7 +66,7 @@ describe('runtime run store', () => {
     const roots = await createRuntimeTestRoots()
     const store = await openStore(roots)
 
-    await expect(store.beginRequest('REQUEST-1', digest('a'))).resolves.toEqual({ kind: 'pending' })
+    await expect(store.beginRequest('REQUEST-1', digest('a'))).resolves.toEqual({ kind: 'reserved' })
     await expect(store.beginRequest('REQUEST-1', digest('b')))
       .rejects.toThrow(/E2E_RUNTIME_REQUEST_REPLAY_MISMATCH/)
     await expect(store.completeGlobalRequest('REQUEST-1', digest('a'), { ok: false }))
@@ -323,6 +325,172 @@ describe('runtime run store', () => {
     await expect(openStore(roots)).rejects.toThrow(/E2E_RUNTIME_JOURNAL_INTEGRITY_FAILED/)
   })
 
+  test('startup atomically migrates a valid legacy created Run and appends a durable migration journal row', async () => {
+    const roots = await createRuntimeTestRoots()
+    const setup = await openStore(roots)
+    await setup.beginRequest('REQUEST-CREATE-LEGACY', digest('a'))
+    const lock = await setup.acquireRunLock(digest('1'), 'RUN-1')
+    await setup.createRunOutcome(
+      runSnapshot(), 'REQUEST-CREATE-LEGACY', digest('a'), { ok: true }, lock,
+    )
+    await lock.close()
+    await setup.close()
+
+    const key = `${digest('1')}\0RUN-1`
+    mutateRunStoreSnapshotForTest(roots.home, (snapshot) => {
+      const runs = snapshot.runs as Record<string, Record<string, unknown>>
+      const run = runs[key]!
+      run.schemaVersion = '1.0.0'
+      delete run.frozenArtifacts
+      delete run.trustedExecutionFacts
+      delete run.runRevision
+      const legacyDigest = digestText('e2e-runtime-run-snapshot/v1', canonicalizeJson(run))
+      const journals = snapshot.journals as Record<string, Array<Record<string, unknown>>>
+      const runTail = journals[key]!.at(-1)!
+      ;(runTail.event as Record<string, unknown>).digest = legacyDigest
+      rechainJournal(journals[key]!)
+
+      const ledger = snapshot.globalLedger as {
+        entries: Record<string, { runOutcome?: { snapshotDigest: string } }>
+        journal: Array<Record<string, unknown>>
+      }
+      ledger.entries['REQUEST-CREATE-LEGACY']!.runOutcome!.snapshotDigest = legacyDigest
+      for (const row of ledger.journal) {
+        const event = row.event as Record<string, unknown>
+        if (event.kind === 'request-completed' && event.requestId === 'REQUEST-CREATE-LEGACY') {
+          ;(event.runOutcome as { snapshotDigest: string }).snapshotDigest = legacyDigest
+        }
+      }
+      rechainJournal(ledger.journal)
+    })
+
+    const migrated = await openStore(roots)
+    await expect(migrated.getRun(digest('1'), 'RUN-1')).resolves.toMatchObject({
+      schemaVersion: '1.1.0', runRevision: 0, frozenArtifacts: {}, trustedExecutionFacts: {},
+    })
+    await migrated.close()
+    const afterFirstOpen = readRunStoreSnapshotForTest(roots.home)
+    const firstRows = (afterFirstOpen.journals as Record<string, Array<Record<string, unknown>>>)[key]!
+    expect(firstRows.at(-1)?.event).toMatchObject({
+      kind: 'runtime-state-migrated', fromSchemaVersion: '1.0.0', toSchemaVersion: '1.1.0',
+    })
+
+    const reopened = await openStore(roots)
+    await reopened.close()
+    const afterSecondOpen = readRunStoreSnapshotForTest(roots.home)
+    const secondRows = (afterSecondOpen.journals as Record<string, Array<Record<string, unknown>>>)[key]!
+    expect(secondRows).toHaveLength(firstRows.length)
+  })
+
+  test('reopen has no side effect; explicit reconcile closes the exact running-real attempt and pending request', async () => {
+    const roots = await createRuntimeTestRoots()
+    let now = new Date('2026-07-17T00:00:00.000Z')
+    const setup = await RuntimeRunStore.open({
+      homeDir: roots.home, projectRoot: roots.project, now: () => now,
+    })
+    await setup.beginRequest('REQUEST-CREATE-STALE', digest('a'))
+    const createLock = await setup.acquireRunLock(digest('1'), 'RUN-1')
+    const compiled = {
+      ...runSnapshot(),
+      workflow: { current: 'compiled' as const, sequence: 9, eventChainDigest: digest('9') },
+    }
+    await setup.createRunOutcome(
+      compiled, 'REQUEST-CREATE-STALE', digest('a'), { ok: true }, createLock,
+    )
+    await createLock.close()
+    await setup.beginRequest('REQUEST-EXECUTE-STALE', digest('b'))
+    const executeLock = await setup.acquireRunLock(digest('1'), 'RUN-1')
+    await setup.beginExecutionAttempt({
+      projectIdentityDigest: digest('1'), runId: 'RUN-1',
+      requestId: 'REQUEST-EXECUTE-STALE', requestDigest: digest('b'),
+      startedAt: now.toISOString(), lock: executeLock,
+      toRunning: (snapshot) => ({ ...snapshot, workflow: transitionWorkflow({
+        state: snapshot.workflow, next: 'running-real', reason: 'test execution started',
+        timestamp: now.toISOString(), engineVersion: 'test',
+      }).state }),
+    })
+    await executeLock.close()
+    await setup.close()
+
+    now = new Date('2026-07-17T00:04:59.000Z')
+    const stillRunning = await RuntimeRunStore.open({
+      homeDir: roots.home, projectRoot: roots.project, now: () => now,
+    })
+    await expect(stillRunning.getRun(digest('1'), 'RUN-1'))
+      .resolves.toMatchObject({ workflow: { current: 'running-real' } })
+    await stillRunning.close()
+
+    now = new Date('2026-07-17T00:05:00.000Z')
+    const recovered = await RuntimeRunStore.open({
+      homeDir: roots.home, projectRoot: roots.project, now: () => now,
+    })
+    const competing = await RuntimeRunStore.open({
+      homeDir: roots.home, projectRoot: roots.project, now: () => now,
+    })
+    await expect(recovered.getRun(digest('1'), 'RUN-1'))
+      .resolves.toMatchObject({ workflow: { current: 'running-real' } })
+    const running = await recovered.getRun(digest('1'), 'RUN-1')
+    const attemptId = running?.executionAttempt?.attemptId
+    expect(attemptId).toMatch(/^ATTEMPT-/)
+    await expect(recovered.beginRequest('REQUEST-RECONCILE-STALE', digest('c')))
+      .resolves.toEqual({ kind: 'reserved' })
+    const competingLock = await competing.acquireRunLock(digest('1'), 'RUN-1')
+    await expect(recovered.reconcileExecutionAttempt({
+      projectIdentityDigest: digest('1'), runId: 'RUN-1', expectedAttemptId: attemptId!,
+      reconcileRequestId: 'REQUEST-RECONCILE-STALE', reconcileRequestDigest: digest('c'),
+      runtimeVersion: '0.0.0', installationDigest: digest('2'),
+      lock: competingLock,
+    })).rejects.toThrow(/E2E_RUNTIME_RUN_LOCKED/)
+    await expect(recovered.acquireRunLock(digest('1'), 'RUN-1'))
+      .rejects.toThrow(/E2E_RUNTIME_RUN_LOCKED/)
+    await competingLock.close()
+    const reconcileLock = await recovered.acquireRunLock(digest('1'), 'RUN-1')
+    await expect(recovered.reconcileExecutionAttempt({
+      projectIdentityDigest: digest('1'), runId: 'RUN-1', expectedAttemptId: attemptId!,
+      reconcileRequestId: 'REQUEST-RECONCILE-STALE', reconcileRequestDigest: digest('c'),
+      runtimeVersion: '0.0.0', installationDigest: digest('2'),
+      lock: reconcileLock,
+    })).resolves.toMatchObject({ attemptId, response: { ok: true } })
+    await reconcileLock.close()
+    const replayLock = await recovered.acquireRunLock(digest('1'), 'RUN-1')
+    await expect(recovered.reconcileExecutionAttempt({
+      projectIdentityDigest: digest('1'), runId: 'RUN-1', expectedAttemptId: attemptId!,
+      reconcileRequestId: 'REQUEST-RECONCILE-STALE', reconcileRequestDigest: digest('c'),
+      runtimeVersion: '0.0.0', installationDigest: digest('2'),
+      lock: replayLock,
+    })).resolves.toMatchObject({ attemptId, response: { ok: true } })
+    await replayLock.close()
+    await expect(recovered.getRun(digest('1'), 'RUN-1')).resolves.toMatchObject({
+      workflow: { current: 'safety-blocked' },
+      runRevision: 2,
+    })
+    await expect(recovered.getRun(digest('1'), 'RUN-1')).resolves.not.toHaveProperty('executionAttempt')
+    await expect(recovered.beginRequest('REQUEST-EXECUTE-STALE', digest('b'))).resolves.toMatchObject({
+      kind: 'replay', response: {
+        ok: false, error: {
+          code: 'E2E_RUNTIME_EXECUTION_ATTEMPT_STALE',
+          details: { attemptId: expect.stringMatching(/^ATTEMPT-/), reconciledAt: now.toISOString() },
+        },
+      },
+    })
+    await expect(recovered.beginRequest('REQUEST-RECONCILE-STALE', digest('c'))).resolves.toMatchObject({
+      kind: 'replay', response: { ok: true, result: { reconciledAttemptId: attemptId } },
+    })
+    await recovered.close()
+    const persisted = readRunStoreSnapshotForTest(roots.home)
+    const key = `${digest('1')}\0RUN-1`
+    const rows = (persisted.journals as Record<string, Array<Record<string, unknown>>>)[key]!
+    expect(rows.slice(-2).map((row) => row.event)).toEqual([
+      expect.objectContaining({
+        kind: 'stale-execution-attempt-reconciled', requestId: 'REQUEST-EXECUTE-STALE',
+      }),
+      expect.objectContaining({
+        kind: 'execution-reconcile-request-completed', requestId: 'REQUEST-RECONCILE-STALE',
+      }),
+    ])
+    await competing.close()
+  })
+
   test('startup rejects deleted global history retained by a Run response', async () => {
     const roots = await createRuntimeTestRoots()
     const store = await openStore(roots)
@@ -383,13 +551,15 @@ async function openStore(roots: { home: string; project: string }): Promise<Runt
 
 function runSnapshot(): RuntimeRunSnapshot {
   return {
-    schemaVersion: '1.0.0',
+    schemaVersion: '1.1.0',
     runId: 'RUN-1',
     assetId: 'ASSET-1',
     projectIdentityDigest: digest('1'),
     runtimeInstallationDigest: digest('2'),
     workflow: createWorkflow(),
     artifactDigests: { 'prd-source': digest('3') },
+    frozenArtifacts: {},
+    trustedExecutionFacts: {},
     requestResponses: {},
     createdAt: '2026-07-17T00:00:00.000Z',
     updatedAt: '2026-07-17T00:00:00.000Z',
@@ -398,4 +568,19 @@ function runSnapshot(): RuntimeRunSnapshot {
 
 function unchangedOutcome(snapshot: RuntimeRunSnapshot) {
   return { snapshot, response: { ok: true } }
+}
+
+function rechainJournal(rows: Array<Record<string, unknown>>): void {
+  let previousDigest = digest('0')
+  for (const [index, row] of rows.entries()) {
+    const eventDigest = digestText(
+      'e2e-runtime-journal-event/v1', canonicalizeJson(row.event),
+    )
+    const core = { sequence: index + 1, previousDigest, eventDigest }
+    row.sequence = core.sequence
+    row.previousDigest = core.previousDigest
+    row.eventDigest = core.eventDigest
+    row.rowDigest = digestText('e2e-runtime-journal-row/v1', canonicalizeJson(core))
+    previousDigest = row.rowDigest as string
+  }
 }

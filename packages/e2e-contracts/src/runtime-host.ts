@@ -84,6 +84,12 @@ const commandSchemas = [
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
+    command: z.literal('run-preflight'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema,
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
     command: z.literal('execute-run'),
     projectRoot: z.string().min(1),
     payload: RunIdPayloadSchema,

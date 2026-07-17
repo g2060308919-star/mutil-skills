@@ -18,6 +18,7 @@ describe('runtime layout', () => {
       versions: join(roots.home, '.mutil-skills', 'runtime', 'e2e', 'versions'),
       current: join(roots.home, '.mutil-skills', 'runtime', 'e2e', 'current.json'),
       installLock: join(roots.home, '.mutil-skills', 'runtime', 'e2e', 'install.lock'),
+      browserInstallLock: join(roots.home, '.mutil-skills', 'runtime', 'e2e', 'browser-install.lock'),
       bin: join(roots.home, '.mutil-skills', 'bin', 'repo-e2e'),
       state: join(roots.home, '.mutil-skills', 'e2e', 'state'),
       authority: join(roots.home, '.mutil-skills', 'e2e', 'authority'),

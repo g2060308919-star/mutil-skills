@@ -2,11 +2,20 @@ import {
   canonicalizeJson,
   canonicalGrantApprovalSubjectDigest,
   CanonicalApprovalContextSchema,
+  DiscoveryApprovalSubjectSchema,
+  ReadApprovalSubjectSchema,
+  SignedGrantSchema,
   WriteApprovalSubjectV2Schema,
   type AttemptExecutionContext,
   type CapabilityReservation,
   type GrantDecision,
   type SignedWriteGrant,
+  type SignedDiscoveryGrant,
+  type SignedReadGrant,
+  type SignedGrant,
+  type DiscoveryApprovalSubject,
+  type DiscoveryPreflightOutcome,
+  type ReadApprovalSubject,
   type WriteApprovalSubject,
 } from '@mutil-skills/e2e-contracts'
 import {
@@ -32,6 +41,11 @@ const GATEWAY_VERIFY_OPERATION = 'gateway.write.verifyForSubject.v2'
 const GATEWAY_RESERVE_OPERATION = 'gateway.write.reserveForSubject.v1'
 const GATEWAY_COMPLETE_OPERATION = 'gateway.write.complete.v1'
 const GATEWAY_UNKNOWN_OPERATION = 'gateway.write.markUnknown.v1'
+const DISCOVERY_RESERVE_OPERATION = 'discovery.reserveForSubject.v1'
+const DISCOVERY_COMPLETE_OPERATION = 'discovery.completePreflight.v1'
+const READ_RESERVE_OPERATION = 'read.reserveForSubject.v1'
+const READ_COMPLETE_OPERATION = 'read.complete.v1'
+const READ_UNKNOWN_OPERATION = 'read.markUnknown.v1'
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 
@@ -43,6 +57,28 @@ export interface AuthorityExecutionRpcHostDependencies {
     verifyTarget(leaseId: string, fencingToken: number, targetFingerprint: string): Promise<boolean>
   }
   gatewayAuthority?: GatewayWriteAuthorityRpcClient
+  readAuthority?: ReadAuthorityRpcClient
+  discoveryAuthority?: DiscoveryAuthorityRpcClient
+}
+
+export interface ReadAuthorityRpcClient {
+  reserveForSubject(input: {
+    grant: SignedReadGrant; currentSubject: ReadApprovalSubject
+    capabilityId: string; actionId: string; attemptId: string
+  }): Promise<CapabilityReservation>
+  complete(reservationId: string, outcomeDigest: string): Promise<void>
+  markUnknown(reservationId: string, observation: string): Promise<void>
+}
+
+export interface DiscoveryAuthorityRpcClient {
+  reserveForSubject(input: {
+    grant: SignedDiscoveryGrant; currentSubject: DiscoveryApprovalSubject
+    capabilityId: string; actionId: string; attemptId: string
+  }): Promise<CapabilityReservation>
+  completeDiscoveryPreflight(input: {
+    grant: SignedDiscoveryGrant; currentSubject: DiscoveryApprovalSubject
+    reservationId: string; capabilityId: string; outcome: DiscoveryPreflightOutcome
+  }): Promise<string>
 }
 
 export interface GatewayWriteAuthorityRpcClient {
@@ -73,6 +109,7 @@ export function registerAuthorityExecutionRpcOperations(
   rpc: AuthenticatedRpcServer,
   dependencies: AuthorityExecutionRpcHostDependencies,
 ): void {
+  const readReservationApprovalContexts = new Map<string, string>()
   rpc.registerOperation(WRITE_VERIFY_OPERATION, async (payload, rpcContext) => {
     const input = parseWriteVerifyInput(payload)
     const contextDecision = verifyRegisteredApprovalContext(input.grant, rpcContext)
@@ -112,6 +149,56 @@ export function registerAuthorityExecutionRpcOperations(
       return { markedUnknown: true }
     })
   }
+  if (dependencies.discoveryAuthority) {
+    rpc.registerOperation(DISCOVERY_RESERVE_OPERATION, async (payload, rpcContext) => {
+      const input = parseDiscoveryReserveInput(payload)
+      requireRegisteredApprovalContext(input.grant, rpcContext, 'discovery')
+      return parseCapabilityReservation(await dependencies.discoveryAuthority!.reserveForSubject(input), input)
+    })
+    rpc.registerOperation(DISCOVERY_COMPLETE_OPERATION, async (payload, rpcContext) => {
+      const input = parseDiscoveryCompleteInput(payload)
+      requireRegisteredApprovalContext(input.grant, rpcContext, 'discovery')
+      const preflightDigest = await dependencies.discoveryAuthority!.completeDiscoveryPreflight(input)
+      if (typeof preflightDigest !== 'string' || !DIGEST.test(preflightDigest)) {
+        throw executionRpcError('E2E_RPC_DISCOVERY_COMPLETE_RESULT_INVALID')
+      }
+      return { preflightDigest }
+    })
+  }
+  if (dependencies.readAuthority) {
+    rpc.registerOperation(READ_RESERVE_OPERATION, async (payload, rpcContext) => {
+      const input = parseReadReserveInput(payload)
+      requireRegisteredApprovalContext(input.grant, rpcContext, 'execution')
+      const reservation = parseCapabilityReservation(
+        await dependencies.readAuthority!.reserveForSubject(input), input,
+      )
+      const approvalContext = canonicalizeJson(input.grant.approvalContext)
+      const existing = readReservationApprovalContexts.get(reservation.reservationId)
+      if (existing !== undefined && existing !== approvalContext) {
+        throw executionRpcError('E2E_RPC_RESERVATION_CONTEXT_MISMATCH')
+      }
+      readReservationApprovalContexts.set(reservation.reservationId, approvalContext)
+      return reservation
+    })
+    rpc.registerOperation(READ_COMPLETE_OPERATION, async (payload, rpcContext) => {
+      const input = parseGatewayCompleteInput(payload)
+      const registered = registeredApprovalContext(rpcContext, 'execution')
+      if (readReservationApprovalContexts.get(input.reservationId) !== canonicalizeJson(registered)) {
+        throw executionRpcError('E2E_RPC_RESERVATION_CONTEXT_MISMATCH')
+      }
+      await dependencies.readAuthority!.complete(input.reservationId, input.outcomeDigest)
+      return { completed: true }
+    })
+    rpc.registerOperation(READ_UNKNOWN_OPERATION, async (payload, rpcContext) => {
+      const input = parseGatewayUnknownInput(payload)
+      const registered = registeredApprovalContext(rpcContext, 'execution')
+      if (readReservationApprovalContexts.get(input.reservationId) !== canonicalizeJson(registered)) {
+        throw executionRpcError('E2E_RPC_RESERVATION_CONTEXT_MISMATCH')
+      }
+      await dependencies.readAuthority!.markUnknown(input.reservationId, input.observation)
+      return { markedUnknown: true }
+    })
+  }
 }
 
 function verifyRegisteredApprovalContext(
@@ -135,6 +222,37 @@ function verifyRegisteredApprovalContext(
       reason: 'Grant approvalContext 与 RPC Host 注册的当前可信执行上下文不一致或已失效' }
   }
   return undefined
+}
+
+function requireRegisteredApprovalContext(
+  grant: SignedGrant,
+  rpcContext: AuthenticatedRpcOperationContext,
+  approvalType: 'discovery' | 'execution',
+): void {
+  const current = registeredApprovalContext(rpcContext, approvalType)
+  if (canonicalizeJson(current) !== canonicalizeJson(grant.approvalContext)
+    || current.subjectDigest !== grant.subjectDigest
+    || current.subject !== grant.approver.subject) {
+    throw executionRpcError('E2E_APPROVAL_CONTEXT_MISMATCH')
+  }
+}
+
+function registeredApprovalContext(
+  rpcContext: AuthenticatedRpcOperationContext,
+  approvalType: 'discovery' | 'execution',
+) {
+  const registration = rpcContext.registration
+  const candidate = isPlainObject(registration) && hasExactKeys(registration, ['approvalContext'])
+    ? CanonicalApprovalContextSchema.safeParse(registration.approvalContext)
+    : undefined
+  const current = candidate?.success ? candidate.data : undefined
+  const now = Date.parse(rpcContext.now)
+  if (!current || current.approvalType !== approvalType
+    || !Number.isFinite(now) || Date.parse(current.issuedAt) > now
+    || Date.parse(current.expiresAt) <= now) {
+    throw executionRpcError('E2E_APPROVAL_CONTEXT_MISMATCH')
+  }
+  return current
 }
 
 export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRpcClientOptions): {
@@ -186,6 +304,72 @@ export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRp
   return { writeApproval, lease, gatewayAuthority, destroy: () => rpc.destroy() }
 }
 
+export function createAuthorityReadRpcClient(
+  options: AuthorityExecutionRpcClientOptions,
+): ReadAuthorityRpcClient & { destroy(): void } {
+  parseRpcApprovalBinding(options.approvalBinding, 'execution')
+  const rpc = AuthenticatedRpcClient.create(options)
+  return Object.freeze({
+    async reserveForSubject(input: {
+      grant: SignedReadGrant; currentSubject: ReadApprovalSubject; capabilityId: string
+      actionId: string; attemptId: string
+    }) {
+      const parsed = parseReadReserveInput(input)
+      return parseCapabilityReservation(await rpc.call(READ_RESERVE_OPERATION, parsed), parsed)
+    },
+    async complete(reservationId: string, outcomeDigest: string) {
+      const input = parseGatewayCompleteInput({ reservationId, outcomeDigest })
+      parseAck(await rpc.call(READ_COMPLETE_OPERATION, input), 'completed', 'E2E_RPC_READ_COMPLETE_RESULT_INVALID')
+    },
+    async markUnknown(reservationId: string, observation: string) {
+      const input = parseGatewayUnknownInput({ reservationId, observation })
+      parseAck(await rpc.call(READ_UNKNOWN_OPERATION, input), 'markedUnknown',
+        'E2E_RPC_READ_UNKNOWN_RESULT_INVALID')
+    },
+    destroy: () => rpc.destroy(),
+  })
+}
+
+export function createAuthorityDiscoveryRpcClient(
+  options: AuthorityExecutionRpcClientOptions,
+): DiscoveryAuthorityRpcClient & { destroy(): void } {
+  parseRpcApprovalBinding(options.approvalBinding, 'discovery')
+  const rpc = AuthenticatedRpcClient.create(options)
+  return Object.freeze({
+    async reserveForSubject(input: {
+      grant: SignedDiscoveryGrant; currentSubject: DiscoveryApprovalSubject; capabilityId: string
+      actionId: string; attemptId: string
+    }) {
+      const parsed = parseDiscoveryReserveInput(input)
+      return parseCapabilityReservation(await rpc.call(DISCOVERY_RESERVE_OPERATION, parsed), parsed)
+    },
+    async completeDiscoveryPreflight(input: {
+      grant: SignedDiscoveryGrant; currentSubject: DiscoveryApprovalSubject
+      reservationId: string; capabilityId: string; outcome: DiscoveryPreflightOutcome
+    }) {
+      const parsed = parseDiscoveryCompleteInput(input)
+      const result = await rpc.call(DISCOVERY_COMPLETE_OPERATION, parsed)
+      if (!isPlainObject(result) || !hasExactKeys(result, ['preflightDigest'])
+        || typeof result.preflightDigest !== 'string' || !DIGEST.test(result.preflightDigest)) {
+        throw executionRpcError('E2E_RPC_DISCOVERY_COMPLETE_RESULT_INVALID')
+      }
+      return result.preflightDigest
+    },
+    destroy: () => rpc.destroy(),
+  })
+}
+
+function parseRpcApprovalBinding(
+  value: unknown,
+  approvalType: 'discovery' | 'execution',
+): ApprovalExecutionBinding {
+  try {
+    const binding = parseApprovalExecutionBinding(value)
+    if (binding.approvalType !== approvalType) throw new Error(`${approvalType} binding required`)
+    return binding
+  } catch { throw executionRpcError('E2E_RPC_APPROVAL_BINDING_INVALID') }
+}
+
 function parseExecutionRpcApprovalBinding(value: unknown): ApprovalExecutionBinding {
   try {
     const binding = parseApprovalExecutionBinding(value)
@@ -205,6 +389,88 @@ function parseWriteVerifyInput(value: unknown): {
   const grant = parseSignedWriteGrant(value.grant)
   if (!currentSubject.success || !grant) throw executionRpcError('E2E_RPC_WRITE_VERIFY_INPUT_INVALID')
   return { grant, currentSubject: currentSubject.data }
+}
+
+function parseReadReserveInput(value: unknown): {
+  grant: SignedReadGrant; currentSubject: ReadApprovalSubject
+  capabilityId: string; actionId: string; attemptId: string
+} {
+  if (!isPlainObject(value) || !hasExactKeys(
+    value, ['actionId', 'attemptId', 'capabilityId', 'currentSubject', 'grant'],
+  )) throw executionRpcError('E2E_RPC_READ_RESERVE_INPUT_INVALID')
+  const grant = SignedGrantSchema.safeParse(value.grant)
+  const subject = ReadApprovalSubjectSchema.safeParse(value.currentSubject)
+  if (!grant.success || !subject.success || !('caseDigest' in grant.data.subject)
+    || grant.data.approvalContext.approvalType !== 'execution'
+    || canonicalizeJson(grant.data.subject) !== canonicalizeJson(subject.data)
+    || typeof value.capabilityId !== 'string' || !SAFE_ID.test(value.capabilityId)
+    || typeof value.actionId !== 'string' || !SAFE_ID.test(value.actionId)
+    || typeof value.attemptId !== 'string' || !SAFE_ID.test(value.attemptId)) {
+    throw executionRpcError('E2E_RPC_READ_RESERVE_INPUT_INVALID')
+  }
+  return { grant: grant.data as SignedReadGrant, currentSubject: subject.data,
+    capabilityId: value.capabilityId, actionId: value.actionId, attemptId: value.attemptId }
+}
+
+function parseDiscoveryReserveInput(value: unknown): {
+  grant: SignedDiscoveryGrant; currentSubject: DiscoveryApprovalSubject
+  capabilityId: string; actionId: string; attemptId: string
+} {
+  if (!isPlainObject(value) || !hasExactKeys(
+    value, ['actionId', 'attemptId', 'capabilityId', 'currentSubject', 'grant'],
+  )) throw executionRpcError('E2E_RPC_DISCOVERY_RESERVE_INPUT_INVALID')
+  const grant = SignedGrantSchema.safeParse(value.grant)
+  const subject = DiscoveryApprovalSubjectSchema.safeParse(value.currentSubject)
+  if (!grant.success || !subject.success || !('expectedPageIdentity' in grant.data.subject)
+    || grant.data.approvalContext.approvalType !== 'discovery'
+    || canonicalizeJson(grant.data.subject) !== canonicalizeJson(subject.data)
+    || typeof value.capabilityId !== 'string' || !SAFE_ID.test(value.capabilityId)
+    || typeof value.actionId !== 'string' || !SAFE_ID.test(value.actionId)
+    || typeof value.attemptId !== 'string' || !SAFE_ID.test(value.attemptId)) {
+    throw executionRpcError('E2E_RPC_DISCOVERY_RESERVE_INPUT_INVALID')
+  }
+  return { grant: grant.data as SignedDiscoveryGrant, currentSubject: subject.data,
+    capabilityId: value.capabilityId, actionId: value.actionId, attemptId: value.attemptId }
+}
+
+function parseDiscoveryCompleteInput(value: unknown): {
+  grant: SignedDiscoveryGrant; currentSubject: DiscoveryApprovalSubject
+  reservationId: string; capabilityId: string; outcome: DiscoveryPreflightOutcome
+} {
+  if (!isPlainObject(value) || !hasExactKeys(
+    value, ['capabilityId', 'currentSubject', 'grant', 'outcome', 'reservationId'],
+  )) throw executionRpcError('E2E_RPC_DISCOVERY_COMPLETE_INPUT_INVALID')
+  const base = parseDiscoveryReserveInput({
+    grant: value.grant, currentSubject: value.currentSubject,
+    capabilityId: value.capabilityId, actionId: 'PREFLIGHT-COMPLETE', attemptId: 'PREFLIGHT-COMPLETE',
+  })
+  const outcome = parseDiscoveryOutcome(value.outcome)
+  if (!outcome || typeof value.reservationId !== 'string' || !SAFE_ID.test(value.reservationId)) {
+    throw executionRpcError('E2E_RPC_DISCOVERY_COMPLETE_INPUT_INVALID')
+  }
+  return { grant: base.grant, currentSubject: base.currentSubject,
+    capabilityId: base.capabilityId, reservationId: value.reservationId, outcome }
+}
+
+function parseDiscoveryOutcome(value: unknown): DiscoveryPreflightOutcome | undefined {
+  if (!isPlainObject(value) || typeof value.status !== 'string'
+    || !['ready', 'input-blocked', 'environment-blocked', 'safety-blocked'].includes(value.status)) return undefined
+  const allowedKeys = ['status', ...(Object.hasOwn(value, 'reasonCode') ? ['reasonCode'] : []),
+    ...(Object.hasOwn(value, 'observedIdentity') ? ['observedIdentity'] : [])]
+  if (!hasExactKeys(value, allowedKeys)
+    || (Object.hasOwn(value, 'reasonCode') && (typeof value.reasonCode !== 'string' || !SAFE_ID.test(value.reasonCode)))) return undefined
+  if (Object.hasOwn(value, 'observedIdentity')) {
+    const identity = value.observedIdentity
+    if (!isPlainObject(identity)) return undefined
+    const keys = ['headings', 'title', 'url', ...(Object.hasOwn(identity, 'role') ? ['role'] : []),
+      ...(Object.hasOwn(identity, 'ariaSignals') ? ['ariaSignals'] : [])]
+    if (!hasExactKeys(identity, keys) || typeof identity.url !== 'string' || typeof identity.title !== 'string'
+      || !Array.isArray(identity.headings) || !identity.headings.every((item) => typeof item === 'string')
+      || (Object.hasOwn(identity, 'role') && typeof identity.role !== 'string')
+      || (Object.hasOwn(identity, 'ariaSignals') && (!Array.isArray(identity.ariaSignals)
+        || !identity.ariaSignals.every((item) => typeof item === 'string')))) return undefined
+  }
+  return structuredClone(value) as unknown as DiscoveryPreflightOutcome
 }
 
 function parseSignedWriteGrant(value: unknown): SignedWriteGrant | undefined {
@@ -319,7 +585,7 @@ function parseAttemptContext(value: unknown): AttemptExecutionContext | undefine
 }
 
 function parseCapabilityReservation(value: unknown, expected: {
-  grant: SignedWriteGrant; capabilityId: string; actionId: string; attemptId: string
+  grant: SignedGrant; capabilityId: string; actionId: string; attemptId: string
   attemptContext?: AttemptExecutionContext
 }): CapabilityReservation {
   if (!isPlainObject(value)) throw executionRpcError('E2E_RPC_GATEWAY_RESERVATION_RESULT_INVALID')

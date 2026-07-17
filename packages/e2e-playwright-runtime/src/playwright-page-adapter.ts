@@ -1,4 +1,5 @@
 import type { Page } from 'playwright'
+import { E2EError, canonicalizeJson } from '@mutil-skills/e2e-contracts'
 import type { BrowserPageAdapter, ObservedPageIdentity } from './read-only-runner.js'
 
 export class PlaywrightPageAdapter implements BrowserPageAdapter {
@@ -40,12 +41,27 @@ export class PlaywrightPageAdapter implements BrowserPageAdapter {
   }
 
   async screenshot(): Promise<Uint8Array> {
-    return this.page.screenshot({ fullPage: true })
+    const bytes = await this.page.screenshot({ fullPage: true })
+    if (bytes.byteLength > 16 * 1024 * 1024) throw evidenceLimit('screenshot')
+    return bytes
   }
 
   async domSnapshot(): Promise<string> {
-    const main = this.page.locator('main')
-    if (await main.count() > 0) return main.first().evaluate((element) => element.outerHTML)
-    return this.page.locator('body').evaluate((element) => element.outerHTML)
+    const session = await this.page.context().newCDPSession(this.page)
+    try {
+      const snapshot = await session.send('DOMSnapshot.captureSnapshot', {
+        computedStyles: [], includeDOMRects: false, includePaintOrder: false,
+      })
+      const serialized = canonicalizeJson(snapshot)
+      if (Buffer.byteLength(serialized, 'utf8') > 4 * 1024 * 1024) throw evidenceLimit('dom')
+      return serialized
+    } finally { await session.detach() }
   }
+}
+
+function evidenceLimit(kind: string): E2EError {
+  return new E2EError({
+    code: 'E2E_RUNTIME_EVIDENCE_SIZE_LIMIT', category: 'evidence',
+    message: `E2E_RUNTIME_EVIDENCE_SIZE_LIMIT: ${kind} 证据超过固定上限`, retryable: false,
+  })
 }

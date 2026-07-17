@@ -113,6 +113,108 @@ describe('runReadOnlyCase', () => {
     expect(page.navigations).toEqual([])
   })
 
+  test('后续 capability 保留失败时补偿完成此前 reservation，且不开始浏览器动作', async () => {
+    const page = fakePage()
+    const authorized = readAuthorizationInput()
+    let reserveCalls = 0
+    const completed: Array<{ reservationId: string; outcomeDigest: string }> = []
+    authorized.authorization.authority = {
+      async reserveForSubject(input) {
+        reserveCalls += 1
+        if (reserveCalls === 2) throw new E2EError({
+          code: 'E2E_APPROVAL_CAPABILITY_EXHAUSTED', category: 'decision',
+          message: 'capability exhausted', retryable: false,
+        })
+        return {
+          reservationId: `RES-${input.capabilityId}`, grantId: authorized.authorization.grant.grantId,
+          capabilityId: input.capabilityId, actionId: input.actionId, attemptId: input.attemptId,
+          status: 'reserved' as const, reservedAt: '2026-07-12T00:00:00.000Z',
+        }
+      },
+      async complete(reservationId, outcomeDigest) { completed.push({ reservationId, outcomeDigest }) },
+      async markUnknown() {},
+    }
+    const result = await runReadOnlyCase({
+      caseId: 'CASE-READ-1', actionId: 'ACTION-READ-1', url: 'https://test.example.com/orders',
+      expectedIdentity: { title: '订单', heading: '订单列表' }, expectedText: '待审核',
+      runtime: { sandboxHealthy: true, gatewayConnected: true }, ...authorized,
+      gatewayAudit: { received: 0, forwarded: 0, blocked: 0, byIntent: {} }, page,
+    })
+
+    expect(result).toMatchObject({
+      status: 'safety-blocked', reasonCode: 'E2E_APPROVAL_CAPABILITY_EXHAUSTED',
+    })
+    expect(completed).toEqual([{
+      reservationId: 'RES-CAP-READ-1', outcomeDigest: expect.stringMatching(/^sha256:/),
+    }])
+    expect(page.navigations).toEqual([])
+  })
+
+  test('部分 reservation 补偿失败时升级为专用安全阻塞', async () => {
+    const page = fakePage()
+    const authorized = readAuthorizationInput()
+    let reserveCalls = 0
+    authorized.authorization.authority = {
+      async reserveForSubject(input) {
+        reserveCalls += 1
+        if (reserveCalls === 2) throw new Error('reserve failed')
+        return {
+          reservationId: `RES-${input.capabilityId}`, grantId: authorized.authorization.grant.grantId,
+          capabilityId: input.capabilityId, actionId: input.actionId, attemptId: input.attemptId,
+          status: 'reserved' as const, reservedAt: '2026-07-12T00:00:00.000Z',
+        }
+      },
+      async complete() { throw new Error('compensation failed') },
+      async markUnknown() {},
+    }
+    const result = await runReadOnlyCase({
+      caseId: 'CASE-READ-1', actionId: 'ACTION-READ-1', url: 'https://test.example.com/orders',
+      expectedIdentity: { title: '订单', heading: '订单列表' }, expectedText: '待审核',
+      runtime: { sandboxHealthy: true, gatewayConnected: true }, ...authorized,
+      gatewayAudit: { received: 0, forwarded: 0, blocked: 0, byIntent: {} }, page,
+    })
+
+    expect(result).toMatchObject({
+      status: 'safety-blocked', reasonCode: 'E2E_RUNTIME_READ_RESERVATION_COMPENSATION_FAILED',
+      reservationIds: ['RES-CAP-READ-1'], outcomeDigest: expect.stringMatching(/^sha256:/),
+    })
+    expect(page.navigations).toEqual([])
+  })
+
+  test('complete 中途失败时把失败项及剩余项全部标为 unknown，并保留完整 reservationIds', async () => {
+    const page = fakePage()
+    const authorized = readAuthorizationInput()
+    let completeCalls = 0
+    const unknown: string[] = []
+    authorized.authorization.authority = {
+      async reserveForSubject(input) {
+        return {
+          reservationId: `RES-${input.capabilityId}`, grantId: authorized.authorization.grant.grantId,
+          capabilityId: input.capabilityId, actionId: input.actionId, attemptId: input.attemptId,
+          status: 'reserved' as const, reservedAt: '2026-07-12T00:00:00.000Z',
+        }
+      },
+      async complete() {
+        completeCalls += 1
+        if (completeCalls === 2) throw new Error('complete failed')
+      },
+      async markUnknown(reservationId) { unknown.push(reservationId) },
+    }
+    const result = await runReadOnlyCase({
+      caseId: 'CASE-READ-1', actionId: 'ACTION-READ-1', url: 'https://test.example.com/orders',
+      expectedIdentity: { title: '订单', heading: '订单列表' }, expectedText: '待审核',
+      runtime: { sandboxHealthy: true, gatewayConnected: true }, ...authorized,
+      gatewayAudit: { received: 1, forwarded: 1, blocked: 0, byIntent: {} }, page,
+    })
+
+    expect(result).toMatchObject({
+      status: 'safety-blocked', reasonCode: 'E2E_RUNTIME_READ_RESERVATION_FINALIZE_FAILED',
+      reservationIds: ['RES-CAP-READ-1', 'RES-CAP-READ-2', 'RES-CAP-READ-3'],
+      outcomeDigest: expect.stringMatching(/^sha256:/),
+    })
+    expect(unknown).toEqual(['RES-CAP-READ-2', 'RES-CAP-READ-3'])
+  })
+
   test('records page identity, actual result, and minimum evidence for a passing case', async () => {
     const page = fakePage()
     const result = await runReadOnlyCase({
@@ -213,6 +315,7 @@ function readAuthorizationInput(actionId = 'ACTION-READ-1'): {
         attemptId: string; status: 'reserved'; reservedAt: string
       }>
       complete(reservationId: string, outcomeDigest: string): Promise<void>
+      markUnknown(reservationId: string, observation: string): Promise<void>
     }
   }
   attemptId: string
@@ -258,6 +361,7 @@ function readAuthorizationInput(actionId = 'ACTION-READ-1'): {
           }
         },
         async complete() {},
+        async markUnknown() {},
       },
     },
     attemptId: 'ATTEMPT-READ-1',

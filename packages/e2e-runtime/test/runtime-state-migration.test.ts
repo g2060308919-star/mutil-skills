@@ -6,13 +6,16 @@ import { migrateRuntimeRunSnapshot } from '../src/runtime-state-migration.js'
 
 function currentSnapshot(): RuntimeRunSnapshot {
   return {
-    schemaVersion: '1.0.0',
+    schemaVersion: '1.1.0',
     runId: 'RUN-1',
     assetId: 'ASSET-1',
     projectIdentityDigest: `sha256:${'a'.repeat(64)}`,
     runtimeInstallationDigest: `sha256:${'b'.repeat(64)}`,
+    runRevision: 0,
     workflow: createWorkflow(),
     artifactDigests: {},
+    frozenArtifacts: {},
+    trustedExecutionFacts: {},
     requestResponses: {},
     createdAt: '2026-07-17T00:00:00.000Z',
     updatedAt: '2026-07-17T00:00:00.000Z',
@@ -28,7 +31,23 @@ describe('runtime state migration', () => {
     expect(migrated).not.toBe(snapshot)
   })
 
-  test.each(['1.1.0', '2.0.0', 'invalid'])(
+  test('explicitly migrates the previous same-major snapshot without inventing artifacts', () => {
+    const current = currentSnapshot()
+    const legacy = {
+      ...current,
+      schemaVersion: '1.0.0',
+    } as Record<string, unknown>
+    delete legacy.frozenArtifacts
+    delete legacy.trustedExecutionFacts
+
+    expect(migrateRuntimeRunSnapshot(legacy)).toEqual({
+      ...current,
+      frozenArtifacts: {},
+      trustedExecutionFacts: {},
+    })
+  })
+
+  test.each(['1.2.0', '2.0.0', 'invalid'])(
     'blocks unsupported snapshot version %s instead of guessing a migration',
     (schemaVersion) => {
       expect(() => migrateRuntimeRunSnapshot({ ...currentSnapshot(), schemaVersion }))
