@@ -101,6 +101,46 @@ test('Runtime Authority adapter sends only the four provable fields and rejects 
   await host.close()
 })
 
+test('Runtime Authority adapter strictly parses finalization acknowledgements before child IPC', async () => {
+  const acknowledgeFinalization = vi.fn(async () => undefined)
+  const host = new RuntimeAuthorityHost({
+    installationDigest,
+    processHandle: {
+      enrollIdentity: vi.fn(), openApprovalSession: vi.fn(), waitForSession: vi.fn(),
+      acknowledgeFinalization, close: vi.fn(async () => undefined),
+    },
+  })
+  const acknowledgement = {
+    finalizationId: 'FINALIZE-STRICT-1', requestDigest: `sha256:${'d'.repeat(64)}`,
+    grantId: 'GRANT-STRICT-1',
+    approvalBinding: {
+      runId: 'RUN-1', installationDigest, approvalType: 'execution' as const,
+      subjectDigest: `sha256:${'e'.repeat(64)}`,
+    },
+  }
+
+  await expect(host.acknowledgeFinalization({ ...acknowledgement, injected: true } as never))
+    .rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_INVALID' })
+  await expect(host.acknowledgeFinalization({
+    ...acknowledgement,
+    approvalBinding: { ...acknowledgement.approvalBinding, rebound: true },
+  } as never)).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_INVALID' })
+  expect(acknowledgeFinalization).not.toHaveBeenCalled()
+  await host.close()
+
+  const hostWithoutAckTransport = new RuntimeAuthorityHost({
+    installationDigest,
+    processHandle: {
+      enrollIdentity: vi.fn(), openApprovalSession: vi.fn(), waitForSession: vi.fn(),
+      close: vi.fn(async () => undefined),
+    },
+  })
+  await expect(hostWithoutAckTransport.acknowledgeFinalization({
+    ...acknowledgement, injected: true,
+  } as never)).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_INVALID' })
+  await hostWithoutAckTransport.close()
+})
+
 test('loads approval assets only from this Runtime package and verifies the pinned bundle', async () => {
   const assets = await loadRuntimeApprovalAssets()
   const approvalJavaScript = Buffer.from(assets.approvalJavaScript).toString()

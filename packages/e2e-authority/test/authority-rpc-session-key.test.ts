@@ -19,3 +19,23 @@ test('zeroizes the decoded child session key when client registration throws', (
   expect(observedKey).toBeDefined()
   expect([...observedKey!]).toEqual(new Array(32).fill(0))
 })
+
+test.each([
+  Buffer.alloc(31, 7).toString('base64url'),
+  `${Buffer.alloc(32, 7).toString('base64url')}=`,
+])('zeroizes temporary decoded bytes when the child session key is invalid', (invalidKey) => {
+  const fill = vi.spyOn(Buffer.prototype, 'fill')
+  try {
+    const config = {
+      rpc: { clientId: 'runner' },
+      sessionKeyBase64Url: invalidKey,
+    }
+
+    expect(() => registerAuthenticatedRpcClientFromConfig({ registerClient: vi.fn() }, config))
+      .toThrow('E2E_RPC_HOST_KEY_INVALID')
+    expect(fill.mock.instances.some((bytes) => [31, 32].includes(bytes.byteLength)
+      && [...bytes].every((byte) => byte === 0))).toBe(true)
+  } finally {
+    fill.mockRestore()
+  }
+})

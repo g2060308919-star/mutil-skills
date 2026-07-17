@@ -52,18 +52,29 @@ const CanonicalPayloadSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('binary'), digest: DigestSchema }).strict(),
 ])
 
-export const WriteHttpIntentSchema = z.object({
-  intentId: SafeIdSchema,
-  method: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Z-]{1,32}$/),
+const WriteHttpIntentTailShape = {
   canonicalOrigin: CanonicalOriginSchema,
   exactPath: ExactPathSchema,
   query: z.array(z.tuple([QueryPartSchema, QueryPartSchema])).max(1_000),
   payload: CanonicalPayloadSchema, targetFingerprint: DigestSchema,
   maxRequests: z.number().int().positive().max(1_000),
   expectedOrder: z.number().int().positive().max(100_000),
+}
+
+/** Historical Write intent accepted by Authority snapshot 2.3 and earlier. */
+export const LegacyWriteHttpIntentV23Schema = z.object({
+  intentId: SafeIdSchema,
+  method: z.string().min(1).max(32),
+  ...WriteHttpIntentTailShape,
 }).strict()
 
-export const WriteApprovalSubjectV2Schema = z.object({
+export const WriteHttpIntentSchema = z.object({
+  intentId: SafeIdSchema,
+  method: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Z-]{1,32}$/),
+  ...WriteHttpIntentTailShape,
+}).strict()
+
+const WriteApprovalSubjectV2Shape = {
   schemaVersion: z.literal('2.0.0'), assetId: AssetIdSchema, prdRevision: DigestSchema,
   executionDigest: DigestSchema, scopeDigest: DigestSchema, requirementModelDigest: DigestSchema,
   coveragePolicyDigest: DigestSchema, universeDigest: DigestSchema, caseDigest: DigestSchema,
@@ -71,9 +82,26 @@ export const WriteApprovalSubjectV2Schema = z.object({
   runBundleProjectionDigest: DigestSchema, environment: z.enum(['local', 'test', 'staging']),
   baseOrigin: CanonicalOriginSchema, actor: SafeIdSchema,
   discoveryGrantId: SafeIdSchema, preflightDigest: DigestSchema,
+}
+
+const WriteActionShape = {
+  actionId: SafeIdSchema, effect: z.literal('reversible-write'), dataLeaseId: SafeIdSchema,
+  fencingToken: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), cleanupPlanDigest: DigestSchema,
+}
+
+/** Historical Write subject accepted by Authority snapshot 2.3 and earlier. */
+export const LegacyWriteApprovalSubjectV23Schema = z.object({
+  ...WriteApprovalSubjectV2Shape,
   actions: z.array(z.object({
-    actionId: SafeIdSchema, effect: z.literal('reversible-write'), dataLeaseId: SafeIdSchema,
-    fencingToken: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), cleanupPlanDigest: DigestSchema,
+    ...WriteActionShape,
+    requests: z.array(LegacyWriteHttpIntentV23Schema).min(1).max(1_000),
+  }).strict()).min(1).max(100_000),
+}).strict()
+
+export const WriteApprovalSubjectV2Schema = z.object({
+  ...WriteApprovalSubjectV2Shape,
+  actions: z.array(z.object({
+    ...WriteActionShape,
     requests: z.array(WriteHttpIntentSchema).min(1).max(1_000),
   }).strict()).min(1).max(100_000),
 }).strict()

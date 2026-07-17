@@ -23,6 +23,7 @@ import {
   type AuthorityExecutionHostConfig as HostConfig,
 } from './authority-execution-rpc-host-ipc.js'
 import {
+  ApprovalFinalizationAcknowledgementSchema,
   ApprovalGrantSubjectSchema,
   canonicalGrantApprovalSubjectDigest,
   canonicalGrantApprovalType,
@@ -345,19 +346,11 @@ async function handleAcknowledgeFinalization(message: Record<string, any>): Prom
   const requestId = parseControlRequestId(message)
   if (requestId === undefined) return
   try {
-    if (!isObject(message.input)
-      || Object.keys(message.input).sort().join('\0')
-        !== ['approvalBinding', 'finalizationId', 'grantId', 'requestDigest'].join('\0')
-      || typeof message.input.finalizationId !== 'string'
-      || typeof message.input.requestDigest !== 'string'
-      || typeof message.input.grantId !== 'string'
-      || !approvalAuthority) throw rpcHostError('E2E_APPROVAL_FINALIZATION_INVALID')
-    await approvalAuthority.acknowledgeFinalizedGrant({
-      finalizationId: message.input.finalizationId,
-      requestDigest: message.input.requestDigest,
-      grantId: message.input.grantId,
-      approvalBinding: parseApprovalExecutionBinding(message.input.approvalBinding),
-    })
+    const acknowledgement = ApprovalFinalizationAcknowledgementSchema.safeParse(message.input)
+    if (!acknowledgement.success || !approvalAuthority) {
+      throw rpcHostError('E2E_APPROVAL_FINALIZATION_INVALID')
+    }
+    await approvalAuthority.acknowledgeFinalizedGrant(acknowledgement.data)
     sendToParent({ type: 'finalization-acknowledged', requestId, result: { acknowledged: true } })
   } catch (error) {
     sendToParent({ type: 'control-error', requestId, code: safeCode(error) })

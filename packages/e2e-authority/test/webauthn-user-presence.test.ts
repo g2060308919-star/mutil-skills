@@ -470,6 +470,9 @@ describe('WebAuthn user presence authority', () => {
         grant: { ...grant, injected: true } as never, approvalBinding,
       })).rejects.toMatchObject({ code: 'E2E_APPROVAL_GRANT_INVALID' })
       await expect(third.acknowledgeFinalizedGrant({
+        finalizationId, requestDigest, grantId: grant.grantId, approvalBinding, injected: true,
+      } as never)).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_INVALID' })
+      await expect(third.acknowledgeFinalizedGrant({
         finalizationId, requestDigest, grantId: 'GRANT-REBOUND', approvalBinding,
       })).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_MISMATCH' })
       await expect(third.acknowledgeFinalizedGrant({

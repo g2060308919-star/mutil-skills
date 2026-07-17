@@ -5,15 +5,17 @@ import {
   type WebAuthnApprovalType,
 } from '@mutil-skills/e2e-authority'
 import {
+  ApprovalFinalizationAcknowledgementSchema,
   canonicalizeJson,
   canonicalGrantApprovalSubjectDigest,
   canonicalGrantApprovalType,
   digestText,
   E2EError,
+  type ApprovalExecutionBinding,
+  type ApprovalFinalizationAcknowledgement,
   type ApprovalGrantSubject,
   type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
-import type { ApprovalExecutionBinding } from '@mutil-skills/e2e-authority'
 import { constants } from 'node:fs'
 import { lstat, open, realpath, type FileHandle } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
@@ -148,15 +150,14 @@ export class RuntimeAuthorityHost {
     catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
   }
 
-  async acknowledgeFinalization(input: {
-    finalizationId: string
-    requestDigest: string
-    grantId: string
-    approvalBinding: ApprovalExecutionBinding
-  }): Promise<void> {
+  async acknowledgeFinalization(input: ApprovalFinalizationAcknowledgement): Promise<void> {
     this.#requireOpen()
+    const parsed = ApprovalFinalizationAcknowledgementSchema.safeParse(input)
+    if (!parsed.success || parsed.data.approvalBinding.installationDigest !== this.#installationDigest) {
+      throw authorityHostError('E2E_APPROVAL_FINALIZATION_INVALID')
+    }
     if (!this.#process.acknowledgeFinalization) return
-    try { await this.#process.acknowledgeFinalization(input) }
+    try { await this.#process.acknowledgeFinalization(parsed.data) }
     catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
   }
 

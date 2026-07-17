@@ -7,8 +7,9 @@ import { createDecipheriv, createPrivateKey, sign } from 'node:crypto'
 import {
   canonicalGrantApprovalSubjectDigest,
   canonicalizeJson,
+  digestCanonicalGrantApprovalSubject,
   digestText,
-  type WriteApprovalSubject,
+  type WriteApprovalSubjectV2,
 } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, LocalLeaseAuthority, SqliteSnapshotStore } from '../src/index.js'
 import { testApprovalReceipt } from './approval-authority.fixture.js'
@@ -44,13 +45,70 @@ function convertToRealLegacySnapshot(snapshot: Record<string, any>, encryptionKe
   } finally { plaintext.fill(0) }
 }
 
+function resignSnapshotGrant(
+  snapshot: Record<string, any>, encryptionKey: Buffer, grant: Record<string, any>,
+): void {
+  const encrypted = snapshot.privateKeys.primary
+  const decipher = createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(encrypted.iv, 'base64'))
+  decipher.setAAD(Buffer.from('e2e-authority-private-key/v1:primary'))
+  decipher.setAuthTag(Buffer.from(encrypted.authTag, 'base64'))
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(encrypted.ciphertext, 'base64')),
+    decipher.final(),
+  ])
+  try {
+    const privateKey = createPrivateKey({ key: plaintext, type: 'pkcs8', format: 'der' })
+    const { signature: _signature, ...payload } = grant
+    grant.signature = sign(null, Buffer.from(canonicalizeJson(payload)), privateKey).toString('base64url')
+  } finally { plaintext.fill(0) }
+}
+
+function convertWriteFinalizationToRealV23(
+  snapshot: Record<string, any>, encryptionKey: Buffer, finalizationId: string, method: string,
+): {
+  grantId: string
+  grant: Record<string, any>
+  subject: Record<string, any>
+  approvalBinding: Record<string, any>
+} {
+  const finalization = new Map(snapshot.grantFinalizations).get(finalizationId) as Record<string, any>
+  const grant = new Map(snapshot.grants).get(finalization.grantId) as Record<string, any>
+  grant.subject.actions[0].requests[0].method = method
+  grant.capabilities[0].requests[0].method = method
+  finalization.subject.actions[0].requests[0].method = method
+  const subjectDigest = digestCanonicalGrantApprovalSubject('execution', grant.subject)
+  grant.subjectDigest = subjectDigest
+  grant.approvalContext.subjectDigest = subjectDigest
+  finalization.approvalBinding.subjectDigest = subjectDigest
+  resignSnapshotGrant(snapshot, encryptionKey, grant)
+  return {
+    grantId: grant.grantId,
+    grant: structuredClone(grant),
+    subject: structuredClone(grant.subject),
+    approvalBinding: structuredClone(finalization.approvalBinding),
+  }
+}
+
+function convertWriteGrantToRealLegacy(
+  snapshot: Record<string, any>, encryptionKey: Buffer, grantId: string, method: string,
+): Record<string, any> {
+  const grant = new Map(snapshot.grants).get(grantId) as Record<string, any>
+  grant.subject.actions[0].requests[0].method = method
+  grant.capabilities[0].requests[0].method = method
+  const subjectDigest = digestCanonicalGrantApprovalSubject('execution', grant.subject)
+  grant.subjectDigest = subjectDigest
+  grant.approvalContext.subjectDigest = subjectDigest
+  resignSnapshotGrant(snapshot, encryptionKey, grant)
+  return structuredClone(grant)
+}
+
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
 })
 
 async function writeSubject(
   authority: LocalApprovalAuthority, leaseId: string, fencingToken: number, suffix = leaseId,
-): Promise<WriteApprovalSubject> {
+): Promise<WriteApprovalSubjectV2> {
   const discoverySubject = {
     schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision: digest('prd'), scopeDigest: digest('scope'),
     environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'operator',
@@ -322,7 +380,7 @@ describe('SQLite 持久 Authority 状态', () => {
     },
   )
 
-  test('2.2.0 snapshot preserves existing grants while adding empty 2.4.0 finalization sets', async () => {
+  test('2.2.0 snapshot preserves a current-compatible uppercase Write Grant and adds finalization sets', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-22-migration-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')
     const options = {
@@ -355,7 +413,54 @@ describe('SQLite 持久 Authority 状态', () => {
     migratedDatabase.close()
   })
 
-  test('2.3.0 snapshot preserves its finalization outbox while adding empty 2.4.0 acknowledgements', async () => {
+  test('2.2.0 migration verifies then revokes a real lowercase legacy Write Grant', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-22-write-migration-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(authority, 'LEASE-MIGRATION-LOWER-22', 1, 'MIGRATION-LOWER-22')
+    const grant = await authority.issueWriteGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    await authority.reserveForSubject({
+      grant, currentSubject: subject, capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: subject.actions[0]!.actionId, attemptId: 'ATTEMPT-WRITE-MIGRATION-22', attemptContext,
+    })
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const old = JSON.parse(row.snapshot) as Record<string, any>
+    old.schemaVersion = '2.2.0'
+    delete old.grantFinalizations
+    delete old.acknowledgedFinalizations
+    const legacyGrant = convertWriteGrantToRealLegacy(old, stateEncryptionKey, grant.grantId, 'post')
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
+    database.close()
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    await expect(migrated.verify(legacyGrant as never)).resolves.toMatchObject({
+      allowed: false, code: 'E2E_APPROVAL_REVOKED',
+    })
+    migrated.close()
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const persisted = JSON.parse(migratedRow.snapshot) as Record<string, any>
+    expect(persisted).toMatchObject({
+      schemaVersion: '2.4.0',
+      grantFinalizations: [],
+      acknowledgedFinalizations: [],
+      revoked: expect.arrayContaining([[grant.grantId, 'legacy-write-method-migration']]),
+    })
+    expect(persisted.uses.some(([key]: [string]) => key.startsWith(`${grant.grantId}:`))).toBe(false)
+    expect(persisted.reservations.some(([, value]: [string, { grantId: string }]) =>
+      value.grantId === grant.grantId)).toBe(false)
+    migratedDatabase.close()
+  })
+
+  test('2.3.0 snapshot preserves a current-compatible uppercase Write outbox and adds empty acknowledgements', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-23-migration-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')
     const options = {
@@ -363,17 +468,9 @@ describe('SQLite 持久 Authority 状态', () => {
       approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
     }
     const authority = await LocalApprovalAuthority.open(options)
-    const subject = {
-      schemaVersion: '1.0.0' as const, assetId: 'ASSET-MIGRATION-23', prdRevision: digest('23-prd'),
-      scopeDigest: digest('23-scope'), environment: 'test' as const, baseOrigin: 'https://example.test',
-      actor: 'operator', expectedPageIdentity: {
-        url: 'https://example.test/orders', title: 'Orders', heading: 'Orders', ariaSignals: ['main'],
-      },
-      bootstrapIntentsDigest: digest('23-bootstrap'),
-      actions: [{ actionId: 'DISCOVERY-23', operation: 'dom-read' as const, maxUses: 1 as const }],
-    }
+    const subject = await writeSubject(authority, 'LEASE-MIGRATION-UPPER-23', 1, 'MIGRATION-UPPER-23')
     const approvalBinding = {
-      runId: 'RUN-TEST', approvalType: 'discovery' as const,
+      runId: 'RUN-TEST', approvalType: 'execution' as const,
       subjectDigest: canonicalGrantApprovalSubjectDigest(subject),
       installationDigest: `sha256:${'a'.repeat(64)}`,
     }
@@ -400,6 +497,137 @@ describe('SQLite 持久 Authority 状态', () => {
     expect(JSON.parse(migratedRow.snapshot)).toMatchObject({
       schemaVersion: '2.4.0', acknowledgedFinalizations: [],
     })
+    migratedDatabase.close()
+  })
+
+  test.each(['2.2.0', '2.3.0'] as const)(
+    '%s migration rejects an invalidly signed legacy Write snapshot without committing', async (legacyVersion) => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-legacy-write-signature-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(authority, 'LEASE-MIGRATION-SIGNATURE-23', 1, 'MIGRATION-SIGNATURE-23')
+    const approvalBinding = {
+      runId: 'RUN-TEST', approvalType: 'execution' as const,
+      subjectDigest: canonicalGrantApprovalSubjectDigest(subject), installationDigest: `sha256:${'a'.repeat(64)}`,
+    }
+    await authority.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+      finalizationId: 'FINALIZE-WRITE-SIGNATURE-23', requestDigest: digest('23-signature-request'), approvalBinding,
+    })
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    const old = JSON.parse(row.snapshot) as Record<string, any>
+    old.schemaVersion = legacyVersion
+    delete old.acknowledgedFinalizations
+    const legacy = convertWriteFinalizationToRealV23(
+      old, stateEncryptionKey, 'FINALIZE-WRITE-SIGNATURE-23', 'post',
+    )
+    const storedGrant = new Map(old.grants).get(legacy.grantId) as Record<string, any>
+    const invalidSignature = Buffer.from(storedGrant.signature, 'base64url')
+    invalidSignature[0] = invalidSignature[0]! ^ 1
+    storedGrant.signature = invalidSignature.toString('base64url')
+    if (legacyVersion === '2.2.0') delete old.grantFinalizations
+    const legacyBytes = JSON.stringify(old)
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(legacyBytes)
+    database.close()
+
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_CORRUPT',
+    })
+    const after = new DatabaseSync(statePath)
+    expect(after.prepare('SELECT revision, snapshot FROM authority_snapshots').get()).toEqual({
+      revision: row.revision, snapshot: legacyBytes,
+    })
+    after.close()
+    },
+  )
+
+  test('2.3.0 migration enforces the legacy finalization capacity before filtering grants', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-23-capacity-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const old = JSON.parse(row.snapshot) as Record<string, any>
+    old.schemaVersion = '2.3.0'
+    delete old.acknowledgedFinalizations
+    old.grantFinalizations = Array.from({ length: 1_025 }, (_, index) => [`FINALIZE-23-${index}`, {}])
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
+    database.close()
+
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_CORRUPT',
+    })
+  })
+
+  test('2.3.0 migration verifies a real lowercase Write Grant then revokes it and clears linked state', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-23-write-migration-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(authority, 'LEASE-MIGRATION-23', 1, 'MIGRATION-23')
+    const approvalBinding = {
+      runId: 'RUN-TEST', approvalType: 'execution' as const,
+      subjectDigest: canonicalGrantApprovalSubjectDigest(subject),
+      installationDigest: `sha256:${'a'.repeat(64)}`,
+    }
+    const grant = await authority.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+      finalizationId: 'FINALIZE-WRITE-MIGRATION-23', requestDigest: digest('23-write-request'), approvalBinding,
+    })
+    await authority.reserveForSubject({
+      grant, currentSubject: subject, capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: subject.actions[0]!.actionId, attemptId: 'ATTEMPT-WRITE-MIGRATION-23', attemptContext,
+    })
+    authority.close()
+
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const old = JSON.parse(row.snapshot) as Record<string, any>
+    old.schemaVersion = '2.3.0'
+    delete old.acknowledgedFinalizations
+    const legacy = convertWriteFinalizationToRealV23(
+      old, stateEncryptionKey, 'FINALIZE-WRITE-MIGRATION-23', 'post',
+    )
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
+    database.close()
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    await expect(migrated.recoverFinalizedGrant({
+      finalizationId: 'FINALIZE-WRITE-MIGRATION-23', requestDigest: digest('23-write-request'),
+      subject, approvalBinding,
+    })).resolves.toBeUndefined()
+    await expect(migrated.verify(legacy.grant as never)).resolves.toMatchObject({
+      allowed: false, code: 'E2E_APPROVAL_REVOKED',
+    })
+    migrated.close()
+
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const persisted = JSON.parse(migratedRow.snapshot) as Record<string, any>
+    expect(persisted).toMatchObject({
+      schemaVersion: '2.4.0', grantFinalizations: [], acknowledgedFinalizations: [],
+    })
+    expect(persisted.grants.some(([grantId]: [string]) => grantId === legacy.grantId)).toBe(false)
+    expect(persisted.uses.some(([key]: [string]) => key.startsWith(`${legacy.grantId}:`))).toBe(false)
+    expect(persisted.reservations.some(([, value]: [string, { grantId: string }]) =>
+      value.grantId === legacy.grantId)).toBe(false)
+    expect(persisted.revoked).toContainEqual([legacy.grantId, 'legacy-write-method-migration'])
     migratedDatabase.close()
   })
 

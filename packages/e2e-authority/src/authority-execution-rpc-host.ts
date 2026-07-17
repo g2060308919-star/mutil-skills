@@ -4,9 +4,11 @@ import { createRequire } from 'node:module'
 import { isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  ApprovalFinalizationAcknowledgementSchema,
   ApprovalGrantSubjectSchema,
   SignedGrantSchema,
   type ApproverIdentity,
+  type ApprovalFinalizationAcknowledgement,
   type ApprovalGrantSubject,
   type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
@@ -97,12 +99,7 @@ export interface AuthorityExecutionRpcProcessHandle extends AuthenticatedRpcHttp
     grant: SignedGrant
     approvalBinding: ApprovalExecutionBinding
   }): Promise<void>
-  acknowledgeFinalization(input: {
-    finalizationId: string
-    requestDigest: string
-    grantId: string
-    approvalBinding: ApprovalExecutionBinding
-  }): Promise<void>
+  acknowledgeFinalization(input: ApprovalFinalizationAcknowledgement): Promise<void>
 }
 
 export async function startAuthorityExecutionRpcHostProcess(
@@ -728,21 +725,13 @@ function callActivateControl(
 
 function callAcknowledgeControl(
   child: ChildProcess,
-  input: {
-    finalizationId: string
-    requestDigest: string
-    grantId: string
-    approvalBinding: ApprovalExecutionBinding
-  },
+  input: ApprovalFinalizationAcknowledgement,
   terminalSignal: Promise<never>,
 ): Promise<void> {
-  validateFinalizationControl(input.finalizationId, input.requestDigest)
-  if (!SAFE_ID.test(input.grantId)) throw hostError('E2E_APPROVAL_FINALIZATION_INVALID')
+  const acknowledgement = ApprovalFinalizationAcknowledgementSchema.safeParse(input)
+  if (!acknowledgement.success) throw hostError('E2E_APPROVAL_FINALIZATION_INVALID')
   return callChildControl(child, 'ack-finalization', {
-    finalizationId: input.finalizationId,
-    requestDigest: input.requestDigest,
-    grantId: input.grantId,
-    approvalBinding: parseApprovalExecutionBinding(input.approvalBinding),
+    ...acknowledgement.data,
   }, 'finalization-acknowledged', terminalSignal, (message) => {
     if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
       || !isObject(message.result) || Object.keys(message.result).join('\0') !== 'acknowledged'

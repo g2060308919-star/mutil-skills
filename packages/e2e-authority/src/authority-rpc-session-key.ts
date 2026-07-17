@@ -24,6 +24,7 @@ export function registerAuthenticatedRpcClientFromConfig(
 function decode32(value: string): Buffer {
   const bytes = Buffer.from(value, 'base64url')
   if (bytes.byteLength !== 32 || bytes.toString('base64url') !== value) {
+    bytes.fill(0)
     throw Object.assign(new Error('E2E_RPC_HOST_KEY_INVALID'), { code: 'E2E_RPC_HOST_KEY_INVALID' })
   }
   return bytes

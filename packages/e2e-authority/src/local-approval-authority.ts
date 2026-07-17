@@ -2,18 +2,24 @@ import {
   E2EError,
   canonicalizeJson,
   digestBytes,
+  digestCanonicalGrantApprovalSubject,
   digestText,
   type ApproverIdentity,
   ApprovalCapabilityRecordSchema,
+  ApprovalFinalizationAcknowledgementSchema,
   ApprovalGrantSubjectSchema,
   ApprovalFreshnessReceiptSchema,
   ApprovalFreshnessVerifierMaterialSchema,
+  LegacyWriteApprovalSubjectV23Schema,
+  LegacyWriteHttpIntentV23Schema,
   WriteApprovalSubjectV2Schema,
+  WriteHttpIntentSchema,
   ReadApprovalSubjectSchema,
   type ApprovalCapabilityRecord,
   type ApprovalFreshnessReceipt,
   type ApprovalFreshnessVerification,
   type ApprovalFreshnessVerifierMaterial,
+  type ApprovalFinalizationAcknowledgement,
   type ArtifactDocument,
   type ArtifactSignature,
   ArtifactAuthorityVerifierMaterialSchema,
@@ -534,14 +540,14 @@ export class LocalApprovalAuthority {
     })
   }
 
-  async acknowledgeFinalizedGrant(input: {
-    finalizationId: string
-    requestDigest: string
-    grantId: string
-    approvalBinding: ApprovalExecutionBinding
-  }): Promise<void> {
+  async acknowledgeFinalizedGrant(input: ApprovalFinalizationAcknowledgement): Promise<void> {
     if (!this.#stateStore) throw authorityError('E2E_APPROVAL_PERSISTENCE_REQUIRED', '确认 Grant 需要持久 Authority')
+    const parsedInput = ApprovalFinalizationAcknowledgementSchema.safeParse(immutableSnapshot(input))
+    if (!parsedInput.success) {
+      throw authorityError('E2E_APPROVAL_FINALIZATION_INVALID', 'finalization ack 结构无效')
+    }
     await this.#withStateMutation(async () => {
+      const input = parsedInput.data
       validateFinalizationIdentity(input.finalizationId, input.requestDigest)
       if (!/^[A-Za-z0-9._:-]{1,256}$/.test(input.grantId)) {
         throw authorityError('E2E_APPROVAL_FINALIZATION_INVALID', 'grantId 无效')
@@ -1955,20 +1961,9 @@ function loadAuthoritySnapshot(
   if (!isPlainSnapshot(parsed)) {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
-  const version = parsed.schemaVersion
-  const migrated = version === '2.0.0' || version === '2.1.0'
-    || version === '2.2.0' || version === '2.3.0'
-  if (!migrated && version !== '2.4.0') {
-    throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 版本未知或旧结构无效')
-  }
-  parseAuthoritySnapshotStructure(
-    parsed,
-    version !== '2.0.0',
-    version === '2.2.0' || version === '2.3.0' || version === '2.4.0',
-    version === '2.2.0' || version === '2.3.0' || version === '2.4.0',
-    version === '2.3.0' || version === '2.4.0',
-    version === '2.4.0',
-  )
+  const policy = authoritySnapshotPolicy(parsed.schemaVersion)
+  const version = policy.schemaVersion
+  parseAuthoritySnapshotStructure(parsed, policy)
   const encryptedKeys = parsed.privateKeys as AuthorityPersistentSnapshot['privateKeys']
   let privateKeys: DecryptedAuthorityPrivateKeys
   try {
@@ -1983,17 +1978,20 @@ function loadAuthoritySnapshot(
     throw authorityError('E2E_AUTHORITY_STATE_DECRYPTION_FAILED', 'Authority 状态密钥错误或私钥密文已损坏')
   }
   validateSnapshotCryptography(parsed, privateKeys)
-  if (version !== '2.0.0') {
+  if (policy.hasCredentials) {
     decryptWebAuthnCredentials(parsed.webAuthnCredentials as EncryptedPrivateKey, stateEncryptionKey)
   }
-  if (version === '2.2.0' || version === '2.3.0' || version === '2.4.0') {
+  if (policy.hasReceipts) {
     decryptWebAuthnReceipts(parsed.webAuthnReceipts as EncryptedPrivateKey, stateEncryptionKey)
     if (version === '2.4.0') {
       return { snapshot: parsed as unknown as AuthorityPersistentSnapshot, migrated: false, privateKeys }
     }
+    const migrationSource = policy.hasApprovalContext && policy.writeContract === 'legacy-v23'
+      ? migrateLegacyWriteGrants(parsed)
+      : parsed
     return {
       snapshot: parseCurrentAuthoritySnapshot({
-        ...parsed,
+        ...migrationSource,
         schemaVersion: '2.4.0',
         ...(version === '2.2.0' ? { grantFinalizations: [] } : {}),
         acknowledgedFinalizations: [],
@@ -2022,25 +2020,114 @@ function loadAuthoritySnapshot(
   return { snapshot, migrated: true, privateKeys }
 }
 
+function migrateLegacyWriteGrants(snapshot: Record<string, unknown>): Record<string, unknown> {
+  const incompatibleGrantIds = new Set<string>()
+  for (const [grantId, grant] of snapshot.grants as Array<[string, Record<string, unknown>]>) {
+    if (validateStoredGrantSubject(grant.subject, 'legacy-v23') !== 'write') continue
+    const capabilities = grant.capabilities as Array<Record<string, unknown>>
+    if (!validateStoredWriteSubject(grant.subject, 'current')
+      || capabilities.some((capability) => !validateStoredWriteRequests(capability.requests, 'current'))) {
+      incompatibleGrantIds.add(grantId)
+    }
+  }
+  if (incompatibleGrantIds.size === 0) return snapshot
+
+  const removedCapabilityKeys = new Set(
+    (snapshot.grants as Array<[string, SignedGrant]>)
+      .filter(([grantId]) => incompatibleGrantIds.has(grantId))
+      .flatMap(([grantId, grant]) => grant.capabilities.map((capability) =>
+        `${grantId}:${capability.capabilityId}`)),
+  )
+  const removedReservationIds = new Set(
+    (snapshot.reservations as Array<[string, { grantId: string }]>)
+      .filter(([, reservation]) => incompatibleGrantIds.has(reservation.grantId))
+      .map(([reservationId]) => reservationId),
+  )
+  const referencesRemovedReservation = (log: { events: AttemptEvent[] }): boolean =>
+    log.events.some((event) => event.kind === 'terminal'
+      && event.result.reservationId !== undefined
+      && removedReservationIds.has(event.result.reservationId))
+
+  return {
+    ...snapshot,
+    grants: (snapshot.grants as Array<[string, unknown]>)
+      .filter(([grantId]) => !incompatibleGrantIds.has(grantId)),
+    ...(Array.isArray(snapshot.grantFinalizations) ? {
+      grantFinalizations: (snapshot.grantFinalizations as Array<[string, StoredGrantFinalization]>)
+        .filter(([, finalization]) => !incompatibleGrantIds.has(finalization.grantId)),
+    } : {}),
+    revoked: [
+      ...(snapshot.revoked as Array<[string, string]>)
+        .filter(([grantId]) => !incompatibleGrantIds.has(grantId)),
+      ...[...incompatibleGrantIds].map((grantId) =>
+        [grantId, 'legacy-write-method-migration'] as [string, string]),
+    ],
+    uses: (snapshot.uses as Array<[string, number]>)
+      .filter(([key]) => !removedCapabilityKeys.has(key)),
+    reservations: (snapshot.reservations as Array<[string, { grantId: string }]>)
+      .filter(([, reservation]) => !incompatibleGrantIds.has(reservation.grantId)),
+    completedPreflights: (snapshot.completedPreflights as Array<[string, { grantId: string }]>)
+      .filter(([, preflight]) => !incompatibleGrantIds.has(preflight.grantId)),
+    attemptLogs: (snapshot.attemptLogs as AuthorityPersistentSnapshot['attemptLogs'])
+      .filter(([, log]) => !referencesRemovedReservation(log)),
+  }
+}
+
 function parseCurrentAuthoritySnapshot(parsed: unknown): AuthorityPersistentSnapshot {
   if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.4.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
-  parseAuthoritySnapshotStructure(parsed, true, true, true, true, true)
+  parseAuthoritySnapshotStructure(parsed, authoritySnapshotPolicy('2.4.0'))
   return parsed as unknown as AuthorityPersistentSnapshot
+}
+
+type AuthoritySnapshotVersion = '2.0.0' | '2.1.0' | '2.2.0' | '2.3.0' | '2.4.0'
+type StoredWriteContract = 'legacy-v23' | 'current'
+
+interface AuthoritySnapshotPolicy {
+  schemaVersion: AuthoritySnapshotVersion
+  hasCredentials: boolean
+  hasReceipts: boolean
+  hasApprovalContext: boolean
+  hasGrantFinalizations: boolean
+  hasAcknowledgedFinalizations: boolean
+  writeContract: StoredWriteContract
+}
+
+function authoritySnapshotPolicy(version: unknown): AuthoritySnapshotPolicy {
+  switch (version) {
+    case '2.0.0': return {
+      schemaVersion: version, hasCredentials: false, hasReceipts: false, hasApprovalContext: false,
+      hasGrantFinalizations: false, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
+    }
+    case '2.1.0': return {
+      schemaVersion: version, hasCredentials: true, hasReceipts: false, hasApprovalContext: false,
+      hasGrantFinalizations: false, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
+    }
+    case '2.2.0': return {
+      schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
+      hasGrantFinalizations: false, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
+    }
+    case '2.3.0': return {
+      schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
+      hasGrantFinalizations: true, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
+    }
+    case '2.4.0': return {
+      schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
+      hasGrantFinalizations: true, hasAcknowledgedFinalizations: true, writeContract: 'current',
+    }
+    default:
+      throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 版本未知或旧结构无效')
+  }
 }
 
 function parseAuthoritySnapshotStructure(
   candidate: Record<string, unknown>,
-  withCredentials: boolean,
-  withReceipts: boolean,
-  withApprovalContext: boolean,
-  withGrantFinalizations: boolean,
-  withAcknowledgedFinalizations: boolean,
+  policy: AuthoritySnapshotPolicy,
 ): void {
   const privateKeys = candidate.privateKeys as Record<string, unknown> | undefined
   if (!hasExactSnapshotKeys(
-    candidate, withCredentials, withReceipts, withGrantFinalizations, withAcknowledgedFinalizations,
+    candidate, policy,
   )
     || typeof candidate.issuer !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.issuer)
     || typeof candidate.keyId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.keyId)
@@ -2048,8 +2135,8 @@ function parseAuthoritySnapshotStructure(
     || !privateKeys || Object.keys(privateKeys).sort().join('\0')
       !== ['attempt', 'decision', 'freshness', 'primary', 'privacyReview'].join('\0')
     || Object.values(privateKeys).some((key) => !isEncryptedBlob(key))
-    || (withCredentials && !isEncryptedBlob(candidate.webAuthnCredentials))
-    || (withReceipts && !isEncryptedBlob(candidate.webAuthnReceipts))
+    || (policy.hasCredentials && !isEncryptedBlob(candidate.webAuthnCredentials))
+    || (policy.hasReceipts && !isEncryptedBlob(candidate.webAuthnReceipts))
     || !Array.isArray(candidate.grants) || !Array.isArray(candidate.revoked) || !Array.isArray(candidate.uses)
     || !Array.isArray(candidate.reservations) || !Array.isArray(candidate.completedPreflights)
     || !Array.isArray(candidate.manualResultIds) || !Array.isArray(candidate.attemptLogs)) {
@@ -2057,15 +2144,15 @@ function parseAuthoritySnapshotStructure(
   }
   const grants = parseUniqueTuples(candidate.grants, 'grant', (key, value) => {
     if (!isPlainSnapshot(value) || value.grantId !== key) corruptSnapshot()
-    validateStoredGrantStructure(value, withApprovalContext)
+    validateStoredGrantStructure(value, policy)
   })
   const grantMap = new Map(grants.map(([key, value]) => [key, value as unknown as SignedGrant]))
   let finalizationIds = new Set<string>()
-  if (withGrantFinalizations) {
+  if (policy.hasGrantFinalizations) {
     const grantFinalizations = candidate.grantFinalizations
     const acknowledgedFinalizations = candidate.acknowledgedFinalizations
     if (!Array.isArray(grantFinalizations)
-      || (withAcknowledgedFinalizations && !Array.isArray(acknowledgedFinalizations))
+      || (policy.hasAcknowledgedFinalizations && !Array.isArray(acknowledgedFinalizations))
       || grantFinalizations.length
         + (Array.isArray(acknowledgedFinalizations) ? acknowledgedFinalizations.length : 0)
           > MAX_GRANT_FINALIZATIONS) corruptSnapshot()
@@ -2078,19 +2165,18 @@ function parseAuthoritySnapshotStructure(
         || typeof value.grantId !== 'string' || !grantMap.has(value.grantId)
         || typeof value.approvalSessionRef !== 'string'
         || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.approvalSessionRef)) corruptSnapshot()
-      const subject = ApprovalGrantSubjectSchema.safeParse(value.subject)
-      if (!subject.success) corruptSnapshot()
+      validateStoredGrantSubject(value.subject, policy.writeContract)
       let binding: ApprovalExecutionBinding
       try { binding = parseApprovalExecutionBinding(value.approvalBinding) }
       catch { return corruptSnapshot() }
       const grant = grantMap.get(value.grantId as string)!
-      if (canonicalizeJson(subject.data) !== canonicalizeJson(grant.subject)
+      if (canonicalizeJson(value.subject) !== canonicalizeJson(grant.subject)
         || !sameApprovalExecutionBinding(grant.approvalContext, binding)) corruptSnapshot()
       },
     )
     finalizationIds = new Set(parsedFinalizations.map(([key]) => key))
   }
-  if (withAcknowledgedFinalizations) {
+  if (policy.hasAcknowledgedFinalizations) {
     parseUniqueTuples(candidate.acknowledgedFinalizations as unknown[], 'acknowledged finalization', (key, value) => {
       if (finalizationIds.has(key) || !/^[A-Za-z0-9._:-]{1,256}$/.test(key) || !isPlainSnapshot(value)
         || Object.keys(value).sort().join('\0')
@@ -2108,6 +2194,7 @@ function parseAuthoritySnapshotStructure(
   }
   parseUniqueTuples(candidate.revoked, 'revocation', (key, reason) => {
     const migratedTombstone = reason === 'legacy-approval-context-migration'
+      || reason === 'legacy-write-method-migration'
     if ((!grantMap.has(key) && !migratedTombstone)
       || typeof reason !== 'string' || reason.length === 0 || reason.length > 16 * 1024) {
       corruptSnapshot()
@@ -2134,18 +2221,15 @@ function parseAuthoritySnapshotStructure(
 
 function hasExactSnapshotKeys(
   candidate: Record<string, unknown>,
-  withCredentials: boolean,
-  withReceipts: boolean,
-  withGrantFinalizations: boolean,
-  withAcknowledgedFinalizations: boolean,
+  policy: AuthoritySnapshotPolicy,
 ): boolean {
   const keys = [
     'attemptLogs', 'completedPreflights', 'grants', 'identityDigest', 'issuer', 'keyId', 'manualResultIds',
     'privateKeys', 'reservations', 'revoked', 'schemaVersion', 'uses',
-    ...(withCredentials ? ['webAuthnCredentials'] : []),
-    ...(withReceipts ? ['webAuthnReceipts'] : []),
-    ...(withGrantFinalizations ? ['grantFinalizations'] : []),
-    ...(withAcknowledgedFinalizations ? ['acknowledgedFinalizations'] : []),
+    ...(policy.hasCredentials ? ['webAuthnCredentials'] : []),
+    ...(policy.hasReceipts ? ['webAuthnReceipts'] : []),
+    ...(policy.hasGrantFinalizations ? ['grantFinalizations'] : []),
+    ...(policy.hasAcknowledgedFinalizations ? ['acknowledgedFinalizations'] : []),
   ].sort()
   return Object.keys(candidate).sort().join('\0') === keys.join('\0')
 }
@@ -2174,9 +2258,9 @@ function parseUniqueTuples(
 
 type StoredGrantKind = 'discovery' | 'read' | 'write' | 'injection' | 'websocket' | 'sse'
 
-function validateStoredGrantStructure(grant: Record<string, unknown>, withApprovalContext: boolean): void {
+function validateStoredGrantStructure(grant: Record<string, unknown>, policy: AuthoritySnapshotPolicy): void {
   requireExactKeys(grant, [
-    ...(withApprovalContext ? ['approvalContext'] : []),
+    ...(policy.hasApprovalContext ? ['approvalContext'] : []),
     'approver', 'capabilities', 'expiresAt', 'grantId', 'issuedAt', 'issuer', 'keyId', 'proofScope',
     'revocationSequence', 'signature', 'subject', 'subjectDigest',
   ])
@@ -2192,12 +2276,12 @@ function validateStoredGrantStructure(grant: Record<string, unknown>, withApprov
   if (typeof grant.approver.subject !== 'string' || !Array.isArray(grant.approver.roles)
     || grant.approver.roles.some((role) => typeof role !== 'string')
     || new Set(grant.approver.roles).size !== grant.approver.roles.length) corruptSnapshot()
-  const kind = validateStoredGrantSubject(grant.subject)
-  const context = withApprovalContext ? CanonicalApprovalContextSchema.safeParse(grant.approvalContext) : undefined
-  const expectedSubjectDigest = withApprovalContext
-    ? canonicalGrantApprovalSubjectDigest(grant.subject as ApprovalGrantSubject)
+  const kind = validateStoredGrantSubject(grant.subject, policy.writeContract)
+  const context = policy.hasApprovalContext ? CanonicalApprovalContextSchema.safeParse(grant.approvalContext) : undefined
+  const expectedSubjectDigest = policy.hasApprovalContext
+    ? digestCanonicalGrantApprovalSubject(kind === 'discovery' ? 'discovery' : 'execution', grant.subject)
     : digestText('approval-subject/v1', canonicalizeJson(grant.subject))
-  if ((withApprovalContext && (!context?.success || context.data.subject !== grant.approver.subject
+  if ((policy.hasApprovalContext && (!context?.success || context.data.subject !== grant.approver.subject
     || context.data.approvalType !== (kind === 'discovery' ? 'discovery' : 'execution')
     || context.data.subjectDigest !== grant.subjectDigest))
     || expectedSubjectDigest !== grant.subjectDigest
@@ -2224,14 +2308,18 @@ function validateStoredGrantStructure(grant: Record<string, unknown>, withApprov
       || capability.maxUses < 1) corruptSnapshot()
   }
   const capabilities = grant.capabilities as Array<Record<string, unknown>>
+  if (kind === 'write' && capabilities.some((capability) =>
+    !validateStoredWriteRequests(capability.requests, policy.writeContract))) corruptSnapshot()
   if (new Set(capabilities.map((item) => item.capabilityId)).size !== capabilities.length) corruptSnapshot()
 }
 
-function validateStoredGrantSubject(value: unknown): StoredGrantKind {
+function validateStoredGrantSubject(
+  value: unknown,
+  writeContract: StoredWriteContract = 'current',
+): StoredGrantKind {
   const read = ReadApprovalSubjectSchema.safeParse(value)
   if (read.success) return 'read'
-  const write = WriteApprovalSubjectV2Schema.safeParse(value)
-  if (write.success) return 'write'
+  if (validateStoredWriteSubject(value, writeContract)) return 'write'
   if (!isPlainSnapshot(value) || !Array.isArray(value.actions) || value.actions.length === 0) corruptSnapshot()
   try {
     if ('expectedPageIdentity' in value) {
@@ -2259,6 +2347,19 @@ function validateStoredGrantSubject(value: unknown): StoredGrantKind {
     }
   } catch { corruptSnapshot() }
   return corruptSnapshot()
+}
+
+function validateStoredWriteSubject(value: unknown, contract: StoredWriteContract): boolean {
+  const schema = contract === 'legacy-v23'
+    ? LegacyWriteApprovalSubjectV23Schema
+    : WriteApprovalSubjectV2Schema
+  return schema.safeParse(value).success
+}
+
+function validateStoredWriteRequests(value: unknown, contract: StoredWriteContract): boolean {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 1_000) return false
+  const schema = contract === 'legacy-v23' ? LegacyWriteHttpIntentV23Schema : WriteHttpIntentSchema
+  return value.every((request) => schema.safeParse(request).success)
 }
 
 function validateStoredReservation(

@@ -330,3 +330,28 @@ git diff --check                               PASS
 ```
 
 `npm run e2e:golden` 按要求未申请 elevated：24 项仍全部在产品断言前被宿主环境阻断，其中 21 项为 loopback `listen EPERM`，3 项为 Chromium MachPort/进程权限。未观察到产品断言失败，且不宣称 Golden 在该宿主通过。
+
+## 九次外审修复附录
+
+本轮关闭 `2.3.0` Write migration blocker、ACK data clump、snapshot 版本能力散落和无效 session-key decode 临时内存四类问题：
+
+1. **真实 2.2/2.3 Write 迁移**：fixture 将两个版本的 lowercase 与 uppercase Write subject、capability，以及 2.3 outbox，按旧 `e2e-canonical-approval-subject/v1` digest 重算并用 snapshot 内 Ed25519 私钥重新签名。loader 按 policy 对所有“有 approvalContext 且使用 legacy Write contract”的版本先验证完整结构、digest、签名、关联和适用容量，再分类迁移；当前-compatible uppercase Grant/outbox 保留，lowercase Grant 定向清除 outbox/use/reservation/preflight/相关 attempt log，并留下 `legacy-write-method-migration` revoked tombstone，要求重新审批。两个旧版本的签名篡改仍 corrupt 且 snapshot revision/bytes 不提交。
+2. **集中版本策略**：`2.0.0` 至 `2.4.0` 的 credentials、receipts、approval context、finalization outbox、ack tombstone 与 Write contract 能力由单一 version policy switch 选择；结构 parser 不再接收五个易错位置布尔参数。
+3. **共享 ACK contract、独立边界 parse**：`e2e-contracts` 新增 strict `ApprovalExecutionBindingSchema` 与 `ApprovalFinalizationAcknowledgementSchema` 及对应 type。Runtime Authority adapter、parent Host、child IPC handler 与 Local Authority 各自调用 schema parse，额外字段、错误 ID/digest 或重绑定在进入下一层前拒绝；共享 type 不扩大 Runtime 根公开 API。
+4. **无效 key decode 清零**：child session key 长度错误或非 canonical 时，decode 产生的临时 Buffer 在抛出 `E2E_RPC_HOST_KEY_INVALID` 前显式清零；注册成功/失败的既有 `finally` 清零保持不变。
+
+九次外审最终门禁：
+
+```text
+npm run typecheck                              PASS
+npm run lint:architecture                      PASS
+npm run build                                  PASS
+npm test                                       120 files / 871 passed / 15 sandbox skips / 0 failed
+npm pack --dry-run --workspace @mutil-skills/e2e-runtime
+                                                PASS / 96 files / 88.0 kB
+git diff --check                               PASS
+```
+
+只读复算 schema generator records 得到 current digest `sha256:5a259753c2a83c4e12d92d54099ade25f681e1a8a5aefc817009a839da92ce0f`，与 `current.json` 及八次外审报告引用一致；`30ce35ff…`、`d131b009…` 和 `5a259753…` 三个内容寻址 set 均保留。本轮没有因内部 legacy validation schema 产生新的 artifact schema set。
+
+`npm run e2e:golden` 按要求仅在 sandbox 内运行且未申请 elevated：24 项都在产品断言前被环境阻断，其中 21 项为 loopback `listen EPERM`，3 项为 Chromium MachPort/进程权限拒绝；该结果只分类宿主限制，不宣称 Golden 产品通过，也未观察到进入产品断言后的失败。

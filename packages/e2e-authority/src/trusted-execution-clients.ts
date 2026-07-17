@@ -1,10 +1,13 @@
 import {
+  ApprovalExecutionBindingSchema,
   E2EError,
-  type CanonicalApprovalContext,
+  type ApprovalExecutionBinding,
   type GrantDecision,
   type SignedWriteGrant,
   type WriteApprovalSubject,
 } from '@mutil-skills/e2e-contracts'
+
+export type { ApprovalExecutionBinding } from '@mutil-skills/e2e-contracts'
 
 export interface TrustedWriteApprovalClient {
   verifyForSubject(grant: SignedWriteGrant, currentSubject: WriteApprovalSubject): Promise<GrantDecision>
@@ -14,22 +17,11 @@ export interface TrustedLeaseClient {
   verifyTarget(leaseId: string, fencingToken: number, targetFingerprint: string): Promise<boolean>
 }
 
-export type ApprovalExecutionBinding = Pick<CanonicalApprovalContext,
-  'runId' | 'installationDigest' | 'approvalType' | 'subjectDigest'>
-
 /** Strictly parses the four-field execution binding; parsing alone does not confer client trust. */
 export function parseApprovalExecutionBinding(value: unknown): ApprovalExecutionBinding {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) bindingInvalid()
-  const candidate = value as Record<string, unknown>
-  if (Object.keys(candidate).sort().join('\0')
-      !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')
-    || typeof candidate.runId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.runId)
-    || (candidate.approvalType !== 'discovery' && candidate.approvalType !== 'execution')
-    || typeof candidate.subjectDigest !== 'string'
-    || !/^sha256:[a-f0-9]{64}$/.test(candidate.subjectDigest)
-    || typeof candidate.installationDigest !== 'string'
-    || !/^sha256:[a-f0-9]{64}$/.test(candidate.installationDigest)) bindingInvalid()
-  return structuredClone(candidate) as ApprovalExecutionBinding
+  const parsed = ApprovalExecutionBindingSchema.safeParse(value)
+  if (!parsed.success) bindingInvalid()
+  return structuredClone(parsed.data)
 }
 
 function bindingInvalid(): never {
