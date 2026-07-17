@@ -1,9 +1,15 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { randomBytes } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto'
 import { expect, test } from 'vitest'
-import { digestText } from '@mutil-skills/e2e-contracts'
+import {
+  canonicalGrantApprovalSubjectDigest,
+  canonicalizeJson,
+  digestText,
+  type WriteApprovalSubjectV2,
+} from '@mutil-skills/e2e-contracts'
+import { isoCBOR } from '@simplewebauthn/server/helpers'
 import {
   LocalApprovalAuthority,
   LocalLeaseAuthority,
@@ -150,3 +156,215 @@ test('Authority child opens WebAuthn sessions while the parent receives only URL
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+test('production Host completes WebAuthn, finalizes one Grant, and registers its full receipt for RPC use', async ({ skip }) => {
+  const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-production-finalize-'))
+  const approvalPath = join(directory, 'approval.sqlite')
+  const leasePath = join(directory, 'lease.sqlite')
+  const encryptionKey = randomBytes(32)
+  const installationDigest = `sha256:${'a'.repeat(64)}`
+  const fixedNow = '2026-07-17T04:00:00.000Z'
+  const now = () => new Date(fixedNow)
+  const approver = { subject: 'local:user', roles: ['e2e-approver'] }
+  const credential = createTestAuthenticatorCredential()
+  let host: Awaited<ReturnType<typeof startAuthorityExecutionRpcHostProcess>> | undefined
+  try {
+    const seed = await LocalApprovalAuthority.open({
+      issuer: 'authority', keyId: 'key-1', now, statePath: approvalPath,
+      stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()],
+      approvalIdentities: [approver],
+      authenticateApproverSession: (_sessionId, expected) => ({
+        subject: approver.subject, runId: 'RUN-PREFLIGHT', ...expected, installationDigest,
+        origin: 'http://localhost:43210', issuedAt: fixedNow, expiresAt: '2026-07-17T04:05:00.000Z',
+      }),
+    })
+    await seed.createWebAuthnCredentialRepository().insert({
+      id: credential.id, publicKey: credential.publicKey, counter: 0,
+      transports: ['internal'], subject: approver.subject,
+    })
+    const discoverySubject = {
+      schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision: digest('prd'),
+      scopeDigest: digest('scope'), environment: 'test' as const,
+      baseOrigin: 'https://example.test', actor: 'operator',
+      expectedPageIdentity: {
+        url: 'https://example.test/orders/1', title: 'Order', heading: 'Order 1', ariaSignals: ['main'],
+      },
+      bootstrapIntentsDigest: digest('bootstrap'),
+      actions: [{ actionId: 'DISCOVERY-1', operation: 'local-navigation' as const, maxUses: 1 }],
+    }
+    const discovery = await seed.issueDiscoveryGrant({
+      subject: discoverySubject, approvalSessionRef: 'seed-session', ttlMs: 120_000,
+    })
+    const discoveryReservation = await seed.reserveForSubject({
+      grant: discovery, currentSubject: discoverySubject,
+      capabilityId: discovery.capabilities[0]!.capabilityId,
+      actionId: discovery.capabilities[0]!.actionId,
+      attemptId: 'ATTEMPT-DISCOVERY-1',
+    })
+    const preflightDigest = await seed.completeDiscoveryPreflight({
+      grant: discovery, currentSubject: discoverySubject,
+      reservationId: discoveryReservation.reservationId,
+      capabilityId: discovery.capabilities[0]!.capabilityId,
+      outcome: { status: 'ready', observedIdentity: {
+        url: discoverySubject.expectedPageIdentity.url,
+        title: discoverySubject.expectedPageIdentity.title,
+        headings: [discoverySubject.expectedPageIdentity.heading],
+        role: discoverySubject.actor, ariaSignals: ['main'],
+      } },
+    })
+    const writeSubject: WriteApprovalSubjectV2 = {
+      schemaVersion: '2.0.0', assetId: discoverySubject.assetId,
+      prdRevision: discoverySubject.prdRevision, scopeDigest: discoverySubject.scopeDigest,
+      requirementModelDigest: digest('model'), coveragePolicyDigest: digest('coverage'),
+      universeDigest: digest('universe'), caseDigest: digest('cases'), actionMapDigest: digest('actions'),
+      policyDigest: digest('policy'), executionContractDigest: digest('contract'),
+      runBundleProjectionDigest: digest('bundle'), executionDigest: digest('execution'),
+      environment: 'test', baseOrigin: discoverySubject.baseOrigin, actor: discoverySubject.actor,
+      discoveryGrantId: discovery.grantId, preflightDigest,
+      actions: [{
+        actionId: 'WRITE-1', effect: 'reversible-write', dataLeaseId: 'LEASE-1', fencingToken: 1,
+        cleanupPlanDigest: digest('cleanup'), requests: [{
+          intentId: 'INTENT-1', method: 'POST', canonicalOrigin: discoverySubject.baseOrigin,
+          exactPath: '/orders/1', query: [], payload: { kind: 'no-body' },
+          targetFingerprint: digest('target'), maxRequests: 1, expectedOrder: 1,
+        }],
+      }],
+    }
+    seed.close()
+    const lease = await LocalLeaseAuthority.open({ now, statePath: leasePath, testWorkspaceRoots: [process.cwd()] })
+    lease.close()
+
+    try {
+      host = await startAuthorityExecutionRpcHostProcess({
+        rpc: { issuer: 'authority-host', keyId: 'rpc-key-1', clientId: 'runner-1' },
+        approval: {
+          issuer: 'authority', keyId: 'key-1', statePath: approvalPath,
+          stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()],
+          approvalIdentities: [approver],
+        },
+        lease: { statePath: leasePath, testWorkspaceRoots: [process.cwd()] },
+        userPresence: {
+          installationDigest,
+          assets: {
+            indexHtml: Buffer.from('<!doctype html>'), approvalJavaScript: Buffer.from('void 0'),
+            simpleWebAuthnBrowser: Buffer.from('void 0'),
+          },
+        },
+        clock: { kind: 'fixed-test-only', now: fixedNow },
+      })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EPERM') { skip(); return }
+      throw error
+    }
+    const subjectDigest = canonicalGrantApprovalSubjectDigest(writeSubject)
+    const session = await host.openApprovalSession({
+      runId: 'RUN-1', approvalType: 'execution', subjectDigest, installationDigest,
+    })
+    await expect(host.finalizeApproval({ sessionId: session.sessionId, grantSubject: writeSubject }))
+      .rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_INVALID' })
+
+    await completeWebAuthnApproval(session, credential)
+    await host.waitForSession(session.sessionId)
+    const reboundSubject: WriteApprovalSubjectV2 = {
+      ...writeSubject,
+      actions: [{ ...writeSubject.actions[0]!, cleanupPlanDigest: digest('rebound-cleanup') }],
+    }
+    await expect(host.finalizeApproval({ sessionId: session.sessionId, grantSubject: reboundSubject }))
+      .rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' })
+
+    const finalized = await host.finalizeApproval({ sessionId: session.sessionId, grantSubject: writeSubject })
+    expect(finalized).toMatchObject({
+      grant: { subject: writeSubject, subjectDigest, approver },
+      approvalBinding: { runId: 'RUN-1', installationDigest, approvalType: 'execution', subjectDigest },
+    })
+    await expect(host.finalizeApproval({ sessionId: session.sessionId, grantSubject: writeSubject }))
+      .rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_INVALID' })
+
+    const clients = createAuthorityExecutionRpcClients({
+      credential: host.credential, approvalBinding: finalized.approvalBinding,
+      verifierMaterial: host.verifierMaterial,
+      expectedPublicKeyDigest: host.verifierMaterial.publicKeyDigest,
+      transport: createAuthenticatedRpcHttpTransport(host.endpoint), now,
+    })
+    try {
+      await expect(clients.gatewayAuthority.verifyForSubject(finalized.grant as never, writeSubject))
+        .resolves.toEqual({ allowed: true })
+      await expect(clients.gatewayAuthority.reserveForSubject({
+        grant: finalized.grant as never, currentSubject: writeSubject,
+        capabilityId: finalized.grant.capabilities[0]!.capabilityId,
+        actionId: writeSubject.actions[0]!.actionId, attemptId: 'ATTEMPT-WRITE-1',
+        attemptContext: {
+          assetId: 'ASSET-1', generationId: 'GEN-1', prdRevision: writeSubject.prdRevision,
+          runId: 'RUN-1', caseId: 'CASE-1',
+        },
+      })).resolves.toMatchObject({ status: 'reserved', attemptId: 'ATTEMPT-WRITE-1' })
+    } finally { clients.destroy() }
+  } finally {
+    await host?.close()
+    encryptionKey.fill(0)
+    await rm(directory, { recursive: true, force: true })
+  }
+}, 10_000)
+
+const digest = (value: string): string => digestText('authority-production-finalize-test/v1', value)
+
+function createTestAuthenticatorCredential(): {
+  id: string
+  publicKey: string
+  privateKey: ReturnType<typeof generateKeyPairSync>['privateKey']
+} {
+  const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const jwk = keys.publicKey.export({ format: 'jwk' })
+  const x = Buffer.from(jwk.x!, 'base64url')
+  const y = Buffer.from(jwk.y!, 'base64url')
+  const cose = isoCBOR.encode(new Map<number, number | Uint8Array>([
+    [1, 2], [3, -7], [-1, 1], [-2, x], [-3, y],
+  ]))
+  return {
+    id: randomBytes(16).toString('base64url'),
+    publicKey: Buffer.from(cose).toString('base64url'),
+    privateKey: keys.privateKey,
+  }
+}
+
+async function completeWebAuthnApproval(
+  session: { url: string; sessionId: string },
+  credential: ReturnType<typeof createTestAuthenticatorCredential>,
+): Promise<void> {
+  const url = new URL(session.url)
+  const bearer = url.hash.slice(1)
+  const sessionResponse = await fetch(`${url.origin}/session`, {
+    headers: { authorization: `Bearer ${bearer}` },
+  })
+  const approval = await sessionResponse.json() as { challenge: string; sessionId: string }
+  const clientData = Buffer.from(canonicalizeJson({
+    type: 'webauthn.get', challenge: approval.challenge, origin: url.origin,
+  }))
+  const authenticatorData = Buffer.alloc(37)
+  createHash('sha256').update('localhost').digest().copy(authenticatorData)
+  authenticatorData[32] = 0x05
+  authenticatorData.writeUInt32BE(1, 33)
+  const signatureBase = Buffer.concat([
+    authenticatorData,
+    createHash('sha256').update(clientData).digest(),
+  ])
+  const signature = sign('sha256', signatureBase, credential.privateKey)
+  const response = await fetch(`${url.origin}/submit`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${bearer}`, origin: url.origin, 'content-type': 'application/json',
+    },
+    body: canonicalizeJson({
+      sessionId: approval.sessionId, challenge: approval.challenge, credentialId: credential.id,
+      response: {
+        id: credential.id, rawId: credential.id, type: 'public-key',
+        response: {
+          clientDataJSON: clientData.toString('base64url'),
+          authenticatorData: authenticatorData.toString('base64url'),
+          signature: signature.toString('base64url'), userHandle: null,
+        },
+      },
+    }),
+  })
+  expect(response.status, await response.text()).toBe(204)
+}

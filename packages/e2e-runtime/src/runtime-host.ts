@@ -315,11 +315,21 @@ export class E2ERuntimeHost {
           'WebAuthn callback 返回前 Run approval subject 已改变',
         )
       }
+      if (request.payload.grantSubject !== undefined && session.finalize === undefined) {
+        throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
+      }
+      const finalized = request.payload.grantSubject === undefined
+        ? undefined
+        : await session.finalize!(request.payload.grantSubject)
       const response = this.successResponse(request.requestId, {
         runId: current.runId,
         approvalType: request.payload.approvalType,
         subjectDigest,
         sessionId: session.sessionId,
+        ...(finalized === undefined ? {} : {
+          signedGrant: finalized.grant,
+          approvalBinding: finalized.approvalBinding,
+        }),
       })
       return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.readRunOutcome(
         identity.digest,

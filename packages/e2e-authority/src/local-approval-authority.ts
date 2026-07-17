@@ -387,6 +387,43 @@ export class LocalApprovalAuthority {
     })
   }
 
+  async issueGrantFromApprovalSession(input: {
+    subject: ApprovalGrantSubject
+    approvalSessionRef: string
+    ttlMs: number
+    registerApprovalContext(context: CanonicalApprovalContext): void
+  }): Promise<SignedGrant> {
+    if (!this.#stateStore) {
+      throw authorityError(
+        'E2E_APPROVAL_PERSISTENCE_REQUIRED',
+        '生产 WebAuthn Grant 签发必须使用持久 Authority transaction',
+      )
+    }
+    if (!this.#stateContext.getStore()) {
+      return await this.#withStateMutation(() => this.issueGrantFromApprovalSession(input))
+    }
+    const subject = ApprovalGrantSubjectSchema.parse(immutableSnapshot(input.subject))
+    const common = { approvalSessionRef: input.approvalSessionRef, ttlMs: input.ttlMs }
+    const discovery = DiscoveryApprovalSubjectSchema.safeParse(subject)
+    const read = ReadApprovalSubjectSchema.safeParse(subject)
+    const write = WriteApprovalSubjectV2Schema.safeParse(subject)
+    const injection = InjectionApprovalSubjectSchema.safeParse(subject)
+    const webSocket = WebSocketReadApprovalSubjectSchema.safeParse(subject)
+    const sse = SseReadApprovalSubjectSchema.safeParse(subject)
+    const grant = discovery.success ? await this.issueDiscoveryGrant({ subject: discovery.data, ...common })
+      : read.success ? await this.issueReadGrant({ subject: read.data, ...common })
+      : write.success ? await this.issueWriteGrant({ subject: write.data, ...common })
+      : injection.success ? await this.issueInjectionGrant({ subject: injection.data, ...common })
+      : webSocket.success ? await this.issueWebSocketReadGrant({ subject: webSocket.data, ...common })
+      : sse.success ? await this.issueSseReadGrant({ subject: sse.data, ...common })
+      : undefined
+    if (grant === undefined) {
+      throw authorityError('E2E_APPROVAL_SUBJECT_INVALID', 'Grant subject 不属于严格 canonical union')
+    }
+    input.registerApprovalContext(structuredClone(grant.approvalContext))
+    return grant
+  }
+
   #assertCredentialCas(expected: StoredWebAuthnCredential, next: StoredWebAuthnCredential): void {
     const current = this.#webAuthnCredentials.get(expected.id)
     if (current === undefined || canonicalizeJson(current) !== canonicalizeJson(expected)
@@ -403,7 +440,7 @@ export class LocalApprovalAuthority {
 
   async issueDiscoveryGrant(input: {
     subject: DiscoveryApprovalSubject
-    approver: ApproverIdentity
+    approver?: ApproverIdentity
     approvalSessionRef?: string
     ttlMs: number
   }): Promise<SignedDiscoveryGrant> {
@@ -418,14 +455,14 @@ export class LocalApprovalAuthority {
     const subject = parsedSubject.data
     validateDiscoverySubject(subject)
     const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
-    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+    const approval = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
       { approvalType: 'discovery', subjectDigest },
       request.ttlMs, MAX_DISCOVERY_TTL_MS)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedDiscoveryGrant, 'signature'> = {
       grantId: randomUUID(), issuer: this.#issuer, keyId: this.#keyId, proofScope: 'local-os-user',
-      approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
-      approvalContext,
+      approver: approval.approver,
+      approvalContext: approval.context,
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
@@ -452,7 +489,7 @@ export class LocalApprovalAuthority {
 
   async issueReadGrant(input: {
     subject: ReadApprovalSubject
-    approver: ApproverIdentity
+    approver?: ApproverIdentity
     approvalSessionRef?: string
     ttlMs: number
   }): Promise<SignedReadGrant> {
@@ -477,7 +514,7 @@ export class LocalApprovalAuthority {
       )
     }
     const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
-    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+    const approval = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
       { approvalType: 'execution', subjectDigest },
       request.ttlMs, MAX_READ_TTL_MS)
 
@@ -487,8 +524,8 @@ export class LocalApprovalAuthority {
       issuer: this.#issuer,
       keyId: this.#keyId,
       proofScope: 'local-os-user',
-      approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
-      approvalContext,
+      approver: approval.approver,
+      approvalContext: approval.context,
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
@@ -512,7 +549,7 @@ export class LocalApprovalAuthority {
 
   async issueWriteGrant(input: {
     subject: WriteApprovalSubject
-    approver: ApproverIdentity
+    approver?: ApproverIdentity
     approvalSessionRef?: string
     ttlMs: number
   }): Promise<SignedWriteGrant> {
@@ -538,7 +575,7 @@ export class LocalApprovalAuthority {
       )
     }
     const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
-    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+    const approval = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
       { approvalType: 'execution', subjectDigest },
       request.ttlMs, MAX_WRITE_TTL_MS)
     const issuedAt = this.#now()
@@ -547,8 +584,8 @@ export class LocalApprovalAuthority {
       issuer: this.#issuer,
       keyId: this.#keyId,
       proofScope: 'local-os-user',
-      approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
-      approvalContext,
+      approver: approval.approver,
+      approvalContext: approval.context,
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
@@ -576,7 +613,7 @@ export class LocalApprovalAuthority {
 
   async issueInjectionGrant(input: {
     subject: InjectionApprovalSubject
-    approver: ApproverIdentity
+    approver?: ApproverIdentity
     approvalSessionRef?: string
     ttlMs: number
   }): Promise<SignedInjectionGrant> {
@@ -591,7 +628,7 @@ export class LocalApprovalAuthority {
     const subject = parsedSubject.data
     validateInjectionSubject(subject)
     const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
-    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+    const approval = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
       { approvalType: 'execution', subjectDigest },
       request.ttlMs, MAX_INJECTION_TTL_MS)
     const issuedAt = this.#now()
@@ -600,8 +637,8 @@ export class LocalApprovalAuthority {
       issuer: this.#issuer,
       keyId: this.#keyId,
       proofScope: 'local-os-user',
-      approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
-      approvalContext,
+      approver: approval.approver,
+      approvalContext: approval.context,
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
@@ -631,7 +668,7 @@ export class LocalApprovalAuthority {
 
   async issueWebSocketReadGrant(input: {
     subject: WebSocketReadApprovalSubject
-    approver: ApproverIdentity
+    approver?: ApproverIdentity
     approvalSessionRef?: string
     ttlMs: number
   }): Promise<SignedWebSocketReadGrant> {
@@ -646,7 +683,7 @@ export class LocalApprovalAuthority {
     const subject = parsedSubject.data
     validateWebSocketReadSubject(subject)
     const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
-    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+    const approval = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
       { approvalType: 'execution', subjectDigest },
       request.ttlMs, MAX_READ_TTL_MS)
     const issuedAt = this.#now()
@@ -655,8 +692,8 @@ export class LocalApprovalAuthority {
       issuer: this.#issuer,
       keyId: this.#keyId,
       proofScope: 'local-os-user',
-      approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
-      approvalContext,
+      approver: approval.approver,
+      approvalContext: approval.context,
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
@@ -683,7 +720,7 @@ export class LocalApprovalAuthority {
 
   async issueSseReadGrant(input: {
     subject: SseReadApprovalSubject
-    approver: ApproverIdentity
+    approver?: ApproverIdentity
     approvalSessionRef?: string
     ttlMs: number
   }): Promise<SignedSseReadGrant> {
@@ -698,14 +735,14 @@ export class LocalApprovalAuthority {
     const subject = parsedSubject.data
     validateSseReadSubject(subject)
     const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
-    const approvalContext = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
+    const approval = await this.validateApproverAndTtl(request.approver, request.approvalSessionRef,
       { approvalType: 'execution', subjectDigest },
       request.ttlMs, MAX_READ_TTL_MS)
     const issuedAt = this.#now()
     const grantWithoutSignature: Omit<SignedSseReadGrant, 'signature'> = {
       grantId: randomUUID(), issuer: this.#issuer, keyId: this.#keyId, proofScope: 'local-os-user',
-      approver: { subject: request.approver.subject, roles: [...request.approver.roles].sort() },
-      approvalContext,
+      approver: approval.approver,
+      approvalContext: approval.context,
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
@@ -1592,15 +1629,19 @@ export class LocalApprovalAuthority {
   }
 
   private async validateApproverAndTtl(
-    approver: ApproverIdentity,
+    claimedApprover: ApproverIdentity | undefined,
     approvalSessionRef: string | undefined,
     expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string },
     ttlMs: number,
     maximum: number,
-  ): Promise<CanonicalApprovalContext> {
-    if (!matchesRegisteredIdentity(approver, this.#approvalIdentities.get(approver.subject))
-      || !approver.roles.includes('e2e-approver')) {
-      throw authorityError('E2E_APPROVAL_APPROVER_UNTRUSTED', '审批人必须通过 Authority 会话认证且是登记的 e2e-approver')
+  ): Promise<{ approver: ApproverIdentity; context: CanonicalApprovalContext }> {
+    if (claimedApprover !== undefined
+      && (!matchesRegisteredIdentity(claimedApprover, this.#approvalIdentities.get(claimedApprover.subject))
+        || !claimedApprover.roles.includes('e2e-approver'))) {
+      throw authorityError(
+        'E2E_APPROVAL_APPROVER_UNTRUSTED',
+        '审批人必须通过 Authority 会话认证且是登记的 e2e-approver',
+      )
     }
     if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > maximum) {
       throw authorityError('E2E_APPROVAL_TTL_INVALID', `Grant TTL 必须在 1ms 到 ${maximum}ms 之间`)
@@ -1612,13 +1653,24 @@ export class LocalApprovalAuthority {
       throw authorityError('E2E_APPROVAL_APPROVER_UNTRUSTED', '审批人必须通过 Authority 会话认证且是登记的 e2e-approver')
     }
     const context = CanonicalApprovalContextSchema.safeParse({ schemaVersion: '1.0.0', ...receipt })
-    if (!context.success || context.data.subject !== approver.subject
+    const registered = context.success ? this.#approvalIdentities.get(context.data.subject) : undefined
+    if (!context.success
+      || (claimedApprover !== undefined && context.data.subject !== claimedApprover.subject)
       || context.data.approvalType !== expected.approvalType
       || context.data.subjectDigest !== expected.subjectDigest
       || this.#now().getTime() > Date.parse(context.data.expiresAt)) {
       throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'WebAuthn approval receipt 与实际 Grant/可信 Run 上下文不一致')
     }
-    return context.data
+    if (registered === undefined || !registered.roles.includes('e2e-approver')) {
+      throw authorityError(
+        'E2E_APPROVAL_APPROVER_UNTRUSTED',
+        'WebAuthn receipt subject 必须属于 Authority 登记的 e2e-approver',
+      )
+    }
+    return {
+      approver: { subject: registered.subject, roles: [...registered.roles] },
+      context: context.data,
+    }
   }
 }
 
@@ -1865,10 +1917,13 @@ function validateStoredGrantStructure(grant: Record<string, unknown>, withApprov
     || new Set(grant.approver.roles).size !== grant.approver.roles.length) corruptSnapshot()
   const kind = validateStoredGrantSubject(grant.subject)
   const context = withApprovalContext ? CanonicalApprovalContextSchema.safeParse(grant.approvalContext) : undefined
+  const expectedSubjectDigest = withApprovalContext
+    ? canonicalGrantApprovalSubjectDigest(grant.subject as ApprovalGrantSubject)
+    : digestText('approval-subject/v1', canonicalizeJson(grant.subject))
   if ((withApprovalContext && (!context?.success || context.data.subject !== grant.approver.subject
     || context.data.approvalType !== (kind === 'discovery' ? 'discovery' : 'execution')
     || context.data.subjectDigest !== grant.subjectDigest))
-    || canonicalGrantApprovalSubjectDigest(grant.subject as ApprovalGrantSubject) !== grant.subjectDigest
+    || expectedSubjectDigest !== grant.subjectDigest
     || !Array.isArray(grant.capabilities) || grant.capabilities.length === 0) corruptSnapshot()
   const keySets: Record<StoredGrantKind, string[]> = {
     discovery: ['actionId', 'actor', 'bootstrapIntentsDigest', 'capabilityId', 'effect', 'expectedPageIdentityDigest',

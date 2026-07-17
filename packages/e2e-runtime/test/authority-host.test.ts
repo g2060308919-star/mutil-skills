@@ -66,6 +66,38 @@ test('Runtime Authority adapter can only open and wait for child-owned sessions'
   await unsafe.close()
 })
 
+test('Runtime Authority adapter sends only the four provable fields and rejects a rebound finalize result', async () => {
+  const subject = executionGrantSubject(runSnapshot())
+  const subjectDigest = computeRuntimeApprovalSubjectDigest(runSnapshot(), 'execution', subject)
+  const finalizeApproval = vi.fn(async () => ({
+    grant: { grantId: 'GRANT-REBOUND' } as never,
+    approvalBinding: {
+      runId: 'RUN-OTHER', installationDigest, approvalType: 'execution' as const, subjectDigest,
+    },
+  }))
+  const openApprovalSession = vi.fn(async () => ({
+    url: `http://localhost:41003/#${'c'.repeat(43)}`, sessionId: 'SESSION-FINALIZE',
+  }))
+  const host = new RuntimeAuthorityHost({
+    installationDigest,
+    processHandle: {
+      enrollIdentity: vi.fn(), openApprovalSession,
+      waitForSession: vi.fn(async () => undefined), finalizeApproval,
+      close: vi.fn(async () => undefined),
+    },
+  })
+  const session = await host.requestApproval({
+    runId: 'RUN-1', approvalType: 'execution', subjectDigest, installationDigest,
+  })
+  expect(openApprovalSession).toHaveBeenCalledWith({
+    runId: 'RUN-1', approvalType: 'execution', subjectDigest, installationDigest,
+  })
+  await expect(session.finalize!(subject)).rejects.toMatchObject({
+    code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH',
+  })
+  await host.close()
+})
+
 test('loads approval assets only from this Runtime package and verifies the pinned bundle', async () => {
   const assets = await loadRuntimeApprovalAssets()
   const approvalJavaScript = Buffer.from(assets.approvalJavaScript).toString()
@@ -233,6 +265,66 @@ test('Runtime Host recomputes the approval subject from the locked Run before op
       ok: false, error: { code: 'E2E_RUNTIME_APPROVAL_TYPE_MISMATCH' },
     })
     expect(requestApproval).toHaveBeenCalledTimes(1)
+  } finally {
+    await runStore.close()
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
+test('Runtime Host finalizes a Grant and journals the traceable Grant plus four-field binding idempotently', async () => {
+  const roots = await createRuntimeTestRoots()
+  const runStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+  try {
+    await mkdir(`${roots.project}/.biztest`, { recursive: true })
+    await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-1',
+    }))
+    const identity = await resolveProjectIdentity(roots.project)
+    const snapshot = {
+      ...runSnapshot(), projectIdentityDigest: identity.digest,
+      workflow: {
+        current: 'awaiting-execution-approval' as const, sequence: 8,
+        eventChainDigest: `sha256:${'8'.repeat(64)}`,
+      },
+    }
+    const seedDigest = `sha256:${'7'.repeat(64)}`
+    await runStore.beginRequest('SEED-FINALIZE', seedDigest)
+    const seedLock = await runStore.acquireRunLock(identity.digest, snapshot.runId)
+    try { await runStore.createRunOutcome(snapshot, 'SEED-FINALIZE', seedDigest, { seeded: true }, seedLock) }
+    finally { await seedLock.close() }
+
+    const grantSubject = executionGrantSubject(snapshot)
+    const subjectDigest = computeRuntimeApprovalSubjectDigest(snapshot, 'execution', grantSubject)
+    const approvalBinding = {
+      runId: snapshot.runId, installationDigest,
+      approvalType: 'execution' as const, subjectDigest,
+    }
+    const signedGrant = { grantId: 'GRANT-1', subject: grantSubject, subjectDigest }
+    const finalize = vi.fn(async () => ({ grant: signedGrant as never, approvalBinding }))
+    const requestApproval = vi.fn(async () => ({
+      url: 'http://localhost:42009/#approval', sessionId: 'SESSION-FINALIZE',
+      wait: vi.fn(async () => undefined), finalize,
+    }))
+    const host = new E2ERuntimeHost({
+      installation: runtimeInstallation(), doctor: async () => { throw new Error('not used') },
+      runStore, now: () => new Date('2026-07-17T00:00:00.000Z'),
+      authorityHostFactory: async () => ({ requestApproval }),
+    })
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'APPROVE-FINALIZE',
+      client: { name: 'test', version: '1.0.0' }, command: 'open-approval',
+      projectRoot: roots.project,
+      payload: { runId: snapshot.runId, approvalType: 'execution', grantSubject },
+    })
+    const first = await host.handle(request, JSON.stringify(request))
+    expect(first).toMatchObject({ ok: true, result: {
+      sessionId: 'SESSION-FINALIZE', signedGrant, approvalBinding,
+    } })
+    expect(await host.handle(request, JSON.stringify(request))).toEqual(first)
+    expect(requestApproval).toHaveBeenCalledTimes(1)
+    expect(finalize).toHaveBeenCalledOnce()
+    expect((await runStore.getRun(identity.digest, snapshot.runId))?.requestResponses['APPROVE-FINALIZE'])
+      .toMatchObject({ response: first })
   } finally {
     await runStore.close()
     await rm(roots.root, { recursive: true, force: true })

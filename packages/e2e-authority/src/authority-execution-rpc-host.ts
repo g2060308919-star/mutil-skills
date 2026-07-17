@@ -4,10 +4,15 @@ import { createRequire } from 'node:module'
 import { isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  ApprovalGrantSubjectSchema,
   CanonicalApprovalContextSchema,
+  canonicalGrantApprovalSubjectDigest,
+  canonicalGrantApprovalType,
   type ApproverIdentity,
-  type CanonicalApprovalContext,
+  type ApprovalGrantSubject,
+  type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
+import type { TrustedApprovalExecutionBinding } from './trusted-execution-clients.js'
 import type { WebAuthnApprovalAssets } from './webauthn-approval-server.js'
 import type { WebAuthnApprovalType } from './webauthn-user-presence.js'
 import type { SqliteStateDirectoryIdentity } from './sqlite-state-store.js'
@@ -46,8 +51,6 @@ export interface AuthorityExecutionRpcHostOptions {
     ttlMs?: number
   }
   clock?: { kind: 'system' } | { kind: 'fixed-test-only'; now: string }
-  /** 仅限固定时钟测试/Golden：生产环境的绑定必须由 WebAuthn 完成事件建立。 */
-  testOnlyApprovalContext?: CanonicalApprovalContext
   process?: {
     cwd: string
     env: Record<string, string>
@@ -72,6 +75,10 @@ export interface AuthorityExecutionRpcProcessHandle extends AuthenticatedRpcHttp
     installationDigest: string
   }): Promise<{ url: string; sessionId: string }>
   waitForSession(sessionId: string): Promise<void>
+  finalizeApproval(input: {
+    sessionId: string
+    grantSubject: ApprovalGrantSubject
+  }): Promise<{ grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }>
 }
 
 export async function startAuthorityExecutionRpcHostProcess(
@@ -133,14 +140,14 @@ export async function startAuthorityExecutionRpcHostProcess(
           },
         }),
         clock: options.clock ?? { kind: 'system' },
-        ...(options.testOnlyApprovalContext === undefined
-          ? {} : { testOnlyApprovalContext: options.testOnlyApprovalContext }),
         sessionKeyBase64Url: sessionKey.toString('base64url'),
       },
     })
     const credential = { clientId: options.rpc.clientId, sessionKeyBase64Url: sessionKey.toString('base64url') }
     let closed = false
     const openedSessions = new Set<string>()
+    const approvalSessions = new Set<string>()
+    const completedApprovalSessions = new Set<string>()
     const finishedSessions = new Set<string>()
     const failedSessions = new Map<string, string>()
     const waiters = new Map<string, { resolve(): void; reject(error: Error): void }>()
@@ -148,6 +155,8 @@ export async function startAuthorityExecutionRpcHostProcess(
     let terminalError: Error | undefined
     const clearSessionState = () => {
       openedSessions.clear()
+      approvalSessions.clear()
+      completedApprovalSessions.clear()
       finishedSessions.clear()
       failedSessions.clear()
       claimedWaits.clear()
@@ -163,6 +172,7 @@ export async function startAuthorityExecutionRpcHostProcess(
       if (!isObject(message) || typeof message.sessionId !== 'string') return
       if (message.type === 'session-finished') {
         finishedSessions.add(message.sessionId)
+        if (approvalSessions.has(message.sessionId)) completedApprovalSessions.add(message.sessionId)
         waiters.get(message.sessionId)?.resolve()
         waiters.delete(message.sessionId)
       } else if (message.type === 'session-failed' && typeof message.code === 'string') {
@@ -180,6 +190,7 @@ export async function startAuthorityExecutionRpcHostProcess(
       if (terminalError !== undefined) throw terminalError
       const result = await callControl(child, type, input)
       openedSessions.add(result.sessionId)
+      if (type === 'open-approval-session') approvalSessions.add(result.sessionId)
       return result
     }
     return {
@@ -189,6 +200,17 @@ export async function startAuthorityExecutionRpcHostProcess(
       verifierMaterial: ready.verifierMaterial,
       async enrollIdentity(input) { return await open('enroll-identity', input) },
       async openApprovalSession(input) { return await open('open-approval-session', input) },
+      async finalizeApproval(input) {
+        if (closed) throw hostError('E2E_RPC_HOST_CLOSED')
+        if (terminalError !== undefined) throw terminalError
+        if (!completedApprovalSessions.has(input.sessionId)) {
+          throw hostError('E2E_APPROVAL_SESSION_INVALID')
+        }
+        const result = await callFinalizeControl(child, input)
+        completedApprovalSessions.delete(input.sessionId)
+        approvalSessions.delete(input.sessionId)
+        return result
+      },
       async waitForSession(sessionId) {
         if (terminalError !== undefined) throw terminalError
         if (!openedSessions.has(sessionId)) throw hostError('E2E_APPROVAL_SESSION_INVALID')
@@ -379,6 +401,71 @@ function callControl(
   })
 }
 
+function callFinalizeControl(
+  child: ChildProcess,
+  input: { sessionId: string; grantSubject: ApprovalGrantSubject },
+): Promise<{ grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }> {
+  const parsedSubject = ApprovalGrantSubjectSchema.parse(input.grantSubject)
+  return new Promise((resolve, reject) => {
+    const requestId = randomBytes(16).toString('hex')
+    const timeout = setTimeout(() => finishReject(hostError('E2E_RPC_HOST_CONTROL_TIMEOUT')), HOST_START_TIMEOUT_MS)
+    const cleanup = () => {
+      clearTimeout(timeout)
+      child.off('message', onMessage)
+      child.off('error', finishReject)
+      child.off('exit', onExit)
+      child.off('disconnect', onDisconnect)
+    }
+    const finishReject = (error: unknown) => { cleanup(); reject(error) }
+    const onExit = () => finishReject(hostError('E2E_RPC_HOST_EXITED'))
+    const onDisconnect = () => finishReject(hostError('E2E_RPC_HOST_EXITED'))
+    const onMessage = (message: unknown) => {
+      if (!isObject(message) || message.requestId !== requestId) return
+      if (message.type === 'control-error' && typeof message.code === 'string') {
+        finishReject(hostError(message.code)); return
+      }
+      if (message.type !== 'approval-finalized' || !isObject(message.result)) return
+      let result: { grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }
+      try { result = parseFinalizedApproval(message.result) }
+      catch (error) { finishReject(error); return }
+      cleanup()
+      resolve(result)
+    }
+    child.on('message', onMessage)
+    child.once('error', finishReject)
+    child.once('exit', onExit)
+    child.once('disconnect', onDisconnect)
+    child.send({ type: 'finalize-approval', requestId,
+      input: { sessionId: input.sessionId, grantSubject: parsedSubject } },
+    (error) => { if (error) finishReject(error) })
+  })
+}
+
+function parseFinalizedApproval(
+  value: Record<string, any>,
+): { grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding } {
+  if (Object.keys(value).sort().join('\0') !== ['approvalBinding', 'grant'].join('\0')
+    || !isObject(value.grant) || !isObject(value.approvalBinding)
+    || Object.keys(value.approvalBinding).sort().join('\0')
+      !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')) {
+    throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID')
+  }
+  const subject = ApprovalGrantSubjectSchema.safeParse(value.grant.subject)
+  const context = CanonicalApprovalContextSchema.safeParse(value.grant.approvalContext)
+  if (!subject.success || !context.success
+    || value.grant.subjectDigest !== canonicalGrantApprovalSubjectDigest(subject.data)
+    || context.data.subjectDigest !== value.grant.subjectDigest
+    || canonicalGrantApprovalType(subject.data) !== context.data.approvalType
+    || value.grant.approver?.subject !== context.data.subject
+    || value.approvalBinding.runId !== context.data.runId
+    || value.approvalBinding.installationDigest !== context.data.installationDigest
+    || value.approvalBinding.approvalType !== context.data.approvalType
+    || value.approvalBinding.subjectDigest !== context.data.subjectDigest) {
+    throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID')
+  }
+  return structuredClone(value) as { grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }
+}
+
 function validateOptions(options: AuthorityExecutionRpcHostOptions): void {
   if (!SAFE_ID.test(options.rpc.issuer) || !SAFE_ID.test(options.rpc.keyId) || !SAFE_ID.test(options.rpc.clientId)
     || !SAFE_ID.test(options.approval.issuer) || !SAFE_ID.test(options.approval.keyId)
@@ -386,10 +473,6 @@ function validateOptions(options: AuthorityExecutionRpcHostOptions): void {
     || !options.approval.statePath || !options.lease.statePath
     || options.approval.testWorkspaceRoots.length === 0 || options.lease.testWorkspaceRoots.length === 0
     || (options.clock?.kind === 'fixed-test-only' && !isCanonicalInstant(options.clock.now))
-    || (options.testOnlyApprovalContext !== undefined && (
-      options.clock?.kind !== 'fixed-test-only'
-      || !CanonicalApprovalContextSchema.safeParse(options.testOnlyApprovalContext).success
-    ))
     || (options.userPresence !== undefined && (
       !/^sha256:[a-f0-9]{64}$/.test(options.userPresence.installationDigest)
       || (options.userPresence.ttlMs !== undefined && (

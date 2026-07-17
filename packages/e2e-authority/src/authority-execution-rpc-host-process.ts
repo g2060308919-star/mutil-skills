@@ -12,7 +12,14 @@ import {
   type WebAuthnUserPresenceAuthority,
 } from './webauthn-user-presence.js'
 import type { SqliteStateDirectoryIdentity } from './sqlite-state-store.js'
-import type { CanonicalApprovalContext } from '@mutil-skills/e2e-contracts'
+import { closeAuthorityExecutionRpcHostResources } from './authority-execution-rpc-host-lifecycle.js'
+import {
+  ApprovalGrantSubjectSchema,
+  canonicalGrantApprovalSubjectDigest,
+  canonicalGrantApprovalType,
+  type ApprovalGrantSubject,
+  type CanonicalApprovalContext,
+} from '@mutil-skills/e2e-contracts'
 
 interface HostConfig {
   rpc: { issuer: string; keyId: string; clientId: string }
@@ -38,7 +45,6 @@ interface HostConfig {
     }
   }
   clock: { kind: 'system' } | { kind: 'fixed-test-only'; now: string }
-  testOnlyApprovalContext?: CanonicalApprovalContext
   sessionKeyBase64Url: string
 }
 
@@ -48,8 +54,16 @@ let approvalAuthority: LocalApprovalAuthority | undefined
 let leaseAuthority: LocalLeaseAuthority | undefined
 let httpHandle: Awaited<ReturnType<typeof startAuthenticatedRpcLoopbackServer>> | undefined
 let executionRpc: AuthenticatedRpcServer | undefined
+let registeredApprovalContext: CanonicalApprovalContext | undefined
 let webAuthnAuthority: WebAuthnUserPresenceAuthority | undefined
 const approvalServers = new Map<string, WebAuthnApprovalServerHandle>()
+const approvalControls = new Map<string, {
+  runId: string
+  approvalType: 'discovery' | 'execution'
+  subjectDigest: string
+  installationDigest: string
+  completed: boolean
+}>()
 let hostConfig: HostConfig | undefined
 let started = false
 
@@ -62,6 +76,10 @@ process.on('message', async (message: unknown) => {
   }
   if (message.type === 'enroll-identity' || message.type === 'open-approval-session') {
     await handleUserPresenceControl(message)
+    return
+  }
+  if (message.type === 'finalize-approval') {
+    await handleFinalizeApproval(message)
     return
   }
   if (message.type !== 'start' || started) return
@@ -84,14 +102,7 @@ process.on('message', async (message: unknown) => {
         approvalIdentities: config.approval.approvalIdentities,
         manualIdentities: config.approval.manualIdentities,
         authenticateApproverSession: async (sessionId, _expected) => {
-          const receipt = await webAuthnAuthority?.authenticateSession(sessionId)
-          if (receipt !== undefined) {
-            if (executionRpc === undefined) throw rpcHostError('E2E_RPC_HOST_START_FAILED')
-            executionRpc.updateClientRegistration(config.rpc.clientId, {
-              approvalContext: { schemaVersion: '1.0.0', ...receipt },
-            })
-          }
-          return receipt
+          return await webAuthnAuthority?.authenticateSession(sessionId)
         },
       })
     } finally { stateEncryptionKey.fill(0) }
@@ -110,8 +121,7 @@ process.on('message', async (message: unknown) => {
     executionRpc = rpc
     const sessionKey = decode32(config.sessionKeyBase64Url)
     config.sessionKeyBase64Url = ''
-    rpc.registerClient(config.rpc.clientId, sessionKey, config.testOnlyApprovalContext === undefined
-      ? null : { approvalContext: config.testOnlyApprovalContext })
+    rpc.registerClient(config.rpc.clientId, sessionKey)
     sessionKey.fill(0)
     registerAuthorityExecutionRpcOperations(rpc, {
       writeAuthority: approvalAuthority,
@@ -122,29 +132,34 @@ process.on('message', async (message: unknown) => {
     sendToParent({ type: 'ready', endpoint: httpHandle.endpoint, verifierMaterial: rpc.verifierMaterial })
   } catch (error) {
     sendToParent({ type: 'error', code: safeCode(error) })
-    await shutdown()
-    process.disconnect()
+    try { await shutdown() } catch { /* parent 已收到原始 startup error；资源错误已聚合且进程仍须退出 */ }
+    finally { process.disconnect() }
   }
 })
 
-process.once('disconnect', () => { void shutdown() })
-process.once('SIGTERM', () => { void shutdown().finally(() => process.exit(0)) })
+process.once('disconnect', () => { void shutdown().catch(() => undefined) })
+process.once('SIGTERM', () => { void shutdown().catch(() => undefined).finally(() => process.exit(0)) })
 
 async function shutdown(): Promise<void> {
-  webAuthnAuthority?.revokePendingSessions()
   const servers = [...approvalServers.values()]
   approvalServers.clear()
-  await Promise.allSettled(servers.map(async (server) => await server.close()))
-  const handle = httpHandle
+  approvalControls.clear()
+  const resources = {
+    webAuthnAuthority,
+    approvalServers: servers,
+    httpHandle,
+    executionRpc,
+    approvalAuthority,
+    leaseAuthority,
+  }
   httpHandle = undefined
-  await handle?.close()
-  approvalAuthority?.close()
-  leaseAuthority?.close()
   approvalAuthority = undefined
   leaseAuthority = undefined
   executionRpc = undefined
+  registeredApprovalContext = undefined
   webAuthnAuthority = undefined
   hostConfig = undefined
+  await closeAuthorityExecutionRpcHostResources(resources)
 }
 
 async function handleUserPresenceControl(message: Record<string, any>): Promise<void> {
@@ -167,13 +182,84 @@ async function handleUserPresenceControl(message: Record<string, any>): Promise<
       session: control,
     })
     approvalServers.set(server.sessionId, server)
+    if (control.kind === 'approval' && (control.approvalType === 'discovery' || control.approvalType === 'execution')) {
+      approvalControls.set(server.sessionId, {
+        runId: control.runId, approvalType: control.approvalType,
+        subjectDigest: control.subjectDigest, installationDigest: control.installationDigest,
+        completed: false,
+      })
+    }
     void server.completion.then(async (result) => {
-      if (result.completed) sendToParent({ type: 'session-finished', sessionId: server.sessionId })
-      else sendToParent({ type: 'session-failed', sessionId: server.sessionId, code: result.code })
+      if (result.completed) {
+        const pending = approvalControls.get(server.sessionId)
+        if (pending) pending.completed = true
+        sendToParent({ type: 'session-finished', sessionId: server.sessionId })
+      }
+      else {
+        approvalControls.delete(server.sessionId)
+        sendToParent({ type: 'session-failed', sessionId: server.sessionId, code: result.code })
+      }
       approvalServers.delete(server.sessionId)
       await server.close().catch(() => undefined)
     })
     sendToParent({ type: 'session-opened', requestId, url: server.url, sessionId: server.sessionId })
+  } catch (error) {
+    sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
+  }
+}
+
+async function handleFinalizeApproval(message: Record<string, any>): Promise<void> {
+  const requestId = typeof message.requestId === 'string' && /^[a-f0-9]{32}$/.test(message.requestId)
+    ? message.requestId : undefined
+  if (requestId === undefined) return
+  try {
+    if (!isObject(message.input)
+      || Object.keys(message.input).sort().join('\0') !== ['grantSubject', 'sessionId'].join('\0')
+      || typeof message.input.sessionId !== 'string') throw rpcHostError('E2E_APPROVAL_FINALIZE_INPUT_INVALID')
+    const parsedSubject = ApprovalGrantSubjectSchema.safeParse(message.input.grantSubject)
+    if (!parsedSubject.success) throw rpcHostError('E2E_APPROVAL_FINALIZE_INPUT_INVALID')
+    const subject = parsedSubject.data
+    const pending = approvalControls.get(message.input.sessionId)
+    if (!pending || !pending.completed || !approvalAuthority || !hostConfig?.userPresence) {
+      throw rpcHostError('E2E_APPROVAL_SESSION_INVALID')
+    }
+    if (canonicalGrantApprovalType(subject) !== pending.approvalType
+      || canonicalGrantApprovalSubjectDigest(subject) !== pending.subjectDigest
+      || pending.installationDigest !== hostConfig.userPresence.installationDigest) {
+      throw rpcHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
+    }
+    if (executionRpc === undefined) throw rpcHostError('E2E_RPC_HOST_START_FAILED')
+    const previousRegistration = registeredApprovalContext
+    let registrationChanged = false
+    let grant
+    try {
+      grant = await approvalAuthority.issueGrantFromApprovalSession({
+        subject,
+        approvalSessionRef: message.input.sessionId,
+        ttlMs: Math.min(60_000, hostConfig.userPresence.ttlMs),
+        registerApprovalContext(context) {
+          executionRpc!.updateClientRegistration(hostConfig!.rpc.clientId, { approvalContext: context })
+          registeredApprovalContext = context
+          registrationChanged = true
+        },
+      })
+    } catch (error) {
+      if (registrationChanged) {
+        try {
+          executionRpc.updateClientRegistration(hostConfig.rpc.clientId,
+            previousRegistration === undefined ? null : { approvalContext: previousRegistration })
+          registeredApprovalContext = previousRegistration
+        } catch { /* shutdown 已开始；RPC destroy 会清零 credential */ }
+      }
+      throw error
+    }
+    approvalControls.delete(message.input.sessionId)
+    sendToParent({ type: 'approval-finalized', requestId, result: { grant, approvalBinding: {
+      runId: grant.approvalContext.runId,
+      installationDigest: grant.approvalContext.installationDigest,
+      approvalType: grant.approvalContext.approvalType,
+      subjectDigest: grant.approvalContext.subjectDigest,
+    } } })
   } catch (error) {
     sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
   }

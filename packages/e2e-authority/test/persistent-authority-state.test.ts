@@ -32,6 +32,7 @@ function convertToRealLegacySnapshot(snapshot: Record<string, any>, encryptionKe
     const privateKey = createPrivateKey({ key: plaintext, type: 'pkcs8', format: 'der' })
     for (const [, grant] of snapshot.grants as Array<[string, Record<string, any>]>) {
       delete grant.approvalContext
+      grant.subjectDigest = digestText('approval-subject/v1', canonicalizeJson(grant.subject))
       const { signature: _signature, ...payload } = grant
       grant.signature = sign(null, Buffer.from(canonicalizeJson(payload)), privateKey).toString('base64url')
     }
@@ -85,7 +86,8 @@ const attemptContext = {
 }
 
 describe('SQLite 持久 Authority 状态', () => {
-  test('将真实 2.0.0 snapshot 幂等迁移到 2.2.0，并对未知版本 fail closed', async () => {
+  test.each(['2.0.0', '2.1.0'] as const)(
+    '将真实 %s snapshot 幂等迁移到 2.2.0，并对未知版本 fail closed', async (legacyVersion) => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-migration-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')
     const options = {
@@ -103,8 +105,8 @@ describe('SQLite 持久 Authority 状态', () => {
     const database = new DatabaseSync(statePath)
     const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
     const legacy = JSON.parse(row.snapshot) as Record<string, unknown>
-    legacy.schemaVersion = '2.0.0'
-    delete legacy.webAuthnCredentials
+    legacy.schemaVersion = legacyVersion
+    if (legacyVersion === '2.0.0') delete legacy.webAuthnCredentials
     delete legacy.webAuthnReceipts
     convertToRealLegacySnapshot(legacy, stateEncryptionKey)
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
@@ -129,7 +131,8 @@ describe('SQLite 持久 Authority 状态', () => {
     await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
       code: 'E2E_AUTHORITY_STATE_CORRUPT',
     })
-  })
+    },
+  )
 
   test('2.0.0 migration validates the supplied key before commit and wrong-key rollback preserves exact bytes', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-wrong-key-migration-'))

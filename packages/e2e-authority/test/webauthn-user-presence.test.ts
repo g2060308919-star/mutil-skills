@@ -141,7 +141,7 @@ describe('WebAuthn user presence authority', () => {
         url: 'https://test.example.com/orders', title: 'Orders', heading: 'Orders', ariaSignals: [],
       },
       bootstrapIntentsDigest: subjectDigest,
-      actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 }],
+      actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 as const }],
     }
     const approvalSubjectDigest = canonicalGrantApprovalSubjectDigest(approvalSubject)
     const openAndComplete = async (runId: string) => {
@@ -383,7 +383,7 @@ describe('WebAuthn user presence authority', () => {
         url: 'https://test.example.com/orders', title: 'Orders', heading: 'Orders', ariaSignals: [],
       },
       bootstrapIntentsDigest: subjectDigest,
-      actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 }],
+      actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 as const }],
     }
     const grantSubjectDigest = canonicalGrantApprovalSubjectDigest(grantSubject)
     try {
@@ -422,13 +422,12 @@ describe('WebAuthn user presence authority', () => {
       secondPresence = createWebAuthnUserPresenceAuthority({
         now: () => fixedNow, credentialRepository: second.createWebAuthnCredentialRepository(),
       })
-      const grant = await second.issueDiscoveryGrant({
-        subject: grantSubject, approver, approvalSessionRef: session.sessionId, ttlMs: 60_000,
-      })
-      expect(grant.approvalContext).toMatchObject({
-        subject: approver.subject, runId: 'RUN-PERSISTED', approvalType: 'discovery',
-        subjectDigest: grantSubjectDigest, installationDigest, origin: 'http://localhost:43210',
-      })
+      await expect(second.issueGrantFromApprovalSession({
+        subject: grantSubject, approvalSessionRef: session.sessionId, ttlMs: 60_000,
+        registerApprovalContext: () => {
+          throw new Error('registration failed')
+        },
+      })).rejects.toThrow('registration failed')
       second.close()
 
       let thirdPresence: ReturnType<typeof createWebAuthnUserPresenceAuthority>
@@ -439,10 +438,33 @@ describe('WebAuthn user presence authority', () => {
       thirdPresence = createWebAuthnUserPresenceAuthority({
         now: () => fixedNow, credentialRepository: third.createWebAuthnCredentialRepository(),
       })
-      await expect(third.issueDiscoveryGrant({
-        subject: grantSubject, approver, approvalSessionRef: session.sessionId, ttlMs: 60_000,
-      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_APPROVER_UNTRUSTED' })
+      let registeredContext: unknown
+      const grant = await third.issueGrantFromApprovalSession({
+        subject: grantSubject, approvalSessionRef: session.sessionId, ttlMs: 60_000,
+        registerApprovalContext: (context) => {
+          registeredContext = context
+        },
+      })
+      expect(grant.approvalContext).toMatchObject({
+        subject: approver.subject, runId: 'RUN-PERSISTED', approvalType: 'discovery',
+        subjectDigest: grantSubjectDigest, installationDigest, origin: 'http://localhost:43210',
+      })
+      expect(registeredContext).toEqual(grant.approvalContext)
       third.close()
+
+      let fourthPresence: ReturnType<typeof createWebAuthnUserPresenceAuthority>
+      const fourth = await LocalApprovalAuthority.open({
+        ...options,
+        authenticateApproverSession: (sessionId) => fourthPresence.authenticateSession(sessionId),
+      })
+      fourthPresence = createWebAuthnUserPresenceAuthority({
+        now: () => fixedNow, credentialRepository: fourth.createWebAuthnCredentialRepository(),
+      })
+      await expect(fourth.issueGrantFromApprovalSession({
+        subject: grantSubject, approvalSessionRef: session.sessionId, ttlMs: 60_000,
+        registerApprovalContext: () => undefined,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_APPROVER_UNTRUSTED' })
+      fourth.close()
     } finally {
       stateEncryptionKey.fill(0)
       await rm(directory, { recursive: true, force: true })

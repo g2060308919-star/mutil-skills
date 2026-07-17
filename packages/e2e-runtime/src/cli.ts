@@ -3,6 +3,7 @@ import {
   E2EError,
   canonicalizeJson,
   canonicalGrantApprovalType,
+  digestText,
   type ApprovalGrantSubject,
 } from '@mutil-skills/e2e-contracts'
 import { homedir } from 'node:os'
@@ -90,8 +91,10 @@ export async function runCli(
       const session = await (dependencies.openHumanAuthoritySession?.(arguments_)
         ?? openDefaultHumanAuthoritySession(arguments_, dependencies))
       await writeText(stderr, `${session.url}\n`)
-      await session.wait()
-      await responseWriter.write(`${canonicalizeJson({ sessionId: session.sessionId, status: 'verified' })}\n`)
+      const outcome = await session.wait()
+      await responseWriter.write(`${canonicalizeJson(
+        outcome ?? { sessionId: session.sessionId, status: 'verified' },
+      )}\n`)
       return 0
     } catch (error) {
       const runtimeError = error instanceof E2EError ? error : new E2EError({
@@ -434,6 +437,7 @@ async function openDefaultHumanAuthoritySession(
       url: session.url,
       sessionId: session.sessionId,
       async wait() {
+        let outcome: Awaited<ReturnType<RuntimeAuthoritySession['wait']>> = undefined
         await runWithResourceCleanup(async () => {
           await session.wait()
           const currentIdentity = await resolveProjectIdentity(projectRoot)
@@ -442,7 +446,29 @@ async function openDefaultHumanAuthoritySession(
           if (computeRuntimeApprovalSubjectDigest(current, approvalType, grantSubject) !== subjectDigest) {
             throw cliAuthorityError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')
           }
+          if (grantSubject !== undefined) {
+            if (!session.finalize) throw cliAuthorityError('E2E_APPROVAL_FINALIZE_UNAVAILABLE')
+            const finalized = await session.finalize(grantSubject)
+            const response = {
+              sessionId: session.sessionId,
+              status: 'verified' as const,
+              signedGrant: finalized.grant,
+              approvalBinding: finalized.approvalBinding,
+            }
+            const requestId = `HUMAN-APPROVAL-${session.sessionId}`
+            const requestDigest = digestText('e2e-runtime-human-approval/v1', canonicalizeJson({
+              runId, approvalType, subjectDigest, sessionId: session.sessionId,
+            }))
+            await store.beginRequest(requestId, requestDigest)
+            const lock = await store.acquireRunLock(identity.digest, runId)
+            try {
+              outcome = await store.readRunOutcome(
+                identity.digest, runId, requestId, requestDigest, () => response, lock,
+              ) as typeof response
+            } finally { await lock.close() }
+          }
         }, [store, authority])
+        return outcome
       },
     }
   } catch (error) {
@@ -487,7 +513,7 @@ function closeAuthorityAfterWait(
     url: session.url,
     sessionId: session.sessionId,
     async wait() {
-      await runWithResourceCleanup(async () => await session.wait(), [authority])
+      await runWithResourceCleanup(async () => { await session.wait() }, [authority])
     },
   }
 }
