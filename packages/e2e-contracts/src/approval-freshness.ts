@@ -52,8 +52,10 @@ const CanonicalPayloadSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('binary'), digest: DigestSchema }).strict(),
 ])
 
-const HttpIntentSchema = z.object({
-  intentId: SafeIdSchema, method: z.string().min(1).max(32), canonicalOrigin: CanonicalOriginSchema,
+export const WriteHttpIntentSchema = z.object({
+  intentId: SafeIdSchema,
+  method: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Z-]{1,32}$/),
+  canonicalOrigin: CanonicalOriginSchema,
   exactPath: ExactPathSchema,
   query: z.array(z.tuple([QueryPartSchema, QueryPartSchema])).max(1_000),
   payload: CanonicalPayloadSchema, targetFingerprint: DigestSchema,
@@ -72,7 +74,7 @@ export const WriteApprovalSubjectV2Schema = z.object({
   actions: z.array(z.object({
     actionId: SafeIdSchema, effect: z.literal('reversible-write'), dataLeaseId: SafeIdSchema,
     fencingToken: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), cleanupPlanDigest: DigestSchema,
-    requests: z.array(HttpIntentSchema).min(1).max(1_000),
+    requests: z.array(WriteHttpIntentSchema).min(1).max(1_000),
   }).strict()).min(1).max(100_000),
 }).strict()
 

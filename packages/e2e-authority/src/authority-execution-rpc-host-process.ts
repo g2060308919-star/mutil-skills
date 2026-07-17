@@ -16,6 +16,7 @@ import {
   closeAuthorityExecutionRpcHostResources,
 } from './authority-execution-rpc-host-lifecycle.js'
 import { AuthorityExecutionControlQueue } from './authority-execution-control-queue.js'
+import { registerAuthenticatedRpcClientFromConfig } from './authority-rpc-session-key.js'
 import {
   parseAuthorityExecutionIncomingEnvelope,
   parseAuthorityExecutionHostConfig,
@@ -31,8 +32,8 @@ import {
   type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
 import {
-  parseTrustedApprovalExecutionBinding,
-  type TrustedApprovalExecutionBinding,
+  parseApprovalExecutionBinding,
+  type ApprovalExecutionBinding,
 } from './trusted-execution-clients.js'
 
 type EncodedApprovalAssets = NonNullable<HostConfig['userPresence']>['assets']
@@ -129,10 +130,7 @@ process.on('message', async (incoming: unknown) => {
     }
     const rpc = AuthenticatedRpcServer.create({ issuer: config.rpc.issuer, keyId: config.rpc.keyId, now })
     executionRpc = rpc
-    const sessionKey = decode32(config.sessionKeyBase64Url)
-    config.sessionKeyBase64Url = ''
-    rpc.registerClient(config.rpc.clientId, sessionKey)
-    sessionKey.fill(0)
+    registerAuthenticatedRpcClientFromConfig(rpc, config)
     registerAuthorityExecutionRpcOperations(rpc, {
       writeAuthority: approvalAuthority,
       leaseAuthority: leaseAuthority.createExecutionClient(),
@@ -147,6 +145,7 @@ process.on('message', async (incoming: unknown) => {
     }
     try { await shutdown(); cleanup = { ok: true } }
     catch (cleanupError) {
+      process.exitCode = 1
       cleanup = { ok: false, error: authorityHostCleanupFailurePayload(cleanupError) }
     }
     try {
@@ -298,7 +297,7 @@ async function handleRecoverApproval(message: Record<string, any>): Promise<void
       || typeof message.input.requestDigest !== 'string') throw rpcHostError('E2E_APPROVAL_FINALIZE_INPUT_INVALID')
     if (!approvalAuthority || !executionRpc || !hostConfig) throw rpcHostError('E2E_RPC_HOST_START_FAILED')
     const subject = ApprovalGrantSubjectSchema.parse(message.input.grantSubject)
-    const approvalBinding = parseTrustedApprovalExecutionBinding(message.input.approvalBinding)
+    const approvalBinding = parseApprovalExecutionBinding(message.input.approvalBinding)
     const recovered = await approvalAuthority.recoverFinalizedGrant({
       finalizationId: message.input.finalizationId,
       requestDigest: message.input.requestDigest,
@@ -331,7 +330,7 @@ async function handleActivateGrant(message: Record<string, any>): Promise<void> 
       || !approvalAuthority || !executionRpc || !hostConfig) throw rpcHostError('E2E_APPROVAL_GRANT_INVALID')
     const parsed = SignedGrantSchema.safeParse(message.input.grant)
     if (!parsed.success) throw rpcHostError('E2E_APPROVAL_GRANT_INVALID')
-    const approvalBinding = parseTrustedApprovalExecutionBinding(message.input.approvalBinding)
+    const approvalBinding = parseApprovalExecutionBinding(message.input.approvalBinding)
     const context = await approvalAuthority.activatePersistedGrant({
       grant: parsed.data as SignedGrant, approvalBinding,
     })
@@ -357,7 +356,7 @@ async function handleAcknowledgeFinalization(message: Record<string, any>): Prom
       finalizationId: message.input.finalizationId,
       requestDigest: message.input.requestDigest,
       grantId: message.input.grantId,
-      approvalBinding: parseTrustedApprovalExecutionBinding(message.input.approvalBinding),
+      approvalBinding: parseApprovalExecutionBinding(message.input.approvalBinding),
     })
     sendToParent({ type: 'finalization-acknowledged', requestId, result: { acknowledged: true } })
   } catch (error) {

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import {
   DiscoveryApprovalSubjectSchema,
+  InjectionHttpIntentSchema,
   InjectionApprovalSubjectSchema,
   SseReadApprovalSubjectSchema,
   WebSocketReadApprovalSubjectSchema,
@@ -8,7 +9,11 @@ import {
   canonicalGrantApprovalSubjectDigest,
   canonicalGrantApprovalType,
 } from './approval-subject.js'
-import { ReadApprovalSubjectSchema, WriteApprovalSubjectV2Schema } from './approval-freshness.js'
+import {
+  ReadApprovalSubjectSchema,
+  WriteApprovalSubjectV2Schema,
+  WriteHttpIntentSchema,
+} from './approval-freshness.js'
 import { digestInjectionResponseBody } from './approval.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -27,22 +32,6 @@ const RolesSchema = z.array(SafeIdSchema).min(1).max(1_000)
   .refine((roles) => new Set(roles).size === roles.length)
 
 const ApproverSchema = z.object({ subject: SafeIdSchema, roles: RolesSchema }).strict()
-const CanonicalPayloadSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('no-body') }).strict(),
-  z.object({ kind: z.literal('json'), digest: DigestSchema }).strict(),
-  z.object({ kind: z.literal('binary'), digest: DigestSchema }).strict(),
-])
-const HttpIntentSchema = z.object({
-  intentId: SafeIdSchema,
-  method: z.string().regex(/^[A-Z]{3,16}$/),
-  canonicalOrigin: CanonicalOriginSchema,
-  exactPath: ExactPathSchema,
-  query: QuerySchema,
-  payload: CanonicalPayloadSchema,
-  targetFingerprint: z.union([DigestSchema, z.literal('not-applicable')]),
-  maxRequests: z.number().int().positive().max(1_000),
-  expectedOrder: z.number().int().nonnegative().max(100_000),
-}).strict()
 const InjectionResponseBodySchema = z.union([
   z.object({ kind: z.literal('no-body') }).strict(),
   z.object({ kind: z.literal('utf8'), value: BoundedStringSchema(64 * 1024), digest: DigestSchema })
@@ -97,12 +86,12 @@ const WriteCapabilitySchema = z.object({
   dataLeaseId: SafeIdSchema,
   fencingToken: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   cleanupPlanDigest: DigestSchema,
-  requests: z.array(HttpIntentSchema).min(1).max(1_000), maxUses: z.literal(1),
+  requests: z.array(WriteHttpIntentSchema).min(1).max(1_000), maxUses: z.literal(1),
 }).strict()
 const InjectionCapabilitySchema = z.object({
   capabilityId: SafeIdSchema, nonce: NonceSchema, transport: z.literal('gateway-injection'),
   actionId: SafeIdSchema, caseId: SafeIdSchema, runId: SafeIdSchema,
-  attemptSlot: z.number().int().positive().max(99), request: HttpIntentSchema,
+  attemptSlot: z.number().int().positive().max(99), request: InjectionHttpIntentSchema,
   response: InjectionResponseSchema, expectedMatches: z.number().int().positive().max(100_000),
   expectedOrder: z.number().int().positive().max(100_000), upstreamForwarding: z.literal('forbidden'),
   maxUses: z.number().int().positive().max(100_000),

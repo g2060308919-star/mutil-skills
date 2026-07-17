@@ -50,7 +50,7 @@ const CanonicalPayloadSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('binary'), digest: DigestSchema }).strict(),
 ])
 
-const HttpIntentSchema = z.object({
+export const InjectionHttpIntentSchema = z.object({
   intentId: SafeIdSchema,
   method: z.string().regex(/^[A-Z]{3,16}$/),
   canonicalOrigin: CanonicalOriginSchema,
@@ -102,7 +102,7 @@ export const InjectionApprovalSubjectSchema = z.object({
     caseId: SafeIdSchema,
     runId: SafeIdSchema,
     attemptSlot: z.number().int().positive().max(99),
-    request: HttpIntentSchema,
+    request: InjectionHttpIntentSchema,
     response: CanonicalInjectionResponseSchema,
     expectedMatches: z.number().int().positive().max(100_000),
     expectedOrder: z.number().int().positive().max(100_000),

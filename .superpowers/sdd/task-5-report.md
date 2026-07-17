@@ -306,3 +306,27 @@ git diff --check                               PASS
 ```
 
 `npm run e2e:golden` 未申请 elevated：24 项均在产品断言前被当前 sandbox 阻断，其中 21 项为 loopback `listen EPERM`，3 项为 Chromium MachPort/进程权限拒绝。该结果只记录环境阻塞，不宣称 Golden 产品通过，也没有观察到进入产品断言后的失败。
+
+## 八次外审修复附录
+
+本轮关闭 ACK tombstone、child secret、启动状态机、Write intent 契约、真实 Runtime 恢复边界及三项结构收口：
+
+1. **Authority `2.4.0` tombstone**：ack 将 outbox 原子移动到持久 `{ requestDigest, grantId, approvalBinding, expiresAt }` tombstone。精确重复 ack 幂等；request/grant/binding 任一 mismatch 拒绝。outbox+tombstone 合计上限 1024，两个集合共同 expiry prune、共同 oversized snapshot 校验；`2.3.0` 保留 outbox并迁移空 tombstone。
+2. **child key 与启动期终态**：session key decode 后以 `try/finally` 包围 `registerClient`，抛错路径可观察地清零。启动期 disconnect 不再覆盖随后到达的 strict startup-error/exit；非零 exit 为稳定 cleanup failure，零 exit 为 startup exited，仅 disconnect 才等待 timeout。child 启动 cleanup 失败设置非零 exitCode。
+3. **唯一 Write intent**：导出并复用 `WriteHttpIntentSchema`，subject 与 SignedGrant capability 对 method 的接受集合一致：1/32 大写 HTTP token 边界接受，lowercase/33 拒绝；Injection 继续使用独立 3–16 schema。真实 `issueWriteGrant → SignedGrantSchema` 边界往返通过，生成 schema set 更新为 `sha256:5a259753c2a83c4e12d92d54099ade25f681e1a8a5aefc817009a839da92ce0f`，历史内容寻址 schema sets 保留。
+4. **真实 Runtime 恢复链**：新增未 mock `child_process` 的 `E2ERuntimeHost → RuntimeAuthorityHost → Authority child` 集成测试。测试用真实 P-256 WebAuthn assertion 让 child 提交 Grant，再模拟 Run Store outcome failure，关闭 Host1，以新 session key 启动 Host2 recover/activate；同一 request 只展示/完成一次 WebAuthn，随后由 Host2 authenticated RPC verify/reserve。当前 sandbox 禁止 loopback，因此该测试按稳定平台权限分支明确 skip；未申请 elevated，也不把 skip 记为通过。既有 Golden 的 Host1-close→Host2 chain 保持不变。
+5. **结构收口**：四字段值改名 `ApprovalExecutionBinding`/`parseApprovalExecutionBinding`，唯一 parser 自己拥有 exact-key 校验，Trusted 仅保留给 WeakMap 客户端登记。parent finalized result 删除重复四字段手工解析。machine 与直接 CLI 共用 `persistFinalizedApprovalOutcome`，保证 outcome 先持久化、成功后 best-effort ack、持久化失败保持 pending。
+
+八次外审门禁：
+
+```text
+npm run typecheck                              PASS
+npm run lint:architecture                      PASS
+npm run build                                  PASS
+npm test                                       119 files / 861 passed / 15 sandbox skips / 0 failed
+npm pack --dry-run --workspace @mutil-skills/e2e-runtime
+                                                PASS / 96 files / 87.8 kB
+git diff --check                               PASS
+```
+
+`npm run e2e:golden` 按要求未申请 elevated：24 项仍全部在产品断言前被宿主环境阻断，其中 21 项为 loopback `listen EPERM`，3 项为 Chromium MachPort/进程权限。未观察到产品断言失败，且不宣称 Golden 在该宿主通过。

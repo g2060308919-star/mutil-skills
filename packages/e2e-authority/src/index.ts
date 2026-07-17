@@ -15,8 +15,9 @@ export {
   getTrustedExecutionClientBinding,
   isTrustedLeaseClient,
   isTrustedWriteApprovalClient,
+  parseApprovalExecutionBinding,
   type TrustedExecutionClientBinding,
-  type TrustedApprovalExecutionBinding,
+  type ApprovalExecutionBinding,
   type TrustedLeaseClient,
   type TrustedWriteApprovalClient,
 } from './trusted-execution-clients.js'

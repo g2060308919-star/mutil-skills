@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import {
   ApprovalFreshnessReceiptSchema,
   ArtifactSchemaRegistry,
+  WriteHttpIntentSchema,
   canonicalizeJson,
   digestCanonicalGrantApprovalSubject,
   digestText,
@@ -39,6 +40,19 @@ function receipt() {
 }
 
 describe('ApprovalFreshnessReceipt v1 / approval-grants v2', () => {
+  test('Write HTTP methods use one uppercase-token contract at the 1/32 byte boundaries', () => {
+    const intent = {
+      intentId: 'INTENT-1', method: 'X', canonicalOrigin: 'https://example.test', exactPath: '/orders',
+      query: [], payload: { kind: 'no-body' as const }, targetFingerprint: d('target'),
+      maxRequests: 1, expectedOrder: 1,
+    }
+    expect(WriteHttpIntentSchema.safeParse(intent).success).toBe(true)
+    expect(WriteHttpIntentSchema.safeParse({ ...intent, method: 'M-1' }).success).toBe(true)
+    expect(WriteHttpIntentSchema.safeParse({ ...intent, method: 'X'.repeat(32) }).success).toBe(true)
+    expect(WriteHttpIntentSchema.safeParse({ ...intent, method: 'post' }).success).toBe(false)
+    expect(WriteHttpIntentSchema.safeParse({ ...intent, method: 'X'.repeat(33) }).success).toBe(false)
+  })
+
   test('只接受字段完整、严格且可解释的 Authority freshness receipt', () => {
     const valid = receipt()
     expect(ApprovalFreshnessReceiptSchema.parse(valid)).toEqual(valid)

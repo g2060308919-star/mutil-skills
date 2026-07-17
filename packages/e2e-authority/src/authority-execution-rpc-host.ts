@@ -11,8 +11,8 @@ import {
   type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
 import {
-  parseTrustedApprovalExecutionBinding,
-  type TrustedApprovalExecutionBinding,
+  parseApprovalExecutionBinding,
+  type ApprovalExecutionBinding,
 } from './trusted-execution-clients.js'
 import type { WebAuthnApprovalAssets } from './webauthn-approval-server.js'
 import type { WebAuthnApprovalType } from './webauthn-user-presence.js'
@@ -82,26 +82,26 @@ export interface AuthorityExecutionRpcProcessHandle extends AuthenticatedRpcHttp
     grantSubject: ApprovalGrantSubject
     finalizationId: string
     requestDigest: string
-  }): Promise<{ grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }>
+  }): Promise<{ grant: SignedGrant; approvalBinding: ApprovalExecutionBinding }>
   recoverApproval(input: {
     finalizationId: string
     requestDigest: string
     grantSubject: ApprovalGrantSubject
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }): Promise<{
     grant: SignedGrant
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
     sessionId: string
   } | undefined>
   activateGrant(input: {
     grant: SignedGrant
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }): Promise<void>
   acknowledgeFinalization(input: {
     finalizationId: string
     requestDigest: string
     grantId: string
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }): Promise<void>
 }
 
@@ -406,7 +406,6 @@ function waitForReady(child: ChildProcess, startMessage: Record<string, any>): P
       child.off('message', onMessage)
       child.off('error', finishReject)
       child.off('exit', onExit)
-      child.off('disconnect', onDisconnect)
     }
     const finishReject = (error: unknown) => {
       scrubStartMessageSecrets(startMessage)
@@ -414,9 +413,13 @@ function waitForReady(child: ChildProcess, startMessage: Record<string, any>): P
       reject(error)
     }
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
-      finishReject(hostError('E2E_RPC_HOST_EXITED', { code, signal }))
+      finishReject(code !== null && code !== 0
+        ? Object.assign(cleanupAggregate({
+            code: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED',
+            causes: ['E2E_RPC_HOST_RESOURCE_CLEANUP_CAUSE'],
+          }), { code: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED' })
+        : hostError('E2E_RPC_HOST_EXITED', { code, signal }))
     }
-    const onDisconnect = () => finishReject(hostError('E2E_RPC_HOST_EXITED'))
     const onMessage = (message: unknown) => {
       if (!isObject(message)) return
       if (message.type === 'startup-error') {
@@ -435,7 +438,6 @@ function waitForReady(child: ChildProcess, startMessage: Record<string, any>): P
     child.on('message', onMessage)
     child.once('error', finishReject)
     child.once('exit', onExit)
-    child.once('disconnect', onDisconnect)
     child.send(startMessage, (error) => {
       scrubStartMessageSecrets(startMessage)
       if (error) finishReject(error)
@@ -647,7 +649,7 @@ function callFinalizeControl(
     requestDigest: string
   },
   terminalSignal: Promise<never>,
-): Promise<{ grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding }> {
+): Promise<{ grant: SignedGrant; approvalBinding: ApprovalExecutionBinding }> {
   const parsedSubject = ApprovalGrantSubjectSchema.parse(input.grantSubject)
   validateFinalizationControl(input.finalizationId, input.requestDigest)
   return callChildControl(child, 'finalize-approval', {
@@ -666,12 +668,12 @@ function callRecoverControl(
     finalizationId: string
     requestDigest: string
     grantSubject: ApprovalGrantSubject
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   },
   terminalSignal: Promise<never>,
 ): Promise<{
   grant: SignedGrant
-  approvalBinding: TrustedApprovalExecutionBinding
+  approvalBinding: ApprovalExecutionBinding
   sessionId: string
 } | undefined> {
   validateFinalizationControl(input.finalizationId, input.requestDigest)
@@ -679,7 +681,7 @@ function callRecoverControl(
     finalizationId: input.finalizationId,
     requestDigest: input.requestDigest,
     grantSubject: ApprovalGrantSubjectSchema.parse(input.grantSubject),
-    approvalBinding: parseTrustedApprovalExecutionBinding(input.approvalBinding),
+    approvalBinding: parseApprovalExecutionBinding(input.approvalBinding),
   }, 'approval-recovered', terminalSignal, (message) => {
     if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
       || !isObject(message.result) || typeof message.result.found !== 'boolean') {
@@ -708,14 +710,14 @@ function callRecoverControl(
 
 function callActivateControl(
   child: ChildProcess,
-  input: { grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding },
+  input: { grant: SignedGrant; approvalBinding: ApprovalExecutionBinding },
   terminalSignal: Promise<never>,
 ): Promise<void> {
   const parsedGrant = SignedGrantSchema.safeParse(input.grant)
   if (!parsedGrant.success) throw hostError('E2E_APPROVAL_GRANT_INVALID')
   return callChildControl(child, 'activate-grant', {
     grant: parsedGrant.data,
-    approvalBinding: parseTrustedApprovalExecutionBinding(input.approvalBinding),
+    approvalBinding: parseApprovalExecutionBinding(input.approvalBinding),
   }, 'grant-activated', terminalSignal, (message) => {
     if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
       || !isObject(message.result)
@@ -730,7 +732,7 @@ function callAcknowledgeControl(
     finalizationId: string
     requestDigest: string
     grantId: string
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   },
   terminalSignal: Promise<never>,
 ): Promise<void> {
@@ -740,7 +742,7 @@ function callAcknowledgeControl(
     finalizationId: input.finalizationId,
     requestDigest: input.requestDigest,
     grantId: input.grantId,
-    approvalBinding: parseTrustedApprovalExecutionBinding(input.approvalBinding),
+    approvalBinding: parseApprovalExecutionBinding(input.approvalBinding),
   }, 'finalization-acknowledged', terminalSignal, (message) => {
     if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
       || !isObject(message.result) || Object.keys(message.result).join('\0') !== 'acknowledged'
@@ -787,15 +789,15 @@ function callChildControl<T>(
 
 function parseFinalizedApproval(
   value: Record<string, any>,
-): { grant: SignedGrant; approvalBinding: TrustedApprovalExecutionBinding } {
+): { grant: SignedGrant; approvalBinding: ApprovalExecutionBinding } {
   if (Object.keys(value).sort().join('\0') !== ['approvalBinding', 'grant'].join('\0')
-    || !isObject(value.grant) || !isObject(value.approvalBinding)
-    || Object.keys(value.approvalBinding).sort().join('\0')
-      !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')) {
+    || !isObject(value.grant)) {
     throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID')
   }
   const grant = SignedGrantSchema.safeParse(value.grant)
-  const approvalBinding = parseTrustedApprovalExecutionBinding(value.approvalBinding)
+  let approvalBinding: ApprovalExecutionBinding
+  try { approvalBinding = parseApprovalExecutionBinding(value.approvalBinding) }
+  catch { throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID') }
   if (!grant.success
     || approvalBinding.runId !== grant.data.approvalContext.runId
     || approvalBinding.installationDigest !== grant.data.approvalContext.installationDigest

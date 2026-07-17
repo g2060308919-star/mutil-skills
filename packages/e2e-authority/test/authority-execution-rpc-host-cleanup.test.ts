@@ -2,7 +2,9 @@ import { EventEmitter } from 'node:events'
 import { afterEach, expect, test, vi } from 'vitest'
 
 let childMode: 'startup-hang' | 'ready-cleanup-failure' | 'ready-cleanup-failure-hang'
-  | 'ready-cleanup-success' | 'ready-terminal-cleanup' | 'ready-organic-disconnect' = 'startup-hang'
+  | 'ready-cleanup-success' | 'ready-terminal-cleanup' | 'ready-organic-disconnect'
+  | 'startup-disconnect-exit1' | 'startup-disconnect-exit0'
+  | 'startup-disconnect-error' | 'startup-disconnect-only' = 'startup-hang'
 let lastChild: NonTerminatingChild | undefined
 
 class NonTerminatingChild extends EventEmitter {
@@ -18,6 +20,27 @@ class NonTerminatingChild extends EventEmitter {
         if (childMode === 'startup-hang') {
           this.emit('message', {
             type: 'startup-error', code: 'E2E_RPC_HOST_START_FAILED', cleanup: { ok: true },
+          })
+        } else if (childMode.startsWith('startup-disconnect')) {
+          this.connected = false
+          this.emit('disconnect')
+          queueMicrotask(() => {
+            if (childMode === 'startup-disconnect-error') {
+              this.emit('message', {
+                type: 'startup-error', code: 'E2E_RPC_HOST_START_FAILED', cleanup: {
+                  ok: false,
+                  error: {
+                    code: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED',
+                    causes: ['E2E_RPC_HOST_STARTUP_CLEANUP_CAUSE'],
+                  },
+                },
+              })
+              this.exitCode = 1
+              this.emit('exit', 1, null)
+            } else if (childMode !== 'startup-disconnect-only') {
+              this.exitCode = childMode === 'startup-disconnect-exit1' ? 1 : 0
+              this.emit('exit', this.exitCode, null)
+            }
           })
         } else {
           this.emit('message', {
@@ -61,6 +84,12 @@ class NonTerminatingChild extends EventEmitter {
   }
 
   kill(signal?: NodeJS.Signals | number): boolean {
+    if (childMode === 'startup-disconnect-only') {
+      queueMicrotask(() => {
+        this.signalCode = typeof signal === 'string' ? signal : null
+        this.emit('exit', null, this.signalCode)
+      })
+    }
     if (childMode === 'ready-terminal-cleanup' && signal === 'SIGTERM') {
       queueMicrotask(() => {
         this.emit('message', {
@@ -134,6 +163,54 @@ test('真实启动失败路径在 child 有界清理也失败时聚合保留两�
     expect.objectContaining({ code: 'E2E_RPC_HOST_STOP_TIMEOUT' }),
   ])
   expect((result as Error).message).toBe('E2E_RPC_HOST_START_AND_CLEANUP_FAILED')
+})
+
+test.each([
+  ['startup-disconnect-exit1', 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED'],
+  ['startup-disconnect-exit0', 'E2E_RPC_HOST_EXITED'],
+] as const)('startup disconnect waits for exit and maps %s deterministically', async (mode, code) => {
+  childMode = mode
+  await expect(startAuthorityExecutionRpcHostProcess({
+    rpc: { issuer: 'authority-host', keyId: 'rpc-key', clientId: 'runner' },
+    approval: { issuer: 'authority', keyId: 'approval-key', statePath: 'approval.sqlite',
+      stateEncryptionKey: Buffer.alloc(32, 7), testWorkspaceRoots: [process.cwd()] },
+    lease: { statePath: 'lease.sqlite', testWorkspaceRoots: [process.cwd()] },
+    clock: { kind: 'fixed-test-only', now: '2026-07-17T00:00:00.000Z' },
+  })).rejects.toMatchObject({ code })
+})
+
+test('strict startup-error wins after disconnect and preserves startup plus child cleanup', async () => {
+  childMode = 'startup-disconnect-error'
+  const result = await startAuthorityExecutionRpcHostProcess({
+    rpc: { issuer: 'authority-host', keyId: 'rpc-key', clientId: 'runner' },
+    approval: { issuer: 'authority', keyId: 'approval-key', statePath: 'approval.sqlite',
+      stateEncryptionKey: Buffer.alloc(32, 7), testWorkspaceRoots: [process.cwd()] },
+    lease: { statePath: 'lease.sqlite', testWorkspaceRoots: [process.cwd()] },
+    clock: { kind: 'fixed-test-only', now: '2026-07-17T00:00:00.000Z' },
+  }).catch((error: unknown) => error)
+
+  expect(result).toMatchObject({
+    message: 'E2E_RPC_HOST_START_AND_CLEANUP_FAILED',
+    errors: [
+      expect.objectContaining({ code: 'E2E_RPC_HOST_START_FAILED' }),
+      expect.objectContaining({ code: 'E2E_RPC_HOST_STARTUP_CLEANUP_CAUSE' }),
+    ],
+  })
+})
+
+test('disconnect without exit or startup-error remains pending until the startup timeout', async () => {
+  vi.useFakeTimers()
+  childMode = 'startup-disconnect-only'
+  const pending = startAuthorityExecutionRpcHostProcess({
+    rpc: { issuer: 'authority-host', keyId: 'rpc-key', clientId: 'runner' },
+    approval: { issuer: 'authority', keyId: 'approval-key', statePath: 'approval.sqlite',
+      stateEncryptionKey: Buffer.alloc(32, 7), testWorkspaceRoots: [process.cwd()] },
+    lease: { statePath: 'lease.sqlite', testWorkspaceRoots: [process.cwd()] },
+    clock: { kind: 'fixed-test-only', now: '2026-07-17T00:00:00.000Z' },
+  }).catch((error: unknown) => error)
+  await vi.runAllTimersAsync()
+
+  await expect(pending).resolves.toMatchObject({ code: 'E2E_RPC_HOST_START_TIMEOUT' })
 })
 
 test('显式 close 等待严格 shutdown IPC，并保留 child cleanup cause codes', async () => {

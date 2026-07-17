@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
+import { SignedGrantSchema, digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, testApprovalReceipt } from './approval-authority.fixture.js'
 import { LocalApprovalAuthority as RuntimeApprovalAuthority } from '../src/index.js'
 
@@ -118,6 +118,26 @@ describe('LocalApprovalAuthority write grants', () => {
       ...grant,
       subject: { ...grant.subject, actions: [{ ...grant.subject.actions[0]!, fencingToken: 8 }] },
     })).toMatchObject({ allowed: false, code: 'E2E_APPROVAL_SIGNATURE_INVALID' })
+  })
+
+  test('a boundary-valid issued Write Grant round-trips through the shared SignedGrant contract', async () => {
+    const authority = LocalApprovalAuthority.create({
+      issuer: 'local-authority', keyId: 'local-key-1', now: () => new Date('2026-07-11T10:00:00.000Z'),
+    })
+    const approved = await subject(authority)
+    const boundary = {
+      ...approved,
+      actions: [{
+        ...approved.actions[0]!,
+        requests: approved.actions[0]!.requests.map((request, index) =>
+          index === 0 ? { ...request, method: 'X' } : { ...request, method: 'X'.repeat(32) }),
+      }],
+    }
+    const issued = await authority.issueWriteGrant({
+      subject: boundary, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
+    })
+
+    expect(SignedGrantSchema.parse(issued)).toEqual(issued)
   })
 
   test('旧 Grant 与当前 target、payload、environment 或 Revision 任一不同时均失效', async () => {

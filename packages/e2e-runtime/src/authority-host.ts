@@ -13,7 +13,7 @@ import {
   type ApprovalGrantSubject,
   type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
-import type { TrustedApprovalExecutionBinding } from '@mutil-skills/e2e-authority'
+import type { ApprovalExecutionBinding } from '@mutil-skills/e2e-authority'
 import { constants } from 'node:fs'
 import { lstat, open, realpath, type FileHandle } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
@@ -48,11 +48,11 @@ export interface RuntimeAuthoritySession {
     sessionId: string
     status: 'verified'
     signedGrant: SignedGrant
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }>
   finalize?(grantSubject: ApprovalGrantSubject): Promise<{
     grant: SignedGrant
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }>
 }
 
@@ -97,7 +97,7 @@ export class RuntimeAuthorityHost {
       runId: input.runId, approvalType: input.approvalType,
       subjectDigest: input.subjectDigest, installationDigest: input.installationDigest,
     })
-    const binding: TrustedApprovalExecutionBinding | undefined = grantsCapability
+    const binding: ApprovalExecutionBinding | undefined = grantsCapability
       ? {
           runId: input.runId,
           installationDigest: input.installationDigest,
@@ -114,10 +114,10 @@ export class RuntimeAuthorityHost {
     finalizationId: string
     requestDigest: string
     grantSubject: ApprovalGrantSubject
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }): Promise<{
     grant: SignedGrant
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
     sessionId: string
   } | undefined> {
     this.#requireOpen()
@@ -137,7 +137,7 @@ export class RuntimeAuthorityHost {
 
   async activateGrant(input: {
     grant: SignedGrant
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }): Promise<void> {
     this.#requireOpen()
     if (!this.#process.activateGrant) throw authorityHostError('E2E_APPROVAL_ACTIVATE_UNAVAILABLE')
@@ -152,7 +152,7 @@ export class RuntimeAuthorityHost {
     finalizationId: string
     requestDigest: string
     grantId: string
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }): Promise<void> {
     this.#requireOpen()
     if (!this.#process.acknowledgeFinalization) return
@@ -160,7 +160,7 @@ export class RuntimeAuthorityHost {
     catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
   }
 
-  executionRpcConnection(approvalBinding: TrustedApprovalExecutionBinding) {
+  executionRpcConnection(approvalBinding: ApprovalExecutionBinding) {
     this.#requireOpen()
     if (!this.#process.endpoint || !this.#process.credential || !this.#process.verifierMaterial) {
       throw authorityHostError('E2E_RPC_HOST_NOT_READY')
@@ -181,7 +181,7 @@ export class RuntimeAuthorityHost {
 
   #session(
     reference: { url: string; sessionId: string },
-    expectedBinding?: TrustedApprovalExecutionBinding,
+    expectedBinding?: ApprovalExecutionBinding,
     finalization?: { finalizationId: string; requestDigest: string },
   ): RuntimeAuthoritySession {
     let url: URL

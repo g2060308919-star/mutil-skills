@@ -114,7 +114,10 @@ test('Authority child pins the inherited directory fd and creates no database af
           wrapperPath: join(process.cwd(), 'packages/e2e-runtime/scripts/authority-child-fchdir.py'),
         },
       },
-    })).rejects.toMatchObject({ code: 'E2E_RPC_HOST_EXITED' })
+    })).rejects.toMatchObject({
+      code: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED',
+      message: 'E2E_RPC_HOST_RESOURCE_CLEANUP_FAILED',
+    })
     expect(await readdir(authorityDirectory)).toEqual([])
     expect(await readdir(originalDirectory)).toEqual([])
     expect((await stat(authorityDirectory)).mode & 0o777).toBe(0o755)

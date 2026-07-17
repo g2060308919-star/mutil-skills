@@ -18,10 +18,10 @@ import {
   type AuthenticatedRpcOperationContext,
 } from './authenticated-rpc.js'
 import {
-  parseTrustedApprovalExecutionBinding,
+  parseApprovalExecutionBinding,
   trustLeaseClient,
   trustWriteApprovalClient,
-  type TrustedApprovalExecutionBinding,
+  type ApprovalExecutionBinding,
   type TrustedLeaseClient,
   type TrustedWriteApprovalClient,
 } from './trusted-execution-clients.js'
@@ -66,7 +66,7 @@ export interface AuthorityExecutionRpcClientOptions {
   transport: AuthenticatedRpcTransport
   now?: () => Date
   ttlMs?: number
-  approvalBinding: TrustedApprovalExecutionBinding
+  approvalBinding: ApprovalExecutionBinding
 }
 
 export function registerAuthorityExecutionRpcOperations(
@@ -186,9 +186,9 @@ export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRp
   return { writeApproval, lease, gatewayAuthority, destroy: () => rpc.destroy() }
 }
 
-function parseExecutionRpcApprovalBinding(value: unknown): TrustedApprovalExecutionBinding {
+function parseExecutionRpcApprovalBinding(value: unknown): ApprovalExecutionBinding {
   try {
-    const binding = parseTrustedApprovalExecutionBinding(value)
+    const binding = parseApprovalExecutionBinding(value)
     if (binding.approvalType !== 'execution') throw new Error('execution binding required')
     return binding
   } catch { throw executionRpcError('E2E_RPC_APPROVAL_BINDING_INVALID') }

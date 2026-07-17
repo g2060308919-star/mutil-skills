@@ -35,6 +35,7 @@ import {
   computeRuntimeApprovalSubjectDigest,
   type RuntimeAuthorityHost,
 } from './authority-host.js'
+import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js'
 
 export interface RuntimeHostDependencies {
   installation: RuntimeInstallation
@@ -317,26 +318,25 @@ export class E2ERuntimeHost {
           signedGrant: finalized.grant, approvalBinding: finalized.approvalBinding,
         }),
       })
-      try {
-        const persisted = RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.readRunOutcome(
+      const persist = async () => RuntimeResponseEnvelopeSchema.parse(
+        await this.dependencies.runStore.readRunOutcome(
           identity.digest, current.runId, request.requestId, requestDigest, () => response, lock,
-        ))
-        if (finalized !== undefined && authorityHost.acknowledgeFinalization !== undefined) {
-          try {
-            await authorityHost.acknowledgeFinalization({
-              finalizationId: request.requestId, requestDigest,
-              grantId: finalized.grant.grantId, approvalBinding: finalized.approvalBinding,
-            })
-          } catch { /* Run Store success 已持久化；残留 outbox 由幂等 retry/expiry prune 回收 */ }
-        }
-        return persisted
-      } catch (cause) {
-        if (finalized !== undefined) throw runtimeHostError(
+        ),
+      )
+      if (finalized === undefined) return await persist()
+      return await persistFinalizedApprovalOutcome({
+        persist,
+        acknowledge: async () => {
+          await authorityHost.acknowledgeFinalization?.({
+            finalizationId: request.requestId, requestDigest,
+            grantId: finalized.grant.grantId, approvalBinding: finalized.approvalBinding,
+          })
+        },
+        persistencePending: (cause) => runtimeHostError(
           'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING', 'safety',
           'Authority 已最终化 Grant，但 Run Store outcome 尚未持久化；请求保持 pending 并可恢复', cause,
-        )
-        throw cause
-      }
+        ),
+      })
     }
 
     if (approvalBinding !== undefined && authorityHost.recoverApproval !== undefined) {

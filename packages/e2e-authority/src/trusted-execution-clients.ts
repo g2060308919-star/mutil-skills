@@ -14,11 +14,11 @@ export interface TrustedLeaseClient {
   verifyTarget(leaseId: string, fencingToken: number, targetFingerprint: string): Promise<boolean>
 }
 
-export type TrustedApprovalExecutionBinding = Pick<CanonicalApprovalContext,
+export type ApprovalExecutionBinding = Pick<CanonicalApprovalContext,
   'runId' | 'installationDigest' | 'approvalType' | 'subjectDigest'>
 
-/** @internal Strictly parses the four-field execution binding; this does not confer client trust. */
-export function parseTrustedApprovalExecutionBinding(value: unknown): TrustedApprovalExecutionBinding {
+/** Strictly parses the four-field execution binding; parsing alone does not confer client trust. */
+export function parseApprovalExecutionBinding(value: unknown): ApprovalExecutionBinding {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) bindingInvalid()
   const candidate = value as Record<string, unknown>
   if (Object.keys(candidate).sort().join('\0')
@@ -29,7 +29,7 @@ export function parseTrustedApprovalExecutionBinding(value: unknown): TrustedApp
     || !/^sha256:[a-f0-9]{64}$/.test(candidate.subjectDigest)
     || typeof candidate.installationDigest !== 'string'
     || !/^sha256:[a-f0-9]{64}$/.test(candidate.installationDigest)) bindingInvalid()
-  return structuredClone(candidate) as TrustedApprovalExecutionBinding
+  return structuredClone(candidate) as ApprovalExecutionBinding
 }
 
 function bindingInvalid(): never {
@@ -40,9 +40,9 @@ function bindingInvalid(): never {
 }
 
 export type TrustedExecutionClientBinding =
-  | { transport: 'in-process-test'; approvalBinding?: TrustedApprovalExecutionBinding }
+  | { transport: 'in-process-test'; approvalBinding?: ApprovalExecutionBinding }
   | { transport: 'authenticated-rpc'; authorityPublicKeyDigest: string;
-      approvalBinding?: TrustedApprovalExecutionBinding }
+      approvalBinding?: ApprovalExecutionBinding }
 
 const trustedWriteApprovalClients = new WeakMap<object, TrustedExecutionClientBinding>()
 const trustedLeaseClients = new WeakMap<object, TrustedExecutionClientBinding>()

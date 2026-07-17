@@ -98,9 +98,9 @@ import {
   type SqliteStateDirectoryIdentity,
 } from './sqlite-state-store.js'
 import {
-  parseTrustedApprovalExecutionBinding,
+  parseApprovalExecutionBinding,
   trustWriteApprovalClient,
-  type TrustedApprovalExecutionBinding,
+  type ApprovalExecutionBinding,
   type TrustedWriteApprovalClient,
 } from './trusted-execution-clients.js'
 import type {
@@ -147,7 +147,7 @@ interface DecryptedAuthorityPrivateKeys {
 }
 
 interface AuthorityPersistentSnapshot {
-  schemaVersion: '2.3.0'
+  schemaVersion: '2.4.0'
   issuer: string
   keyId: string
   identityDigest: string
@@ -159,6 +159,7 @@ interface AuthorityPersistentSnapshot {
   webAuthnReceipts: EncryptedPrivateKey
   grants: Array<[string, SignedGrant]>
   grantFinalizations: Array<[string, StoredGrantFinalization]>
+  acknowledgedFinalizations: Array<[string, StoredAcknowledgedFinalization]>
   revoked: Array<[string, string]>
   uses: Array<[string, number]>
   reservations: Array<[string, CapabilityReservation]>
@@ -172,7 +173,14 @@ interface StoredGrantFinalization {
   grantId: string
   approvalSessionRef: string
   subject: ApprovalGrantSubject
-  approvalBinding: TrustedApprovalExecutionBinding
+  approvalBinding: ApprovalExecutionBinding
+}
+
+interface StoredAcknowledgedFinalization {
+  requestDigest: string
+  grantId: string
+  approvalBinding: ApprovalExecutionBinding
+  expiresAt: string
 }
 
 const MAX_GRANT_FINALIZATIONS = 1_024
@@ -206,6 +214,7 @@ export class LocalApprovalAuthority {
   #activeStateTransactions = 0
   readonly #grants = new Map<string, SignedGrant>()
   readonly #grantFinalizations = new Map<string, StoredGrantFinalization>()
+  readonly #acknowledgedFinalizations = new Map<string, StoredAcknowledgedFinalization>()
   readonly #revoked = new Map<string, string>()
   readonly #uses = new Map<string, number>()
   readonly #reservations = new Map<string, CapabilityReservation>()
@@ -282,7 +291,7 @@ export class LocalApprovalAuthority {
     const decision = generateKeyPairSync('ed25519')
     const attempt = generateKeyPairSync('ed25519')
     const initial: AuthorityPersistentSnapshot = {
-      schemaVersion: '2.3.0', issuer: options.issuer, keyId: options.keyId,
+      schemaVersion: '2.4.0', issuer: options.issuer, keyId: options.keyId,
       identityDigest: authorityIdentityDigest(options),
       privateKeys: {
         primary: encryptPrivateKey(primary.privateKey, stateEncryptionKey, 'primary'),
@@ -293,7 +302,8 @@ export class LocalApprovalAuthority {
       },
       webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey),
       webAuthnReceipts: encryptWebAuthnReceipts([], stateEncryptionKey),
-      grants: [], grantFinalizations: [], revoked: [], uses: [], reservations: [], completedPreflights: [],
+      grants: [], grantFinalizations: [], acknowledgedFinalizations: [],
+      revoked: [], uses: [], reservations: [], completedPreflights: [],
       manualResultIds: [], attemptLogs: [],
     }
     store.initialize(canonicalizeJson(initial))
@@ -412,7 +422,7 @@ export class LocalApprovalAuthority {
     ttlMs: number
     finalizationId: string
     requestDigest: string
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }): Promise<SignedGrant> {
     if (!this.#stateStore) {
       throw authorityError(
@@ -424,9 +434,9 @@ export class LocalApprovalAuthority {
       return await this.#withStateMutation(() => this.finalizeApprovalGrant(input))
     }
     const subject = ApprovalGrantSubjectSchema.parse(immutableSnapshot(input.subject))
-    const approvalBinding = parseTrustedApprovalExecutionBinding(input.approvalBinding)
+    const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
     validateFinalizationIdentity(input.finalizationId, input.requestDigest)
-    this.#pruneExpiredGrantFinalizations()
+    this.#pruneExpiredFinalizations()
     const expectedFinalization: Omit<StoredGrantFinalization, 'grantId' | 'approvalSessionRef'> = {
       requestDigest: input.requestDigest,
       subject,
@@ -445,6 +455,12 @@ export class LocalApprovalAuthority {
         throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', 'finalization outbox 引用了不存在的 Grant')
       }
       return structuredClone(existingGrant)
+    }
+    if (this.#acknowledgedFinalizations.has(input.finalizationId)) {
+      throw authorityError(
+        'E2E_APPROVAL_FINALIZATION_MISMATCH',
+        'finalizationId 已被已确认 tombstone 占用',
+      )
     }
     const common = { approvalSessionRef: input.approvalSessionRef, ttlMs: input.ttlMs }
     const discovery = DiscoveryApprovalSubjectSchema.safeParse(subject)
@@ -466,7 +482,7 @@ export class LocalApprovalAuthority {
     if (!sameApprovalExecutionBinding(grant.approvalContext, approvalBinding)) {
       throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'WebAuthn receipt 与 Runtime 可信绑定不一致')
     }
-    if (this.#grantFinalizations.size >= MAX_GRANT_FINALIZATIONS) {
+    if (this.#finalizationEntryCount() >= MAX_GRANT_FINALIZATIONS) {
       throw authorityError(
         'E2E_APPROVAL_FINALIZATION_CAPACITY_EXCEEDED',
         'finalization outbox 已达到安全上限',
@@ -484,16 +500,29 @@ export class LocalApprovalAuthority {
     finalizationId: string
     requestDigest: string
     subject: ApprovalGrantSubject
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }): Promise<{ grant: SignedGrant; approvalSessionRef: string } | undefined> {
     if (!this.#stateStore) throw authorityError('E2E_APPROVAL_PERSISTENCE_REQUIRED', '恢复 Grant 需要持久 Authority')
     return await this.#withStateMutation(async () => {
       validateFinalizationIdentity(input.finalizationId, input.requestDigest)
-      this.#pruneExpiredGrantFinalizations()
+      this.#pruneExpiredFinalizations()
       const subject = ApprovalGrantSubjectSchema.parse(immutableSnapshot(input.subject))
-      const approvalBinding = parseTrustedApprovalExecutionBinding(input.approvalBinding)
+      const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
       const existing = this.#grantFinalizations.get(input.finalizationId)
-      if (existing === undefined) return undefined
+      if (existing === undefined) {
+        const acknowledged = this.#acknowledgedFinalizations.get(input.finalizationId)
+        if (acknowledged === undefined) return undefined
+        const acknowledgedGrant = this.#grants.get(acknowledged.grantId)
+        if (acknowledgedGrant === undefined) {
+          throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', 'tombstone Grant 不存在')
+        }
+        if (acknowledged.requestDigest !== input.requestDigest
+          || canonicalizeJson(acknowledgedGrant.subject) !== canonicalizeJson(subject)
+          || canonicalizeJson(acknowledged.approvalBinding) !== canonicalizeJson(approvalBinding)) {
+          throw authorityError('E2E_APPROVAL_FINALIZATION_MISMATCH', 'finalization recovery 与 tombstone 不一致')
+        }
+        return undefined
+      }
       if (existing.requestDigest !== input.requestDigest
         || canonicalizeJson(existing.subject) !== canonicalizeJson(subject)
         || canonicalizeJson(existing.approvalBinding) !== canonicalizeJson(approvalBinding)) {
@@ -509,7 +538,7 @@ export class LocalApprovalAuthority {
     finalizationId: string
     requestDigest: string
     grantId: string
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }): Promise<void> {
     if (!this.#stateStore) throw authorityError('E2E_APPROVAL_PERSISTENCE_REQUIRED', '确认 Grant 需要持久 Authority')
     await this.#withStateMutation(async () => {
@@ -517,19 +546,41 @@ export class LocalApprovalAuthority {
       if (!/^[A-Za-z0-9._:-]{1,256}$/.test(input.grantId)) {
         throw authorityError('E2E_APPROVAL_FINALIZATION_INVALID', 'grantId 无效')
       }
-      const approvalBinding = parseTrustedApprovalExecutionBinding(input.approvalBinding)
-      this.#pruneExpiredGrantFinalizations()
+      const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
+      this.#pruneExpiredFinalizations()
+      const acknowledged = this.#acknowledgedFinalizations.get(input.finalizationId)
+      if (acknowledged !== undefined) {
+        if (acknowledged.requestDigest !== input.requestDigest || acknowledged.grantId !== input.grantId
+          || canonicalizeJson(acknowledged.approvalBinding) !== canonicalizeJson(approvalBinding)) {
+          throw authorityError('E2E_APPROVAL_FINALIZATION_MISMATCH', 'finalization ack 与 tombstone 不一致')
+        }
+        return
+      }
       const existing = this.#grantFinalizations.get(input.finalizationId)
-      if (existing === undefined) return
+      if (existing === undefined) {
+        throw authorityError('E2E_APPROVAL_FINALIZATION_MISMATCH', 'finalization ack 没有对应 outbox 或 tombstone')
+      }
       if (existing.requestDigest !== input.requestDigest || existing.grantId !== input.grantId
         || canonicalizeJson(existing.approvalBinding) !== canonicalizeJson(approvalBinding)) {
         throw authorityError('E2E_APPROVAL_FINALIZATION_MISMATCH', 'finalization ack 与 outbox 不一致')
       }
+      const grant = this.#grants.get(existing.grantId)
+      if (grant === undefined) throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', 'outbox Grant 不存在')
+      this.#acknowledgedFinalizations.set(input.finalizationId, {
+        requestDigest: existing.requestDigest,
+        grantId: existing.grantId,
+        approvalBinding: existing.approvalBinding,
+        expiresAt: grant.expiresAt,
+      })
       this.#grantFinalizations.delete(input.finalizationId)
     })
   }
 
-  #pruneExpiredGrantFinalizations(): void {
+  #finalizationEntryCount(): number {
+    return this.#grantFinalizations.size + this.#acknowledgedFinalizations.size
+  }
+
+  #pruneExpiredFinalizations(): void {
     const now = this.#now().getTime()
     for (const [finalizationId, entry] of this.#grantFinalizations) {
       const grant = this.#grants.get(entry.grantId)
@@ -537,19 +588,22 @@ export class LocalApprovalAuthority {
         this.#grantFinalizations.delete(finalizationId)
       }
     }
+    for (const [finalizationId, entry] of this.#acknowledgedFinalizations) {
+      if (Date.parse(entry.expiresAt) <= now) this.#acknowledgedFinalizations.delete(finalizationId)
+    }
   }
 
   /** Verifies the persisted signed Grant and binding before returning context for ephemeral RPC activation. */
   async activatePersistedGrant(input: {
     grant: SignedGrant
-    approvalBinding: TrustedApprovalExecutionBinding
+    approvalBinding: ApprovalExecutionBinding
   }): Promise<CanonicalApprovalContext> {
     if (!this.#stateStore) throw authorityError('E2E_APPROVAL_PERSISTENCE_REQUIRED', '激活 Grant 需要持久 Authority')
     return await this.#withStateRead(async () => {
       const parsed = SignedGrantSchema.safeParse(immutableSnapshot(input.grant))
       if (!parsed.success) throw authorityError('E2E_APPROVAL_GRANT_INVALID', 'SignedGrant 结构无效')
       const grant = parsed.data as SignedGrant
-      const approvalBinding = parseTrustedApprovalExecutionBinding(input.approvalBinding)
+      const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
       if (!sameApprovalExecutionBinding(grant.approvalContext, approvalBinding)) {
         throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'SignedGrant 与 Runtime 可信绑定不一致')
       }
@@ -1725,7 +1779,7 @@ export class LocalApprovalAuthority {
 
   #persistentSnapshot(): AuthorityPersistentSnapshot {
     return {
-      schemaVersion: '2.3.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
+      schemaVersion: '2.4.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
       privateKeys: {
         primary: encryptPrivateKey(this.#privateKey, this.#stateEncryptionKey!, 'primary'),
         freshness: encryptPrivateKey(this.#freshnessPrivateKey, this.#stateEncryptionKey!, 'freshness'),
@@ -1742,6 +1796,7 @@ export class LocalApprovalAuthority {
         this.#stateEncryptionKey!,
       ),
       grants: [...this.#grants.entries()], grantFinalizations: [...this.#grantFinalizations.entries()],
+      acknowledgedFinalizations: [...this.#acknowledgedFinalizations.entries()],
       revoked: [...this.#revoked.entries()], uses: [...this.#uses.entries()],
       reservations: [...this.#reservations.entries()], completedPreflights: [...this.#completedPreflights.entries()],
       manualResultIds: [...this.#manualResultIds], attemptLogs: [...this.#attemptLogs.entries()],
@@ -1755,6 +1810,7 @@ export class LocalApprovalAuthority {
     }
     replaceMap(this.#grants, snapshot.grants)
     replaceMap(this.#grantFinalizations, snapshot.grantFinalizations)
+    replaceMap(this.#acknowledgedFinalizations, snapshot.acknowledgedFinalizations)
     replaceMap(this.#revoked, snapshot.revoked)
     replaceMap(this.#uses, snapshot.uses)
     replaceMap(this.#reservations, snapshot.reservations)
@@ -1900,16 +1956,18 @@ function loadAuthoritySnapshot(
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
   const version = parsed.schemaVersion
-  const migrated = version === '2.0.0' || version === '2.1.0' || version === '2.2.0'
-  if (!migrated && version !== '2.3.0') {
+  const migrated = version === '2.0.0' || version === '2.1.0'
+    || version === '2.2.0' || version === '2.3.0'
+  if (!migrated && version !== '2.4.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 版本未知或旧结构无效')
   }
   parseAuthoritySnapshotStructure(
     parsed,
     version !== '2.0.0',
-    version === '2.2.0' || version === '2.3.0',
-    version === '2.2.0' || version === '2.3.0',
-    version === '2.3.0',
+    version === '2.2.0' || version === '2.3.0' || version === '2.4.0',
+    version === '2.2.0' || version === '2.3.0' || version === '2.4.0',
+    version === '2.3.0' || version === '2.4.0',
+    version === '2.4.0',
   )
   const encryptedKeys = parsed.privateKeys as AuthorityPersistentSnapshot['privateKeys']
   let privateKeys: DecryptedAuthorityPrivateKeys
@@ -1928,14 +1986,17 @@ function loadAuthoritySnapshot(
   if (version !== '2.0.0') {
     decryptWebAuthnCredentials(parsed.webAuthnCredentials as EncryptedPrivateKey, stateEncryptionKey)
   }
-  if (version === '2.2.0' || version === '2.3.0') {
+  if (version === '2.2.0' || version === '2.3.0' || version === '2.4.0') {
     decryptWebAuthnReceipts(parsed.webAuthnReceipts as EncryptedPrivateKey, stateEncryptionKey)
-    if (version === '2.3.0') {
+    if (version === '2.4.0') {
       return { snapshot: parsed as unknown as AuthorityPersistentSnapshot, migrated: false, privateKeys }
     }
     return {
       snapshot: parseCurrentAuthoritySnapshot({
-        ...parsed, schemaVersion: '2.3.0', grantFinalizations: [],
+        ...parsed,
+        schemaVersion: '2.4.0',
+        ...(version === '2.2.0' ? { grantFinalizations: [] } : {}),
+        acknowledgedFinalizations: [],
       }),
       migrated: true,
       privateKeys,
@@ -1943,9 +2004,10 @@ function loadAuthoritySnapshot(
   }
   const snapshot = parseCurrentAuthoritySnapshot({
     ...parsed,
-    schemaVersion: '2.3.0',
+    schemaVersion: '2.4.0',
     grants: [],
     grantFinalizations: [],
+    acknowledgedFinalizations: [],
     revoked: (parsed.grants as Array<[string, unknown]>).map(([grantId]) =>
       [grantId, 'legacy-approval-context-migration'] as [string, string]),
     uses: [],
@@ -1961,10 +2023,10 @@ function loadAuthoritySnapshot(
 }
 
 function parseCurrentAuthoritySnapshot(parsed: unknown): AuthorityPersistentSnapshot {
-  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.3.0') {
+  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.4.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
-  parseAuthoritySnapshotStructure(parsed, true, true, true, true)
+  parseAuthoritySnapshotStructure(parsed, true, true, true, true, true)
   return parsed as unknown as AuthorityPersistentSnapshot
 }
 
@@ -1974,9 +2036,12 @@ function parseAuthoritySnapshotStructure(
   withReceipts: boolean,
   withApprovalContext: boolean,
   withGrantFinalizations: boolean,
+  withAcknowledgedFinalizations: boolean,
 ): void {
   const privateKeys = candidate.privateKeys as Record<string, unknown> | undefined
-  if (!hasExactSnapshotKeys(candidate, withCredentials, withReceipts, withGrantFinalizations)
+  if (!hasExactSnapshotKeys(
+    candidate, withCredentials, withReceipts, withGrantFinalizations, withAcknowledgedFinalizations,
+  )
     || typeof candidate.issuer !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.issuer)
     || typeof candidate.keyId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.keyId)
     || typeof candidate.identityDigest !== 'string' || !isDigest(candidate.identityDigest)
@@ -1995,10 +2060,17 @@ function parseAuthoritySnapshotStructure(
     validateStoredGrantStructure(value, withApprovalContext)
   })
   const grantMap = new Map(grants.map(([key, value]) => [key, value as unknown as SignedGrant]))
+  let finalizationIds = new Set<string>()
   if (withGrantFinalizations) {
-    if (!Array.isArray(candidate.grantFinalizations)
-      || candidate.grantFinalizations.length > MAX_GRANT_FINALIZATIONS) corruptSnapshot()
-    parseUniqueTuples(candidate.grantFinalizations as unknown[], 'grant finalization', (key, value) => {
+    const grantFinalizations = candidate.grantFinalizations
+    const acknowledgedFinalizations = candidate.acknowledgedFinalizations
+    if (!Array.isArray(grantFinalizations)
+      || (withAcknowledgedFinalizations && !Array.isArray(acknowledgedFinalizations))
+      || grantFinalizations.length
+        + (Array.isArray(acknowledgedFinalizations) ? acknowledgedFinalizations.length : 0)
+          > MAX_GRANT_FINALIZATIONS) corruptSnapshot()
+    const parsedFinalizations = parseUniqueTuples(
+      grantFinalizations as unknown[], 'grant finalization', (key, value) => {
       if (!/^[A-Za-z0-9._:-]{1,256}$/.test(key) || !isPlainSnapshot(value)
         || Object.keys(value).sort().join('\0')
           !== ['approvalBinding', 'approvalSessionRef', 'grantId', 'requestDigest', 'subject'].join('\0')
@@ -2008,11 +2080,29 @@ function parseAuthoritySnapshotStructure(
         || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.approvalSessionRef)) corruptSnapshot()
       const subject = ApprovalGrantSubjectSchema.safeParse(value.subject)
       if (!subject.success) corruptSnapshot()
-      let binding: TrustedApprovalExecutionBinding
-      try { binding = parseTrustedApprovalExecutionBinding(value.approvalBinding) }
+      let binding: ApprovalExecutionBinding
+      try { binding = parseApprovalExecutionBinding(value.approvalBinding) }
       catch { return corruptSnapshot() }
       const grant = grantMap.get(value.grantId as string)!
       if (canonicalizeJson(subject.data) !== canonicalizeJson(grant.subject)
+        || !sameApprovalExecutionBinding(grant.approvalContext, binding)) corruptSnapshot()
+      },
+    )
+    finalizationIds = new Set(parsedFinalizations.map(([key]) => key))
+  }
+  if (withAcknowledgedFinalizations) {
+    parseUniqueTuples(candidate.acknowledgedFinalizations as unknown[], 'acknowledged finalization', (key, value) => {
+      if (finalizationIds.has(key) || !/^[A-Za-z0-9._:-]{1,256}$/.test(key) || !isPlainSnapshot(value)
+        || Object.keys(value).sort().join('\0')
+          !== ['approvalBinding', 'expiresAt', 'grantId', 'requestDigest'].join('\0')
+        || typeof value.requestDigest !== 'string' || !isDigest(value.requestDigest)
+        || typeof value.grantId !== 'string' || !grantMap.has(value.grantId)
+        || typeof value.expiresAt !== 'string' || !isCanonicalInstant(value.expiresAt)) corruptSnapshot()
+      let binding: ApprovalExecutionBinding
+      try { binding = parseApprovalExecutionBinding(value.approvalBinding) }
+      catch { return corruptSnapshot() }
+      const grant = grantMap.get(value.grantId as string)!
+      if (value.expiresAt !== grant.expiresAt
         || !sameApprovalExecutionBinding(grant.approvalContext, binding)) corruptSnapshot()
     })
   }
@@ -2047,6 +2137,7 @@ function hasExactSnapshotKeys(
   withCredentials: boolean,
   withReceipts: boolean,
   withGrantFinalizations: boolean,
+  withAcknowledgedFinalizations: boolean,
 ): boolean {
   const keys = [
     'attemptLogs', 'completedPreflights', 'grants', 'identityDigest', 'issuer', 'keyId', 'manualResultIds',
@@ -2054,6 +2145,7 @@ function hasExactSnapshotKeys(
     ...(withCredentials ? ['webAuthnCredentials'] : []),
     ...(withReceipts ? ['webAuthnReceipts'] : []),
     ...(withGrantFinalizations ? ['grantFinalizations'] : []),
+    ...(withAcknowledgedFinalizations ? ['acknowledgedFinalizations'] : []),
   ].sort()
   return Object.keys(candidate).sort().join('\0') === keys.join('\0')
 }
@@ -2522,7 +2614,7 @@ function validateFinalizationIdentity(finalizationId: string, requestDigest: str
 
 function sameApprovalExecutionBinding(
   context: CanonicalApprovalContext,
-  binding: TrustedApprovalExecutionBinding,
+  binding: ApprovalExecutionBinding,
 ): boolean {
   return context.runId === binding.runId
     && context.installationDigest === binding.installationDigest

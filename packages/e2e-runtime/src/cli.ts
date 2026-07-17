@@ -32,6 +32,7 @@ import {
 import { isExactRuntimeVersion } from './runtime-manifest.js'
 import { E2ERuntimeHost } from './runtime-host.js'
 import { RuntimeRunStore, type RuntimeRunSnapshot } from './run-store.js'
+import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js'
 import { assertSameProjectIdentity, resolveProjectIdentity } from './project-identity.js'
 import { SecureProjectFileReader } from './secure-project-files.js'
 import {
@@ -482,25 +483,24 @@ async function openDefaultHumanAuthoritySession(
             signedGrant: recovered.grant,
             approvalBinding: recovered.approvalBinding,
           }
-          try {
-            recoveredOutcome = await store.readRunOutcome(
+          recoveredOutcome = await persistFinalizedApprovalOutcome({
+            persist: async () => await store.readRunOutcome(
               identity.digest, runId, stable.requestId, stable.requestDigest, () => response, lock,
-            ) as typeof response
-            try {
-              await authority.acknowledgeFinalization({
+            ) as typeof response,
+            acknowledge: async () => {
+              await authority!.acknowledgeFinalization({
                 finalizationId: stable.finalizationId,
                 requestDigest: stable.requestDigest,
                 grantId: recovered.grant.grantId,
                 approvalBinding: recovered.approvalBinding,
               })
-            } catch { /* outcome 已持久化；outbox 由后续幂等 ack 或 expiry prune 回收 */ }
-          } catch (cause) {
-            throw new E2EError({
+            },
+            persistencePending: (cause) => new E2EError({
               code: 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING', category: 'safety',
               message: 'Authority 已恢复 Grant，但 Run Store outcome 尚未持久化；可用相同命令重试',
               retryable: true, cause,
-            })
-          }
+            }),
+          })
           recoveredSessionId = recovered.sessionId
         }
       } finally { await lock.close() }
@@ -543,25 +543,24 @@ async function openDefaultHumanAuthoritySession(
                 signedGrant: finalized.grant,
                 approvalBinding: finalized.approvalBinding,
               }
-              try {
-                outcome = await store.readRunOutcome(
+              outcome = await persistFinalizedApprovalOutcome({
+                persist: async () => await store.readRunOutcome(
                   identity.digest, runId, stable.requestId, stable.requestDigest, () => response, lock,
-                ) as typeof response
-                try {
+                ) as typeof response,
+                acknowledge: async () => {
                   await authority!.acknowledgeFinalization({
                     finalizationId: stable.finalizationId,
                     requestDigest: stable.requestDigest,
                     grantId: finalized.grant.grantId,
                     approvalBinding: finalized.approvalBinding,
                   })
-                } catch { /* outcome 已持久化；outbox 由后续幂等 ack 或 expiry prune 回收 */ }
-              } catch (cause) {
-                throw new E2EError({
+                },
+                persistencePending: (cause) => new E2EError({
                   code: 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING', category: 'safety',
                   message: 'Authority 已最终化 Grant，但 Run Store outcome 尚未持久化；可用相同命令恢复',
                   retryable: true, cause,
-                })
-              }
+                }),
+              })
             }
           } finally { await lock.close() }
         }, [store, authority!])

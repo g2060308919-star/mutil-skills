@@ -478,6 +478,17 @@ describe('WebAuthn user presence authority', () => {
       await expect(third.acknowledgeFinalizedGrant({
         finalizationId, requestDigest, grantId: grant.grantId, approvalBinding,
       })).resolves.toBeUndefined()
+      await expect(third.acknowledgeFinalizedGrant({
+        finalizationId, requestDigest: `sha256:${'e'.repeat(64)}`,
+        grantId: grant.grantId, approvalBinding,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_MISMATCH' })
+      await expect(third.acknowledgeFinalizedGrant({
+        finalizationId, requestDigest, grantId: 'GRANT-REBOUND', approvalBinding,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_MISMATCH' })
+      await expect(third.acknowledgeFinalizedGrant({
+        finalizationId, requestDigest, grantId: grant.grantId,
+        approvalBinding: { ...approvalBinding, runId: 'RUN-REBOUND' },
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_MISMATCH' })
       await expect(third.recoverFinalizedGrant({
         finalizationId, requestDigest, subject: grantSubject, approvalBinding,
       })).resolves.toBeUndefined()
@@ -502,6 +513,14 @@ describe('WebAuthn user presence authority', () => {
       fourthPresence = createWebAuthnUserPresenceAuthority({
         now: () => fixedNow, credentialRepository: fourth.createWebAuthnCredentialRepository(),
       })
+      await expect(fourth.acknowledgeFinalizedGrant({
+        finalizationId, requestDigest, grantId: grant.grantId, approvalBinding,
+      })).resolves.toBeUndefined()
+      authorityNow = new Date(fixedNow.getTime() + 120_000)
+      await expect(fourth.acknowledgeFinalizedGrant({
+        finalizationId, requestDigest, grantId: grant.grantId, approvalBinding,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_MISMATCH' })
+      authorityNow = fixedNow
       await expect(fourth.finalizeApprovalGrant({
         subject: grantSubject, approvalSessionRef: session.sessionId, ttlMs: 60_000,
         finalizationId: 'FINALIZE-PERSISTED-2', requestDigest, approvalBinding,
