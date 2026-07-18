@@ -13,6 +13,9 @@ import {
   BrowserPreflightFactSchema,
   RuntimePreflightPreparationSchema,
 } from './runtime-preflight.js'
+import { RuntimeWriteAttemptRecordSchema } from './write-attempt.js'
+import { parseRuntimeInjectionExecutionOutput, parseRuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
+import { RuntimeReadExecutionRecordSchema } from './runtime-read-result.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const RunIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -78,7 +81,10 @@ const FrozenArtifactsSchema = CanonicalJsonRecordSchema.superRefine((records, co
 })
 
 const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, context) => {
-  const allowed = new Set(['signed-discovery-grant', 'signed-execution-grant', 'browser-preflight'])
+  const allowed = new Set([
+    'signed-discovery-grant', 'signed-execution-grant', 'browser-preflight',
+    'finalization-material', 'finalization-execution-facts', 'quarantined-evidence',
+  ])
   if (Object.keys(facts).length > allowed.size) context.addIssue({ code: 'custom', message: '可信执行事实数量超限' })
   for (const [key, value] of Object.entries(facts)) {
     if (!allowed.has(key)) {
@@ -88,6 +94,24 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     if (key === 'browser-preflight') {
       const preflight = BrowserPreflightFactSchema.safeParse(value)
       if (!preflight.success) context.addIssue({ code: 'custom', path: [key], message: 'Browser preflight 事实结构非法' })
+      continue
+    }
+    if (key === 'finalization-material') {
+      if (!isPersistedFinalizationMaterialEnvelope(value)) context.addIssue({
+        code: 'custom', path: [key], message: 'Production finalization material envelope 非法',
+      })
+      continue
+    }
+    if (key === 'finalization-execution-facts') {
+      if (!isFinalizationExecutionFacts(value)) context.addIssue({
+        code: 'custom', path: [key], message: 'Production execution finalization facts 非法',
+      })
+      continue
+    }
+    if (key === 'quarantined-evidence') {
+      if (!isQuarantinedEvidenceFacts(value)) context.addIssue({
+        code: 'custom', path: [key], message: 'Quarantine evidence facts 非法',
+      })
       continue
     }
     const parsed = SignedGrantSchema.safeParse(value)
@@ -106,8 +130,117 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
   }
 })
 
+function isPersistedFinalizationMaterialEnvelope(value: unknown): boolean {
+  if (!plain(value)) return false
+  return Object.keys(value).sort().join('\0') === [
+    'artifacts', 'attemptId', 'cleanup', 'evidence', 'execution', 'gatewayAudit', 'materialDigest',
+    'provenance', 'reportPresentation', 'runId', 'schemaVersion', 'verifierMaterials',
+  ].sort().join('\0')
+    && value.schemaVersion === '1.0.0'
+    && typeof value.materialDigest === 'string' && /^sha256:[a-f0-9]{64}$/.test(value.materialDigest)
+    && Array.isArray(value.artifacts) && Array.isArray(value.cleanup) && Array.isArray(value.evidence)
+    && plain(value.execution) && plain(value.verifierMaterials)
+}
+
+function isFinalizationExecutionFacts(value: unknown): boolean {
+  if (!plain(value)) return false
+  const keys = Object.keys(value).sort().join('\0')
+  const writeKeys = [
+    'browserMeasurements', 'cleanup', 'executionOutcomeReceipt', 'executionOutcomeVerifierMaterial',
+    'gatewayAudit', 'gatewayAuditVerifierMaterial', 'isolationMeasurements',
+  ].sort().join('\0')
+  const readKeys = [
+    'browserMeasurements', 'gatewayAudit', 'gatewayAuditVerifierMaterial', 'isolationMeasurements',
+  ].sort().join('\0')
+  return (keys === writeKeys || keys === readKeys) && Object.values(value).every(plainJsonTree)
+}
+
+function isQuarantinedEvidenceFacts(value: unknown): boolean {
+  if (!plain(value) || Object.keys(value).sort().join('\0')
+    !== ['attemptId', 'records', 'runId', 'schemaVersion'].sort().join('\0')
+    || value.schemaVersion !== '1.0.0' || typeof value.runId !== 'string'
+    || typeof value.attemptId !== 'string' || !Array.isArray(value.records)
+    || value.records.length !== 2) return false
+  const types = new Set<string>()
+  for (const record of value.records) {
+    if (!plain(record) || Object.keys(record).sort().join('\0')
+      !== ['byteLength', 'evidenceType', 'plaintextDigest', 'quarantinePath'].sort().join('\0')
+      || !['screenshot', 'dom'].includes(String(record.evidenceType))
+      || typeof record.quarantinePath !== 'string' || record.quarantinePath.startsWith('/')
+      || record.quarantinePath.includes('\\') || record.quarantinePath.split('/').some((part) => !part || part === '.' || part === '..')
+      || typeof record.plaintextDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(record.plaintextDigest)
+      || typeof record.byteLength !== 'number' || !Number.isSafeInteger(record.byteLength)
+      || record.byteLength < 0) return false
+    types.add(String(record.evidenceType))
+  }
+  return types.size === 2
+}
+
+function plainJsonTree(value: unknown, depth = 0): boolean {
+  if (depth > 32) return false
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (Array.isArray(value)) return value.every((item) => plainJsonTree(item, depth + 1))
+  return plain(value) && Object.values(value).every((item) => plainJsonTree(item, depth + 1))
+}
+
+function plain(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && Object.getPrototypeOf(value) === Object.prototype
+}
+
+const WriteAttemptsSchema = z.record(RuntimeWriteAttemptRecordSchema).superRefine((attempts, context) => {
+  if (Object.keys(attempts).length > 1_024) context.addIssue({
+    code: 'custom', message: 'WriteAttempt 数量超过上限',
+  })
+  for (const [attemptId, record] of Object.entries(attempts)) {
+    if (attemptId !== record.attemptId) context.addIssue({
+      code: 'custom', path: [attemptId], message: 'WriteAttempt key 与 attemptId 不一致',
+    })
+  }
+})
+
+const RuntimeExecutionResultsSchema = z.object({
+  readEnvironment: z.record(RuntimeReadExecutionRecordSchema).superRefine((results, context) => {
+    for (const [actionId, value] of Object.entries(results)) {
+      if (value.actionId !== actionId) context.addIssue({
+        code: 'custom', path: [actionId], message: '只读环境结果 key 与 actionId 错绑',
+      })
+    }
+  }),
+  realEnvironment: z.record(z.unknown()).superRefine((results, context) => {
+    for (const [actionId, value] of Object.entries(results)) {
+      try { if (parseRuntimeWriteExecutionOutput(value).actionId !== actionId) throw new Error('action mismatch') }
+      catch { context.addIssue({ code: 'custom', path: [actionId], message: '真实环境结果不合法或 key 错绑' }) }
+    }
+  }),
+  gatewayInjection: z.record(z.unknown()).superRefine((results, context) => {
+    for (const [actionId, value] of Object.entries(results)) {
+      try { if (parseRuntimeInjectionExecutionOutput(value).actionId !== actionId) throw new Error('action mismatch') }
+      catch { context.addIssue({ code: 'custom', path: [actionId], message: '注入结果不合法或 key 错绑' }) }
+    }
+  }),
+}).strict().default({ readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} })
+
+const RuntimeFinalizationAttemptSchema = z.object({
+  attemptId: RunIdSchema,
+  requestId: RunIdSchema,
+  requestDigest: DigestSchema,
+  revision: z.number().int().nonnegative(),
+  startedAt: z.string().datetime(),
+}).strict()
+
+const RuntimePublicationRecordSchema = z.object({
+  generationId: RunIdSchema,
+  generationDigest: DigestSchema,
+  terminalVerdict: z.string().min(1),
+  activeReadbackDigest: DigestSchema,
+  quarantineDispositionDigest: DigestSchema,
+  committedAt: z.string().datetime(),
+}).strict()
+
 const RuntimeRunSnapshotSchema = z.object({
-  schemaVersion: z.literal('1.1.0'),
+  schemaVersion: z.literal('1.4.0'),
   runId: RunIdSchema,
   assetId: AssetIdSchema,
   projectIdentityDigest: DigestSchema,
@@ -115,11 +248,15 @@ const RuntimeRunSnapshotSchema = z.object({
   runRevision: z.number().int().nonnegative().default(0),
   executionAttempt: RuntimeExecutionAttemptSchema.optional(),
   preflightAttempt: RuntimePreflightAttemptSchema.optional(),
+  finalizationAttempt: RuntimeFinalizationAttemptSchema.optional(),
+  publication: RuntimePublicationRecordSchema.optional(),
   workflow: WorkflowStateSchema,
   pendingDecision: PendingWorkflowDecisionSchema.optional(),
   artifactDigests: z.record(DigestSchema),
   frozenArtifacts: FrozenArtifactsSchema,
   trustedExecutionFacts: TrustedExecutionFactsSchema,
+  writeAttempts: WriteAttemptsSchema,
+  executionResults: RuntimeExecutionResultsSchema,
   requestResponses: z.record(z.object({
     requestDigest: DigestSchema,
     response: z.unknown(),
@@ -133,6 +270,14 @@ const RuntimeRunSnapshotSchema = z.object({
     context.addIssue({
       code: 'custom', path: ['preflightAttempt'],
       message: 'preflight attempt 必须绑定 discovery-approved 与当前 revision',
+    })
+  }
+  if (snapshot.finalizationAttempt !== undefined
+    && (snapshot.workflow.current !== 'finalizing'
+      || snapshot.finalizationAttempt.revision !== snapshot.runRevision)) {
+    context.addIssue({
+      code: 'custom', path: ['finalizationAttempt'],
+      message: 'finalization attempt 必须绑定 finalizing 与当前 revision',
     })
   }
   for (const [artifactType, artifact] of Object.entries(snapshot.frozenArtifacts)) {
@@ -164,19 +309,44 @@ export const RuntimeStateMigrationRegistry: Readonly<Record<string, RuntimeState
     trustedExecutionFacts: {},
     runRevision: 0,
   }),
+  '1.1.0': (snapshot) => ({
+    ...snapshot,
+    schemaVersion: '1.2.0',
+    writeAttempts: {},
+  }),
+  '1.2.0': (snapshot) => ({
+    ...snapshot,
+    schemaVersion: '1.3.0',
+    executionResults: snapshot.executionResults ?? { realEnvironment: {}, gatewayInjection: {} },
+  }),
+  '1.3.0': (snapshot) => ({
+    ...snapshot,
+    schemaVersion: '1.4.0',
+    executionResults: {
+      readEnvironment: {},
+      realEnvironment: {},
+      gatewayInjection: {},
+      ...(snapshot.executionResults as Record<string, unknown> | undefined),
+    },
+  }),
 })
 
 export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
   const sourceVersion = schemaVersionOf(input)
   let candidate = input
-  if (sourceVersion !== '1.1.0') {
-    if (sourceVersion === '1.0.0'
-      && (input as { workflow?: { current?: unknown } }).workflow?.current !== 'created') {
-      throw migrationRequired(sourceVersion, new Error('历史 Run 缺少可执行冻结资产，禁止猜测恢复'))
-    }
-    const migrator = RuntimeStateMigrationRegistry[sourceVersion]
+  if (sourceVersion === '1.0.0'
+    && (input as { workflow?: { current?: unknown } }).workflow?.current !== 'created') {
+    throw migrationRequired(sourceVersion, new Error('历史 Run 缺少可执行冻结资产，禁止猜测恢复'))
+  }
+  let candidateVersion = sourceVersion
+  const visited = new Set<string>()
+  while (candidateVersion !== '1.4.0') {
+    if (visited.has(candidateVersion)) throw migrationRequired(sourceVersion)
+    visited.add(candidateVersion)
+    const migrator = RuntimeStateMigrationRegistry[candidateVersion]
     if (migrator === undefined) throw migrationRequired(sourceVersion)
-    candidate = migrator(input as Readonly<Record<string, unknown>>)
+    candidate = migrator(candidate as Readonly<Record<string, unknown>>)
+    candidateVersion = schemaVersionOf(candidate)
   }
 
   const parsed = RuntimeRunSnapshotSchema.safeParse(candidate)

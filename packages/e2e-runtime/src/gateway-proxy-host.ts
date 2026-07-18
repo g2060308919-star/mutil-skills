@@ -119,6 +119,8 @@ export interface GatewayBrowserBinding {
       bodyDigest: string
       actionId: string
       capabilityId: string
+      requestId?: string
+      signedBodyDigest?: string
       channel: 'http' | 'beacon' | 'websocket'
       headers: Record<string, string>
     },
@@ -303,11 +305,11 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
           return accountDecision(decision, recorder, counters, rule, input)
         } finally { body.fill(0) }
       }
-      if (['GET', 'HEAD'].includes(rule.method)) {
+      const write = policies.writeGateways?.[rule.capabilityId]
+      if (['GET', 'HEAD'].includes(rule.method) && !write) {
         const decision = readGateway.decide({ method: input.method, url: input.url }, rule.actionId)
         return accountDecision(decision, recorder, counters, rule, input, true)
       }
-      const write = policies.writeGateways?.[rule.capabilityId]
       if (!write) return blockTransport(recorder, counters, rule, input)
       const body = Buffer.from(input.bodyBase64Url, 'base64url')
       try {
@@ -433,6 +435,10 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
           'x-mutil-e2e-action-token', 'x-mutil-e2e-action-id', 'x-mutil-e2e-capability-id', 'proxy-authorization',
         ]) {
           for (const name of Object.keys(headers)) if (name.toLowerCase() === forbidden) delete headers[name]
+        }
+        for (const [name, value] of Object.entries(rule.requestHeaders)) {
+          for (const existing of Object.keys(headers)) if (existing.toLowerCase() === name) delete headers[existing]
+          headers[name] = value
         }
         if (rule.channel === 'websocket') headers['proxy-authorization'] = `Mutil ${rule.actionToken}`
         else {

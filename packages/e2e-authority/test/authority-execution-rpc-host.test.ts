@@ -183,14 +183,17 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
       transports: ['internal'], subject: approver.subject,
     })
     const discoverySubject = {
-      schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision: digest('prd'),
+      schemaVersion: '1.1.0' as const, assetId: 'ASSET-1', prdRevision: digest('prd'),
       scopeDigest: digest('scope'), environment: 'test' as const,
       baseOrigin: 'https://example.test', actor: 'operator',
       expectedPageIdentity: {
         url: 'https://example.test/orders/1', title: 'Order', heading: 'Order 1', ariaSignals: ['main'],
       },
       bootstrapIntentsDigest: digest('bootstrap'),
-      actions: [{ actionId: 'DISCOVERY-1', operation: 'local-navigation' as const, maxUses: 1 }],
+      requests: [],
+      actions: [{
+        actionId: 'DISCOVERY-1', operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
+      }],
     }
     const discovery = await seed.issueDiscoveryGrant({
       subject: discoverySubject, approvalSessionRef: 'seed-session', ttlMs: 120_000,

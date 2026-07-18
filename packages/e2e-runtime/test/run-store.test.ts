@@ -366,13 +366,16 @@ describe('runtime run store', () => {
 
     const migrated = await openStore(roots)
     await expect(migrated.getRun(digest('1'), 'RUN-1')).resolves.toMatchObject({
-      schemaVersion: '1.1.0', runRevision: 0, frozenArtifacts: {}, trustedExecutionFacts: {},
+      schemaVersion: '1.4.0', runRevision: 0, frozenArtifacts: {}, trustedExecutionFacts: {},
+      writeAttempts: {}, executionResults: {
+        readEnvironment: {}, realEnvironment: {}, gatewayInjection: {},
+      },
     })
     await migrated.close()
     const afterFirstOpen = readRunStoreSnapshotForTest(roots.home)
     const firstRows = (afterFirstOpen.journals as Record<string, Array<Record<string, unknown>>>)[key]!
     expect(firstRows.at(-1)?.event).toMatchObject({
-      kind: 'runtime-state-migrated', fromSchemaVersion: '1.0.0', toSchemaVersion: '1.1.0',
+      kind: 'runtime-state-migrated', fromSchemaVersion: '1.0.0', toSchemaVersion: '1.4.0',
     })
 
     const reopened = await openStore(roots)
@@ -551,7 +554,7 @@ async function openStore(roots: { home: string; project: string }): Promise<Runt
 
 function runSnapshot(): RuntimeRunSnapshot {
   return {
-    schemaVersion: '1.1.0',
+    schemaVersion: '1.3.0',
     runId: 'RUN-1',
     assetId: 'ASSET-1',
     projectIdentityDigest: digest('1'),
@@ -560,6 +563,8 @@ function runSnapshot(): RuntimeRunSnapshot {
     artifactDigests: { 'prd-source': digest('3') },
     frozenArtifacts: {},
     trustedExecutionFacts: {},
+    writeAttempts: {},
+    executionResults: { realEnvironment: {}, gatewayInjection: {} },
     requestResponses: {},
     createdAt: '2026-07-17T00:00:00.000Z',
     updatedAt: '2026-07-17T00:00:00.000Z',

@@ -24,7 +24,10 @@ const allowedTransitions: Readonly<Record<WorkflowNode, readonly WorkflowNode[]>
   compiled: ['running-real', 'awaiting-execution-approval', 'safety-blocked'],
   'running-real': ['running-injection', 'diagnosing', 'safety-blocked', 'environment-blocked', 'automation-blocked'],
   'running-injection': ['diagnosing', 'safety-blocked', 'environment-blocked', 'automation-blocked'],
-  diagnosing: ['finalizing', 'pending-decision', 'input-blocked', 'environment-blocked', 'safety-blocked', 'automation-blocked'],
+  diagnosing: [
+    'execution-approved', 'finalizing', 'pending-decision', 'input-blocked',
+    'environment-blocked', 'safety-blocked', 'automation-blocked',
+  ],
   finalizing: ['publication-ready', 'artifact-blocked', 'migration-required'],
   'publication-ready': [
     'accepted', 'rejected', 'incomplete', 'pending-decision', 'input-blocked',

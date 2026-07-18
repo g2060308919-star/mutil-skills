@@ -42,6 +42,7 @@ const now = () => new Date('2026-07-11T10:00:00.000Z')
 async function trustedContext(input: { authorizationAllowed: boolean; leaseAllowed: boolean }): Promise<{
   authorization: RunReversibleWriteCaseInput['authorization']
   lease: RunReversibleWriteCaseInput['lease']
+  rpcHostAuthorities: { approval: LocalApprovalAuthority; lease: LocalLeaseAuthority }
 }> {
   const leaseAuthority = new LocalLeaseAuthority({ now })
   const acquired = await leaseAuthority.acquire({
@@ -62,11 +63,14 @@ async function trustedContext(input: { authorizationAllowed: boolean; leaseAllow
   const prdRevision = digestText('write-runner-test/v1', 'prd')
   const scopeDigest = digestText('write-runner-test/v1', 'scope')
   const discoverySubject = {
-    schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision, scopeDigest,
+    schemaVersion: '1.1.0' as const, assetId: 'ASSET-1', prdRevision, scopeDigest,
     environment: 'test' as const, baseOrigin: 'https://test.example.com', actor: 'operator',
     expectedPageIdentity: { url: 'https://test.example.com/orders/100', title: '订单审批', heading: '订单 100', ariaSignals: ['main'] },
     bootstrapIntentsDigest: digestText('write-runner-test/v1', 'bootstrap'),
-    actions: [{ actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{
+      actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
+    }],
   }
   const discovery = await authority.issueDiscoveryGrant({ subject: discoverySubject,
     approver: { subject: 'os-user:test', roles: ['e2e-approver'] }, approvalSessionRef: 'test-session', ttlMs: 60_000 })
@@ -101,7 +105,8 @@ async function trustedContext(input: { authorizationAllowed: boolean; leaseAllow
   return { authorization: { grant, currentSubject: grant.subject,
       authority: authority.createWriteExecutionClient(grant.approvalContext) },
     lease: { leaseId: active.leaseId, fencingToken: active.fencingToken, targetFingerprint,
-      authority: leaseAuthority.createExecutionClient() } }
+      authority: leaseAuthority.createExecutionClient() },
+    rpcHostAuthorities: { approval: authority, lease: leaseAuthority } }
 }
 
 async function rpcTrustedContext(): Promise<Awaited<ReturnType<typeof trustedContext>> & {
@@ -113,8 +118,8 @@ async function rpcTrustedContext(): Promise<Awaited<ReturnType<typeof trustedCon
     approvalContext: trusted.authorization.grant.approvalContext,
   })
   registerAuthorityExecutionRpcOperations(rpc, {
-    writeAuthority: trusted.authorization.authority,
-    leaseAuthority: trusted.lease.authority,
+    writeAuthority: trusted.rpcHostAuthorities.approval,
+    leaseAuthority: trusted.rpcHostAuthorities.lease,
   })
   const material = rpc.verifierMaterial
   const clients = createAuthorityExecutionRpcClients({ credential, verifierMaterial: material,
@@ -128,6 +133,7 @@ async function rpcTrustedContext(): Promise<Awaited<ReturnType<typeof trustedCon
   return {
     authorization: { ...trusted.authorization, authority: clients.writeApproval },
     lease: { ...trusted.lease, authority: clients.lease },
+    rpcHostAuthorities: trusted.rpcHostAuthorities,
     expectedAuthorityRpcPublicKeyDigest: material.publicKeyDigest,
   }
 }

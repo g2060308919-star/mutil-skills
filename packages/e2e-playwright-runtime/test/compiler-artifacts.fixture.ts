@@ -75,13 +75,16 @@ export function approvedCompilerArtifacts(options: {
       effect: 'reversible-write', maxUses: 1, digest: digest('cap-write') }]
   const capability = capabilities[0]!
   const approvalSubject = effect === 'read' ? {
-    schemaVersion: '2.0.0', ...approvalContext,
+    schemaVersion: '2.1.0', ...approvalContext,
     scopeDigest: digest('scope'), requirementModelDigest: digest('model'), coveragePolicyDigest: digest('coverage-policy'),
     universeDigest: digest('universe'), caseDigest: digest('cases'), actionMapDigest: digest('action-map'),
     policyDigest: digest('policy'), executionContractDigest: digest('execution'), runBundleProjectionDigest: digest('run-bundle'),
     environment: 'test', baseOrigin: 'https://example.test', actor: 'USER', discoveryGrantId: 'DISCOVERY-1',
     preflightDigest: digest('preflight'),
-    actions: actionIds.map((currentActionId) => ({ actionId: currentActionId, operation: 'dom-read', maxUses: 1 })),
+    requests: [],
+    actions: actionIds.map((currentActionId) => ({
+      actionId: currentActionId, operation: 'dom-read', maxUses: 1, requestIds: [],
+    })),
   } : {
     schemaVersion: '2.0.0', ...approvalContext,
     executionDigest: digest('execution-approval'), scopeDigest: digest('scope'), requirementModelDigest: digest('model'),
@@ -169,6 +172,7 @@ export function approvedCompilerArtifacts(options: {
         oracleIds: ['ORACLE-1'], effect,
         capabilities: [{ operation: effect === 'read' ? 'dom-read' : 'http-request',
           capabilityId: capabilities[index]!.capabilityId }],
+        requestIds: [],
       })),
       unmappedSteps: [], discoveredRisks: [],
     },
@@ -177,8 +181,9 @@ export function approvedCompilerArtifacts(options: {
       browserMatrix: [{ browserId: 'CHROMIUM', channel: 'chromium', viewportId: 'DESKTOP' }],
       identities: [{ identityId: 'IDENTITY-1', roleIds: ['USER'], secretRef: 'SECRET-1' }],
       caseQueue: [{ ordinal: 0, caseId }], actionIntents: actionIds.map((currentActionId, index) => ({
-        actionId: currentActionId, effect, intentDigest: digest(`intent-${index + 1}`),
+      actionId: currentActionId, effect, intentDigest: digest(`intent-${index + 1}`), requestIds: [],
       })),
+      readHttpRequests: [],
       dataNeeds: effect === 'read' ? [] : [{ leaseId: 'LEASE-1', resourceKey: 'ORDER-1', mode: 'write' }],
       manualProcedures: [], evidencePolicyDigest: digest('evidence-policy'), runtimeIsolation: null, unresolvedItems: [],
     },
@@ -223,7 +228,7 @@ export function approvedCompilerArtifacts(options: {
   const schemaVersions: Record<string, string> = {
     'prd-manifest': '1.0.0', 'prd-diff': '2.0.0', 'acceptance-scope': '2.0.0',
     'project-policy': '2.0.0', 'requirement-model': '1.0.0', 'coverage-universe': '1.0.0',
-    'test-cases': '1.0.0', 'browser-action-map': '2.0.0', 'execution-contract': '2.0.0', 'approval-grants': '2.0.0',
+    'test-cases': '1.0.0', 'browser-action-map': '2.1.0', 'execution-contract': '1.1.0', 'approval-grants': '2.0.0',
     'run-bundle': '2.0.0',
   }
   return Object.entries(contents).map(([artifactType, content]) => seal({

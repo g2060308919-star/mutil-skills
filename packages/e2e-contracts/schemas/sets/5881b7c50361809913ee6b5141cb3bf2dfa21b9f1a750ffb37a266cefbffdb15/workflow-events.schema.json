@@ -1,0 +1,636 @@
+{
+  "type": "object",
+  "properties": {
+    "artifactId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "artifactType": {
+      "type": "string",
+      "const": "workflow-events"
+    },
+    "schemaVersion": {
+      "type": "string",
+      "const": "2.0.0"
+    },
+    "engineVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "assetId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9._:-]+(?:\\/[A-Za-z0-9._:-]+)*$"
+    },
+    "prdRevision": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "generationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "contentDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "signatures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "issuer": {
+            "type": "string",
+            "minLength": 1
+          },
+          "keyId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "algorithm": {
+            "type": "string",
+            "const": "Ed25519"
+          },
+          "signedDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "issuer",
+          "keyId",
+          "algorithm",
+          "signedDigest",
+          "signature"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifactId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "artifactType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "schemaVersion": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+          },
+          "relativePath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "pattern": "^(?!\\/)(?!.*\\\\)(?!.*:)(?!.*\\/\\/)(?!.*\\/$)(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:\\/|$))[^\\0/]+(?:\\/[^\\0/]+)*$"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "artifactId",
+          "artifactType",
+          "schemaVersion",
+          "relativePath",
+          "digest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "graph": {
+      "type": "object",
+      "properties": {
+        "defines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100000
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100000
+        }
+      },
+      "required": [
+        "defines",
+        "references"
+      ],
+      "additionalProperties": false
+    },
+    "content": {
+      "type": "object",
+      "properties": {
+        "runId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "attemptCases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "caseId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "retryPolicy": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "read-automation-max-2",
+                  "verified-not-applied-max-1"
+                ]
+              },
+              "initialChainDigest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "events": {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "sequence": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "caseId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9._:-]+$"
+                        },
+                        "slot": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 99
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9._:-]+$"
+                        },
+                        "timestamp": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "previousChainDigest": {
+                          "type": "string",
+                          "pattern": "^sha256:[a-f0-9]{64}$"
+                        },
+                        "eventDigest": {
+                          "type": "string",
+                          "pattern": "^sha256:[a-f0-9]{64}$"
+                        },
+                        "authorityProof": {
+                          "type": "object",
+                          "properties": {
+                            "purpose": {
+                              "type": "string",
+                              "const": "attempt-event-authority-proof/v2"
+                            },
+                            "issuer": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[A-Za-z0-9._:-]+$"
+                            },
+                            "keyId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[A-Za-z0-9._:-]+$"
+                            },
+                            "algorithm": {
+                              "type": "string",
+                              "const": "Ed25519"
+                            },
+                            "signedDigest": {
+                              "type": "string",
+                              "pattern": "^sha256:[a-f0-9]{64}$"
+                            },
+                            "signature": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 16384
+                            }
+                          },
+                          "required": [
+                            "purpose",
+                            "issuer",
+                            "keyId",
+                            "algorithm",
+                            "signedDigest",
+                            "signature"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "kind": {
+                          "type": "string",
+                          "const": "started"
+                        },
+                        "mode": {
+                          "type": "string",
+                          "enum": [
+                            "real-environment",
+                            "gateway-injection"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "sequence",
+                        "caseId",
+                        "slot",
+                        "attemptId",
+                        "timestamp",
+                        "previousChainDigest",
+                        "eventDigest",
+                        "authorityProof",
+                        "kind",
+                        "mode"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "sequence": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0
+                        },
+                        "caseId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9._:-]+$"
+                        },
+                        "slot": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 99
+                        },
+                        "attemptId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9._:-]+$"
+                        },
+                        "timestamp": {
+                          "type": "string",
+                          "format": "date-time"
+                        },
+                        "previousChainDigest": {
+                          "type": "string",
+                          "pattern": "^sha256:[a-f0-9]{64}$"
+                        },
+                        "eventDigest": {
+                          "type": "string",
+                          "pattern": "^sha256:[a-f0-9]{64}$"
+                        },
+                        "authorityProof": {
+                          "type": "object",
+                          "properties": {
+                            "purpose": {
+                              "type": "string",
+                              "const": "attempt-event-authority-proof/v2"
+                            },
+                            "issuer": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[A-Za-z0-9._:-]+$"
+                            },
+                            "keyId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256,
+                              "pattern": "^[A-Za-z0-9._:-]+$"
+                            },
+                            "algorithm": {
+                              "type": "string",
+                              "const": "Ed25519"
+                            },
+                            "signedDigest": {
+                              "type": "string",
+                              "pattern": "^sha256:[a-f0-9]{64}$"
+                            },
+                            "signature": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 16384
+                            }
+                          },
+                          "required": [
+                            "purpose",
+                            "issuer",
+                            "keyId",
+                            "algorithm",
+                            "signedDigest",
+                            "signature"
+                          ],
+                          "additionalProperties": false
+                        },
+                        "kind": {
+                          "type": "string",
+                          "const": "terminal"
+                        },
+                        "result": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "mode": {
+                                  "type": "string",
+                                  "enum": [
+                                    "real-environment",
+                                    "gateway-injection"
+                                  ]
+                                },
+                                "effect": {
+                                  "type": "string",
+                                  "enum": [
+                                    "read",
+                                    "reversible-write",
+                                    "irreversible-write"
+                                  ]
+                                },
+                                "effectObservation": {
+                                  "type": "string",
+                                  "enum": [
+                                    "not-applicable",
+                                    "proven-not-applied",
+                                    "applied",
+                                    "unknown"
+                                  ]
+                                },
+                                "reservationSafeToVoid": {
+                                  "type": "boolean"
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "passed",
+                                    "failed"
+                                  ]
+                                },
+                                "reservationId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "outcomeDigest": {
+                                  "type": "string",
+                                  "pattern": "^sha256:[a-f0-9]{64}$"
+                                }
+                              },
+                              "required": [
+                                "mode",
+                                "effect",
+                                "effectObservation",
+                                "reservationSafeToVoid",
+                                "status",
+                                "reservationId",
+                                "outcomeDigest"
+                              ],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "object",
+                              "properties": {
+                                "mode": {
+                                  "type": "string",
+                                  "enum": [
+                                    "real-environment",
+                                    "gateway-injection"
+                                  ]
+                                },
+                                "effect": {
+                                  "type": "string",
+                                  "enum": [
+                                    "read",
+                                    "reversible-write",
+                                    "irreversible-write"
+                                  ]
+                                },
+                                "effectObservation": {
+                                  "type": "string",
+                                  "enum": [
+                                    "not-applicable",
+                                    "proven-not-applied",
+                                    "applied",
+                                    "unknown"
+                                  ]
+                                },
+                                "reservationSafeToVoid": {
+                                  "type": "boolean"
+                                },
+                                "status": {
+                                  "type": "string",
+                                  "enum": [
+                                    "input-blocked",
+                                    "environment-blocked",
+                                    "safety-blocked",
+                                    "automation-blocked",
+                                    "pending-decision",
+                                    "not-executed-user-declined",
+                                    "manual-required"
+                                  ]
+                                },
+                                "reservationId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "outcomeDigest": {
+                                  "type": "string",
+                                  "pattern": "^sha256:[a-f0-9]{64}$"
+                                }
+                              },
+                              "required": [
+                                "mode",
+                                "effect",
+                                "effectObservation",
+                                "reservationSafeToVoid",
+                                "status"
+                              ],
+                              "additionalProperties": false
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "sequence",
+                        "caseId",
+                        "slot",
+                        "attemptId",
+                        "timestamp",
+                        "previousChainDigest",
+                        "eventDigest",
+                        "authorityProof",
+                        "kind",
+                        "result"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "minItems": 2,
+                "maxItems": 200
+              },
+              "selection": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "const": "selected"
+                  },
+                  "attemptId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "slot": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 99
+                  },
+                  "eventChainDigest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "status",
+                  "attemptId",
+                  "slot",
+                  "eventChainDigest"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "caseId",
+              "retryPolicy",
+              "initialChainDigest",
+              "events",
+              "selection"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100000
+        },
+        "workflowDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "runId",
+        "attemptCases",
+        "workflowDigest"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "artifactId",
+    "artifactType",
+    "schemaVersion",
+    "engineVersion",
+    "assetId",
+    "prdRevision",
+    "generationId",
+    "createdAt",
+    "contentDigest",
+    "signatures",
+    "dependencies",
+    "graph",
+    "content"
+  ],
+  "additionalProperties": false,
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mutil-skills.local/e2e/schemas/workflow-events.schema.json",
+  "title": "workflow-events artifact",
+  "x-e2e-runtime-validation": {
+    "required": true,
+    "constraints": [
+      "contentDigest、Authority 签名、dependency 与 graph 必须由 validateGeneration 校验"
+    ]
+  }
+}

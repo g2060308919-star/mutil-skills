@@ -30,6 +30,7 @@ const SECTION_TITLES = [
   '写入副作用与清理',
   '回归资产与独立执行',
   '剩余风险与建议动作',
+  'Runtime 与隔离证明',
 ] as const
 
 export function renderCompleteReport(input: unknown): RenderedCompleteReport {
@@ -162,6 +163,20 @@ function renderMarkdown(report: FinalReportArtifact): string {
       '',
       ...list(content.recommendations),
     ]),
+    markdownSection(SECTION_TITLES[15], [
+      `- Runtime：${cell(content.runtimeProvenance.runtimeVersion)}`,
+      `- Runtime installation：${content.runtimeProvenance.runtimeInstallationDigest}`,
+      `- Protocol / Contracts / Engine：${cell(content.runtimeProvenance.protocolVersion)} / ${cell(content.runtimeProvenance.contractsVersion)} / ${cell(content.runtimeProvenance.engineVersion)}`,
+      `- Playwright：${cell(content.runtimeProvenance.playwrightVersion)}`,
+      `- Chromium：${content.runtimeProvenance.chromiumDigest}`,
+      `- Gateway policy：${content.runtimeProvenance.gatewayPolicyDigest}`,
+      `- Authority：${content.runtimeProvenance.authorityPublicKeyDigest}`,
+      `- Authority 状态保护：${content.runtimeProvenance.authorityStateProtectionLevel}`,
+      `- Project identity：${content.runtimeProvenance.projectIdentityDigest}`,
+      `- Source revision：${content.runtimeProvenance.sourceRevisionDigest}`,
+      `- Isolation proof：${content.runtimeProvenance.isolationProofDigest}`,
+      `- 源码仓库独立：${content.runtimeProvenance.sourceRepositoryIndependent ? '是' : '否'}`,
+    ]),
   ]
   return [
     `# ${text(content.title)}`,
@@ -243,7 +258,21 @@ function htmlSection(index: number, report: FinalReportArtifact): string {
     `固定 Launcher 执行：${content.regressionDetails.trustedCompiler.executionDigest}`,
     `Toolchain：Node ${content.regressionDetails.trustedCompiler.nodeVersion} · Playwright ${content.regressionDetails.trustedCompiler.playwrightVersion} · CLI ${content.regressionDetails.trustedCompiler.playwrightCliDigest}`,
   ])
-  return `${htmlFindingTable(content.risks)}<h3>建议动作</h3>${htmlList(content.recommendations)}`
+  if (index === 14) return `${htmlFindingTable(content.risks)}<h3>建议动作</h3>${htmlList(content.recommendations)}`
+  return htmlList([
+    `Runtime：${content.runtimeProvenance.runtimeVersion}`,
+    `Runtime installation：${content.runtimeProvenance.runtimeInstallationDigest}`,
+    `Protocol / Contracts / Engine：${content.runtimeProvenance.protocolVersion} / ${content.runtimeProvenance.contractsVersion} / ${content.runtimeProvenance.engineVersion}`,
+    `Playwright：${content.runtimeProvenance.playwrightVersion}`,
+    `Chromium：${content.runtimeProvenance.chromiumDigest}`,
+    `Gateway policy：${content.runtimeProvenance.gatewayPolicyDigest}`,
+    `Authority：${content.runtimeProvenance.authorityPublicKeyDigest}`,
+    `Authority 状态保护：${content.runtimeProvenance.authorityStateProtectionLevel}`,
+    `Project identity：${content.runtimeProvenance.projectIdentityDigest}`,
+    `Source revision：${content.runtimeProvenance.sourceRevisionDigest}`,
+    `Isolation proof：${content.runtimeProvenance.isolationProofDigest}`,
+    `源码仓库独立：${content.runtimeProvenance.sourceRepositoryIndependent ? '是' : '否'}`,
+  ])
 }
 
 function renderCaseControls(report: FinalReportArtifact): string {

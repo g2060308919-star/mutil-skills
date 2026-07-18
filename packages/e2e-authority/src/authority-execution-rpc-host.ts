@@ -6,10 +6,14 @@ import { fileURLToPath } from 'node:url'
 import {
   ApprovalFinalizationAcknowledgementSchema,
   ApprovalGrantSubjectSchema,
+  DecisionReceiptSchema,
+  DecisionSubjectSchema,
   SignedGrantSchema,
   type ApproverIdentity,
   type ApprovalFinalizationAcknowledgement,
   type ApprovalGrantSubject,
+  type DecisionReceipt,
+  type DecisionSubject,
   type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
 import {
@@ -85,6 +89,11 @@ export interface AuthorityExecutionRpcProcessHandle extends AuthenticatedRpcHttp
     finalizationId: string
     requestDigest: string
   }): Promise<{ grant: SignedGrant; approvalBinding: ApprovalExecutionBinding }>
+  finalizeDecision(input: {
+    sessionId: string
+    decisionId: string
+    decisionSubject: DecisionSubject
+  }): Promise<DecisionReceipt>
   recoverApproval(input: {
     finalizationId: string
     requestDigest: string
@@ -279,6 +288,17 @@ export async function startAuthorityExecutionRpcHostProcess(
           throw hostError('E2E_APPROVAL_SESSION_INVALID')
         }
         const result = await callFinalizeControl(child, input, terminalSignal)
+        completedApprovalSessions.delete(input.sessionId)
+        approvalSessions.delete(input.sessionId)
+        return result
+      },
+      async finalizeDecision(input) {
+        if (closed) throw hostError('E2E_RPC_HOST_CLOSED')
+        if (terminalError !== undefined) throw terminalError
+        if (!completedApprovalSessions.has(input.sessionId)) {
+          throw hostError('E2E_APPROVAL_SESSION_INVALID')
+        }
+        const result = await callDecisionControl(child, input, terminalSignal)
         completedApprovalSessions.delete(input.sessionId)
         approvalSessions.delete(input.sessionId)
         return result
@@ -656,6 +676,27 @@ function callFinalizeControl(
     if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
       || !isObject(message.result)) throw hostError('E2E_APPROVAL_FINALIZE_RESULT_INVALID')
     return parseFinalizedApproval(message.result)
+  })
+}
+
+function callDecisionControl(
+  child: ChildProcess,
+  input: { sessionId: string; decisionId: string; decisionSubject: DecisionSubject },
+  terminalSignal: Promise<never>,
+): Promise<DecisionReceipt> {
+  if (!SAFE_ID.test(input.sessionId) || !SAFE_ID.test(input.decisionId)) {
+    throw hostError('E2E_APPROVAL_DECISION_INPUT_INVALID')
+  }
+  const subject = DecisionSubjectSchema.parse(input.decisionSubject)
+  return callChildControl(child, 'finalize-decision', {
+    sessionId: input.sessionId, decisionId: input.decisionId, decisionSubject: subject,
+  }, 'decision-finalized', terminalSignal, (message) => {
+    if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')) {
+      throw hostError('E2E_APPROVAL_DECISION_RESULT_INVALID')
+    }
+    const parsed = DecisionReceiptSchema.safeParse(message.result)
+    if (!parsed.success) throw hostError('E2E_APPROVAL_DECISION_RESULT_INVALID')
+    return parsed.data
   })
 }
 

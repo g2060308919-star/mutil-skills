@@ -12,13 +12,14 @@ const digest = (value: string) => `sha256:${value.repeat(64)}`
 
 function compilerInput(): CompilerInputV1 {
   const subject = {
-    schemaVersion: '2.0.0' as const, assetId: 'PRODUCT/PRD-1', prdRevision: digest('a'),
+    schemaVersion: '2.1.0' as const, assetId: 'PRODUCT/PRD-1', prdRevision: digest('a'),
     scopeDigest: digest('d'), requirementModelDigest: digest('e'), coveragePolicyDigest: digest('f'),
     universeDigest: digest('1'), caseDigest: digest('2'), actionMapDigest: digest('3'),
     policyDigest: digest('c'), executionContractDigest: digest('4'), runBundleProjectionDigest: digest('5'),
     environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'USER',
     discoveryGrantId: 'DISCOVERY-1', preflightDigest: digest('6'),
-    actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1, requestIds: [] }],
   }
   const capabilities = [{ capabilityId: 'CAP-1', actionId: 'ACTION-1', operation: 'dom-read' as const,
     effect: 'read' as const, maxUses: 1, digest: digest('7') }]

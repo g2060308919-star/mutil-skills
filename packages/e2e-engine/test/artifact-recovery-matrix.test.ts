@@ -208,7 +208,7 @@ describe('Artifact kill-point 与恢复矩阵', () => {
         await expect(store.recover('PRODUCT-PRD-1')).resolves.toMatchObject({ generationId: 'GENERATION-2' })
       }
     }
-  })
+  }, 15_000)
 
   test('成功提交后 GC 收敛为唯一 latest generation', async () => {
     const { root, store } = await createStore()

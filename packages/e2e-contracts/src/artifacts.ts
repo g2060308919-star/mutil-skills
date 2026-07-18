@@ -7,6 +7,7 @@ import {
 } from './regression-discovery.js'
 import {
   ArtifactEnvelopeSchema, ArtifactSignatureSchema, AssetIdSchema, E2EError, RelativePathSchema,
+  canonicalizeJson,
 } from './common.js'
 import { RequirementModelSchema } from './design.js'
 import { ManualResultSchema } from './manual-result.js'
@@ -25,12 +26,43 @@ import { ExecutionOutcomeReceiptSchema } from './execution-outcome.js'
 import { CleanupPlanDefinitionSchema } from './cleanup-plan.js'
 import { RuntimeIsolationPolicySchema } from './runtime-isolation.js'
 import { TrustedCompilerExecutionFactSchema } from './trusted-compiler-execution.js'
+import { DiscoveryApprovalSubjectSchema } from './approval-subject.js'
+import { ReadApprovalSubjectSchema } from './approval-freshness.js'
+import {
+  ReadHttpRequestSetSchema,
+  validateReadHttpActionReferences,
+  validateReadHttpRequestSet,
+  type ReadHttpRequestReferences,
+} from './read-http-request.js'
+import {
+  RuntimeWriteHttpActionSchema,
+  digestRuntimeWriteHttpAction,
+} from './runtime-http-action.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const NonEmptyTextSchema = z.string().min(1).max(16 * 1024)
 const UniqueIdsSchema = z.array(SafeIdSchema).max(100_000)
   .refine((values) => new Set(values).size === values.length, 'ID 必须唯一')
+
+export const RuntimeProvenanceSchema = z.object({
+  runtimeVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  runtimeInstallationDigest: DigestSchema,
+  protocolVersion: z.literal('1.0.0'),
+  contractsVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  engineVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  playwrightVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
+  chromiumDigest: DigestSchema,
+  gatewayPolicyDigest: DigestSchema,
+  authorityPublicKeyDigest: DigestSchema,
+  authorityStateProtectionLevel: z.enum(['local-crash-integrity', 'trusted-monotonic']),
+  projectIdentityDigest: DigestSchema,
+  sourceRevisionDigest: DigestSchema,
+  sourceRepositoryIndependent: z.literal(true),
+  isolationProofDigest: DigestSchema,
+}).strict()
+
+export type RuntimeProvenance = z.infer<typeof RuntimeProvenanceSchema>
 
 export const ARTIFACT_TYPES = [
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation',
@@ -243,19 +275,109 @@ const designAuditContent = z.object({
   status: z.enum(['passed', 'failed']),
 }).strict()
 
-const executionContractContent = z.object({
+const ExecutionActionIntentV10Schema = z.object({
+  actionId: SafeIdSchema,
+  effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']),
+  intentDigest: DigestSchema,
+  runtimeHttpActionDigest: DigestSchema.optional(),
+}).strict()
+
+export const ExecutionContractV10ContentSchema = z.object({
   environment: SafeIdSchema,
   baseOrigin: z.string().url(),
   browserMatrix: z.array(z.object({ browserId: SafeIdSchema, channel: SafeIdSchema, viewportId: SafeIdSchema }).strict()).min(1).max(256),
   identities: z.array(z.object({ identityId: SafeIdSchema, roleIds: z.array(SafeIdSchema).min(1), secretRef: SafeIdSchema }).strict()).max(10_000),
   caseQueue: z.array(z.object({ ordinal: z.number().int().nonnegative(), caseId: SafeIdSchema }).strict()).max(100_000),
-  actionIntents: z.array(z.object({ actionId: SafeIdSchema, effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']), intentDigest: DigestSchema }).strict()).max(100_000),
+  actionIntents: z.array(ExecutionActionIntentV10Schema).max(100_000),
   dataNeeds: z.array(z.object({ leaseId: SafeIdSchema, resourceKey: SafeIdSchema, mode: z.enum(['read', 'write']) }).strict()).max(100_000),
   manualProcedures: z.array(z.object({ manualProcedureId: SafeIdSchema, instructionDigest: DigestSchema }).strict()).max(100_000),
   evidencePolicyDigest: DigestSchema,
   runtimeIsolation: RuntimeIsolationPolicySchema.nullable(),
   unresolvedItems: z.array(z.object({ itemId: SafeIdSchema, kind: SafeIdSchema, blocking: z.boolean() }).strict()).max(100_000),
 }).strict()
+
+export const ExecutionContractV11ContentSchema = ExecutionContractV10ContentSchema.extend({
+  readHttpRequests: ReadHttpRequestSetSchema,
+  writeHttpActions: z.array(RuntimeWriteHttpActionSchema).max(100_000).optional(),
+  writeCleanupPlans: z.array(CleanupPlanDefinitionSchema).max(100_000).optional(),
+  actionIntents: z.array(ExecutionActionIntentV10Schema.extend({
+    requestIds: z.array(SafeIdSchema).max(1_000),
+  }).strict()).max(100_000),
+}).strict().superRefine((content, context) => {
+  const actionIds = content.actionIntents.map((action) => action.actionId)
+  if (new Set(actionIds).size !== actionIds.length) {
+    context.addIssue({ code: 'custom', message: 'actionId 必须唯一', path: ['actionIntents'] })
+  }
+  const knownRequests = new Set(content.readHttpRequests.map((request) => request.requestId))
+  const counts = new Map<string, number>()
+  for (const [actionIndex, action] of content.actionIntents.entries()) {
+    if (new Set(action.requestIds).size !== action.requestIds.length) {
+      context.addIssue({ code: 'custom', message: 'requestId 引用必须唯一', path: ['actionIntents', actionIndex, 'requestIds'] })
+    }
+    for (const [requestIndex, requestId] of action.requestIds.entries()) {
+      if (!knownRequests.has(requestId)) {
+        context.addIssue({ code: 'custom', message: 'E2E_READ_HTTP_REQUEST_REFERENCE_UNKNOWN',
+          path: ['actionIntents', actionIndex, 'requestIds', requestIndex] })
+      }
+      counts.set(requestId, (counts.get(requestId) ?? 0) + 1)
+    }
+  }
+  for (const requestId of knownRequests) {
+    if (counts.get(requestId) !== 1) {
+      context.addIssue({ code: 'custom', message: 'E2E_READ_HTTP_REQUEST_REFERENCE_CARDINALITY', path: ['actionIntents'] })
+    }
+  }
+  const writeActions = content.writeHttpActions ?? []
+  const writeById = new Map(writeActions.map((action) => [action.actionId, action]))
+  if (writeById.size !== writeActions.length) {
+    context.addIssue({ code: 'custom', message: 'writeHttpActions.actionId 必须唯一', path: ['writeHttpActions'] })
+  }
+  for (const [index, action] of content.actionIntents.entries()) {
+    const definition = writeById.get(action.actionId)
+    if (action.runtimeHttpActionDigest !== undefined && (definition === undefined
+      || action.runtimeHttpActionDigest !== digestRuntimeWriteHttpAction(definition))) {
+      context.addIssue({
+        code: 'custom', message: 'runtimeHttpActionDigest 与固定 HTTP action 不一致',
+        path: ['actionIntents', index, 'runtimeHttpActionDigest'],
+      })
+    }
+  }
+  const cleanupPlans = content.writeCleanupPlans ?? []
+  const cleanupById = new Map(cleanupPlans.map((plan) => [plan.cleanupPlanId, plan]))
+  if (cleanupById.size !== cleanupPlans.length) {
+    context.addIssue({ code: 'custom', message: 'writeCleanupPlans.cleanupPlanId 必须唯一', path: ['writeCleanupPlans'] })
+  }
+  for (const [index, action] of writeActions.entries()) {
+    const cleanup = cleanupById.get(action.cleanupPlanId)
+    if (cleanup !== undefined && cleanup.actionId !== action.actionId) {
+      context.addIssue({
+        code: 'custom', message: 'write action 与 cleanup plan 的 actionId 不闭合',
+        path: ['writeHttpActions', index, 'cleanupPlanId'],
+      })
+    }
+  }
+})
+
+const executionContractContent = ExecutionContractV11ContentSchema
+
+export function migrateExecutionContractV10ToV11(
+  candidate: unknown,
+  requestCandidates: unknown,
+  references: ReadHttpRequestReferences,
+) {
+  const legacy = ExecutionContractV10ContentSchema.parse(candidate)
+  const readHttpRequests = validateReadHttpRequestSet(requestCandidates)
+  const mapped = validateReadHttpActionReferences(
+    legacy.actionIntents.map((action) => action.actionId), readHttpRequests, references,
+  )
+  return ExecutionContractV11ContentSchema.parse({
+    ...legacy,
+    readHttpRequests,
+    actionIntents: legacy.actionIntents.map((action) => ({
+      ...action, requestIds: mapped[action.actionId],
+    })),
+  })
+}
 
 const approvalGrantsContent = z.object({
   runBundleDigest: DigestSchema,
@@ -289,29 +411,120 @@ const browserPreflightContent = z.object({
   status: z.enum(['passed', 'failed']),
 }).strict()
 
-const browserActionMapContent = z.object({
+const BrowserActionMapV20ActionSchema = z.object({
+  caseId: SafeIdSchema,
+  stepId: SafeIdSchema,
+  actionId: SafeIdSchema,
+  pageIdentityId: SafeIdSchema,
+  locatorCandidates: z.array(z.object({ strategy: SafeIdSchema, value: NonEmptyTextSchema, confidence: z.number().min(0).max(1) }).strict()).max(32),
+  playwrightAction: NonEmptyTextSchema,
+  waits: z.array(z.object({ kind: SafeIdSchema, timeoutMs: z.number().int().positive().max(3_600_000) }).strict()).max(32),
+  oracleIds: z.array(SafeIdSchema).min(1).max(1_000),
+  effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']),
+  runtimeHttpActionDigest: DigestSchema.optional(),
+  capabilities: z.array(z.object({
+    operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request']),
+    capabilityId: SafeIdSchema,
+  }).strict()).min(1).max(16).refine((items) =>
+    new Set(items.map((item) => item.operation)).size === items.length,
+  '同一 action 的 operation 必须唯一'),
+}).strict()
+
+export const BrowserActionMapV20ContentSchema = z.object({
   actionMapRevision: z.number().int().positive(),
   pageIdentities: z.array(z.object({ pageId: SafeIdSchema, origin: z.string().url(), assertionDigest: DigestSchema }).strict()).min(1).max(10_000),
-  actions: z.array(z.object({
-    caseId: SafeIdSchema,
-    stepId: SafeIdSchema,
-    actionId: SafeIdSchema,
-    pageIdentityId: SafeIdSchema,
-    locatorCandidates: z.array(z.object({ strategy: SafeIdSchema, value: NonEmptyTextSchema, confidence: z.number().min(0).max(1) }).strict()).min(1).max(32),
-    playwrightAction: NonEmptyTextSchema,
-    waits: z.array(z.object({ kind: SafeIdSchema, timeoutMs: z.number().int().positive().max(3_600_000) }).strict()).max(32),
-    oracleIds: z.array(SafeIdSchema).min(1).max(1_000),
-    effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']),
-    capabilities: z.array(z.object({
-      operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request']),
-      capabilityId: SafeIdSchema,
-    }).strict()).min(1).max(16).refine((items) =>
-      new Set(items.map((item) => item.operation)).size === items.length,
-    '同一 action 的 operation 必须唯一'),
-  }).strict()).max(100_000),
+  actions: z.array(BrowserActionMapV20ActionSchema).max(100_000),
   unmappedSteps: z.array(z.object({ caseId: SafeIdSchema, stepId: SafeIdSchema, reasonCode: SafeIdSchema }).strict()).max(100_000),
   discoveredRisks: z.array(FindingSchema).max(100_000),
 }).strict()
+
+export const BrowserActionMapV21ContentSchema = BrowserActionMapV20ContentSchema.extend({
+  actions: z.array(BrowserActionMapV20ActionSchema.extend({
+    requestIds: z.array(SafeIdSchema).max(1_000)
+      .refine((values) => new Set(values).size === values.length, 'requestId 引用必须唯一'),
+  }).strict()).max(100_000),
+}).strict().superRefine((content, context) => {
+  const actionIds = content.actions.map((action) => action.actionId)
+  if (new Set(actionIds).size !== actionIds.length) {
+    context.addIssue({ code: 'custom', message: 'actionId 必须唯一', path: ['actions'] })
+  }
+  const requestIds = content.actions.flatMap((action) => action.requestIds)
+  if (new Set(requestIds).size !== requestIds.length) {
+    context.addIssue({
+      code: 'custom', message: 'E2E_READ_HTTP_REQUEST_REFERENCE_CARDINALITY', path: ['actions'],
+    })
+  }
+})
+
+const browserActionMapContent = BrowserActionMapV21ContentSchema
+
+export function migrateBrowserActionMapV20ToV21(
+  candidate: unknown,
+  references: ReadHttpRequestReferences,
+) {
+  const legacy = BrowserActionMapV20ContentSchema.parse(candidate)
+  const actionIds = legacy.actions.map((action) => action.actionId)
+  const expected = [...actionIds].sort()
+  const actual = Object.keys(references).sort()
+  if (expected.length !== actual.length || expected.some((id, index) => id !== actual[index])) {
+    throw new Error('E2E_READ_HTTP_MIGRATION_MAPPING')
+  }
+  for (const actionId of actionIds) {
+    const values = references[actionId]
+    if (!Array.isArray(values) || new Set(values).size !== values.length
+      || values.some((requestId) => !SafeIdSchema.safeParse(requestId).success)) {
+      throw new Error('E2E_READ_HTTP_REQUEST_REFERENCE_UNKNOWN')
+    }
+  }
+  const referenced = actionIds.flatMap((actionId) => references[actionId]!)
+  if (new Set(referenced).size !== referenced.length) {
+    throw new Error('E2E_READ_HTTP_REQUEST_REFERENCE_CARDINALITY')
+  }
+  return BrowserActionMapV21ContentSchema.parse({
+    ...legacy,
+    actions: legacy.actions.map((action) => ({ ...action, requestIds: [...references[action.actionId]!] })),
+  })
+}
+
+export function validateReadHttpProtocolProjection(input: {
+  executionContract: unknown
+  browserActionMap: unknown
+  approvalSubject: unknown
+}): void {
+  const execution = ExecutionContractV11ContentSchema.parse(input.executionContract)
+  const actionMap = BrowserActionMapV21ContentSchema.parse(input.browserActionMap)
+  const subjectResult = z.union([DiscoveryApprovalSubjectSchema, ReadApprovalSubjectSchema])
+    .safeParse(input.approvalSubject)
+  if (!subjectResult.success) throw new Error('E2E_READ_HTTP_APPROVAL_SUBJECT_INVALID')
+  const subject = subjectResult.data
+
+  const expectedRequests = new Map(execution.readHttpRequests.map((request) => [request.requestId, request]))
+  const subjectRequests = new Map(subject.requests.map((request) => [request.requestId, request]))
+  if (expectedRequests.size !== subjectRequests.size
+    || [...expectedRequests].some(([requestId, request]) =>
+      canonicalizeJson(request) !== canonicalizeJson(subjectRequests.get(requestId)))) {
+    throw new Error('E2E_READ_HTTP_APPROVAL_REQUEST_SET_MISMATCH')
+  }
+
+  const executionReferences = new Map(execution.actionIntents
+    .filter((action) => action.requestIds.length > 0).map((action) => [action.actionId, action.requestIds]))
+  const actionMapReferences = new Map(actionMap.actions
+    .filter((action) => action.requestIds.length > 0).map((action) => [action.actionId, action.requestIds]))
+  const subjectReferences = new Map(subject.actions
+    .filter((action) => action.requestIds.length > 0).map((action) => [action.actionId, action.requestIds]))
+  for (const [actionId, requestIds] of executionReferences) {
+    const mapped = actionMapReferences.get(actionId)
+    const approved = subjectReferences.get(actionId)
+    if (mapped === undefined || approved === undefined
+      || canonicalizeJson(requestIds) !== canonicalizeJson(mapped)
+      || canonicalizeJson(requestIds) !== canonicalizeJson(approved)) {
+      throw new Error('E2E_READ_HTTP_ACTION_REFERENCE_MISMATCH')
+    }
+  }
+  if (executionReferences.size !== actionMapReferences.size || executionReferences.size !== subjectReferences.size) {
+    throw new Error('E2E_READ_HTTP_ACTION_REFERENCE_MISMATCH')
+  }
+}
 
 const regressionManifestContent = z.object({
   testDomain: z.literal('prd-e2e-trusted-compiler'),
@@ -462,6 +675,7 @@ export const ReportGatewayAuditSchema = z.object({
 }).strict()
 
 export const FinalReportContentSchema = z.object({
+  runtimeProvenance: RuntimeProvenanceSchema,
   verdictRuleVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
   verdictInputDigest: DigestSchema,
   verdict: VerdictResultSchema.shape.verdict,
@@ -698,6 +912,7 @@ export const FinalReportContentSchema = z.object({
 export type FinalReportContent = z.infer<typeof FinalReportContentSchema>
 
 const generationManifestContent = z.object({
+  runtimeProvenance: RuntimeProvenanceSchema,
   generationId: SafeIdSchema,
   fencingToken: z.number().int().positive(),
   finalizationSnapshotDigest: DigestSchema,
@@ -768,9 +983,17 @@ const ContentSchemaRegistry = {
 function createArtifactSchema<T extends ArtifactType>(artifactType: T) {
   return ArtifactEnvelopeSchema.extend({
     artifactType: z.literal(artifactType),
-    schemaVersion: artifactType === 'final-report' || artifactType === 'cleanup-results'
+    schemaVersion: artifactType === 'execution-contract'
+      ? z.literal('1.1.0')
+      : artifactType === 'browser-action-map'
+        ? z.literal('2.1.0')
+        : artifactType === 'final-report'
+          ? z.literal('3.0.0')
+          : artifactType === 'generation-manifest'
+            ? z.literal('2.0.0')
+        : artifactType === 'cleanup-results'
       || artifactType === 'approval-grants' || artifactType === 'browser-preflight'
-      || artifactType === 'browser-action-map' || artifactType === 'run-bundle'
+      || artifactType === 'run-bundle'
       || artifactType === 'project-policy' || artifactType === 'browser-evidence'
       || artifactType === 'acceptance-scope' || artifactType === 'prd-diff'
       || artifactType === 'regression-manifest' || artifactType === 'workflow-events'
@@ -798,6 +1021,24 @@ export function parseArtifactDocument(candidate: unknown): ArtifactDocument {
     })
   }
   const versionResult = z.object({ schemaVersion: z.string() }).passthrough().safeParse(candidate)
+  if ((typeResult.data.artifactType === 'final-report'
+      && (!versionResult.success || versionResult.data.schemaVersion !== '3.0.0'))
+    || (typeResult.data.artifactType === 'generation-manifest'
+      && (!versionResult.success || versionResult.data.schemaVersion !== '2.0.0'))) {
+    throw new E2EError({
+      code: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED', category: 'artifact', retryable: false,
+      message: `E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED: ${typeResult.data.artifactType} 必须携带严格 Runtime provenance`,
+    })
+  }
+  if ((typeResult.data.artifactType === 'execution-contract'
+      && (!versionResult.success || versionResult.data.schemaVersion !== '1.1.0'))
+    || (typeResult.data.artifactType === 'browser-action-map'
+      && (!versionResult.success || versionResult.data.schemaVersion !== '2.1.0'))) {
+    throw new E2EError({
+      code: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED', category: 'artifact', retryable: false,
+      message: `E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED: ${typeResult.data.artifactType} 必须显式迁移到严格只读请求协议版本`,
+    })
+  }
   if ((typeResult.data.artifactType === 'acceptance-scope' || typeResult.data.artifactType === 'prd-diff')
     && (!versionResult.success || versionResult.data.schemaVersion !== '2.0.0')) {
     throw new E2EError({

@@ -8,7 +8,9 @@ export function fixedLauncherSource(layout: RuntimeLayout): string {
     entrypoint: RUNTIME_ENTRYPOINT,
     manifest: RUNTIME_MANIFEST_FILE,
   })
-  return `#!/usr/bin/env node
+  const nodeExecutable = shellSingleQuote(process.execPath)
+  return `#!/bin/sh
+':' //; unset NODE_OPTIONS NODE_PATH; exec ${nodeExecutable} "$0" "$@"
 'use strict'
 const { createHash } = require('node:crypto')
 const { lstatSync, readFileSync, realpathSync } = require('node:fs')
@@ -18,7 +20,6 @@ const configuration = ${configuration}
 
 try {
   if ((process.platform !== 'darwin' && process.platform !== 'linux')
-    || process.env.NODE_OPTIONS || process.env.NODE_PATH
     || process.execArgv.some((argument) => argument === '--loader'
       || argument.startsWith('--loader=')
       || argument === '--require'
@@ -150,4 +151,8 @@ function fail() {
   process.exit(70)
 }
 `
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`
 }

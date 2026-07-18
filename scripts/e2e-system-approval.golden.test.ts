@@ -177,11 +177,12 @@ async function prepareWriteSubject(authority: LocalApprovalAuthority, input: {
 }): Promise<WriteApprovalSubject> {
   const scopeDigest = digest('scope')
   const discoverySubject = {
-    schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-APPROVAL', prdRevision: input.revision,
+    schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-APPROVAL', prdRevision: input.revision,
     scopeDigest, environment: input.environment, baseOrigin: 'http://fixture.test', actor: 'operator',
     expectedPageIdentity: { url: 'http://fixture.test/orders/100', title: '订单', heading: '订单 100', ariaSignals: ['main'] },
     bootstrapIntentsDigest: digest('bootstrap'),
-    actions: [{ actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
   }
   const discovery = await authority.issueDiscoveryGrant({ subject: discoverySubject,
     approver: { subject: 'os-user:approval', roles: ['e2e-approver'] }, approvalSessionRef: 'approval-session', ttlMs: 60_000 })

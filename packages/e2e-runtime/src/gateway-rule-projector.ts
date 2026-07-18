@@ -14,11 +14,17 @@ export type GatewayChannel = 'http' | 'beacon' | 'websocket'
 export interface ApprovedGatewayRequest {
   actionId: string
   capabilityId: string
+  requestId?: string
   method: string
   url: string
   maxUses: number
+  signedBodyDigest?: string
+  headers?: Array<{ name: string; value: string }>
+  redirectRequestIds?: string[]
   channel?: GatewayChannel
   bodyBase64Url?: string
+  /** secret template 只传运行时解析后的 body 摘要；不得把 secret body 写入规则或 IPC 配置。 */
+  resolvedBodyDigest?: string
   contentType?: string
   behavior?:
     | { kind: 'pass-through' }
@@ -32,12 +38,16 @@ export interface ProjectedGatewayRule {
   stepOrdinal: number
   actionId: string
   capabilityId: string
+  requestId?: string
   method: string
   url: string
   maxUses: number
   channel: GatewayChannel
   actionToken: string
   bodyDigest: string
+  signedBodyDigest?: string
+  requestHeaders: Record<string, string>
+  redirectRequestIds: string[]
   bodyBase64Url?: string
   contentType?: string
   behavior: NonNullable<ApprovedGatewayRequest['behavior']>
@@ -58,16 +68,37 @@ export function projectGatewayRules(input: {
   }
   const seen = new Set<string>()
   const correlations = new Set<string>()
+  const requestIds = new Set<string>()
+  const actionTokens = new Set<string>()
   const rules = input.approvedRequests.map((candidate, index): ProjectedGatewayRule => {
     if (!candidate || !SAFE_ID.test(candidate.actionId) || !SAFE_ID.test(candidate.capabilityId)
       || !HTTP_METHOD.test(candidate.method) || !Number.isSafeInteger(candidate.maxUses)
       || candidate.maxUses < 1 || candidate.maxUses > 100_000) {
       throw gatewayProjectionError('E2E_GATEWAY_POLICY_INVALID')
     }
+    const hasRequestClosure = candidate.requestId !== undefined || candidate.signedBodyDigest !== undefined
+      || candidate.headers !== undefined || candidate.redirectRequestIds !== undefined
+    if (hasRequestClosure && (!candidate.requestId || !SAFE_ID.test(candidate.requestId)
+      || !candidate.signedBodyDigest || !/^sha256:[a-f0-9]{64}$/.test(candidate.signedBodyDigest)
+      || !Array.isArray(candidate.headers) || !Array.isArray(candidate.redirectRequestIds))) {
+      throw gatewayProjectionError('E2E_GATEWAY_POLICY_INVALID')
+    }
+    if (candidate.requestId !== undefined) {
+      if (requestIds.has(candidate.requestId)) throw gatewayProjectionError('E2E_GATEWAY_POLICY_DUPLICATE')
+      requestIds.add(candidate.requestId)
+    }
+    const requestHeaders = normalizeApprovedHeaders(candidate.headers ?? [])
+    const redirectRequestIds = [...(candidate.redirectRequestIds ?? [])]
+    if (new Set(redirectRequestIds).size !== redirectRequestIds.length
+      || redirectRequestIds.some((requestId) => !SAFE_ID.test(requestId))) {
+      throw gatewayProjectionError('E2E_GATEWAY_POLICY_INVALID')
+    }
     const channel = candidate.channel ?? 'http'
     if (!['http', 'beacon', 'websocket'].includes(channel)) throw gatewayProjectionError('E2E_GATEWAY_POLICY_INVALID')
     const normalizedUrl = normalizeTargetUrl(candidate.url, channel)
-    const identity = canonicalizeJson({ candidate: { ...candidate, url: normalizedUrl, channel } })
+    const identity = canonicalizeJson({ candidate: {
+      ...candidate, url: normalizedUrl, channel, headers: Object.entries(requestHeaders), redirectRequestIds,
+    } })
     if (seen.has(identity)) throw gatewayProjectionError('E2E_GATEWAY_POLICY_DUPLICATE')
     seen.add(identity)
     if (candidate.bodyBase64Url !== undefined) {
@@ -78,29 +109,43 @@ export function projectGatewayRules(input: {
         }
       } finally { body.fill(0) }
     }
+    if (candidate.resolvedBodyDigest !== undefined && (!/^sha256:[a-f0-9]{64}$/.test(candidate.resolvedBodyDigest)
+      || candidate.bodyBase64Url !== undefined)) {
+      throw gatewayProjectionError('E2E_GATEWAY_POLICY_INVALID')
+    }
     if (candidate.contentType !== undefined && (candidate.bodyBase64Url === undefined
+      && candidate.resolvedBodyDigest === undefined
       || Buffer.byteLength(candidate.contentType) > 8 * 1024 || /[\r\n\0]/.test(candidate.contentType))) {
       throw gatewayProjectionError('E2E_GATEWAY_POLICY_INVALID')
     }
     const behavior = snapshotBehavior(candidate.behavior)
-    const bodyDigest = digestText('gateway-request-body/v1', candidate.bodyBase64Url ?? '')
+    const bodyDigest = candidate.resolvedBodyDigest
+      ?? digestText('gateway-request-body/v1', candidate.bodyBase64Url ?? '')
     const correlation = canonicalizeJson({
       actionId: candidate.actionId, capabilityId: candidate.capabilityId, method: candidate.method,
       url: normalizedUrl, channel, bodyDigest,
+      ...(candidate.requestId === undefined ? {} : { requestId: candidate.requestId }),
     })
     if (correlations.has(correlation)) throw gatewayProjectionError('E2E_GATEWAY_POLICY_CORRELATION_CONFLICT')
     correlations.add(correlation)
+    let actionToken: string
+    do { actionToken = randomBytes(32).toString('base64url') } while (actionTokens.has(actionToken))
+    actionTokens.add(actionToken)
     return {
       ruleId: digestText('gateway-projected-rule/v1', identity),
       stepOrdinal: index + 1,
       actionId: candidate.actionId,
       capabilityId: candidate.capabilityId,
+      ...(candidate.requestId === undefined ? {} : { requestId: candidate.requestId }),
       method: candidate.method,
       url: normalizedUrl,
       maxUses: candidate.maxUses,
       channel,
-      actionToken: randomBytes(32).toString('base64url'),
+      actionToken,
       bodyDigest,
+      ...(candidate.signedBodyDigest === undefined ? {} : { signedBodyDigest: candidate.signedBodyDigest }),
+      requestHeaders,
+      redirectRequestIds,
       ...(candidate.bodyBase64Url === undefined ? {} : { bodyBase64Url: candidate.bodyBase64Url }),
       ...(candidate.contentType === undefined ? {} : { contentType: candidate.contentType }),
       behavior,
@@ -143,15 +188,38 @@ export function selectProjectedRuleForBrowser(
   input: {
     ruleId: string; stepOrdinal: number; actionId: string; capabilityId: string
     method: string; url: string; channel: GatewayChannel; bodyDigest: string
+    requestId?: string; signedBodyDigest?: string
   },
 ): ProjectedGatewayRule {
   const canonicalUrl = normalizeTargetUrl(input.url, input.channel)
   const matches = rules.filter((rule) => rule.ruleId === input.ruleId
     && rule.stepOrdinal === input.stepOrdinal && rule.actionId === input.actionId
     && rule.capabilityId === input.capabilityId && rule.method === input.method.toUpperCase()
-    && rule.url === canonicalUrl && rule.channel === input.channel && rule.bodyDigest === input.bodyDigest)
+    && rule.url === canonicalUrl && rule.channel === input.channel && rule.bodyDigest === input.bodyDigest
+    && rule.requestId === input.requestId && rule.signedBodyDigest === input.signedBodyDigest)
   if (matches.length !== 1) throw gatewayProjectionError('E2E_GATEWAY_BROWSER_CORRELATION_DENIED')
   return matches[0]!
+}
+
+function normalizeApprovedHeaders(headers: Array<{ name: string; value: string }>): Record<string, string> {
+  const normalized: Record<string, string> = {}
+  const forbidden = new Set([
+    'api-key', 'authorization', 'connection', 'content-length', 'cookie', 'host', 'keep-alive',
+    'proxy-authenticate', 'proxy-authorization', 'set-cookie', 'te', 'trailer',
+    'transfer-encoding', 'upgrade', 'x-api-key', 'x-auth-token',
+  ])
+  for (const header of headers) {
+    if (!header || !/^[!#$%&'*+.^_`|~0-9a-z-]{1,128}$/.test(header.name)
+      || forbidden.has(header.name)
+      || /(^|-)(?:auth|credential|csrf|secret|session|token)(?:-|$)/.test(header.name)
+      || Buffer.byteLength(header.value, 'utf8') > 8 * 1024
+      || /[\0-\x08\x0a-\x1f\x7f]/.test(header.value)
+      || Object.hasOwn(normalized, header.name)) {
+      throw gatewayProjectionError('E2E_GATEWAY_POLICY_INVALID')
+    }
+    normalized[header.name] = header.value
+  }
+  return normalized
 }
 
 function normalizeTargetUrl(value: string, channel: GatewayChannel): string {

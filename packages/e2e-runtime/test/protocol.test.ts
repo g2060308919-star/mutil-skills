@@ -14,7 +14,7 @@ import {
 } from '../src/protocol.js'
 
 const digest = `sha256:${'0'.repeat(64)}`
-const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.0.0 -- repo-e2e install-runtime --version 0.0.0'
+const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.1.0 -- repo-e2e install-runtime --version 0.1.0'
 const doctorRequest = {
   schemaVersion: '1.0.0',
   requestId: 'REQ-1',
@@ -49,7 +49,7 @@ describe('Runtime protocol', () => {
     expect(response).toMatchObject({
       schemaVersion: '1.0.0',
       requestId: 'REQ-1',
-      runtime: { version: '0.0.0', installationDigest: digest },
+      runtime: { version: '0.1.0', installationDigest: digest },
       ok: false,
       error: {
         code: 'E2E_RUNTIME_NOT_INSTALLED',
@@ -58,6 +58,24 @@ describe('Runtime protocol', () => {
         retryable: false,
         details: { remediation: installRemediation },
       },
+    })
+  })
+
+  test.each([
+    'E2E_RUNTIME_PACKAGE_VERSION_SKEW',
+    'E2E_RUNTIME_STATE_MIGRATION_REQUIRED',
+  ])('%s 在公开协议中固定映射为 migration-required', (code) => {
+    const response = runtimeErrorResponse('REQ-MIGRATION', new E2EError({
+      code,
+      category: 'safety',
+      message: '需要显式迁移',
+      retryable: false,
+    }))
+    expect(response.error).toMatchObject({
+      code,
+      category: 'migration',
+      terminalState: 'migration-required',
+      retryable: false,
     })
   })
 
@@ -74,6 +92,40 @@ describe('Runtime protocol', () => {
 })
 
 describe('repo-e2e CLI protocol slice', () => {
+  test('human report command maps to the same render-report Runtime Host protocol', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    const handle = vi.fn(async (
+      request: { requestId: string }, _requestBytes: string | Uint8Array,
+    ) => successResponse(request.requestId, {
+      generationId: 'RUN-1', report: { markdown: '# report\n' },
+    }))
+
+    const exitCode = await runCli(
+      ['report', '--run-id', 'RUN-1'], Readable.from([]), stdout.stream, stderr.stream,
+      {
+        homeDir: '/safe/home',
+        installRuntime: async () => ({
+          version: '0.0.0', installationDigest: digest, launcher: '/safe/repo-e2e',
+        }),
+        uninstallRuntime: async () => ({ version: '0.0.0' }),
+        runtimeHost: { handle }, currentWorkingDirectory: () => '/safe/project',
+      },
+    )
+
+    expect(exitCode).toBe(0)
+    expect(handle).toHaveBeenCalledOnce()
+    expect(handle.mock.calls[0]?.[0]).toMatchObject({
+      schemaVersion: '1.0.0', command: 'render-report', projectRoot: '/safe/project',
+      payload: { runId: 'RUN-1' },
+    })
+    expect(handle.mock.calls[0]?.[1]).toEqual(expect.any(Buffer))
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: true, result: { generationId: 'RUN-1', report: { markdown: '# report\n' } },
+    })
+    expect(stderr.text()).toBe('')
+  })
+
   test('prints only the package version for --version', async () => {
     const stdout = captureWritable()
     const stderr = captureWritable()
@@ -81,7 +133,7 @@ describe('repo-e2e CLI protocol slice', () => {
     const exitCode = await runCli(['--version'], Readable.from([]), stdout.stream, stderr.stream)
 
     expect(exitCode).toBe(0)
-    expect(stdout.text()).toBe('0.0.0\n')
+    expect(stdout.text()).toBe('0.1.0\n')
     expect(stderr.text()).toBe('')
   })
 
@@ -407,13 +459,13 @@ function expectRuntimeError(parse: () => unknown, code: string, category?: strin
   }
 }
 
-function successResponse(): RuntimeResponseEnvelope {
+function successResponse(requestId = 'REQ-1', result: unknown = {}): RuntimeResponseEnvelope {
   return {
     schemaVersion: '1.0.0',
-    requestId: 'REQ-1',
+    requestId,
     runtime: { version: '0.0.0', installationDigest: digest },
     ok: true,
-    result: {},
+    result,
   }
 }
 

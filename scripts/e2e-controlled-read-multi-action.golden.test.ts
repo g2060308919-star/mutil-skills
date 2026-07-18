@@ -160,6 +160,7 @@ function readAuthorizationInput(actionId: string, index: number, finalizeFails =
         attemptId: string; status: 'reserved'; reservedAt: string
       }>
       complete(reservationId: string, outcomeDigest: string): Promise<void>
+      markUnknown(reservationId: string, observation: string): Promise<void>
     }
   }
   attemptId: string
@@ -205,6 +206,7 @@ function readAuthorizationInput(actionId: string, index: number, finalizeFails =
         async complete() {
           if (finalizeFails) throw new Error('authority finalize unavailable')
         },
+        async markUnknown() {},
       },
     },
     attemptId: `ATTEMPT-READ-${index + 1}`,

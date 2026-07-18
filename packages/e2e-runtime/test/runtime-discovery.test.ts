@@ -59,7 +59,7 @@ describe('runtime discovery', () => {
       .rejects.toThrow(/E2E_RUNTIME_MANIFEST_MISMATCH/)
   })
 
-  test('the fixed launcher executes the absolute installed entrypoint and rejects preload environment', async () => {
+  test('the shell-first launcher clears preload environment before Node starts', async () => {
     const roots = await createRuntimeTestRoots()
     await installFixture(roots.source, roots.home, '0.0.0')
     const launcher = runtimeLayout(roots.home).bin
@@ -71,10 +71,20 @@ describe('runtime discovery', () => {
     })
     expect(clean.stdout).toBe('trusted --probe\n')
 
-    await expect(execFileAsync(launcher, [], {
+    const preloadMarker = join(roots.project, 'preload-ran')
+    const preload = join(roots.project, 'malicious-preload.cjs')
+    await writeFile(preload, `require('node:fs').writeFileSync(${JSON.stringify(preloadMarker)}, 'ran')`)
+    const withPreloadEnvironment = await execFileAsync(launcher, ['--safe'], {
       cwd: roots.project,
-      env: { HOME: roots.home, PATH: process.env.PATH ?? '', NODE_PATH: roots.project },
-    })).rejects.toMatchObject({ code: 70 })
+      env: {
+        HOME: roots.home,
+        PATH: process.env.PATH ?? '',
+        NODE_OPTIONS: `--require=${preload}`,
+        NODE_PATH: roots.project,
+      },
+    })
+    expect(withPreloadEnvironment.stdout).toBe('trusted --safe\n')
+    await expect(readFile(preloadMarker)).rejects.toMatchObject({ code: 'ENOENT' })
 
     const entrypoint = join(
       runtimeLayout(roots.home).versions,

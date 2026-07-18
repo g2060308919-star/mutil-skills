@@ -13,11 +13,14 @@ async function subject(authority: RuntimeApprovalAuthority, input: {
 } = {}): Promise<WriteApprovalSubject> {
   const approver = input.approver ?? { subject: 'os-user:qa', roles: ['e2e-approver'] }
   const discoverySubject = {
-    schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
+    schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
     environment: 'test' as const, baseOrigin: 'https://test.example.com', actor: 'qa',
     expectedPageIdentity: { url: 'https://test.example.com/orders/100', title: 'Order', heading: 'Order 100', ariaSignals: ['main'] },
     bootstrapIntentsDigest: digest,
-    actions: [{ actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{
+      actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
+    }],
   }
   const discovery = await authority.issueDiscoveryGrant({ subject: discoverySubject, approver,
     ...(input.approvalSessionRef ? { approvalSessionRef: input.approvalSessionRef } : {}), ttlMs: 60_000 })

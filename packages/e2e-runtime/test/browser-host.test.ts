@@ -82,6 +82,41 @@ describe('Controlled Browser Host', () => {
     await session.close()
   })
 
+  test('action-scoped resolver 仅关联已签页面/API 请求一次，并拒绝未知、重复与跨 action 请求', async () => {
+    const roots = await createRuntimeTestRoots()
+    const driver = fakeDriver()
+    const session = await new ControlledBrowserHost(driver).open({
+      homeDir: roots.home, runId: 'RUN-RESOLVER', installation: installation(),
+      gateway: gateway(vi.fn(async () => ({ approved: true, denied: true, proofDigest: digest('c') }))),
+    })
+    const binding = getControlledBrowserSessionBinding(session) as any
+    const base = {
+      channel: 'http', bodyDigest: digest('2'), signedBodyDigest: digest('3'),
+      actionId: 'ACTION-1', capabilityId: 'CAP-HTTP', headers: {}, maxUses: 1,
+      redirectRequestIds: [],
+    }
+    const outcomes = await binding.executeWithCorrelations([
+      { ...base, requestId: 'REQUEST-PAGE', ruleId: digest('4'), stepOrdinal: 1,
+        method: 'GET', url: 'https://example.test/orders', navigation: true },
+      { ...base, requestId: 'REQUEST-API', ruleId: digest('5'), stepOrdinal: 2,
+        method: 'GET', url: 'https://example.test/api/orders', navigation: false },
+    ], async () => await driver.dispatchRequests!([
+      request('https://example.test/orders', 'document', true, true),
+      request('https://example.test/api/orders', 'xhr', false, true),
+      request('https://example.test/unapproved', 'fetch', false, true),
+      request('https://example.test/api/orders', 'xhr', false, true),
+    ]))
+
+    expect(outcomes).toEqual([true, true, false, false])
+    await expect(binding.executeWithCorrelations([
+      { ...base, requestId: 'REQUEST-1', ruleId: digest('6'), stepOrdinal: 1,
+        method: 'GET', url: 'https://example.test/one', navigation: false },
+      { ...base, actionId: 'ACTION-2', requestId: 'REQUEST-2', ruleId: digest('7'), stepOrdinal: 2,
+        method: 'GET', url: 'https://example.test/two', navigation: false },
+    ], async () => undefined)).rejects.toThrow(/E2E_BROWSER_ACTION_RESOLVER_INVALID/)
+    await session.close()
+  })
+
   test.each(['.', '..'])('rejects path-special runId %s before creating a profile', async (runId) => {
     const roots = await createRuntimeTestRoots()
     const driver = fakeDriver()
@@ -202,6 +237,7 @@ function fakeDriver(commandLine = fixedCommandLine()): BrowserHostDriver & {
   launch: ReturnType<typeof vi.fn>
   launchInput?: { profileDir: string; options: Parameters<BrowserHostDriver['launch']>[1] }
   correlationLeaks: number
+  dispatchRequests?(requests: any[]): Promise<boolean[]>
 } {
   let interceptor: ((request: any) => Promise<void>) | undefined
   let profileDir = ''
@@ -217,6 +253,7 @@ function fakeDriver(commandLine = fixedCommandLine()): BrowserHostDriver & {
     launch: ReturnType<typeof vi.fn>
     launchInput?: { profileDir: string; options: Parameters<BrowserHostDriver['launch']>[1] }
     correlationLeaks: number
+    dispatchRequests?(requests: any[]): Promise<boolean[]>
   } = {
     correlationLeaks: 0,
     page: {} as never, context: {} as never, close, isClosed, launch,
@@ -242,6 +279,24 @@ function fakeDriver(commandLine = fixedCommandLine()): BrowserHostDriver & {
       })
       return { status: continuedTrusted ? 204 : 403 }
     },
+    dispatchRequests: async (requests) => await Promise.all(requests.map(async (request) => {
+      let trusted = false
+      await interceptor!({
+        ...request, headers: request.actionId === undefined ? {} : { 'x-test-action-id': request.actionId },
+        continueWithHeaders: async (headers: Record<string, string>) => { trusted = headers['x-trusted'] === '1' },
+        abort: async () => undefined,
+      })
+      return trusted
+    })),
   }
   return driver
+}
+
+function request(
+  url: string,
+  resourceType: string,
+  isNavigationRequest: boolean,
+  isMainFrame: boolean,
+) {
+  return { url, method: 'GET', resourceType, isNavigationRequest, isMainFrame }
 }

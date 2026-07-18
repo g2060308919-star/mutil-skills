@@ -12,7 +12,7 @@ const d = (value: string) => digestText('test/v1', value)
 
 function receipt() {
   const subject = {
-    schemaVersion: '2.0.0' as const,
+    schemaVersion: '2.1.0' as const,
     assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
     requirementModelDigest: d('model'), coveragePolicyDigest: d('coverage'),
     universeDigest: d('universe'), caseDigest: d('cases'), actionMapDigest: d('actions'),
@@ -20,7 +20,8 @@ function receipt() {
     runBundleProjectionDigest: d('run-bundle-projection'),
     executionContractDigest: d('execution-contract'),
     actor: 'USER', discoveryGrantId: 'DISCOVERY-1', preflightDigest: d('preflight-result'),
-    actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1, requestIds: [] }],
   }
   const capabilities = [{ capabilityId: 'CAPABILITY-1', actionId: 'ACTION-1', operation: 'dom-read' as const,
     effect: 'read' as const, maxUses: 1, digest: d('capability') }]

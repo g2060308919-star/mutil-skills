@@ -163,13 +163,14 @@ async function executeBrowserRun(input: {
     const page = new PlaywrightPageAdapter(await browser.newPage())
     const scopeDigest = digestText('concurrent-scope/v1', runId)
     const subject = {
-      schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-CONCURRENT',
+      schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-CONCURRENT',
       prdRevision: digestText('concurrent-prd/v1', 'revision-1'), scopeDigest,
       environment: 'test' as const, baseOrigin: input.fixtureOrigin, actor: 'auditor',
       expectedPageIdentity: { url: `${input.fixtureOrigin}/orders`, title: '并发订单',
         heading: '订单列表', ariaSignals: ['main:订单列表'] },
       bootstrapIntentsDigest: digestText('concurrent-bootstrap/v1', runId),
-      actions: [{ actionId: preflightActionId, operation: 'local-navigation' as const, maxUses: 1 }],
+      requests: [],
+      actions: [{ actionId: preflightActionId, operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
     }
     const discoveryGrant = await input.authority.issueDiscoveryGrant({
       subject, approver: { subject: 'os-user:concurrent', roles: ['e2e-approver'] },
@@ -184,16 +185,17 @@ async function executeBrowserRun(input: {
     const projection = (name: string) => digestText('concurrent-projection/v1', `${runId}:${name}`)
     const grant = await input.authority.issueReadGrant({
       subject: {
-        schemaVersion: '2.0.0', assetId: 'PRODUCT-CONCURRENT', prdRevision: subject.prdRevision,
+        schemaVersion: '2.1.0', assetId: 'PRODUCT-CONCURRENT', prdRevision: subject.prdRevision,
         scopeDigest, requirementModelDigest: projection('model'), coveragePolicyDigest: projection('coverage-policy'),
         universeDigest: projection('universe'), caseDigest: projection('cases'), actionMapDigest: projection('action-map'),
         policyDigest: projection('policy'), executionContractDigest: projection('execution-contract'),
         runBundleProjectionDigest: projection('run-bundle'), environment: 'test', baseOrigin: input.fixtureOrigin,
         actor: 'auditor', discoveryGrantId: discoveryGrant.grantId, preflightDigest: preflight.preflightDigest,
+        requests: [],
         actions: [
-          { actionId, operation: 'local-navigation', maxUses: 1 },
-          { actionId, operation: 'dom-read', maxUses: 1 },
-          { actionId, operation: 'screenshot', maxUses: 1 },
+          { actionId, operation: 'local-navigation', maxUses: 1, requestIds: [] },
+          { actionId, operation: 'dom-read', maxUses: 1, requestIds: [] },
+          { actionId, operation: 'screenshot', maxUses: 1, requestIds: [] },
         ],
       },
       approver: { subject: 'os-user:concurrent', roles: ['e2e-approver'] },

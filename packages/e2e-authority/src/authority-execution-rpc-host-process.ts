@@ -25,8 +25,10 @@ import {
 import {
   ApprovalFinalizationAcknowledgementSchema,
   ApprovalGrantSubjectSchema,
+  DecisionSubjectSchema,
   canonicalGrantApprovalSubjectDigest,
   canonicalGrantApprovalType,
+  digestDecisionSubject,
   SignedGrantSchema,
   type ApprovalGrantSubject,
   type CanonicalApprovalContext,
@@ -47,7 +49,7 @@ let webAuthnAuthority: WebAuthnUserPresenceAuthority | undefined
 const approvalServers = new Map<string, WebAuthnApprovalServerHandle>()
 const approvalControls = new Map<string, {
   runId: string
-  approvalType: 'discovery' | 'execution'
+  approvalType: WebAuthnApprovalType
   subjectDigest: string
   installationDigest: string
   completed: boolean
@@ -80,6 +82,10 @@ process.on('message', async (incoming: unknown) => {
   }
   if (message.type === 'finalize-approval') {
     await controlQueue.run(async () => await handleFinalizeApproval(message))
+    return
+  }
+  if (message.type === 'finalize-decision') {
+    await controlQueue.run(async () => await handleFinalizeDecision(message))
     return
   }
   if (message.type === 'recover-approval') {
@@ -134,10 +140,14 @@ process.on('message', async (incoming: unknown) => {
     registerAuthenticatedRpcClientFromConfig(rpc, config)
     registerAuthorityExecutionRpcOperations(rpc, {
       writeAuthority: approvalAuthority,
-      leaseAuthority: leaseAuthority.createExecutionClient(),
+      leaseAuthority,
       gatewayAuthority: approvalAuthority,
       readAuthority: approvalAuthority,
       discoveryAuthority: approvalAuthority,
+      reservationAuthority: approvalAuthority,
+      injectionAuthority: approvalAuthority,
+      webSocketAuthority: approvalAuthority,
+      sseAuthority: approvalAuthority,
     })
     httpHandle = await startAuthenticatedRpcLoopbackServer(rpc)
     sendToParent({ type: 'ready', endpoint: httpHandle.endpoint, verifierMaterial: rpc.verifierMaterial })
@@ -216,7 +226,7 @@ async function handleUserPresenceControl(message: Record<string, any>): Promise<
       session: control,
     })
     approvalServers.set(server.sessionId, server)
-    if (control.kind === 'approval' && (control.approvalType === 'discovery' || control.approvalType === 'execution')) {
+    if (control.kind === 'approval') {
       approvalControls.set(server.sessionId, {
         runId: control.runId, approvalType: control.approvalType,
         subjectDigest: control.subjectDigest, installationDigest: control.installationDigest,
@@ -237,6 +247,44 @@ async function handleUserPresenceControl(message: Record<string, any>): Promise<
       await server.close().catch(() => undefined)
     })
     sendToParent({ type: 'session-opened', requestId, url: server.url, sessionId: server.sessionId })
+  } catch (error) {
+    sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
+  }
+}
+
+async function handleFinalizeDecision(message: Record<string, any>): Promise<void> {
+  const requestId = parseControlRequestId(message)
+  if (requestId === undefined) return
+  try {
+    if (!isObject(message.input)
+      || Object.keys(message.input).sort().join('\0')
+        !== ['decisionId', 'decisionSubject', 'sessionId'].join('\0')
+      || typeof message.input.sessionId !== 'string'
+      || typeof message.input.decisionId !== 'string') {
+      throw rpcHostError('E2E_APPROVAL_DECISION_INPUT_INVALID')
+    }
+    const subject = DecisionSubjectSchema.parse(message.input.decisionSubject)
+    const pending = approvalControls.get(message.input.sessionId)
+    if (!pending || !pending.completed || !approvalAuthority || !hostConfig?.userPresence
+      || !['scope', 'lineage'].includes(pending.approvalType)
+      || pending.approvalType !== subject.kind
+      || pending.subjectDigest !== digestDecisionSubject(subject)
+      || pending.installationDigest !== hostConfig.userPresence.installationDigest) {
+      throw rpcHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
+    }
+    const requiredRole = `${subject.kind}-approver`
+    const approvers = hostConfig.approval.manualIdentities?.filter((identity) =>
+      identity.roles.includes(requiredRole)) ?? []
+    if (approvers.length !== 1) throw rpcHostError('E2E_APPROVAL_DECISION_APPROVER_UNAVAILABLE')
+    const receipt = approvalAuthority.issueDecisionReceipt({
+      kind: subject.kind,
+      decisionId: message.input.decisionId,
+      decisionStatus: 'approved',
+      decisionSubject: subject,
+      approver: approvers[0]!,
+    })
+    approvalControls.delete(message.input.sessionId)
+    sendToParent({ type: 'decision-finalized', requestId, result: receipt })
   } catch (error) {
     sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
   }

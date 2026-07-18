@@ -167,7 +167,9 @@ describe('Spec §29 流程与 preflight 系统 E2E', () => {
       gatewayAudit: preflight.gatewayAudit, gatewayVerifier: preflight.gatewayVerifier })
 
     expect(preflight.result).toMatchObject({ status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_URL_MISMATCH' })
-    expect(preflight.grant.subject.actions).toEqual([{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation', maxUses: 1 }])
+    expect(preflight.grant.subject.actions).toEqual([{
+      actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation', maxUses: 1, requestIds: [],
+    }])
     expect(result.actual).toEqual([])
     expect(published.active.terminalVerdict).toBe('environment-blocked')
   }, 30_000)
@@ -264,7 +266,7 @@ async function executeDiscoveryPreflight(input: {
   const expectedUrl = (input.expectedIdentity.url ?? 'http://fixture.test/orders')
     .replace('http://fixture.test', fixtureOrigin)
   const currentSubject = {
-    schemaVersion: '1.0.0' as const,
+    schemaVersion: '1.1.0' as const,
     assetId: 'PRODUCT-PRD-FLOW', prdRevision: input.revision, scopeDigest: input.revision,
     environment: 'test' as const, baseOrigin: fixtureOrigin, actor: input.expectedIdentity.role,
     expectedPageIdentity: {
@@ -272,7 +274,8 @@ async function executeDiscoveryPreflight(input: {
       ariaSignals: [`main:${input.expectedIdentity.heading}`],
     },
     bootstrapIntentsDigest: digestText('bootstrap-intents/v1', canonicalizeJson(paths)),
-    actions: [{ actionId, operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId, operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
   }
   const grant = await input.authority.issueDiscoveryGrant({
     subject: currentSubject, approver: { subject: 'os-user:flow', roles: ['e2e-approver'] },
@@ -388,14 +391,15 @@ async function executeRead(input: {
     const page = await browser.newPage()
     const expectedUrl = input.expectedIdentity.url?.replace('http://fixture.test', fixtureOrigin)
     const discoverySubject = {
-      schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-FLOW', prdRevision: input.revision,
+      schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-FLOW', prdRevision: input.revision,
       scopeDigest: input.revision, environment: 'test' as const, baseOrigin: fixtureOrigin, actor: 'auditor',
       expectedPageIdentity: {
         url: expectedUrl ?? `${fixtureOrigin}/orders`, title: input.expectedIdentity.title,
         heading: input.expectedIdentity.heading, ariaSignals: [`main:${input.expectedIdentity.heading}`],
       },
       bootstrapIntentsDigest: digestText('bootstrap-intents/v1', canonicalizeJson(paths)),
-      actions: [{ actionId: preflightActionId, operation: 'local-navigation' as const, maxUses: 1 }],
+      requests: [],
+      actions: [{ actionId: preflightActionId, operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
     }
     const discoveryGrant = await input.authority.issueDiscoveryGrant({
       subject: discoverySubject, approver: { subject: 'os-user:flow', roles: ['e2e-approver'] },
@@ -405,23 +409,24 @@ async function executeRead(input: {
       authorization: { grant: discoveryGrant, currentSubject: discoverySubject, authority: input.authority },
       runtime: { sandboxHealthy: true, gatewayConnected: true }, gatewayAudit: () => gateway.getAuditSummary(),
       page: new PlaywrightPageAdapter(page), actionId: preflightActionId,
-      attemptId: `ATTEMPT-PREFLIGHT-${input.caseId}`,
+      attemptId: `ATTEMPT-PREFLIGHT-${input.generationId}-${input.caseId}`,
     })
     if (preflight.status !== 'ready' || !preflight.preflightDigest) {
       throw new Error(`Execution Grant 前的 Discovery preflight 未 ready：${preflight.reasonCode ?? preflight.status}`)
     }
     const grant = await input.authority.issueReadGrant({
       subject: {
-        schemaVersion: '2.0.0', assetId: 'PRODUCT-PRD-FLOW', prdRevision: input.revision,
+        schemaVersion: '2.1.0', assetId: 'PRODUCT-PRD-FLOW', prdRevision: input.revision,
         scopeDigest: input.revision, requirementModelDigest: input.revision, coveragePolicyDigest: input.revision,
         universeDigest: input.revision, caseDigest: input.revision, actionMapDigest: input.revision,
         policyDigest: input.revision, executionContractDigest: input.revision,
         runBundleProjectionDigest: input.revision, environment: 'test', baseOrigin: fixtureOrigin, actor: 'auditor',
         discoveryGrantId: discoveryGrant.grantId, preflightDigest: preflight.preflightDigest,
+        requests: [],
         actions: [
-          { actionId: caseActionId, operation: 'local-navigation', maxUses: 1 },
-          { actionId: caseActionId, operation: 'dom-read', maxUses: 1 },
-          { actionId: caseActionId, operation: 'screenshot', maxUses: 1 },
+          { actionId: caseActionId, operation: 'local-navigation', maxUses: 1, requestIds: [] },
+          { actionId: caseActionId, operation: 'dom-read', maxUses: 1, requestIds: [] },
+          { actionId: caseActionId, operation: 'screenshot', maxUses: 1, requestIds: [] },
         ],
       },
       approver: { subject: 'os-user:flow', roles: ['e2e-approver'] },
@@ -438,13 +443,15 @@ async function executeRead(input: {
         if (!reservation) throw new Error('Read reservation 丢失')
         recorder.recordCapabilityReservation({ reservation, consumed: true })
       },
+      markUnknown: (reservationId: string, observation: string) =>
+        input.authority.markUnknown(reservationId, observation),
     }
     const result = await runReadOnlyCase({
       caseId: input.caseId, actionId: caseActionId, url: `${fixtureOrigin}/orders`,
       expectedIdentity: { ...input.expectedIdentity, ...(expectedUrl ? { url: expectedUrl } : {}) },
       expectedText: '待审核',
       authorization: { grant, currentSubject: grant.subject, authority: auditedAuthority },
-      attemptId: `ATTEMPT-${input.caseId}`,
+      attemptId: `ATTEMPT-${input.generationId}-${input.caseId}`,
       runtime: { sandboxHealthy: true, gatewayConnected: true },
       gatewayAudit: () => gateway.getAuditSummary(), page: new PlaywrightPageAdapter(page),
     })
@@ -485,7 +492,7 @@ async function publishResult(input: {
     ? createGoldenAttemptProof({
       authority: input.authority, assetId: 'PRODUCT-PRD-FLOW', generationId: input.generationId,
       prdRevision: input.revision, runId: `RUN-${input.generationId}`, caseId: input.result.caseId,
-      attemptId: `ATTEMPT-${input.result.caseId}`, status: 'passed', effect: 'read',
+      attemptId: `ATTEMPT-${input.generationId}-${input.result.caseId}`, status: 'passed', effect: 'read',
       reservationId: input.result.reservationIds?.[0], outcomeDigest: input.result.outcomeDigest,
     })
     : undefined

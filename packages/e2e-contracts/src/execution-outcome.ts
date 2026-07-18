@@ -17,6 +17,7 @@ const HttpIntentSchema = z.object({
     z.object({ kind: z.literal('no-body') }).strict(),
     z.object({ kind: z.literal('json'), digest: DigestSchema }).strict(),
     z.object({ kind: z.literal('binary'), digest: DigestSchema }).strict(),
+    z.object({ kind: z.literal('template'), templateDigest: DigestSchema }).strict(),
   ]),
   targetFingerprint: DigestSchema,
   maxRequests: z.number().int().positive(),

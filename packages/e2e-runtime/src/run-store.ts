@@ -16,6 +16,17 @@ import { lstat, mkdir, realpath } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { runtimeLayout } from './runtime-layout.js'
 import { migrateRuntimeRunSnapshot } from './runtime-state-migration.js'
+import type { RuntimeReadExecutionRecord } from './runtime-read-result.js'
+import {
+  RuntimeOwnedResourceMarkerSchema,
+  parseRuntimeWriteAttemptRecord,
+  sealRuntimeWriteAttemptRecord,
+  type RuntimeOwnedResourceMarker,
+  type RuntimeWriteAttemptRecord,
+  type RuntimeWriteAttemptState,
+  type UnsealedRuntimeWriteAttemptRecord,
+} from './write-attempt.js'
+import type { RuntimeInjectionExecutionOutput, RuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
 
 const EMPTY_DIGEST = `sha256:${'0'.repeat(64)}`
 const LEASE_MILLISECONDS = 30_000
@@ -62,7 +73,8 @@ export interface RuntimeTrustedFactCapability {
 }
 
 export interface RuntimeRunSnapshot {
-  schemaVersion: '1.1.0'
+  /** 1.1–1.3 仅作为显式迁移输入兼容；Store 读取与写回始终规范化为 1.4。 */
+  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0'
   runId: string
   assetId: string
   projectIdentityDigest: string
@@ -71,6 +83,8 @@ export interface RuntimeRunSnapshot {
   runRevision?: number
   executionAttempt?: RuntimeExecutionAttempt
   preflightAttempt?: RuntimePreflightAttempt
+  finalizationAttempt?: RuntimeFinalizationAttempt
+  publication?: RuntimePublicationRecord
   workflow: WorkflowState
   pendingDecision?: PendingWorkflowDecision
   artifactDigests: Record<string, string>
@@ -78,6 +92,14 @@ export interface RuntimeRunSnapshot {
   frozenArtifacts: Record<string, ArtifactDocument>
   /** 仅 Runtime 内部可信执行链产生；外部 submit-candidate 永远不能写入。 */
   trustedExecutionFacts: Record<string, unknown>
+  /** 写动作的 durable 状态机；恢复只能 reconcile，绝不能据此重放动作。 */
+  writeAttempts?: Record<string, RuntimeWriteAttemptRecord>
+  /** real 与 injection 分域持久化；注入结果永远不能覆盖真实环境结果。 */
+  executionResults?: {
+    readEnvironment?: Record<string, RuntimeReadExecutionRecord>
+    realEnvironment: Record<string, RuntimeWriteExecutionOutput>
+    gatewayInjection: Record<string, RuntimeInjectionExecutionOutput>
+  }
   requestResponses: Record<string, { requestDigest: string; response: unknown }>
   createdAt: string
   updatedAt: string
@@ -97,6 +119,23 @@ export interface RuntimePreflightAttempt {
   revision: number
   startedAt: string
   preparation: unknown
+}
+
+export interface RuntimeFinalizationAttempt {
+  attemptId: string
+  requestId: string
+  requestDigest: string
+  revision: number
+  startedAt: string
+}
+
+export interface RuntimePublicationRecord {
+  generationId: string
+  generationDigest: string
+  terminalVerdict: string
+  activeReadbackDigest: string
+  quarantineDispositionDigest: string
+  committedAt: string
 }
 
 export interface RuntimeExecutionOwner {
@@ -376,6 +415,303 @@ export class RuntimeRunStore {
     })
   }
 
+  async getWriteAttempt(
+    projectIdentityDigest: string,
+    runId: string,
+    attemptId: string,
+  ): Promise<RuntimeWriteAttemptRecord | undefined> {
+    const run = await this.getRun(projectIdentityDigest, runId)
+    const record = run?.writeAttempts?.[attemptId]
+    return record === undefined ? undefined : structuredClone(record)
+  }
+
+  async prepareWriteAttempt(input: {
+    projectIdentityDigest: string
+    runId: string
+    requestId: string
+    requestDigest: string
+    attemptId: string
+    actionId: string
+    lease: { leaseId: string; fencingToken: number; targetFingerprintDigest: string }
+    executionFencingToken: number
+    ownerMarker: RuntimeOwnedResourceMarker
+    preparedAt: string
+    lock: RuntimeRunLock
+  }): Promise<RuntimeWriteAttemptRecord> {
+    return await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      requirePendingRequest(store, input.requestId, input.requestDigest)
+      const raw = store.runs[key]
+      if (raw === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+      const current = migrateRuntimeRunSnapshot(raw)
+      const marker = RuntimeOwnedResourceMarkerSchema.parse(input.ownerMarker)
+      if (marker.projectIdentityDigest !== input.projectIdentityDigest
+        || marker.runId !== input.runId
+        || marker.attemptId !== input.attemptId
+        || marker.runtimeInstallationDigest !== current.runtimeInstallationDigest) {
+        throw runtimeStoreError('E2E_RUNTIME_WRITE_OWNER_MARKER_MISMATCH', 'Write owner marker 与 Run 不一致')
+      }
+      const writeAttempts = current.writeAttempts ?? {}
+      const existing = writeAttempts[input.attemptId]
+      const record = sealRuntimeWriteAttemptRecord({
+        schemaVersion: '1.0.0', state: 'prepared',
+        attemptId: input.attemptId, requestId: input.requestId, requestDigest: input.requestDigest,
+        actionId: input.actionId, lease: structuredClone(input.lease),
+        executionFencingToken: input.executionFencingToken,
+        ownerMarker: marker, preparedAt: input.preparedAt, recordRevision: 1,
+      })
+      if (existing !== undefined) {
+        if (canonicalizeJson(existing) === canonicalizeJson(record)) return structuredClone(existing)
+        throw runtimeStoreError('E2E_RUNTIME_WRITE_ATTEMPT_ALREADY_EXISTS', 'Write attemptId 已绑定其他记录')
+      }
+      if (Object.keys(writeAttempts).length >= 1_024) throw runtimeStoreError(
+        'E2E_RUNTIME_WRITE_ATTEMPT_CAPACITY_EXCEEDED', 'WriteAttempt 数量超过上限',
+      )
+      const updated = migrateRuntimeRunSnapshot({
+        ...current, runRevision: (current.runRevision ?? 0) + 1,
+        writeAttempts: { ...writeAttempts, [input.attemptId]: record },
+        updatedAt: input.preparedAt,
+      })
+      store.runs[key] = updated
+      appendRunSnapshotJournal(store, key, 'write-attempt-prepared', input.requestId)
+      return structuredClone(record)
+    })
+  }
+
+  async observeWriteReservation(input: {
+    projectIdentityDigest: string
+    runId: string
+    attemptId: string
+    reservationId: string
+    observedAt: string
+    expectedRecordDigest?: string
+    lock: RuntimeRunLock
+  }): Promise<RuntimeWriteAttemptRecord> {
+    return await this.#transitionWriteAttempt({
+      ...input, expected: ['prepared'], next: (current) => sealRuntimeWriteAttemptRecord({
+        ...withoutRecordDigest(current), state: 'reservation-observed',
+        reservation: { reservationId: input.reservationId, observedAt: input.observedAt },
+        recordRevision: current.recordRevision + 1,
+      } as UnsealedRuntimeWriteAttemptRecord),
+      eventKind: 'write-reservation-observed', timestamp: input.observedAt,
+    })
+  }
+
+  async prepareWriteOutcome(input: {
+    projectIdentityDigest: string
+    runId: string
+    attemptId: string
+    outcomeDigest: string
+    receiptDigest: string
+    preparedAt: string
+    lock: RuntimeRunLock
+  }): Promise<RuntimeWriteAttemptRecord> {
+    return await this.#transitionWriteAttempt({
+      ...input, expected: ['reservation-observed'], next: (current) => {
+        if (current.state !== 'reservation-observed') throw writeTransitionError()
+        return sealRuntimeWriteAttemptRecord({
+          ...withoutRecordDigest(current), state: 'outcome-prepared',
+          outcome: {
+            outcomeDigest: input.outcomeDigest,
+            receiptDigest: input.receiptDigest,
+            preparedAt: input.preparedAt,
+          },
+          recordRevision: current.recordRevision + 1,
+        } as UnsealedRuntimeWriteAttemptRecord)
+      },
+      eventKind: 'write-outcome-prepared', timestamp: input.preparedAt,
+    })
+  }
+
+  async commitWriteOutcome(input: {
+    projectIdentityDigest: string
+    runId: string
+    attemptId: string
+    outcomeDigest: string
+    receiptDigest: string
+    committedAt: string
+    expectedRecordDigest?: string
+    lock: RuntimeRunLock
+  }): Promise<RuntimeWriteAttemptRecord> {
+    return await this.#transitionWriteAttempt({
+      ...input, expected: ['outcome-prepared'], next: (current) => {
+        if (current.state !== 'outcome-prepared'
+          || current.outcome.outcomeDigest !== input.outcomeDigest
+          || current.outcome.receiptDigest !== input.receiptDigest) throw runtimeStoreError(
+          'E2E_RUNTIME_WRITE_OUTCOME_RECEIPT_MISMATCH', 'Authority outcome receipt 与 intent 不一致',
+        )
+        return sealRuntimeWriteAttemptRecord({
+          ...withoutRecordDigest(current), state: 'outcome-committed',
+          outcome: { ...current.outcome, committedAt: input.committedAt },
+          recordRevision: current.recordRevision + 1,
+        } as UnsealedRuntimeWriteAttemptRecord)
+      },
+      eventKind: 'write-outcome-committed', timestamp: input.committedAt,
+    })
+  }
+
+  async markWriteEffectUnknown(input: {
+    projectIdentityDigest: string
+    runId: string
+    attemptId: string
+    reasonCode: string
+    observedAt: string
+    expectedRecordDigest?: string
+    lock: RuntimeRunLock
+  }): Promise<RuntimeWriteAttemptRecord> {
+    return await this.#transitionWriteAttempt({
+      ...input, expected: ['prepared', 'reservation-observed', 'outcome-prepared'],
+      next: (current) => sealRuntimeWriteAttemptRecord({
+        ...withoutRecordDigest(current), state: 'effect-unknown',
+        ...('reservation' in current ? { reservation: current.reservation } : {}),
+        ...('outcome' in current ? { outcome: current.outcome } : {}),
+        effectUnknown: { reasonCode: input.reasonCode, observedAt: input.observedAt },
+        recordRevision: current.recordRevision + 1,
+      } as UnsealedRuntimeWriteAttemptRecord),
+      eventKind: 'write-effect-unknown', timestamp: input.observedAt,
+    })
+  }
+
+  async recordRecoveryStep(input: {
+    projectIdentityDigest: string
+    runId: string
+    attemptId: string
+    step: string
+    status: string
+    summaryDigest: string
+    expectedRecordDigest?: string
+    expectedRunRevision?: number
+    lock: RuntimeRunLock
+  }): Promise<void> {
+    await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      const current = store.runs[key]
+      const attempt = current?.writeAttempts?.[input.attemptId]
+      if (current === undefined || attempt === undefined) throw runtimeStoreError(
+        'E2E_RUNTIME_WRITE_ATTEMPT_NOT_FOUND', 'WriteAttempt 不存在',
+      )
+      if ((input.expectedRecordDigest !== undefined && attempt.recordDigest !== input.expectedRecordDigest)
+        || (input.expectedRunRevision !== undefined
+          && (current.runRevision ?? 0) !== input.expectedRunRevision)) throw runtimeStoreError(
+        'E2E_RUNTIME_RECOVERY_CAS_FAILED', 'Recovery 观察后的 Run/WriteAttempt 已改变',
+      )
+      appendRunRecoveryJournal(store, key, {
+        kind: 'runtime-recovery-step', requestId: attempt.requestId,
+        attemptId: input.attemptId, step: input.step, status: input.status,
+        summaryDigest: input.summaryDigest,
+      })
+    })
+  }
+
+  async prepareWriteRecovery(input: {
+    projectIdentityDigest: string; runId: string; attemptId: string
+    markUnknownOperationId?: string; quarantineOperationId: string
+    expectedRecordDigest: string; preparedAt: string; lock: RuntimeRunLock
+  }): Promise<RuntimeWriteAttemptRecord> {
+    return await this.#transitionWriteAttempt({
+      ...input, expected: ['prepared', 'reservation-observed', 'outcome-prepared', 'effect-unknown'],
+      next: (current) => {
+        const recovery = {
+          schemaVersion: '1.0.0' as const,
+          ...(input.markUnknownOperationId === undefined ? {} : {
+            markUnknown: { operationId: input.markUnknownOperationId },
+          }),
+          quarantine: { operationId: input.quarantineOperationId },
+        }
+        if (current.recovery !== undefined) {
+          if (current.recovery.quarantine.operationId === input.quarantineOperationId
+            && current.recovery.markUnknown?.operationId === input.markUnknownOperationId) return current
+          throw runtimeStoreError('E2E_RUNTIME_RECOVERY_OPERATION_MISMATCH', 'Recovery operationId 绑定已改变')
+        }
+        return sealRuntimeWriteAttemptRecord({ ...withoutRecordDigest(current), recovery,
+          recordRevision: current.recordRevision + 1 } as UnsealedRuntimeWriteAttemptRecord)
+      },
+      eventKind: 'write-recovery-operations-prepared', timestamp: input.preparedAt,
+      allowExactNoop: true,
+    })
+  }
+
+  async recordWriteRecoveryReceipt(input: {
+    projectIdentityDigest: string; runId: string; attemptId: string
+    operation: 'markUnknown' | 'quarantine'; operationId: string; receiptDigest: string
+    expectedRecordDigest: string; recordedAt: string; lock: RuntimeRunLock
+  }): Promise<RuntimeWriteAttemptRecord> {
+    return await this.#transitionWriteAttempt({
+      ...input, expected: ['prepared', 'reservation-observed', 'outcome-prepared', 'effect-unknown'],
+      next: (current) => {
+        const operation = current.recovery?.[input.operation]
+        if (operation?.operationId !== input.operationId) throw runtimeStoreError(
+          'E2E_RUNTIME_RECOVERY_OPERATION_MISMATCH', 'Recovery receipt operationId 不匹配',
+        )
+        if (operation.receiptDigest !== undefined) {
+          if (operation.receiptDigest === input.receiptDigest) return current
+          throw runtimeStoreError('E2E_RUNTIME_RECOVERY_RECEIPT_MISMATCH', 'Recovery receipt 已绑定其他摘要')
+        }
+        return sealRuntimeWriteAttemptRecord({ ...withoutRecordDigest(current), recovery: {
+          ...current.recovery!, [input.operation]: { ...operation, receiptDigest: input.receiptDigest },
+        }, recordRevision: current.recordRevision + 1 } as UnsealedRuntimeWriteAttemptRecord)
+      },
+      eventKind: `write-recovery-${input.operation}-receipt`, timestamp: input.recordedAt,
+      allowExactNoop: true,
+    })
+  }
+
+  async blockWriteRecovery(input: {
+    projectIdentityDigest: string; runId: string; attemptId: string
+    expectedRecordDigest: string; expectedRunRevision: number
+    reasonCode: string; terminalState: 'safety-blocked' | 'migration-required'
+    blockedAt: string; lock: RuntimeRunLock
+  }): Promise<RuntimeRunSnapshot> {
+    return await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      const raw = store.runs[key]
+      if (raw === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+      const current = migrateRuntimeRunSnapshot(raw)
+      const attempt = current.writeAttempts?.[input.attemptId]
+      if (attempt === undefined) throw runtimeStoreError('E2E_RUNTIME_WRITE_ATTEMPT_NOT_FOUND', 'WriteAttempt 不存在')
+      if (attempt.recordDigest !== input.expectedRecordDigest
+        || (current.runRevision ?? 0) !== input.expectedRunRevision) throw runtimeStoreError(
+        'E2E_RUNTIME_RECOVERY_CAS_FAILED', 'Recovery blocked 观察后的 Run/WriteAttempt 已改变',
+      )
+      const replay = completedReplay(store, attempt.requestId, attempt.requestDigest)
+      if (replay.found) return structuredClone(current)
+      requirePendingRequest(store, attempt.requestId, attempt.requestDigest)
+      const terminalAttempt = attempt.state === 'outcome-committed' || attempt.state === 'effect-unknown'
+        ? attempt : sealRuntimeWriteAttemptRecord({ ...withoutRecordDigest(attempt), state: 'effect-unknown',
+          ...('reservation' in attempt ? { reservation: attempt.reservation } : {}),
+          ...('outcome' in attempt ? { outcome: attempt.outcome } : {}),
+          effectUnknown: { reasonCode: input.reasonCode, observedAt: input.blockedAt },
+          recordRevision: attempt.recordRevision + 1 } as UnsealedRuntimeWriteAttemptRecord)
+      const response = {
+        schemaVersion: '1.0.0', requestId: attempt.requestId,
+        runtime: { version: 'runtime-recovery/1', installationDigest: current.runtimeInstallationDigest },
+        ok: false, error: { code: input.reasonCode,
+          category: input.terminalState === 'migration-required' ? 'migration' : 'safety',
+          terminalState: input.terminalState, message: 'Runtime recovery 已持久阻断该写尝试',
+          retryable: false, resumeState: input.terminalState },
+      }
+      const { pendingDecision: _pendingDecision, ...withoutPendingDecision } = current
+      const blocked = migrateRuntimeRunSnapshot({ ...withoutPendingDecision,
+        runRevision: (current.runRevision ?? 0) + 1,
+        workflow: recoveryTerminalWorkflow(current.workflow, input.terminalState, input.reasonCode, input.blockedAt),
+        writeAttempts: { ...current.writeAttempts, [input.attemptId]: terminalAttempt },
+        requestResponses: { ...current.requestResponses,
+          [attempt.requestId]: { requestDigest: attempt.requestDigest, response } },
+        updatedAt: input.blockedAt,
+      })
+      store.runs[key] = blocked
+      const outcome = appendRunSnapshotJournal(store, key, 'runtime-recovery-blocked', attempt.requestId)
+      completeGlobalLedger(store.globalLedger, attempt.requestId, attempt.requestDigest, response, outcome)
+      return structuredClone(blocked)
+    })
+  }
+
   async recordPreflightPreparation(input: {
     projectIdentityDigest: string
     runId: string
@@ -418,6 +754,60 @@ export class RuntimeRunStore {
       })
       store.runs[key] = prepared
       appendRunSnapshotJournal(store, key, 'trusted-browser-preflight-prepared', input.requestId)
+      return structuredClone(prepared)
+    })
+  }
+
+  async recordFinalizationAttempt(input: {
+    projectIdentityDigest: string
+    runId: string
+    requestId: string
+    requestDigest: string
+    attemptId: string
+    startedAt: string
+    expectedRevision: number
+    expectedWorkflowDigest: string
+    finalizationMaterial?: unknown
+    toFinalizing(snapshot: RuntimeRunSnapshot): RuntimeRunSnapshot
+    lock: RuntimeRunLock
+  }): Promise<RuntimeRunSnapshot> {
+    return await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      requirePendingRequest(store, input.requestId, input.requestDigest)
+      const existing = store.runs[key]
+      if (existing === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+      const current = migrateRuntimeRunSnapshot(existing)
+      if (current.finalizationAttempt !== undefined) throw runtimeStoreError(
+        'E2E_RUNTIME_FINALIZATION_ALREADY_STARTED', 'Run 已有持久 finalization attempt',
+      )
+      if ((current.runRevision ?? 0) !== input.expectedRevision
+        || current.workflow.eventChainDigest !== input.expectedWorkflowDigest
+        || current.workflow.current !== 'diagnosing') throw runtimeStoreError(
+        'E2E_RUNTIME_FINALIZATION_FENCED', 'finalization attempt 已陈旧，拒绝持久化',
+      )
+      const revision = (current.runRevision ?? 0) + 1
+      const prepared = migrateRuntimeRunSnapshot({
+        ...input.toFinalizing(current),
+        ...(input.finalizationMaterial === undefined ? {} : {
+          trustedExecutionFacts: {
+            ...current.trustedExecutionFacts,
+            'finalization-material': structuredClone(input.finalizationMaterial),
+          },
+        }),
+        runRevision: revision,
+        finalizationAttempt: {
+          attemptId: input.attemptId,
+          requestId: input.requestId,
+          requestDigest: input.requestDigest,
+          revision,
+          startedAt: input.startedAt,
+        },
+        updatedAt: input.startedAt,
+      })
+      store.runs[key] = prepared
+      appendRunSnapshotJournal(store, key, 'trusted-finalization-prepared', input.requestId)
       return structuredClone(prepared)
     })
   }
@@ -564,6 +954,8 @@ export class RuntimeRunStore {
     requestId: string
     requestDigest: string
     factType: 'signed-discovery-grant' | 'signed-execution-grant' | 'browser-preflight'
+      | 'finalization-material' | 'finalization-execution-facts'
+      | 'quarantined-evidence'
     fact: unknown
     response: unknown
     update?(snapshot: RuntimeRunSnapshot): RuntimeRunSnapshot
@@ -716,6 +1108,58 @@ export class RuntimeRunStore {
     })
   }
 
+  async #transitionWriteAttempt(input: {
+    projectIdentityDigest: string
+    runId: string
+    attemptId: string
+    expected: RuntimeWriteAttemptState[]
+    next(current: RuntimeWriteAttemptRecord): RuntimeWriteAttemptRecord
+    eventKind: string
+    timestamp: string
+    expectedRecordDigest?: string
+    allowExactNoop?: boolean
+    lock: RuntimeRunLock
+  }): Promise<RuntimeWriteAttemptRecord> {
+    return await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      const raw = store.runs[key]
+      if (raw === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+      const currentRun = migrateRuntimeRunSnapshot(raw)
+      const writeAttempts = currentRun.writeAttempts ?? {}
+      const current = writeAttempts[input.attemptId]
+      if (current === undefined) throw runtimeStoreError(
+        'E2E_RUNTIME_WRITE_ATTEMPT_NOT_FOUND', 'WriteAttempt 不存在',
+      )
+      requirePendingRequest(store, current.requestId, current.requestDigest)
+      if (input.expectedRecordDigest !== undefined && current.recordDigest !== input.expectedRecordDigest) {
+        throw runtimeStoreError('E2E_RUNTIME_RECOVERY_CAS_FAILED', 'Recovery 观察后的 WriteAttempt 已改变')
+      }
+      if (!input.expected.includes(current.state)) throw writeTransitionError()
+      const next = parseRuntimeWriteAttemptRecord(input.next(structuredClone(current)))
+      if (input.allowExactNoop && canonicalizeJson(next) === canonicalizeJson(current)) return structuredClone(current)
+      if (next.attemptId !== current.attemptId
+        || next.requestId !== current.requestId
+        || next.requestDigest !== current.requestDigest
+        || next.actionId !== current.actionId
+        || canonicalizeJson(next.lease) !== canonicalizeJson(current.lease)
+        || next.executionFencingToken !== current.executionFencingToken
+        || canonicalizeJson(next.ownerMarker) !== canonicalizeJson(current.ownerMarker)
+        || next.recordRevision !== current.recordRevision + 1) throw runtimeStoreError(
+        'E2E_RUNTIME_WRITE_ATTEMPT_REBIND_FORBIDDEN', 'WriteAttempt transition 改变了不可变绑定',
+      )
+      const updated = migrateRuntimeRunSnapshot({
+        ...currentRun, runRevision: (currentRun.runRevision ?? 0) + 1,
+        writeAttempts: { ...writeAttempts, [input.attemptId]: next },
+        updatedAt: input.timestamp,
+      })
+      store.runs[key] = updated
+      appendRunSnapshotJournal(store, key, input.eventKind, current.requestId)
+      return structuredClone(next)
+    })
+  }
+
   #requireCurrentLease(snapshot: RunStoreSnapshot, key: string, lock: RuntimeRunLock): void {
     const claim = this.#lockClaims.get(lock)
     const persisted = snapshot.leases[key]
@@ -822,7 +1266,7 @@ export class RuntimeRunStore {
         const snapshot = parseStoreSnapshot(serialized)
         let changed = false
         for (const [key, raw] of Object.entries(snapshot.runs)) {
-          if (isPlainRecord(raw) && raw.schemaVersion === '1.1.0') continue
+          if (isPlainRecord(raw) && raw.schemaVersion === '1.4.0') continue
           const rows = snapshot.journals[key]
           if (!Array.isArray(rows) || rows.length === 0) {
             throw journalIntegrityError('legacy Run 缺少可验证 journal，拒绝迁移')
@@ -1372,6 +1816,51 @@ function appendRunSnapshotJournal(
     requestId,
   })
   return { runKey: key, snapshotDigest, outcomeKind: kind }
+}
+
+function appendRunRecoveryJournal(
+  snapshot: RunStoreSnapshot,
+  key: string,
+  event: Record<string, unknown>,
+): void {
+  const run = snapshot.runs[key]
+  if (run === undefined) throw journalIntegrityError('无法为缺失 Run 写 recovery journal')
+  appendJournalRow(snapshot.journals[key]!, {
+    ...event,
+    digest: runtimeRunSnapshotDigest(run),
+  })
+}
+
+function withoutRecordDigest(
+  record: RuntimeWriteAttemptRecord,
+): Omit<RuntimeWriteAttemptRecord, 'recordDigest'> {
+  const { recordDigest: _recordDigest, ...withoutDigest } = record
+  return withoutDigest
+}
+
+function recoveryTerminalWorkflow(
+  state: WorkflowState,
+  next: 'safety-blocked' | 'migration-required',
+  reason: string,
+  timestamp: string,
+): WorkflowState {
+  const eventCore = {
+    sequence: state.sequence + 1, previous: state.current, next, reason, timestamp,
+    engineVersion: 'runtime-recovery/1', commitVerified: false,
+    previousChainDigest: state.eventChainDigest,
+  }
+  const eventDigest = digestText('workflow-event/v1', canonicalizeJson(eventCore))
+  return { current: next, sequence: eventCore.sequence,
+    eventChainDigest: digestText('workflow-event-chain/v1', canonicalizeJson({
+      previous: state.eventChainDigest, event: eventDigest,
+    })) }
+}
+
+function writeTransitionError(): E2EError {
+  return runtimeStoreError(
+    'E2E_RUNTIME_WRITE_ATTEMPT_TRANSITION_INVALID',
+    'WriteAttempt 状态转换不在固定状态机内',
+  )
 }
 
 function appendJournalRow(journal: JournalRow[], event: Record<string, unknown>): void {

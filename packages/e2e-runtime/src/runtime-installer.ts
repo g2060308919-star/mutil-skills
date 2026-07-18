@@ -125,6 +125,7 @@ export class ProductionClosureInstaller {
       'install',
       '--ignore-scripts',
       '--omit=dev',
+      '--no-bin-links',
       '--no-audit',
       '--no-fund',
       '--save-exact',

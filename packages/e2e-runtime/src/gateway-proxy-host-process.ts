@@ -7,7 +7,10 @@ import {
   verifyGatewayIpcEnvelope,
   type GatewayIpcEnvelope,
 } from './gateway-proxy-ipc.js'
-import { websocketUnsupportedDisposition } from './gateway-websocket-transport.js'
+import {
+  sseUnsupportedDisposition,
+  websocketUnsupportedDisposition,
+} from './gateway-websocket-transport.js'
 import { GATEWAY_MAX_REQUEST_BODY_BYTES, projectedBodyMatches } from './gateway-request-body-policy.js'
 
 interface ChildConfig {
@@ -141,6 +144,19 @@ async function registerRules(server: Mockttp, rules: ProjectedGatewayRule[]): Pr
     } else if (rule.behavior.kind === 'connection-reset') await builder.thenResetConnection()
     else await builder.thenTimeout()
   }
+  await server.forAnyRequest().matching(async (request) => {
+    if (!accepting || !isSseRequest(request)) return false
+    inFlightRequests.add(request.id)
+    await callParent('default-deny', snapshotRequest(request))
+    return true
+  }).thenCallback(() => {
+    const disposition = sseUnsupportedDisposition()
+    return {
+      statusCode: disposition.status,
+      body: disposition.code,
+      headers: { 'content-type': 'text/plain', 'cache-control': 'no-store' },
+    }
+  })
   await server.forUnmatchedRequest().thenCallback(async (request) => {
     if (!accepting) return { statusCode: 503, body: 'E2E_GATEWAY_FROZEN' }
     inFlightRequests.add(request.id)
@@ -163,6 +179,7 @@ async function registerRules(server: Mockttp, rules: ProjectedGatewayRule[]): Pr
 async function ruleMatches(request: CompletedRequest, rule: ProjectedGatewayRule): Promise<boolean> {
   if (!accepting) return false
   inFlightRequests.add(request.id)
+  if (rule.channel !== 'websocket' && isSseRequest(request)) return false
   const proxyAuthorization = request.headers['proxy-authorization']
   const token = rule.channel === 'websocket' ? proxyAuthorization : request.headers['x-mutil-e2e-action-token']
   const actionId = rule.channel === 'websocket' ? rule.actionId : request.headers['x-mutil-e2e-action-id']
@@ -172,9 +189,11 @@ async function ruleMatches(request: CompletedRequest, rule: ProjectedGatewayRule
     || capabilityId !== rule.capabilityId || request.method.toUpperCase() !== rule.method
     || request.url !== rule.url || !projectedBodyMatches({
       headers: request.headers,
-      ...(rule.bodyBase64Url === undefined ? {} : { expectedBodyBase64Url: rule.bodyBase64Url }),
+      ...(rule.bodyBase64Url === undefined
+        ? { expectedBodyDigest: rule.bodyDigest }
+        : { expectedBodyBase64Url: rule.bodyBase64Url }),
       actualBody: request.body.buffer,
-    })) return false
+    }) || Object.entries(rule.requestHeaders).some(([name, value]) => singleHeader(request.headers[name]) !== value)) return false
   const available = remainingUses.get(rule.ruleId) ?? 0
   if (available < 1) return false
   // 在首个 await 之前同步 claim，避免并发 matcher 同时穿透 maxUses。
@@ -189,6 +208,13 @@ async function ruleMatches(request: CompletedRequest, rule: ProjectedGatewayRule
     contentType: singleHeader(request.headers['content-type']),
   })
   return isRecord(result) && result.allowed === true
+}
+
+function isSseRequest(request: Pick<CompletedRequest, 'headers' | 'method'>): boolean {
+  const accept = singleHeader(request.headers.accept)
+  return request.method.toUpperCase() === 'GET'
+    && accept !== undefined
+    && accept.split(',').some((part) => part.trim().split(';', 1)[0]?.toLowerCase() === 'text/event-stream')
 }
 
 async function waitForDrain(): Promise<void> {
@@ -304,13 +330,22 @@ function parseChildConfig(value: unknown): ChildConfig {
 
 function isProjectedRule(value: unknown): value is ProjectedGatewayRule {
   if (!isRecord(value)) return false
-  const optional = new Set(['bodyBase64Url', 'contentType'])
-  const required = ['actionId', 'actionToken', 'behavior', 'bodyDigest', 'capabilityId', 'channel', 'maxUses', 'method', 'ruleId', 'stepOrdinal', 'url']
+  const optional = new Set(['bodyBase64Url', 'contentType', 'requestId', 'signedBodyDigest'])
+  const required = ['actionId', 'actionToken', 'behavior', 'bodyDigest', 'capabilityId', 'channel', 'maxUses',
+    'method', 'redirectRequestIds', 'requestHeaders', 'ruleId', 'stepOrdinal', 'url']
   if (!required.every((key) => Object.hasOwn(value, key))
     || Object.keys(value).some((key) => !required.includes(key) && !optional.has(key))
     || !isSafeId(value.ruleId) || !isSafeId(value.actionId) || !isSafeId(value.capabilityId)
     || typeof value.actionToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.actionToken)
     || typeof value.bodyDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.bodyDigest)
+    || (value.requestId !== undefined && !isSafeId(value.requestId))
+    || (value.signedBodyDigest !== undefined
+      && (typeof value.signedBodyDigest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value.signedBodyDigest)))
+    || !isRecord(value.requestHeaders)
+    || !Object.entries(value.requestHeaders).every(([name, headerValue]) =>
+      /^[!#$%&'*+.^_`|~0-9a-z-]{1,128}$/.test(name) && typeof headerValue === 'string'
+      && Buffer.byteLength(headerValue, 'utf8') <= 8 * 1024 && !/[\0-\x08\x0a-\x1f\x7f]/.test(headerValue))
+    || !Array.isArray(value.redirectRequestIds) || value.redirectRequestIds.some((requestId) => !isSafeId(requestId))
     || typeof value.method !== 'string' || !/^[A-Z]{1,32}$/.test(value.method)
     || typeof value.url !== 'string' || value.url.length > 8 * 1024
     || !['http', 'beacon', 'websocket'].includes(value.channel)

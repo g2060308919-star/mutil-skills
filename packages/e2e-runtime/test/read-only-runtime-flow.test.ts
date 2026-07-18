@@ -130,6 +130,11 @@ function fakeReadDriver(): BrowserHostDriver {
     locator,
     getByText: () => ({ count: async () => 1 }),
     screenshot: async () => new Uint8Array([1, 2, 3]),
+    evaluate: async () => ({ format: 'dom-tree/1', roots: [{
+      tag: 'html', attributes: { role: 'auditor' }, children: [{
+        tag: 'main', attributes: {}, text: '待审核订单', assertionRelevant: true, children: [],
+      }],
+    }] }),
     context: () => context,
   }
   return {

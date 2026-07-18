@@ -22,6 +22,7 @@ describe('Runtime capability proof', () => {
 
     await expect(inspectRuntimeCapabilityProof({
       homeDir: roots.home, runtimeInstallationDigest: d('a'),
+      now: new Date('2026-07-17T01:00:00.000Z'),
     })).resolves.toEqual(proof)
   })
 
@@ -103,6 +104,7 @@ describe('Runtime capability proof', () => {
       } else {
         await expect(inspectRuntimeCapabilityProof({
           homeDir: roots.home, runtimeInstallationDigest: d('a'),
+          now: new Date('2026-07-17T01:00:00.000Z'),
         })).resolves.toMatchObject({ runtimeInstallationDigest: d('a') })
       }
     }

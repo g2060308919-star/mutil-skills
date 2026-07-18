@@ -6,7 +6,16 @@ import {
 } from '../src/index.js'
 
 const digest = (character: string) => `sha256:${character.repeat(64)}`
-const subjectDigest = 'sha256:3191dfcc27615dab80a790da4d5b0ad97135447a29813f6298548a31bf940953'
+const discoverySubject = {
+  schemaVersion: '1.1.0', assetId: 'ASSET-1', prdRevision: digest('3'), scopeDigest: digest('4'),
+  environment: 'test', baseOrigin: 'https://test.example.com', actor: 'operator',
+  expectedPageIdentity: {
+    url: 'https://test.example.com/orders', title: 'Orders', heading: 'Orders', ariaSignals: [],
+  },
+  bootstrapIntentsDigest: digest('5'), requests: [],
+  actions: [{ actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1, requestIds: [] }],
+}
+const subjectDigest = canonicalGrantApprovalSubjectDigest(discoverySubject)
 
 const grant = {
   grantId: 'GRANT-1', issuer: 'authority', keyId: 'key-1', proofScope: 'local-os-user',
@@ -16,15 +25,7 @@ const grant = {
     subjectDigest, installationDigest: digest('2'), origin: 'http://localhost:43210',
     issuedAt: '2026-07-17T00:00:00.000Z', expiresAt: '2026-07-17T00:05:00.000Z',
   },
-  subject: {
-    schemaVersion: '1.0.0', assetId: 'ASSET-1', prdRevision: digest('3'), scopeDigest: digest('4'),
-    environment: 'test', baseOrigin: 'https://test.example.com', actor: 'operator',
-    expectedPageIdentity: {
-      url: 'https://test.example.com/orders', title: 'Orders', heading: 'Orders', ariaSignals: [],
-    },
-    bootstrapIntentsDigest: digest('5'),
-    actions: [{ actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1 }],
-  },
+  subject: discoverySubject,
   subjectDigest, issuedAt: '2026-07-17T00:00:00.000Z',
   expiresAt: '2026-07-17T00:01:00.000Z',
   capabilities: [{

@@ -1,8 +1,20 @@
 import { z } from 'zod'
+import { RuntimeHttpHeaderSchema } from './runtime-http-action.js'
 import { AssetIdSchema, canonicalizeJson, digestCanonicalGrantApprovalSubject, digestText } from './common.js'
-import { ReadApprovalSubjectSchema, WriteApprovalSubjectV2Schema } from './approval-freshness.js'
+import {
+  LegacyReadApprovalSubjectV20Schema,
+  ReadApprovalSubjectSchema,
+  WriteApprovalSubjectV2Schema,
+} from './approval-freshness.js'
 import type { CanonicalApprovalContext } from './approval.js'
 import { digestInjectionResponseBody } from './approval.js'
+import {
+  ReadHttpRequestSetSchema,
+  refineReadHttpActionReferences,
+  validateReadHttpActionReferences,
+  validateReadHttpRequestSet,
+  type ReadHttpRequestReferences,
+} from './read-http-request.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -22,11 +34,11 @@ const QuerySchema = z.array(z.tuple([QueryPartSchema, QueryPartSchema])).max(1_0
 
 const ReadActionSchema = z.object({
   actionId: SafeIdSchema,
-  operation: z.enum(['dom-read', 'screenshot', 'local-navigation']),
+  operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request']),
   maxUses: z.literal(1),
 }).strict()
 
-export const DiscoveryApprovalSubjectSchema = z.object({
+export const LegacyDiscoveryApprovalSubjectV10Schema = z.object({
   schemaVersion: z.literal('1.0.0'),
   assetId: AssetIdSchema,
   prdRevision: DigestSchema,
@@ -44,10 +56,62 @@ export const DiscoveryApprovalSubjectSchema = z.object({
   actions: z.array(ReadActionSchema).min(1).max(100_000),
 }).strict().superRefine(uniqueActions)
 
+export const DiscoveryApprovalSubjectSchema = z.object({
+  schemaVersion: z.literal('1.1.0'),
+  assetId: AssetIdSchema,
+  prdRevision: DigestSchema,
+  scopeDigest: DigestSchema,
+  environment: EnvironmentSchema,
+  baseOrigin: CanonicalOriginSchema,
+  actor: SafeIdSchema,
+  expectedPageIdentity: z.object({
+    url: AbsoluteUrlSchema,
+    title: LimitedTextSchema,
+    heading: LimitedTextSchema,
+    ariaSignals: z.array(LimitedTextSchema).max(1_000),
+  }).strict(),
+  bootstrapIntentsDigest: DigestSchema,
+  requests: ReadHttpRequestSetSchema,
+  actions: z.array(ReadActionSchema.extend({
+    requestIds: z.array(SafeIdSchema).max(1_000),
+  }).strict()).min(1).max(100_000),
+}).strict().superRefine((subject, context) => {
+  refineReadHttpActionReferences(subject.actions, subject.requests, context)
+})
+
+export function migrateDiscoveryApprovalSubjectV10ToV11(
+  candidate: unknown,
+  requestCandidates: unknown,
+  references: ReadHttpRequestReferences,
+) {
+  const legacy = LegacyDiscoveryApprovalSubjectV10Schema.parse(candidate)
+  const requests = validateReadHttpRequestSet(requestCandidates)
+  const mapped = validateReadHttpActionReferences(
+    legacy.actions.map((action) => action.actionId), requests, references,
+  )
+  return DiscoveryApprovalSubjectSchema.parse({
+    ...legacy,
+    schemaVersion: '1.1.0',
+    requests,
+    actions: legacy.actions.map((action) => {
+      const requestIds = mapped[action.actionId]!
+      return {
+        ...action,
+        operation: requestIds.length > 0 ? 'http-request' as const : action.operation,
+        requestIds,
+      }
+    }),
+  })
+}
+
+export type DiscoveryApprovalSubjectV11 = z.infer<typeof DiscoveryApprovalSubjectSchema>
+export type LegacyDiscoveryApprovalSubjectV10 = z.infer<typeof LegacyDiscoveryApprovalSubjectV10Schema>
+
 const CanonicalPayloadSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('no-body') }).strict(),
   z.object({ kind: z.literal('json'), digest: DigestSchema }).strict(),
   z.object({ kind: z.literal('binary'), digest: DigestSchema }).strict(),
+  z.object({ kind: z.literal('template'), templateDigest: DigestSchema }).strict(),
 ])
 
 export const InjectionHttpIntentSchema = z.object({
@@ -57,6 +121,7 @@ export const InjectionHttpIntentSchema = z.object({
   exactPath: ExactPathSchema,
   query: QuerySchema,
   payload: CanonicalPayloadSchema,
+  headers: z.array(RuntimeHttpHeaderSchema).max(128).optional(),
   targetFingerprint: z.union([DigestSchema, z.literal('not-applicable')]),
   maxRequests: z.number().int().positive().max(1_000),
   expectedOrder: z.number().int().nonnegative().max(100_000),
@@ -174,7 +239,13 @@ export function canonicalApprovalContextDigest(context: CanonicalApprovalContext
   )
 }
 
-export type ApprovalGrantSubject = z.infer<typeof ApprovalGrantSubjectSchema>
+export type CanonicalApprovalGrantSubject = z.infer<typeof ApprovalGrantSubjectSchema>
+/** 当前签发与执行协议只接受 canonical subject。 */
+export type ApprovalGrantSubject = CanonicalApprovalGrantSubject
+/** 仅用于读取历史持久状态；进入 canonical digest、签发或执行前必须显式迁移。 */
+export type ApprovalGrantSubjectMigrationInput = CanonicalApprovalGrantSubject
+  | z.infer<typeof LegacyDiscoveryApprovalSubjectV10Schema>
+  | z.infer<typeof LegacyReadApprovalSubjectV20Schema>
 
 export function canonicalGrantApprovalType(subject: unknown): 'discovery' | 'execution' {
   const parsed = ApprovalGrantSubjectSchema.parse(subject)
@@ -182,7 +253,7 @@ export function canonicalGrantApprovalType(subject: unknown): 'discovery' | 'exe
 }
 
 export function canonicalGrantApprovalSubjectDigest(subject: unknown): string {
-  const parsed = ApprovalGrantSubjectSchema.parse(subject) as ApprovalGrantSubject
+  const parsed = ApprovalGrantSubjectSchema.parse(subject) as CanonicalApprovalGrantSubject
   const approvalType = DiscoveryApprovalSubjectSchema.safeParse(parsed).success ? 'discovery' : 'execution'
   return digestCanonicalGrantApprovalSubject(approvalType, parsed)
 }

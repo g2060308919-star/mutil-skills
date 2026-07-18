@@ -322,16 +322,17 @@ function readAuthorizationInput(actionId = 'ACTION-READ-1'): {
 } {
   const digest = digestText('test/v1', 'read-authorization')
   const currentSubject: ReadApprovalSubject = {
-    schemaVersion: '2.0.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
+    schemaVersion: '2.1.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
     requirementModelDigest: digest, coveragePolicyDigest: digest, universeDigest: digest,
     caseDigest: digest, actionMapDigest: digest, policyDigest: digest,
     executionContractDigest: digest, runBundleProjectionDigest: digest,
     environment: 'test', baseOrigin: 'https://test.example.com', actor: 'auditor',
     discoveryGrantId: 'GRANT-DISCOVERY-READY', preflightDigest: digest,
+    requests: [],
     actions: [
-      { actionId, operation: 'local-navigation', maxUses: 1 },
-      { actionId, operation: 'dom-read', maxUses: 1 },
-      { actionId, operation: 'screenshot', maxUses: 1 },
+      { actionId, operation: 'local-navigation', maxUses: 1, requestIds: [] },
+      { actionId, operation: 'dom-read', maxUses: 1, requestIds: [] },
+      { actionId, operation: 'screenshot', maxUses: 1, requestIds: [] },
     ],
   }
   const grant: SignedReadGrant = {
@@ -343,10 +344,13 @@ function readAuthorizationInput(actionId = 'ACTION-READ-1'): {
       installationDigest: digest, origin: 'http://127.0.0.1:43210',
       issuedAt: '2026-07-12T00:00:00.000Z', expiresAt: '2026-07-12T01:00:00.000Z' },
     issuedAt: '2026-07-12T00:00:00.000Z', expiresAt: '2026-07-12T01:00:00.000Z',
-    capabilities: currentSubject.actions.map((action, index) => ({
-      capabilityId: `CAP-READ-${index + 1}`, nonce: `${index}`.repeat(64), transport: 'browser-local',
-      effect: 'read', ...action,
-    })),
+    capabilities: currentSubject.actions.map((action, index) => {
+      if (action.operation === 'http-request') throw new Error('测试夹具只构造 browser-local capability')
+      return {
+        capabilityId: `CAP-READ-${index + 1}`, nonce: `${index}`.repeat(64), transport: 'browser-local' as const,
+        effect: 'read' as const, actionId: action.actionId, operation: action.operation, maxUses: action.maxUses,
+      }
+    }),
     revocationSequence: 0, signature: 'signature',
   }
   return {
@@ -376,14 +380,15 @@ function discoveryAuthorization(): {
 } {
   const digest = `sha256:${'a'.repeat(64)}`
   const currentSubject: DiscoveryApprovalSubject = {
-    schemaVersion: '1.0.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
+    schemaVersion: '1.1.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
     environment: 'test', baseOrigin: 'https://test.example.com', actor: 'auditor',
     expectedPageIdentity: {
       url: 'https://test.example.com/orders', title: '订单', heading: '订单列表',
       ariaSignals: ['main:订单列表'],
     },
     bootstrapIntentsDigest: digest,
-    actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation', maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation', maxUses: 1, requestIds: [] }],
   }
   const grant: SignedDiscoveryGrant = {
     grantId: 'GRANT-DISCOVERY-1', issuer: 'test-authority', keyId: 'test-key', proofScope: 'local-os-user',

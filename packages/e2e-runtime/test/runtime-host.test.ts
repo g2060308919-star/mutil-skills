@@ -3,6 +3,7 @@ import {
   RuntimeResponseEnvelopeSchema,
   ReadApprovalSubjectSchema,
   SignedGrantSchema,
+  canonicalGrantApprovalSubjectDigest,
   canonicalizeJson,
   computeRegressionSourceSetDigest,
   digestArtifactContent,
@@ -17,16 +18,25 @@ import {
 import { LocalApprovalAuthority } from '@mutil-skills/e2e-authority'
 import { cp, mkdir, rename, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { createRuntimeTestRoots } from './fixtures.js'
 import type { RuntimeInstallation } from '../src/runtime-discovery.js'
 import { E2ERuntimeHost } from '../src/runtime-host.js'
 import { RuntimeRunStore } from '../src/run-store.js'
 import { SecureProjectFileReader } from '../src/secure-project-files.js'
-import { authorizeRuntimeReadExecutor } from '../src/trusted-action-runner.js'
+import {
+  authorizeRuntimeInjectionExecutor,
+  authorizeRuntimeReadExecutor,
+  authorizeRuntimeWriteExecutor,
+} from '../src/trusted-action-runner.js'
 import { authorizeRuntimePreflight } from '../src/runtime-preflight.js'
+import { authorizeRuntimeWriteProduction } from '../src/runtime-write-production.js'
 import type { RuntimeAuthorityHost } from '../src/authority-host.js'
+import type { ProjectPublisher } from '../src/project-publisher.js'
 import { projectionFixture } from './trusted-action-runner.test.js'
+import { injectionOutput, realWriteOutput } from './runtime-write-fixtures.js'
+import { authorizeRuntimeGenerationFinalizer } from '../src/runtime-generation-finalizer.js'
+import { authorizeRuntimeEvidenceQuarantine } from '../src/runtime-evidence-quarantine.js'
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`
 
@@ -40,6 +50,131 @@ const installation: RuntimeInstallation = {
 }
 
 describe('E2ERuntimeHost', () => {
+  test('finalize-run 持久化 attempt 后发布同代 generation，完成 active 复读并幂等重放', async () => {
+    const finalize = vi.fn(async (input: { snapshot: { runId: string }; recovery: boolean }) => ({
+      generationId: input.snapshot.runId,
+      generationDigest: digest('1'),
+      terminalVerdict: 'accepted' as const,
+      activeReadbackDigest: digest('2'),
+      quarantineDispositionDigest: digest('3'),
+    }))
+    const fixture = await hostFixture({ finalizeGeneration: finalize })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-FINALIZE-CREATE', fixture.roots.project),
+    ))
+    await seedDiagnosingRun(fixture, created, 'REQUEST-SEED-DIAGNOSING')
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'REQUEST-FINALIZE-1',
+      client: { name: 'e2e-skill', version: '0.1.0' }, command: 'finalize-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })
+
+    const first = await handleRequest(fixture.host, request)
+    const replay = await handleRequest(fixture.host, request)
+
+    expect(first).toEqual(replay)
+    expect(successResult(first)).toMatchObject({
+      runId: created.runId,
+      generationId: created.runId,
+      generationDigest: digest('1'),
+      terminalVerdict: 'accepted',
+    })
+    expect(finalize).toHaveBeenCalledOnce()
+    expect(finalize.mock.calls[0]?.[0]).toMatchObject({
+      recovery: false,
+      snapshot: { workflow: { current: 'finalizing' } },
+    })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(persisted).toMatchObject({
+      workflow: { current: 'accepted' },
+      publication: {
+        generationId: created.runId,
+        generationDigest: digest('1'),
+        activeReadbackDigest: digest('2'),
+        quarantineDispositionDigest: digest('3'),
+      },
+    })
+    expect(persisted).not.toHaveProperty('finalizationAttempt')
+    await fixture.store.close()
+  })
+
+  test('finalize-run 崩溃后只以相同 request/attempt 显式恢复，不重复推测发布', async () => {
+    let calls = 0
+    const finalize = vi.fn(async (input: {
+      snapshot: { runId: string }; recovery: boolean; attemptId: string
+    }) => {
+      calls += 1
+      if (calls === 1) throw new Error('crash after publication boundary')
+      return {
+        generationId: input.snapshot.runId,
+        generationDigest: digest('4'), terminalVerdict: 'rejected' as const,
+        activeReadbackDigest: digest('5'), quarantineDispositionDigest: digest('6'),
+      }
+    })
+    const fixture = await hostFixture({ finalizeGeneration: finalize })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-FINALIZE-RECOVERY-CREATE', fixture.roots.project),
+    ))
+    await seedDiagnosingRun(fixture, created, 'REQUEST-SEED-FINALIZE-RECOVERY')
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'REQUEST-FINALIZE-RECOVERY',
+      client: { name: 'e2e-skill', version: '0.1.0' }, command: 'finalize-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })
+
+    expect(await handleRequest(fixture.host, request)).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_FINALIZATION_RECOVERY_REQUIRED' },
+    })
+    const recovered = successResult(await handleRequest(fixture.host, request))
+    expect(recovered).toMatchObject({ terminalVerdict: 'rejected', generationDigest: digest('4') })
+    expect(finalize.mock.calls.map((call) => call[0].recovery)).toEqual([false, true])
+    expect(finalize.mock.calls[1]?.[0].attemptId).toBe(finalize.mock.calls[0]?.[0].attemptId)
+    await fixture.store.close()
+  })
+
+  test('render-report 只渲染绑定当前 run 的 active generation，并进入请求重放账本', async () => {
+    const renderActiveReport = vi.fn(async () => ({
+      active: {
+        generationId: 'RUN-REQUEST-REPORT-CREATE',
+        generationDigest: digest('7'),
+        terminalVerdict: 'accepted' as const,
+      },
+      rendered: { json: '{}\n', markdown: '# report\n', html: '<h1>report</h1>\n' },
+    }))
+    const fixture = await hostFixture({
+      projectPublisherFactory: () => ({ renderActiveReport }),
+    })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-REPORT-CREATE', fixture.roots.project),
+    ))
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'REQUEST-REPORT-1',
+      client: { name: 'e2e-skill', version: '0.1.0' }, command: 'render-report',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })
+
+    const first = await handleRequest(fixture.host, request)
+    const replay = await handleRequest(fixture.host, request)
+
+    expect(first).toEqual(replay)
+    expect(successResult(first)).toEqual({
+      runId: created.runId,
+      assetId: 'ASSET-1',
+      generationId: created.runId,
+      generationDigest: digest('7'),
+      terminalVerdict: 'accepted',
+      report: { json: '{}\n', markdown: '# report\n', html: '<h1>report</h1>\n' },
+    })
+    expect(renderActiveReport).toHaveBeenCalledOnce()
+    expect(renderActiveReport).toHaveBeenCalledWith({
+      assetId: 'ASSET-1', expectedGenerationId: created.runId,
+      expectedProjectIdentityDigest: created.projectIdentityDigest,
+    })
+    await fixture.store.close()
+  })
+
   test('creates a persistent run and reports status only under the same physical project identity', async () => {
     const fixture = await hostFixture()
     const created = await handleRequest(fixture.host, createRunRequest('REQUEST-CREATE-1', fixture.roots.project))
@@ -171,6 +306,40 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('同阶段可补充完整语义资产，但已冻结类型不能被不同候选覆盖', async () => {
+    const fixture = await hostFixture()
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-SUPPLEMENTAL', fixture.roots.project),
+    ))
+    const binding = {
+      assetId: created.assetId as string,
+      generationId: created.generationId as string,
+      prdRevision: created.prdRevision as string,
+    }
+    const policy = projectPolicyCandidate(binding, 'RUNTIME-POLICY-1')
+    const accepted = successResult(await handleRequest(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-SUPPLEMENTAL-POLICY', projectRoot: fixture.roots.project,
+      runId: created.runId as string, expectedState: 'created',
+      artifactType: 'project-policy', candidate: policy,
+    })))
+    expect(accepted).toMatchObject({
+      workflow: { current: 'created', sequence: 0 },
+      acceptedArtifact: { artifactType: 'project-policy', contentDigest: policy.contentDigest },
+    })
+
+    const replacement = projectPolicyCandidate(binding, 'RUNTIME-POLICY-2')
+    const rejected = await handleRequest(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-REPLACE-POLICY', projectRoot: fixture.roots.project,
+      runId: created.runId as string, expectedState: 'created',
+      artifactType: 'project-policy', candidate: replacement,
+    }))
+    expect(rejected).toMatchObject({
+      ok: false,
+      error: { code: 'E2E_RUNTIME_CANDIDATE_ALREADY_FROZEN', terminalState: 'artifact-blocked' },
+    })
+    await fixture.store.close()
+  })
+
   test('通过公共 submit-candidate 冻结 binding 资产，并仅在两类资产齐备后申请执行审批', async () => {
     const fixture = await hostFixture()
     const created = successResult(await handleRequest(fixture.host,
@@ -243,12 +412,15 @@ describe('E2ERuntimeHost', () => {
 
   test('从 create-run 走公开 Host 全链，以正式 Authority Grant 执行只读 Case', async () => {
     const now = new Date('2026-07-17T00:00:00.000Z')
-    const approver = { subject: 'os-user:runtime-host-test', roles: ['e2e-approver'] }
+    const approver = { subject: 'os-user:runtime-host-test', roles: [
+      'e2e-approver', 'scope-approver', 'lineage-approver',
+    ] }
     let runId = ''
     let formalPreflightDigest: string | undefined
     const authority = LocalApprovalAuthority.create({
       issuer: 'runtime-host-test', keyId: 'runtime-host-key', now: () => now,
       approvalIdentities: [approver],
+      manualIdentities: [approver],
       authenticateApproverSession: (_sessionId, expected) => ({
         subject: approver.subject, runId, approvalType: expected.approvalType,
         subjectDigest: expected.subjectDigest, installationDigest: installation.installationDigest,
@@ -260,6 +432,15 @@ describe('E2ERuntimeHost', () => {
       async requestApproval(input: Parameters<RuntimeAuthorityHost['requestApproval']>[0]) {
         const common = {
           sessionId: `SESSION-${input.approvalType}`, url: 'http://127.0.0.1/approval', async wait() {},
+          async finalizeDecision(decision: { decisionId: string; decisionSubject: any }) {
+            return authority.issueDecisionReceipt({
+              kind: decision.decisionSubject.kind,
+              decisionId: decision.decisionId,
+              decisionStatus: 'approved',
+              decisionSubject: decision.decisionSubject,
+              approver,
+            })
+          },
         }
         if (input.approvalType === 'scope') return common
         return {
@@ -444,6 +625,11 @@ describe('E2ERuntimeHost', () => {
       projectRoot: fixture.roots.project, payload: { runId },
     }))
     expect(executed).toMatchObject({ status: 'passed', workflow: { current: 'diagnosing' } })
+    const persisted = await fixture.store.getRun(created.projectIdentityDigest as string, runId)
+    expect(persisted?.executionResults?.readEnvironment?.['ACTION-1']).toMatchObject({
+      caseId: 'CASE-1', actionId: 'ACTION-1', status: 'passed',
+      gatewayAuditDigest: digest('d'),
+    })
     await fixture.store.close()
     authority.close()
   })
@@ -512,7 +698,19 @@ describe('E2ERuntimeHost', () => {
   test('execute-run 先持久化并释放 Run 锁，再以 fenced attempt 执行并落入 diagnosing', async () => {
     let lockWasReleased = false
     let activeResume: RuntimeResponseEnvelope | undefined
+    const quarantineEvidence = vi.fn(async (input: {
+      runId: string; attemptId: string; evidence: { screenshot: Uint8Array; dom: Uint8Array }
+    }) => ({
+      schemaVersion: '1.0.0' as const, runId: input.runId, attemptId: input.attemptId,
+      records: [
+        { evidenceType: 'screenshot' as const, quarantinePath: `raw/${input.attemptId}/screenshot.bin`,
+          plaintextDigest: digestBytes('quarantine-plaintext/v1', input.evidence.screenshot), byteLength: 2 },
+        { evidenceType: 'dom' as const, quarantinePath: `raw/${input.attemptId}/dom.bin`,
+          plaintextDigest: digestBytes('quarantine-plaintext/v1', input.evidence.dom), byteLength: 2 },
+      ],
+    }))
     const fixture = await hostFixture({
+      quarantineEvidence,
       executeReadOnlyRun: async ({ snapshot }) => {
         const concurrent = await fixture.store.acquireRunLock(snapshot.projectIdentityDigest, snapshot.runId)
         lockWasReleased = true
@@ -598,9 +796,76 @@ describe('E2ERuntimeHost', () => {
       created.projectIdentityDigest as string, created.runId as string,
     )
     expect(persisted).toMatchObject({ workflow: { current: 'diagnosing' } })
+    expect(quarantineEvidence).toHaveBeenCalledOnce()
+    expect(persisted?.trustedExecutionFacts['quarantined-evidence']).toMatchObject({
+      runId: created.runId, records: [{ evidenceType: 'screenshot' }, { evidenceType: 'dom' }],
+    })
     expect(persisted?.executionAttempt).toBeUndefined()
     await fixture.store.close()
   })
+
+  test.each(['write', 'injection'] as const)(
+    'execute-run 通过 Host 调用可信 %s executor，并在同一 fenced attempt 内持久化分域结果',
+    async (mode) => {
+      const fixture = await hostFixture(mode === 'write' ? {
+        executeWriteRun: async ({ snapshot, attemptId, actionId }) => {
+          expect(snapshot?.workflow.current).toBe('running-real')
+          expect(attemptId).toMatch(/^ATTEMPT-/)
+          return realWriteOutput({ actionId }) as never
+        },
+      } : {
+        executeInjectionRun: async ({ snapshot, actionId }) => {
+          expect(snapshot?.workflow.current).toBe('running-real')
+          return injectionOutput({ actionId }) as never
+        },
+      })
+      const created = successResult(await handleRequest(fixture.host,
+        createRunRequest(`REQUEST-CREATE-${mode}`, fixture.roots.project)))
+      const projected = projectionFixture()
+      const frozenArtifacts = structuredClone(projected.frozenArtifacts)
+      const action = ((frozenArtifacts['browser-action-map'].content as Record<string, unknown>)
+        .actions as Array<Record<string, unknown>>)[0]!
+      if (mode === 'write') action.effect = 'reversible-write'
+      const facts = executionFactsFor(projected, {
+        runId: created.runId as string, runtimeInstallationDigest: installation.installationDigest,
+      })
+      facts['signed-execution-grant'] = executionGrantForMode(mode, created.runId as string)
+      await fixture.store.beginRequest(`SEED-${mode}`, digest('7'))
+      const lock = await fixture.store.acquireRunLock(created.projectIdentityDigest as string, created.runId as string)
+      await fixture.store.updateRunOutcome(created.projectIdentityDigest as string, created.runId as string,
+        `SEED-${mode}`, digest('7'), (snapshot) => ({
+          snapshot: { ...snapshot, frozenArtifacts,
+            artifactDigests: {
+              ...snapshot.artifactDigests,
+              ...Object.fromEntries(Object.entries(frozenArtifacts)
+                .map(([key, artifact]) => [key, artifact.contentDigest])),
+            },
+            trustedExecutionFacts: facts,
+            ...(mode !== 'injection' ? {} : {
+              executionResults: {
+                readEnvironment: {},
+                realEnvironment: { 'ACTION-1': realWriteOutput({ actionId: 'ACTION-1' }) },
+                gatewayInjection: {},
+              },
+            }),
+            workflow: { current: 'compiled', sequence: 9, eventChainDigest: digest('8') } },
+          response: { seeded: true },
+        }), `seed-${mode}`, lock)
+      await lock.close()
+
+      const response = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+        ...requestHeader(`REQUEST-EXECUTE-${mode}`), command: 'execute-run', projectRoot: fixture.roots.project,
+        payload: { runId: created.runId },
+      })))
+      expect(response).toMatchObject({ status: 'passed', loadedGeneratedSourceFiles: [],
+        workflow: { current: 'diagnosing' } })
+      expect((response.result as Record<string, unknown>).actionId).toBe('ACTION-1')
+      const persisted = await fixture.store.getRun(created.projectIdentityDigest as string, created.runId as string)
+      expect(persisted).toMatchObject({ workflow: { current: 'diagnosing' } })
+      expect(persisted?.executionAttempt).toBeUndefined()
+      await fixture.store.close()
+    },
+  )
 
   test('run-preflight 只接受 branded 内部执行器并持久化完整 provenance fact', async () => {
     const fixture = await hostFixture({ preflight: async ({ snapshot }) => ({
@@ -958,6 +1223,29 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('resume-run 把 recover-write-attempt 接到生产 Host recovery coordinator，并闭合 resume request', async () => {
+    const recover = vi.fn(async () => ({ status: 'blocked' as const,
+      reasonCode: 'E2E_RUNTIME_WRITE_EFFECT_UNCERTAIN', browserCalls: 0 as const }))
+    const fixture = await hostFixture({ writeRecovery: { recover } })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-WRITE-RECOVERY', fixture.roots.project)))
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-RESUME-WRITE'), command: 'resume-run', projectRoot: fixture.roots.project,
+      payload: { runId: created.runId,
+        decision: { kind: 'recover-write-attempt', expectedAttemptId: 'ATTEMPT-WRITE-1' } },
+    })
+    await expect(handleRequest(fixture.host, request)).resolves.toMatchObject({ ok: true, result: {
+      recoveredAttemptId: 'ATTEMPT-WRITE-1', status: 'blocked', browserCalls: 0,
+    } })
+    expect(recover).toHaveBeenCalledWith({ projectIdentityDigest: created.projectIdentityDigest,
+      runId: created.runId, attemptId: 'ATTEMPT-WRITE-1' })
+    await expect(handleRequest(fixture.host, request)).resolves.toMatchObject({ ok: true, result: {
+      recoveredAttemptId: 'ATTEMPT-WRITE-1', status: 'blocked',
+    } })
+    expect(recover).toHaveBeenCalledTimes(1)
+    await fixture.store.close()
+  })
+
   test('globally reserves invalid-project errors before identity parsing', async () => {
     const fixture = await hostFixture()
     const invalid = createRunRequest('REQUEST-GLOBAL-1', join(fixture.roots.root, 'missing-project'))
@@ -1063,8 +1351,14 @@ async function hostFixture(options: {
   roots?: Awaited<ReturnType<typeof createRuntimeTestRoots>>
   reader?: SecureProjectFileReader
   executeReadOnlyRun?: Parameters<typeof authorizeRuntimeReadExecutor>[0]
+  executeWriteRun?: Parameters<typeof authorizeRuntimeWriteExecutor>[0]
+  executeInjectionRun?: Parameters<typeof authorizeRuntimeInjectionExecutor>[0]
   preflight?: Parameters<typeof authorizeRuntimePreflight>[0]
   authorityHostFactory?: () => Promise<Pick<RuntimeAuthorityHost, 'requestApproval'>>
+  writeRecovery?: Parameters<typeof authorizeRuntimeWriteProduction>[0]['recovery']
+  projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
+  finalizeGeneration?: Parameters<typeof authorizeRuntimeGenerationFinalizer>[0]
+  quarantineEvidence?: Parameters<typeof authorizeRuntimeEvidenceQuarantine>[0]
 } = {}) {
   const roots = options.roots ?? await createRuntimeTestRoots()
   await mkdir(join(roots.project, '.biztest'), { recursive: true })
@@ -1092,11 +1386,32 @@ async function hostFixture(options: {
     ...(options.executeReadOnlyRun === undefined ? {} : {
       readExecutor: authorizeRuntimeReadExecutor(options.executeReadOnlyRun),
     }),
+    ...(options.executeWriteRun === undefined ? {} : {
+      writeExecutor: authorizeRuntimeWriteExecutor(options.executeWriteRun),
+    }),
+    ...(options.executeInjectionRun === undefined ? {} : {
+      injectionExecutor: authorizeRuntimeInjectionExecutor(options.executeInjectionRun),
+    }),
     ...(options.preflight === undefined ? {} : {
       preflightExecutor: authorizeRuntimePreflight(options.preflight),
     }),
     ...(options.authorityHostFactory === undefined ? {} : {
       authorityHostFactory: options.authorityHostFactory,
+    }),
+    ...(options.writeRecovery === undefined ? {} : {
+      writeProduction: authorizeRuntimeWriteProduction({
+        recovery: options.writeRecovery,
+        ownedResources: { register: vi.fn() },
+      }),
+    }),
+    ...(options.projectPublisherFactory === undefined ? {} : {
+      projectPublisherFactory: options.projectPublisherFactory,
+    }),
+    ...(options.finalizeGeneration === undefined ? {} : {
+      generationFinalizer: authorizeRuntimeGenerationFinalizer(options.finalizeGeneration),
+    }),
+    ...(options.quarantineEvidence === undefined ? {} : {
+      evidenceQuarantine: authorizeRuntimeEvidenceQuarantine(options.quarantineEvidence),
     }),
   })
   return { roots, store, host }
@@ -1122,6 +1437,66 @@ function executionFactsFor(
     'signed-execution-grant': execution,
     'browser-preflight': preflight,
   }
+}
+
+function executionGrantForMode(mode: 'write' | 'injection', runId: string) {
+  const issuedAt = '2026-07-17T00:00:00.000Z'
+  const expiresAt = '2026-07-17T01:00:00.000Z'
+  const common = {
+    issuer: 'authority', keyId: 'key', proofScope: 'local-os-user' as const,
+    approver: { subject: 'os-user:test', roles: ['approver'] }, issuedAt, expiresAt,
+    revocationSequence: 0, signature: 'A'.repeat(86),
+  }
+  if (mode === 'write') {
+    const request = {
+      intentId: 'INTENT-WRITE-1', method: 'POST', canonicalOrigin: 'https://test.example.com',
+      exactPath: '/api/orders/1/approve', query: [] as Array<[string, string]>,
+      payload: { kind: 'no-body' as const }, targetFingerprint: digest('3'),
+      maxRequests: 1, expectedOrder: 1,
+    }
+    const subject = {
+      schemaVersion: '2.0.0' as const, assetId: 'ASSET-1', prdRevision: digest('1'),
+      executionDigest: digest('2'), scopeDigest: digest('3'), requirementModelDigest: digest('4'),
+      coveragePolicyDigest: digest('5'), universeDigest: digest('6'), caseDigest: digest('7'),
+      actionMapDigest: digest('8'), policyDigest: digest('a'), executionContractDigest: digest('b'),
+      runBundleProjectionDigest: digest('c'), environment: 'test' as const,
+      baseOrigin: 'https://test.example.com', actor: 'auditor', discoveryGrantId: 'DISCOVERY-1',
+      preflightDigest: digest('d'), actions: [{ actionId: 'ACTION-1', effect: 'reversible-write' as const,
+        dataLeaseId: 'LEASE-1', fencingToken: 1, cleanupPlanDigest: digest('e'), requests: [request] }],
+    }
+    const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+    return SignedGrantSchema.parse({ ...common, grantId: 'WRITE-1', subject, subjectDigest,
+      approvalContext: { schemaVersion: '1.0.0', subject: common.approver.subject, runId,
+        approvalType: 'execution', subjectDigest, installationDigest: installation.installationDigest,
+        origin: 'http://127.0.0.1:43210', issuedAt, expiresAt },
+      capabilities: [{ capabilityId: 'CAP-WRITE-1', nonce: '1'.repeat(64), transport: 'http',
+        effect: 'reversible-write', operation: 'http-request', actionId: 'ACTION-1',
+        dataLeaseId: 'LEASE-1', fencingToken: 1, cleanupPlanDigest: digest('e'),
+        requests: [request], maxUses: 1 }],
+    })
+  }
+  const request = {
+    intentId: 'INTENT-INJECT-1', method: 'POST', canonicalOrigin: 'https://test.example.com',
+    exactPath: '/api/orders/search', query: [] as Array<[string, string]>,
+    payload: { kind: 'no-body' as const }, targetFingerprint: 'not-applicable' as const,
+    maxRequests: 1, expectedOrder: 1,
+  }
+  const response = { kind: 'http-response' as const, status: 500,
+    headers: [] as Array<{ name: 'content-type'; value: string }>,
+    body: { kind: 'no-body' as const }, delayMs: 0 }
+  const action = { actionId: 'ACTION-1', caseId: 'CASE-1', runId, attemptSlot: 1,
+    request, response, expectedMatches: 1, expectedOrder: 1, upstreamForwarding: 'forbidden' as const }
+  const subject = { schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision: digest('1'),
+    executionDigest: digest('2'), environment: 'test' as const,
+    baseOrigin: 'https://test.example.com', actions: [action] }
+  const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+  return SignedGrantSchema.parse({ ...common, grantId: 'INJECTION-1', subject, subjectDigest,
+    approvalContext: { schemaVersion: '1.0.0', subject: common.approver.subject, runId,
+      approvalType: 'execution', subjectDigest, installationDigest: installation.installationDigest,
+      origin: 'http://127.0.0.1:43210', issuedAt, expiresAt },
+    capabilities: [{ capabilityId: 'CAP-INJECT-1', nonce: '2'.repeat(64),
+      transport: 'gateway-injection', ...action, maxUses: 1 }],
+  })
 }
 
 function requestHeader(requestId: string) {
@@ -1189,6 +1564,32 @@ function prdRequestCandidate(binding: {
       `artifact-content/${candidate.schemaVersion}/${candidate.artifactType}`,
       candidate,
     ),
+  }
+}
+
+function projectPolicyCandidate(binding: {
+  assetId: string
+  generationId: string
+  prdRevision: string
+}, runtimePolicyId: string): Record<string, unknown> & { contentDigest: string } {
+  const idDigest = (id: string) => ({ id, digest: digest(id === runtimePolicyId ? 'a' : 'b') })
+  const candidate = {
+    artifactId: 'ARTIFACT-PROJECT-POLICY', artifactType: 'project-policy', schemaVersion: '2.0.0',
+    engineVersion: '0.1.0', ...binding, createdAt: '2026-07-17T00:00:00.000Z',
+    contentDigest: '', signatures: [], dependencies: [], graph: { defines: [], references: [] },
+    content: {
+      policyVersion: '1.0.0',
+      environments: [{ environmentId: 'test', baseOrigin: 'https://test.example.com' }],
+      originPolicies: [{ origin: 'https://test.example.com', allowRead: true, allowWrite: false }],
+      browserMatrix: [{ browserId: 'chromium', channel: 'chromium', required: true }],
+      coveragePolicy: idDigest('COVERAGE-POLICY'), evidencePolicy: idDigest('EVIDENCE-POLICY'),
+      retentionPolicy: idDigest('RETENTION-POLICY'), riskPolicy: idDigest('RISK-POLICY'),
+      timeoutPolicy: idDigest('TIMEOUT-POLICY'), runtimePolicy: idDigest(runtimePolicyId),
+    },
+  }
+  return {
+    ...candidate,
+    contentDigest: digestArtifactContent('artifact-content/2.0.0/project-policy', candidate),
   }
 }
 
@@ -1299,6 +1700,29 @@ async function seedCompiledRun(
       workflow: { current: 'compiled', sequence: 9, eventChainDigest: digest('8') },
     }, response: { seeded: true } }),
     'test-seed-compiled', lock,
+  )
+  await lock.close()
+}
+
+async function seedDiagnosingRun(
+  fixture: Awaited<ReturnType<typeof hostFixture>>,
+  created: Record<string, unknown>,
+  requestId: string,
+): Promise<void> {
+  await fixture.store.beginRequest(requestId, digest('6'))
+  const lock = await fixture.store.acquireRunLock(
+    created.projectIdentityDigest as string, created.runId as string,
+  )
+  await fixture.store.updateRunOutcome(
+    created.projectIdentityDigest as string, created.runId as string, requestId, digest('6'),
+    (snapshot) => ({
+      snapshot: {
+        ...snapshot,
+        workflow: { current: 'diagnosing', sequence: 10, eventChainDigest: digest('5') },
+      },
+      response: { seeded: true },
+    }),
+    'test-seed-diagnosing', lock,
   )
   await lock.close()
 }

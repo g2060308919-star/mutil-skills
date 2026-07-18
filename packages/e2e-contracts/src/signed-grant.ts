@@ -67,7 +67,7 @@ const GrantBaseSchema = z.object({
   signature: SignatureSchema,
 }).strict()
 
-const DiscoveryCapabilitySchema = z.object({
+export const DiscoveryBrowserCapabilitySchema = z.object({
   capabilityId: SafeIdSchema, nonce: NonceSchema, transport: z.literal('browser-local'), effect: z.literal('read'),
   actionId: SafeIdSchema, operation: z.enum(['dom-read', 'screenshot', 'local-navigation']),
   targetUrl: BoundedStringSchema(8 * 1024).refine((value) => {
@@ -75,11 +75,24 @@ const DiscoveryCapabilitySchema = z.object({
   }), actor: SafeIdSchema, expectedPageIdentityDigest: DigestSchema,
   bootstrapIntentsDigest: DigestSchema, maxUses: z.literal(1),
 }).strict()
-const ReadCapabilitySchema = z.object({
+export const ReadHttpCapabilitySchema = z.object({
+  capabilityId: SafeIdSchema, nonce: NonceSchema, transport: z.literal('http'), effect: z.literal('read'),
+  actionId: SafeIdSchema, operation: z.literal('http-request'),
+  requestIds: z.array(SafeIdSchema).min(1).max(1_000)
+    .refine((values) => new Set(values).size === values.length),
+  maxUses: z.number().int().positive().max(100_000),
+}).strict()
+export const DiscoveryCapabilitySchema = z.discriminatedUnion('transport', [
+  DiscoveryBrowserCapabilitySchema, ReadHttpCapabilitySchema,
+])
+export const ReadBrowserCapabilitySchema = z.object({
   capabilityId: SafeIdSchema, nonce: NonceSchema, transport: z.literal('browser-local'), effect: z.literal('read'),
   actionId: SafeIdSchema, operation: z.enum(['dom-read', 'screenshot', 'local-navigation']),
   maxUses: z.number().int().positive().max(100_000),
 }).strict()
+export const ReadCapabilitySchema = z.discriminatedUnion('transport', [
+  ReadBrowserCapabilitySchema, ReadHttpCapabilitySchema,
+])
 const WriteCapabilitySchema = z.object({
   capabilityId: SafeIdSchema, nonce: NonceSchema, transport: z.literal('http'),
   effect: z.literal('reversible-write'), operation: z.literal('http-request'), actionId: SafeIdSchema,
@@ -141,4 +154,66 @@ export const SignedGrantSchema = z.union([
     || grant.approvalContext.approvalType !== canonicalGrantApprovalType(grant.subject)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'grant binding is inconsistent' })
   }
+  if ('requests' in grant.subject) {
+    const knownRequestIds = new Set(grant.subject.requests.map((request) => request.requestId))
+    const subjectActions = new Map(grant.subject.actions.map((action) => [
+      `${action.actionId}\0${action.operation}`, action,
+    ]))
+    const capabilityCounts = new Map<string, number>()
+    const capabilityIds = new Set<string>()
+    for (const [capabilityIndex, capability] of grant.capabilities.entries()) {
+      if (capabilityIds.has(capability.capabilityId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'capabilityId 必须唯一', path: ['capabilities', capabilityIndex, 'capabilityId'],
+        })
+      }
+      capabilityIds.add(capability.capabilityId)
+      const operation = 'operation' in capability ? capability.operation : undefined
+      const actionKey = `${capability.actionId}\0${operation ?? ''}`
+      const action = subjectActions.get(actionKey)
+      capabilityCounts.set(actionKey, (capabilityCounts.get(actionKey) ?? 0) + 1)
+      if (!('effect' in capability) || capability.effect !== 'read' || !('operation' in capability)
+        || action === undefined || capability.operation !== action.operation
+        || capability.maxUses !== action.maxUses) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'read capability 必须精确绑定 subject action 的 operation 与 maxUses',
+          path: ['capabilities', capabilityIndex],
+        })
+        continue
+      }
+      const approved = action.requestIds
+      if (approved.length > 0) {
+        if (!('requestIds' in capability)
+          || approved.length !== capability.requestIds.length
+          || approved.some((requestId, index) => requestId !== capability.requestIds[index])
+          || capability.requestIds.some((requestId) => !knownRequestIds.has(requestId))) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: 'HTTP read capability 必须精确引用 subject 已签名请求',
+            path: ['capabilities', capabilityIndex, 'requestIds'],
+          })
+        }
+      } else if ('requestIds' in capability) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: '无 HTTP 请求的 action 不得签发 HTTP capability',
+          path: ['capabilities', capabilityIndex, 'requestIds'],
+        })
+      }
+    }
+    for (const [actionKey] of subjectActions) {
+      if (capabilityCounts.get(actionKey) !== 1) context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: '每个 subject action 必须且只能由一个 capability 覆盖', path: ['capabilities'],
+      })
+    }
+  }
 })
+
+export type CanonicalDiscoveryBrowserCapability = z.infer<typeof DiscoveryBrowserCapabilitySchema>
+export type CanonicalReadHttpCapability = z.infer<typeof ReadHttpCapabilitySchema>
+export type CanonicalDiscoveryCapability = z.infer<typeof DiscoveryCapabilitySchema>
+export type CanonicalReadBrowserCapability = z.infer<typeof ReadBrowserCapabilitySchema>
+export type CanonicalReadCapability = z.infer<typeof ReadCapabilitySchema>

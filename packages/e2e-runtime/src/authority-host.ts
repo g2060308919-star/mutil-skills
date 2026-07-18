@@ -1,4 +1,5 @@
 import {
+  LocalApprovalAuthority,
   startAuthorityExecutionRpcHostProcess,
   type AuthorityExecutionRpcProcessHandle,
   type WebAuthnApprovalAssets,
@@ -10,12 +11,28 @@ import {
   canonicalGrantApprovalSubjectDigest,
   canonicalGrantApprovalType,
   digestText,
+  digestDecisionSubject,
+  projectLineageDecisionSubject,
+  projectScopeDecisionSubject,
   E2EError,
   type ApprovalExecutionBinding,
   type ApprovalFinalizationAcknowledgement,
   type ApprovalGrantSubject,
+  type DecisionReceipt,
+  type DecisionSubject,
   type SignedGrant,
+  type ArtifactSignature,
+  type ApprovalFreshnessVerifierMaterial,
+  type ArtifactAuthorityVerifierMaterial,
+  type DecisionVerifierMaterial,
+  type PrivacyReviewVerifierMaterial,
+  type AttemptEventVerifierMaterial,
+  type ApprovalCapabilityRecord,
+  type ApprovalFreshnessReceipt,
+  type AppendAttemptEventInput,
+  type AttemptEvent,
 } from '@mutil-skills/e2e-contracts'
+import type { CompleteGenerationAuthority } from '@mutil-skills/e2e-engine'
 import { constants } from 'node:fs'
 import { lstat, open, realpath, type FileHandle } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
@@ -40,7 +57,7 @@ const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 type RuntimeAuthorityProcess = Pick<AuthorityExecutionRpcProcessHandle,
   'enrollIdentity' | 'openApprovalSession' | 'waitForSession' | 'close'> &
   Partial<Pick<AuthorityExecutionRpcProcessHandle,
-    'finalizeApproval' | 'recoverApproval' | 'activateGrant' | 'acknowledgeFinalization'
+    'finalizeApproval' | 'finalizeDecision' | 'recoverApproval' | 'activateGrant' | 'acknowledgeFinalization'
     | 'endpoint' | 'credential' | 'verifierMaterial'>>
 
 export interface RuntimeAuthoritySession {
@@ -56,6 +73,10 @@ export interface RuntimeAuthoritySession {
     grant: SignedGrant
     approvalBinding: ApprovalExecutionBinding
   }>
+  finalizeDecision?(input: {
+    decisionId: string
+    decisionSubject: DecisionSubject
+  }): Promise<DecisionReceipt>
 }
 
 export class RuntimeAuthorityHost {
@@ -109,7 +130,7 @@ export class RuntimeAuthorityHost {
       : undefined
     return this.#session(reference, binding, binding === undefined ? undefined : {
       finalizationId: input.finalizationId!, requestDigest: input.requestDigest!,
-    })
+    }, input.approvalType)
   }
 
   async recoverApproval(input: {
@@ -184,6 +205,7 @@ export class RuntimeAuthorityHost {
     reference: { url: string; sessionId: string },
     expectedBinding?: ApprovalExecutionBinding,
     finalization?: { finalizationId: string; requestDigest: string },
+    approvalType?: WebAuthnApprovalType,
   ): RuntimeAuthoritySession {
     let url: URL
     try { url = new URL(reference.url) } catch {
@@ -219,6 +241,14 @@ export class RuntimeAuthorityHost {
         }
         catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
       } }),
+      ...(!['scope', 'lineage'].includes(approvalType ?? '') ? {} : {
+        finalizeDecision: async (input: { decisionId: string; decisionSubject: DecisionSubject }) => {
+          if (!this.#process.finalizeDecision) throw authorityHostError('E2E_APPROVAL_FINALIZE_UNAVAILABLE')
+          try {
+            return await this.#process.finalizeDecision({ sessionId: reference.sessionId, ...input })
+          } catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
+        },
+      }),
     })
   }
 
@@ -258,6 +288,9 @@ export async function startRuntimeAuthorityHost(options: {
           expectedStateDirectory: prepared.identity,
           testWorkspaceRoots: [options.installation.versionRoot],
           approvalIdentities: [{ subject: options.subject, roles: ['e2e-approver'] }],
+          manualIdentities: [{ subject: options.subject, roles: [
+            'scope-approver', 'lineage-approver', 'privacy-approver',
+          ] }],
         },
         lease: {
           statePath: 'lease.sqlite',
@@ -304,6 +337,129 @@ export async function startRuntimeAuthorityHost(options: {
   }
 }
 
+export interface RuntimeArtifactStoreAuthority extends CompleteGenerationAuthority {
+  readonly credentialCount: number
+  readonly stateProtectionLevel: 'local-crash-integrity' | 'trusted-monotonic'
+  readonly artifactVerifierMaterial: ArtifactAuthorityVerifierMaterial
+  readonly approvalFreshnessVerifierMaterial: ApprovalFreshnessVerifierMaterial
+  readonly decisionVerifierMaterial: DecisionVerifierMaterial
+  readonly privacyReviewVerifierMaterial: PrivacyReviewVerifierMaterial
+  readonly attemptEventVerifierMaterial: AttemptEventVerifierMaterial
+  signDigest(digest: string): ArtifactSignature
+  verifySignature(signature: ArtifactSignature): boolean
+  issueApprovalFreshnessReceipt(input: {
+    grant: SignedGrant
+    currentSubject: SignedGrant['subject']
+    expectedCapabilities: ApprovalCapabilityRecord[]
+    browserPreflight: { artifactDigest: string; discoveryGrantId: string; authorityPreflightDigest: string }
+    runBundle: { artifactDigest: string; content: unknown }
+  }): Promise<ApprovalFreshnessReceipt>
+  appendAttemptEvent(input: {
+    context: { assetId: string; generationId: string; prdRevision: string; runId: string; caseId: string }
+    event: AppendAttemptEventInput
+  }): { event: AttemptEvent; eventChainDigest: string }
+  close(): Promise<void>
+}
+
+/**
+ * Artifact Store 的生产签名适配器。它复用与审批 Authority 完全相同的持久身份、
+ * 加密 key 和 anti-rollback anchor；不得创建测试 signer 或跳过 active pointer 验签。
+ * 单次 CLI 命令结束时必须关闭，且不能与 Authority child 同时打开同一状态库。
+ */
+export async function openRuntimeArtifactStoreAuthority(options: {
+  homeDir: string
+  installation: RuntimeInstallation
+  subject: string
+}): Promise<RuntimeArtifactStoreAuthority> {
+  if (!SAFE_ID.test(options.subject)) throw authorityHostError('E2E_APPROVAL_ENROLLMENT_INPUT_INVALID')
+  const layout = runtimeLayout(options.homeDir)
+  const environment = buildChildEnvironment({
+    host: {}, runtimeBinPaths: [dirname(process.execPath)], homeDir: options.homeDir, tempDir: tmpdir(),
+  })
+  const trustedPython = await discoverTrustedPython()
+  const prepared = await prepareAuthorityState(
+    options.homeDir, layout.authority, environment, trustedPython,
+  )
+  let authority: LocalApprovalAuthority | undefined
+  let setupError: unknown
+  try {
+    authority = await LocalApprovalAuthority.open({
+      issuer: 'e2e-runtime-authority', keyId: 'approval-v1', now: () => new Date(),
+      statePath: join(prepared.identity.realPath, 'approval.sqlite'),
+      stateEncryptionKey: prepared.stateEncryptionKey,
+      expectedStateDirectory: prepared.identity,
+      testWorkspaceRoots: [options.installation.versionRoot],
+      approvalIdentities: [{ subject: options.subject, roles: ['e2e-approver'] }],
+      manualIdentities: [{ subject: options.subject, roles: [
+        'scope-approver', 'lineage-approver', 'privacy-approver',
+      ] }],
+    })
+  } catch (error) {
+    setupError = error
+  } finally {
+    prepared.stateEncryptionKey.fill(0)
+    try { await prepared.directoryHandle.close() } catch (error) {
+      setupError = setupError === undefined ? error : new AggregateError([setupError, error])
+    }
+  }
+  if (setupError !== undefined || authority === undefined) {
+    authority?.close()
+    throw setupError ?? authorityHostError('E2E_ARTIFACT_AUTHORITY_NOT_READY')
+  }
+  let credentialCount: number
+  let stateProtectionLevel: 'local-crash-integrity' | 'trusted-monotonic'
+  try {
+    credentialCount = (await authority.createWebAuthnCredentialRepository().list()).length
+    const protection = authority.stateProtectionLevel
+    if (protection === 'ephemeral') throw authorityHostError('E2E_ARTIFACT_AUTHORITY_NOT_PERSISTENT')
+    stateProtectionLevel = protection
+  } catch (error) {
+    try { authority.close() } catch (closeError) {
+      throw new AggregateError([error, closeError], 'E2E_ARTIFACT_AUTHORITY_INSPECTION_CLEANUP_FAILED')
+    }
+    throw error
+  }
+  let closed = false
+  return {
+    credentialCount,
+    stateProtectionLevel,
+    artifactVerifierMaterial: authority.artifactVerifierMaterial,
+    approvalFreshnessVerifierMaterial: authority.approvalFreshnessVerifierMaterial,
+    decisionVerifierMaterial: authority.decisionVerifierMaterial,
+    privacyReviewVerifierMaterial: authority.privacyReviewVerifierMaterial,
+    attemptEventVerifierMaterial: authority.attemptEventVerifierMaterial,
+    signArtifactDigest: (digest) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return authority.signArtifactDigest(digest)
+    },
+    verifyArtifactSignature: (signature, signedDigest) => !closed
+      && signature.signedDigest === signedDigest && authority.verifyArtifactSignature(signature),
+    verifyApprovalFreshnessReceipt: (receipt, binding) => !closed
+      ? authority.verifyApprovalFreshnessReceipt({ receipt, ...binding })
+      : { authentic: false, current: false, allowed: false, status: 'invalid' },
+    verifyDecisionReceipt: (receipt, binding) => !closed
+      && authority.verifyDecisionReceipt(receipt, binding),
+    signDigest: (digest) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return authority.signArtifactDigest(digest)
+    },
+    verifySignature: (signature) => !closed && authority.verifyArtifactSignature(signature),
+    issueApprovalFreshnessReceipt: async (input) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return await authority.issueApprovalFreshnessReceipt(input)
+    },
+    appendAttemptEvent: (input) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return authority.appendAttemptEvent(input)
+    },
+    async close() {
+      if (closed) return
+      closed = true
+      authority.close()
+    },
+  }
+}
+
 export async function loadRuntimeApprovalAssets(): Promise<WebAuthnApprovalAssets> {
   const sourceMode = import.meta.url.endsWith('.ts')
   const rootCandidate = fileURLToPath(new URL(
@@ -333,6 +489,14 @@ export function computeRuntimeApprovalSubjectDigest(
       throw authorityHostError('E2E_RUNTIME_APPROVAL_SUBJECT_INVALID')
     }
     return canonicalGrantApprovalSubjectDigest(grantSubject)
+  }
+  if (approvalType === 'scope') {
+    const artifact = snapshot.frozenArtifacts['acceptance-scope']
+    if (artifact !== undefined) return digestDecisionSubject(projectScopeDecisionSubject(artifact.content))
+  }
+  if (approvalType === 'lineage') {
+    const artifact = snapshot.frozenArtifacts['prd-diff']
+    if (artifact !== undefined) return digestDecisionSubject(projectLineageDecisionSubject(artifact.content))
   }
   return digestText('e2e-runtime-approval-subject/v1', canonicalizeJson({
     runId: snapshot.runId,
@@ -372,6 +536,57 @@ export interface RuntimeSecretStateKeys {
   wrappingKey: Buffer
   macKey: Buffer
   clear(): void
+}
+
+export interface RuntimeQuarantineMasterKey {
+  masterKey: Buffer
+  clear(): void
+}
+
+/**
+ * 直接从 Authority state key 以 Quarantine 专属 HKDF info 派生。
+ * 不经过、也不复用 SecretState wrappingKey/macKey。
+ */
+export async function deriveRuntimeQuarantineMasterKey(homeDir: string): Promise<RuntimeQuarantineMasterKey> {
+  const layout = runtimeLayout(homeDir)
+  const environment = buildChildEnvironment({
+    host: {}, runtimeBinPaths: [dirname(process.execPath)], homeDir, tempDir: tmpdir(),
+  })
+  const trustedPython = await discoverTrustedPython()
+  const prepared = await prepareAuthorityState(homeDir, layout.authority, environment, trustedPython)
+  let masterKey: Buffer | undefined
+  let preparationError: unknown
+  try {
+    masterKey = Buffer.from(hkdfSync(
+      'sha256',
+      prepared.stateEncryptionKey,
+      Buffer.from('mutil-skills/e2e/authority-state-key/v1', 'utf8'),
+      Buffer.from('e2e-runtime-quarantine/master-key/v1', 'utf8'),
+      32,
+    ))
+  } catch (error) {
+    preparationError = error
+  } finally {
+    prepared.stateEncryptionKey.fill(0)
+    try { await prepared.directoryHandle.close() } catch (error) {
+      preparationError = preparationError === undefined
+        ? error
+        : new AggregateError([preparationError, error], 'E2E_QUARANTINE_KEY_DERIVATION_CLEANUP_FAILED')
+    }
+  }
+  if (preparationError !== undefined || masterKey === undefined) {
+    masterKey?.fill(0)
+    throw preparationError ?? authorityHostError('E2E_QUARANTINE_KEY_DERIVATION_FAILED')
+  }
+  let cleared = false
+  return {
+    masterKey,
+    clear() {
+      if (cleared) return
+      cleared = true
+      masterKey.fill(0)
+    },
+  }
 }
 
 /** Runtime 内部专用：复用 Authority openat/key helper，并以固定域派生 Secret keys。 */

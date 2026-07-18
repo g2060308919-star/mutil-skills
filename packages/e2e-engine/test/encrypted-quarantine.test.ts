@@ -7,6 +7,7 @@ import {
   InMemoryQuarantineAuditLog,
   InMemorySecretProvider,
   type QuarantineActor,
+  type QuarantineSecretProvider,
   verifyQuarantineAuditChain,
 } from '../src/index.js'
 import {
@@ -116,6 +117,40 @@ describe('EncryptedQuarantine encryption boundary', () => {
 })
 
 describe('EncryptedQuarantine lifecycle', () => {
+  test('先持久化 committed-pending-erasure，崩溃后只恢复 crypto-erasure', async () => {
+    const { root, secrets, audit, quarantine } = await fixture()
+    const run = await quarantine.createRun({ runId: 'RUN-PENDING-ERASURE', ttlMs: 60_000, actor: runner })
+    let failOnce = true
+    const failingSecrets: QuarantineSecretProvider = {
+      createRunKey: (input) => secrets.createRunKey(input),
+      seal: (input) => secrets.seal(input),
+      open: (input) => secrets.open(input),
+      hasKey: (keyId) => secrets.hasKey(keyId),
+      destroyKey: async (keyId) => {
+        if (failOnce) { failOnce = false; throw new Error('simulated crash before key erasure') }
+        await secrets.destroyKey(keyId)
+      },
+    }
+    const crashing = new EncryptedQuarantine({
+      root, secrets: failingSecrets, audit, now: () => new Date('2026-07-11T10:00:00.000Z'),
+    })
+    const generationDigest = digestText('generation/v1', 'committed')
+    await expect(crashing.destroyAfterPublication({
+      runId: run.runId, generationDigest, actor: { subject: 'publisher:1', roles: ['e2e-publisher'] },
+    })).rejects.toThrow('simulated crash')
+    expect(QuarantineRunManifestSchema.parse(JSON.parse(
+      await readFile(join(root, run.runId, 'manifest.json'), 'utf8'),
+    ))).toMatchObject({ status: 'committed-pending-erasure', generationDigest })
+
+    const restarted = new EncryptedQuarantine({
+      root, secrets, audit, now: () => new Date('2026-07-11T10:00:01.000Z'),
+    })
+    await expect(restarted.resumePendingErasure({ subject: 'publisher:recovery', roles: ['e2e-publisher'] }))
+      .resolves.toEqual([run.runId])
+    expect(await secrets.hasKey(run.keyId)).toBe(false)
+    await expect(stat(join(root, run.runId))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   test('destroys the data key after publication so retained ciphertext is cryptographically unreadable', async () => {
     const { root, secrets, quarantine } = await fixture()
     const run = await quarantine.createRun({ runId: 'RUN-PUBLISH', ttlMs: 60_000, actor: runner })

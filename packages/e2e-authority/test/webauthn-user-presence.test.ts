@@ -134,14 +134,17 @@ describe('WebAuthn user presence authority', () => {
       authenticateApproverSession: (sessionId) => fixture.authority.authenticateSession(sessionId),
     })
     const approvalSubject = {
-      schemaVersion: '1.0.0' as const,
+      schemaVersion: '1.1.0' as const,
       assetId: 'ASSET-1', prdRevision: subjectDigest, scopeDigest: installationDigest,
       environment: 'test' as const, baseOrigin: 'https://test.example.com', actor: 'qa',
       expectedPageIdentity: {
         url: 'https://test.example.com/orders', title: 'Orders', heading: 'Orders', ariaSignals: [],
       },
       bootstrapIntentsDigest: subjectDigest,
-      actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 as const }],
+      requests: [],
+      actions: [{
+        actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 as const, requestIds: [],
+      }],
     }
     const approvalSubjectDigest = canonicalGrantApprovalSubjectDigest(approvalSubject)
     const openAndComplete = async (runId: string) => {
@@ -377,14 +380,17 @@ describe('WebAuthn user presence authority', () => {
       testWorkspaceRoots: [process.cwd()], approvalIdentities: [approver],
     }
     const grantSubject = {
-      schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision: subjectDigest,
+      schemaVersion: '1.1.0' as const, assetId: 'ASSET-1', prdRevision: subjectDigest,
       scopeDigest: installationDigest, environment: 'test' as const,
       baseOrigin: 'https://test.example.com', actor: 'qa',
       expectedPageIdentity: {
         url: 'https://test.example.com/orders', title: 'Orders', heading: 'Orders', ariaSignals: [],
       },
       bootstrapIntentsDigest: subjectDigest,
-      actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 as const }],
+      requests: [],
+      actions: [{
+        actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1 as const, requestIds: [],
+      }],
     }
     const grantSubjectDigest = canonicalGrantApprovalSubjectDigest(grantSubject)
     const approvalBinding = {

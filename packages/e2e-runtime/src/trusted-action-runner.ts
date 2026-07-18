@@ -7,6 +7,7 @@ import {
   digestText,
   E2EError,
   type ArtifactDocument,
+  type ReadHttpRequest,
   type ReadApprovalSubject,
   type SignedReadGrant,
   type SignedDiscoveryGrant,
@@ -19,7 +20,7 @@ import {
   type ReadOnlyCaseResult,
 } from '@mutil-skills/e2e-playwright-runtime'
 import { z } from 'zod'
-import { projectGatewayRules } from './gateway-rule-projector.js'
+import { projectGatewayRules, type ApprovedGatewayRequest } from './gateway-rule-projector.js'
 import {
   getControlledBrowserSessionBinding,
   type ControlledBrowserSession,
@@ -27,6 +28,13 @@ import {
 import type { GatewayProxyProcessHandle } from './gateway-proxy-host.js'
 import type { RuntimeRunSnapshot } from './run-store.js'
 import { BrowserPreflightFactSchema } from './runtime-preflight.js'
+import {
+  RuntimeExecutionBatch,
+  parseRuntimeInjectionExecutionOutput,
+  parseRuntimeWriteExecutionOutput,
+  type RuntimeInjectionExecutionOutput,
+  type RuntimeWriteExecutionOutput,
+} from './runtime-execution-batch.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 export interface TrustedReadAction {
@@ -36,7 +44,8 @@ export interface TrustedReadAction {
   readonly url: string
   readonly expectedIdentity: { url: string; title: string; heading: string; role: string }
   readonly expectedText: string
-  readonly correlation: {
+  readonly requestCorrelations: ReadonlyArray<{
+    requestId: string
     ruleId: string
     stepOrdinal: number
     method: string
@@ -45,8 +54,12 @@ export interface TrustedReadAction {
     bodyDigest: string
     actionId: string
     capabilityId: string
+    signedBodyDigest: string
+    redirectRequestIds: readonly string[]
+    navigation: boolean
+    maxUses: number
     headers: Record<string, string>
-  }
+  }>
 }
 
 const trustedActions = new WeakMap<object, string>()
@@ -62,6 +75,12 @@ export interface RuntimeReadExecutionOutput {
   gatewayAudit: { received: number; forwarded: number; blocked: number; byIntent: Record<string, number> }
   gatewayAuditDigest: string
   evidence?: { screenshot: Uint8Array; dom: Uint8Array }
+  finalizationFacts?: {
+    gatewayAudit: Record<string, unknown>
+    gatewayAuditVerifierMaterial: Record<string, unknown>
+    browserMeasurements: Record<string, unknown>
+    isolationMeasurements: Record<string, unknown>
+  }
 }
 
 type RuntimeReadExecutorBackend = (input: {
@@ -73,6 +92,93 @@ type RuntimeReadExecutorBackend = (input: {
 }) => Promise<RuntimeReadExecutionOutput>
 
 const runtimeReadExecutors = new WeakMap<object, RuntimeReadExecutorBackend>()
+
+type RuntimeWriteExecutorBackend = (input: {
+  runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot
+}) => Promise<RuntimeWriteExecutionOutput>
+type RuntimeInjectionExecutorBackend = (input: {
+  runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot
+}) => Promise<RuntimeInjectionExecutionOutput>
+
+declare const runtimeWriteExecutorCapabilityBrand: unique symbol
+export interface RuntimeWriteExecutorCapability {
+  readonly [runtimeWriteExecutorCapabilityBrand]: true
+}
+declare const runtimeInjectionExecutorCapabilityBrand: unique symbol
+export interface RuntimeInjectionExecutorCapability {
+  readonly [runtimeInjectionExecutorCapabilityBrand]: true
+}
+const runtimeWriteExecutors = new WeakMap<object, RuntimeWriteExecutorBackend>()
+const runtimeInjectionExecutors = new WeakMap<object, RuntimeInjectionExecutorBackend>()
+
+/** 仅由 Runtime 生产装配层签发；backend 应闭合 Gateway reservation/outcome/cleanup 全链。 */
+export function authorizeRuntimeWriteExecutor(
+  backend: RuntimeWriteExecutorBackend,
+): RuntimeWriteExecutorCapability {
+  const capability = Object.freeze({}) as RuntimeWriteExecutorCapability
+  runtimeWriteExecutors.set(capability, backend)
+  return capability
+}
+
+/** 仅由 Runtime 生产装配层签发；backend 应使用 InjectionGateway，禁止直连目标。 */
+export function authorizeRuntimeInjectionExecutor(
+  backend: RuntimeInjectionExecutorBackend,
+): RuntimeInjectionExecutorCapability {
+  const capability = Object.freeze({}) as RuntimeInjectionExecutorCapability
+  runtimeInjectionExecutors.set(capability, backend)
+  return capability
+}
+
+export async function executeRuntimeWrite(
+  capability: RuntimeWriteExecutorCapability,
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+): Promise<RuntimeWriteExecutionOutput> {
+  const action = projectSingleRuntimeAction(input.snapshot, 'reversible-write')
+  const batch = new RuntimeExecutionBatch({ runId: input.snapshot.runId, attemptId: input.attemptId })
+  return await new TrustedActionRunner().executeWrite({
+    executor: capability, batch, runId: input.snapshot.runId, attemptId: input.attemptId,
+    ...action, snapshot: input.snapshot,
+  })
+}
+
+export async function executeRuntimeInjection(
+  capability: RuntimeInjectionExecutorCapability,
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+): Promise<RuntimeInjectionExecutionOutput> {
+  const action = projectSingleRuntimeAction(input.snapshot)
+  const batch = new RuntimeExecutionBatch({
+    runId: input.snapshot.runId,
+    attemptId: input.attemptId,
+    realEnvironmentResults: Object.values(input.snapshot.executionResults?.realEnvironment ?? {}),
+  })
+  return await new TrustedActionRunner().executeInjection({
+    executor: capability, batch, runId: input.snapshot.runId, attemptId: input.attemptId,
+    ...action, snapshot: input.snapshot,
+  })
+}
+
+function projectSingleRuntimeAction(
+  snapshot: RuntimeRunSnapshot,
+  expectedEffect?: string,
+): { caseId: string; actionId: string } {
+  const actionMap = parseFrozen(snapshot.frozenArtifacts, 'browser-action-map')
+  const actions = (actionMap.content as Record<string, unknown>).actions
+  if (!Array.isArray(actions) || actions.length !== 1 || !isPlainAction(actions[0])) {
+    throw trustedActionError('E2E_RUNTIME_ACTION_SET_UNSUPPORTED', 'Runtime 执行只接受唯一冻结 action')
+  }
+  const caseId = actions[0].caseId
+  const actionId = actions[0].actionId
+  if (typeof caseId !== 'string' || !SafeIdSchema.safeParse(caseId).success
+    || typeof actionId !== 'string' || !SafeIdSchema.safeParse(actionId).success
+    || expectedEffect !== undefined && actions[0].effect !== expectedEffect) {
+    throw trustedActionError('E2E_RUNTIME_ACTION_EFFECT_MISMATCH', '冻结 caseId/actionId/effect 与执行域不一致')
+  }
+  return { caseId, actionId }
+}
+
+function isPlainAction(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
 
 /** 仅供 Runtime 内部装配层签发；Host 依赖只持有不可伪造的 WeakMap capability。 */
 export function authorizeRuntimeReadExecutor(
@@ -229,16 +335,13 @@ export class TrustedReadActionProjector {
       || grantCapabilities.filter((candidate) => candidate.operation === operation).length !== 1)) {
       throw trustedActionError('E2E_RUNTIME_READ_CAPABILITY_BINDING_MISMATCH', 'Action/subject/grant capability 不闭合')
     }
-    const navigation = grantCapabilities.find((capability) => capability.operation === 'local-navigation')!
-    const approved = subjectActions.find((subjectAction) => subjectAction.operation === 'local-navigation')!
-    const approvedRequests = [{
-      actionId: input.actionId, capabilityId: navigation.capabilityId,
-      method: 'GET', url: expectedPage.url, maxUses: approved.maxUses,
-      channel: 'http' as const, behavior: { kind: 'pass-through' as const },
-    }]
-    const rule = projectGatewayRules({ runId: input.runId, approvedRequests }).rules
-      .find((candidate) => candidate.actionId === input.actionId)
-    if (!rule) throw trustedActionError('E2E_RUNTIME_READ_GATEWAY_RULE_MISSING', '无法投影 Gateway rule')
+    const approvedRequests = projectReadRequestClosure({
+      actionId: input.actionId, expectedPageUrl: expectedPage.url, contract, action, subject, grant,
+    })
+    const rules = projectGatewayRules({ runId: input.runId, approvedRequests }).rules
+    if (rules.length !== approvedRequests.length) throw trustedActionError(
+      'E2E_RUNTIME_READ_GATEWAY_RULE_MISSING', '每个已签请求必须精确投影一条 Gateway rule',
+    )
     const projected: TrustedReadAction = Object.freeze({
       caseId: String(action.caseId), stepId: String(action.stepId), actionId: input.actionId,
       url: expectedPage.url,
@@ -246,18 +349,156 @@ export class TrustedReadActionProjector {
         url: expectedPage.url, title: expectedPage.title, heading: expectedPage.heading, role: subject.actor,
       },
       expectedText: oracles[0]!.statement as string,
-      correlation: Object.freeze({
-        ruleId: rule.ruleId, stepOrdinal: rule.stepOrdinal, method: rule.method,
+      requestCorrelations: Object.freeze(rules.map((rule) => Object.freeze({
+        requestId: rule.requestId!, ruleId: rule.ruleId, stepOrdinal: rule.stepOrdinal, method: rule.method,
         url: rule.url, channel: 'http' as const, bodyDigest: rule.bodyDigest,
-        actionId: rule.actionId, capabilityId: rule.capabilityId, headers: {},
-      }),
+        actionId: rule.actionId, capabilityId: rule.capabilityId,
+        signedBodyDigest: rule.signedBodyDigest!, redirectRequestIds: Object.freeze([...rule.redirectRequestIds]),
+        navigation: rule.method === 'GET' && rule.url === expectedPage.url,
+        maxUses: rule.maxUses,
+        headers: Object.freeze({ ...rule.requestHeaders }),
+      }))),
     })
     trustedActions.set(projected, digestText('e2e-trusted-read-action/v1', canonicalizeJson(projected)))
     return projected
   }
 }
 
+function projectReadRequestClosure(input: {
+  actionId: string
+  expectedPageUrl: string
+  contract: Record<string, unknown>
+  action: Record<string, unknown>
+  subject: ReadApprovalSubject
+  grant: SignedReadGrant
+}): ApprovedGatewayRequest[] {
+  const contractRequests = input.contract.readHttpRequests as ReadHttpRequest[]
+  if (canonicalizeJson(contractRequests) !== canonicalizeJson(input.subject.requests)) {
+    throw trustedActionError(
+      'E2E_RUNTIME_READ_REQUEST_CLOSURE_MISMATCH',
+      'ExecutionContract 与 ReadApprovalSubject 的请求集合不一致',
+    )
+  }
+  const intents = (input.contract.actionIntents as Array<Record<string, unknown>>)
+    .filter((candidate) => candidate.actionId === input.actionId && candidate.effect === 'read')
+  const subjectActions = input.subject.actions.filter((candidate) =>
+    candidate.actionId === input.actionId && candidate.operation === 'http-request')
+  const grantCapabilities = input.grant.capabilities.filter((candidate) =>
+    candidate.actionId === input.actionId && candidate.transport === 'http')
+  const mapCapabilities = (input.action.capabilities as Array<Record<string, unknown>>)
+    .filter((candidate) => candidate.operation === 'http-request')
+  if (intents.length !== 1 || subjectActions.length !== 1 || grantCapabilities.length !== 1
+    || mapCapabilities.length !== 1) {
+    throw trustedActionError(
+      'E2E_RUNTIME_READ_REQUEST_CLOSURE_MISMATCH',
+      '每个有 HTTP 请求的 action 必须在四份资产中各有唯一闭合记录',
+    )
+  }
+  const intentRequestIds = intents[0]!.requestIds
+  const mapRequestIds = input.action.requestIds
+  const subjectAction = subjectActions[0]!
+  const capability = grantCapabilities[0]!
+  if (capability.transport !== 'http'
+    || !Array.isArray(intentRequestIds) || !Array.isArray(mapRequestIds)
+    || canonicalizeJson(intentRequestIds) !== canonicalizeJson(mapRequestIds)
+    || canonicalizeJson(intentRequestIds) !== canonicalizeJson(subjectAction.requestIds)
+    || canonicalizeJson(intentRequestIds) !== canonicalizeJson(capability.requestIds)
+    || intentRequestIds.length === 0) {
+    throw trustedActionError(
+      'E2E_RUNTIME_READ_REQUEST_CLOSURE_MISMATCH',
+      'ExecutionContract、ActionMap、Subject 与 Grant 的 requestId/capability 绑定不一致',
+    )
+  }
+  const requestById = new Map(contractRequests.map((request) => [request.requestId, request]))
+  const requestIds = new Set(intentRequestIds as string[])
+  const requests = (intentRequestIds as string[]).map((requestId) => requestById.get(requestId))
+  if (requests.some((request) => request === undefined)
+    || requests.filter((request) => request!.method === 'GET' && request!.url === input.expectedPageUrl).length !== 1) {
+    throw trustedActionError(
+      'E2E_RUNTIME_READ_REQUEST_CLOSURE_MISMATCH',
+      'action 请求闭包缺少唯一页面导航请求或引用未知 requestId',
+    )
+  }
+  for (const request of requests as ReadHttpRequest[]) {
+    if (request.redirectPolicy.mode === 'follow-approved'
+      && request.redirectPolicy.requestIds.some((requestId) => !requestIds.has(requestId))) {
+      throw trustedActionError(
+        'E2E_RUNTIME_READ_REQUEST_CLOSURE_MISMATCH',
+        'redirect 每一跳都必须属于当前 action 的请求闭包',
+      )
+    }
+  }
+  return (requests as ReadHttpRequest[]).map((request) => ({
+    actionId: input.actionId,
+    capabilityId: capability.capabilityId,
+    requestId: request.requestId,
+    method: request.method,
+    url: request.url,
+    maxUses: capability.maxUses,
+    signedBodyDigest: request.bodyDigest,
+    headers: request.headers,
+    redirectRequestIds: request.redirectPolicy.mode === 'follow-approved'
+      ? request.redirectPolicy.requestIds : [],
+    channel: 'http',
+    behavior: { kind: 'pass-through' },
+  }))
+}
+
 export class TrustedActionRunner {
+  async executeWrite(input: {
+    executor: RuntimeWriteExecutorCapability
+    batch: RuntimeExecutionBatch
+    runId: string
+    attemptId: string
+    caseId: string
+    actionId: string
+    snapshot?: RuntimeRunSnapshot
+  }): Promise<RuntimeWriteExecutionOutput> {
+    assertBatchBinding(input.batch, input.runId, input.attemptId)
+    const backend = runtimeWriteExecutors.get(input.executor)
+    if (!backend) throw trustedActionError(
+      'E2E_RUNTIME_WRITE_EXECUTOR_CAPABILITY_INVALID', 'Write executor capability 未由 Runtime 装配层签发',
+    )
+    const output = parseRuntimeWriteExecutionOutput(await backend({
+      runId: input.runId, attemptId: input.attemptId, caseId: input.caseId, actionId: input.actionId,
+      ...(input.snapshot === undefined ? {} : { snapshot: structuredClone(input.snapshot) }),
+    }))
+    if (output.caseId !== input.caseId || output.actionId !== input.actionId) throw trustedActionError(
+      'E2E_RUNTIME_WRITE_EXECUTOR_OUTPUT_INVALID', 'Write executor 输出 caseId/actionId 不闭合',
+    )
+    return input.batch.commitRealWrite(output)
+  }
+
+  async executeInjection(input: {
+    executor: RuntimeInjectionExecutorCapability
+    batch: RuntimeExecutionBatch
+    runId: string
+    attemptId: string
+    caseId: string
+    actionId: string
+    snapshot?: RuntimeRunSnapshot
+  }): Promise<RuntimeInjectionExecutionOutput> {
+    assertBatchBinding(input.batch, input.runId, input.attemptId)
+    const backend = runtimeInjectionExecutors.get(input.executor)
+    if (!backend) throw trustedActionError(
+      'E2E_RUNTIME_INJECTION_EXECUTOR_CAPABILITY_INVALID', 'Injection executor capability 未由 Runtime 装配层签发',
+    )
+    let output: RuntimeInjectionExecutionOutput
+    try {
+      output = parseRuntimeInjectionExecutionOutput(await backend({
+        runId: input.runId, attemptId: input.attemptId, caseId: input.caseId, actionId: input.actionId,
+        ...(input.snapshot === undefined ? {} : { snapshot: structuredClone(input.snapshot) }),
+      }))
+    } catch (cause) {
+      if (cause instanceof E2EError && cause.code === 'E2E_RUNTIME_INJECTION_EXECUTOR_OUTPUT_INVALID') throw cause
+      throw trustedActionError('E2E_RUNTIME_INJECTION_EXECUTOR_OUTPUT_INVALID', 'Injection executor 输出非法', cause)
+    }
+    if (output.caseId !== input.caseId || output.actionId !== input.actionId) throw trustedActionError(
+      'E2E_RUNTIME_INJECTION_EXECUTOR_OUTPUT_INVALID', 'Injection executor 输出 caseId/actionId 不闭合',
+    )
+    return input.batch.commitInjection(output)
+  }
+
   async executeReadOnly(input: {
     action: TrustedReadAction
     grant: SignedReadGrant
@@ -285,7 +526,7 @@ export class TrustedActionRunner {
     }
     const capture = new CapturingPageAdapter(new PlaywrightPageAdapter(input.browser.page))
     try {
-      const result = await browser.executeWithCorrelation(input.action.correlation, async () => await runReadOnlyCase({
+      const result = await browser.executeWithCorrelations(input.action.requestCorrelations, async () => await runReadOnlyCase({
         caseId: input.action.caseId, actionId: input.action.actionId, url: input.action.url,
         expectedIdentity: input.action.expectedIdentity, expectedText: input.action.expectedText,
         authorization: { grant: input.grant, currentSubject: input.currentSubject, authority: input.authority },
@@ -299,6 +540,13 @@ export class TrustedActionRunner {
       capture.clear()
       throw error
     }
+  }
+}
+
+function assertBatchBinding(batch: RuntimeExecutionBatch, runId: string, attemptId: string): void {
+  if (!(batch instanceof RuntimeExecutionBatch) || batch.runId !== runId || batch.attemptId !== attemptId
+    || !SafeIdSchema.safeParse(runId).success || !SafeIdSchema.safeParse(attemptId).success) {
+    throw trustedActionError('E2E_RUNTIME_EXECUTION_BATCH_BINDING_INVALID', 'Batch/Run/Attempt 不闭合')
   }
 }
 
@@ -406,6 +654,9 @@ function parseRuntimeReadExecutionOutput(
   value: unknown,
   expectedAction: TrustedReadAction,
 ): RuntimeReadExecutionOutput {
+  const JsonRecordSchema = z.record(z.unknown()).refine((candidate) => {
+    try { canonicalizeJson(candidate); return true } catch { return false }
+  })
   const parsed = z.object({
     status: z.enum(['passed', 'failed', 'input-blocked', 'environment-blocked', 'safety-blocked']),
     result: ReadOnlyCaseResultSchema,
@@ -414,6 +665,12 @@ function parseRuntimeReadExecutionOutput(
     evidence: z.object({
       screenshot: z.custom<Uint8Array>((bytes) => bytes instanceof Uint8Array),
       dom: z.custom<Uint8Array>((bytes) => bytes instanceof Uint8Array),
+    }).strict().optional(),
+    finalizationFacts: z.object({
+      gatewayAudit: JsonRecordSchema,
+      gatewayAuditVerifierMaterial: JsonRecordSchema,
+      browserMeasurements: JsonRecordSchema,
+      isolationMeasurements: JsonRecordSchema,
     }).strict().optional(),
   }).strict().safeParse(value)
   if (!parsed.success || parsed.data.status !== parsed.data.result.status

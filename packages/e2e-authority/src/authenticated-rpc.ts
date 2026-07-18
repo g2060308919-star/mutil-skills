@@ -18,6 +18,8 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 
 const MAX_RPC_BYTES = 1024 * 1024
 const MAX_RPC_TTL_MS = 30_000
+const MAX_RPC_REPLAY_ENTRIES = 2_048
+const MAX_RPC_REPLAY_ENTRIES_PER_CLIENT = 1_024
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 
@@ -87,7 +89,8 @@ export class AuthenticatedRpcServer {
   readonly #publicKeySpki: Buffer
   readonly #credentials = new Map<string, { key: Buffer; registration: unknown }>()
   readonly #operations = new Map<string, AuthenticatedRpcOperation>()
-  readonly #consumed = new Map<string, number>()
+  readonly #consumed = new Map<string, { clientId: string; expiresAt: number }>()
+  readonly #consumedByClient = new Map<string, number>()
   #destroyed = false
 
   private constructor(input: { issuer: string; keyId: string; now: () => Date },
@@ -158,6 +161,10 @@ export class AuthenticatedRpcServer {
     if (this.#consumed.has(replayKey)) throw rpcError('E2E_RPC_REQUEST_REPLAYED')
     const credential = this.#credentials.get(request.clientId)
     if (!credential) throw rpcError('E2E_RPC_CLIENT_UNKNOWN')
+    if (this.#consumed.size >= MAX_RPC_REPLAY_ENTRIES
+      || (this.#consumedByClient.get(request.clientId) ?? 0) >= MAX_RPC_REPLAY_ENTRIES_PER_CLIENT) {
+      throw rpcError('E2E_RPC_REPLAY_CACHE_CAPACITY')
+    }
     const expectedPayloadDigest = digestText('authority-rpc-payload/v1', canonicalizeJson(request.payload))
     if (request.payloadDigest !== expectedPayloadDigest) throw rpcError('E2E_RPC_PAYLOAD_DIGEST_INVALID')
     const unsigned = requestWithoutAuthentication(request)
@@ -166,7 +173,8 @@ export class AuthenticatedRpcServer {
     if (expectedMac.byteLength !== suppliedMac.byteLength || !timingSafeEqual(expectedMac, suppliedMac)) {
       throw rpcError('E2E_RPC_REQUEST_MAC_INVALID')
     }
-    this.#consumed.set(replayKey, expiresAt)
+    this.#consumed.set(replayKey, { clientId: request.clientId, expiresAt })
+    this.#consumedByClient.set(request.clientId, (this.#consumedByClient.get(request.clientId) ?? 0) + 1)
     const handler = this.#operations.get(request.operation)
     if (!handler) return this.#signResponse(request, 'error', undefined, 'E2E_RPC_OPERATION_UNKNOWN')
     try {
@@ -196,7 +204,13 @@ export class AuthenticatedRpcServer {
   }
 
   #pruneConsumed(now: number): void {
-    for (const [key, expiresAt] of this.#consumed) if (expiresAt <= now) this.#consumed.delete(key)
+    for (const [key, consumed] of this.#consumed) {
+      if (consumed.expiresAt > now) continue
+      this.#consumed.delete(key)
+      const remaining = (this.#consumedByClient.get(consumed.clientId) ?? 1) - 1
+      if (remaining === 0) this.#consumedByClient.delete(consumed.clientId)
+      else this.#consumedByClient.set(consumed.clientId, remaining)
+    }
   }
 
   destroy(): void {
@@ -206,6 +220,7 @@ export class AuthenticatedRpcServer {
     this.#credentials.clear()
     this.#operations.clear()
     this.#consumed.clear()
+    this.#consumedByClient.clear()
     this.#publicKeySpki.fill(0)
   }
 

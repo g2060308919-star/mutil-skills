@@ -63,6 +63,7 @@ export interface BrowserHostRequest {
   isNavigationRequest: boolean
   isMainFrame: boolean
   resourceType: string
+  redirectedFromUrl?: string
   continueWithHeaders(headers: Record<string, string>): Promise<void>
   abort(): Promise<void>
 }
@@ -98,14 +99,77 @@ export interface ControlledBrowserSession {
 }
 
 type RequestCorrelation = Parameters<GatewayBrowserBinding['continueCorrelatedRequest']>[0]
+type ActionRequestCorrelation = RequestCorrelation & {
+  requestId: string
+  signedBodyDigest: string
+  redirectRequestIds: readonly string[]
+  navigation: boolean
+  maxUses: number
+}
 
 interface TrustedBrowserSessionBinding {
   runId: string
   gatewaySessionMeasurementDigest: string
   executeWithCorrelation<T>(correlation: RequestCorrelation, operation: () => Promise<T>): Promise<T>
+  executeWithCorrelations<T>(correlations: readonly ActionRequestCorrelation[], operation: () => Promise<T>): Promise<T>
 }
 
 const controlledSessions = new WeakMap<object, TrustedBrowserSessionBinding>()
+
+interface ActionRequestResolver {
+  correlations: readonly ActionRequestCorrelation[]
+  remaining: Map<string, number>
+  consumed: Map<string, number>
+}
+
+function createActionRequestResolver(candidates: readonly ActionRequestCorrelation[]): ActionRequestResolver {
+  const correlations = structuredClone(candidates)
+  const actionIds = new Set(correlations.map((candidate) => candidate.actionId))
+  const requestIds = new Set(correlations.map((candidate) => candidate.requestId))
+  if (correlations.length === 0 || correlations.length > 10_000 || actionIds.size !== 1
+    || requestIds.size !== correlations.length
+    || correlations.some((candidate) => !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.requestId)
+      || !Number.isSafeInteger(candidate.maxUses) || candidate.maxUses < 1 || candidate.maxUses > 100_000
+      || !Array.isArray(candidate.redirectRequestIds)
+      || candidate.redirectRequestIds.some((requestId) => !requestIds.has(requestId)))) {
+    throw browserHostError('E2E_BROWSER_ACTION_RESOLVER_INVALID', 'Action request resolver 非法或跨 action')
+  }
+  return {
+    correlations,
+    remaining: new Map(correlations.map((candidate) => [candidate.requestId, candidate.maxUses])),
+    consumed: new Map(correlations.map((candidate) => [candidate.requestId, 0])),
+  }
+}
+
+function resolveActionRequest(
+  resolver: ActionRequestResolver,
+  request: BrowserHostRequest,
+): ActionRequestCorrelation | undefined {
+  const method = request.method.toUpperCase()
+  const candidates = resolver.correlations.filter((candidate) => candidate.method === method
+    && candidate.url === request.url && (resolver.remaining.get(candidate.requestId) ?? 0) > 0)
+  const eligible = candidates.filter((candidate) => {
+    if (request.redirectedFromUrl !== undefined) {
+      return request.isNavigationRequest && resolver.correlations.some((source) =>
+        source.url === request.redirectedFromUrl
+        && (resolver.consumed.get(source.requestId) ?? 0) > 0
+        && source.redirectRequestIds.includes(candidate.requestId))
+    }
+    return candidate.navigation
+      ? request.isNavigationRequest && request.isMainFrame && request.resourceType === 'document'
+      : !request.isNavigationRequest
+  })
+  if (eligible.length === 0) return undefined
+  // effect probe 与 cleanup verification 合法地复用同一 GET URL；按已签 stepOrdinal
+  // 消费下一条候选，避免仅凭 method/url 产生歧义或越序。
+  const nextOrdinal = Math.min(...eligible.map((candidate) => candidate.stepOrdinal))
+  const next = eligible.filter((candidate) => candidate.stepOrdinal === nextOrdinal)
+  if (next.length !== 1) return undefined
+  const selected = next[0]!
+  resolver.remaining.set(selected.requestId, resolver.remaining.get(selected.requestId)! - 1)
+  resolver.consumed.set(selected.requestId, (resolver.consumed.get(selected.requestId) ?? 0) + 1)
+  return selected
+}
 
 export class ControlledBrowserHost {
   constructor(
@@ -147,27 +211,41 @@ export class ControlledBrowserHost {
       tempDir,
     })
     let currentCorrelation: RequestCorrelation | undefined
+    let currentResolver: ActionRequestResolver | undefined
     let launchStarted = false
     try {
       launchStarted = true
       await this.driver.launch(profileDir, options)
       await this.driver.installRequestInterceptor(async (request) => {
-        const correlation = currentCorrelation
-        if (correlation === undefined) {
+        const correlation = currentResolver === undefined
+          ? currentCorrelation
+          : resolveActionRequest(currentResolver, request)
+        if (correlation === undefined && currentResolver === undefined && currentCorrelation === undefined) {
           await request.continueWithHeaders({ ...request.headers })
           return
         }
-        if (!request.isNavigationRequest || !request.isMainFrame || request.resourceType !== 'document'
-          || request.url !== correlation.url || request.method.toUpperCase() !== correlation.method) {
+        if (correlation === undefined || (currentResolver === undefined
+          && (!request.isNavigationRequest || !request.isMainFrame || request.resourceType !== 'document'
+            || request.url !== correlation.url || request.method.toUpperCase() !== correlation.method))) {
           await request.abort()
           return
         }
-        await input.gateway.browserBinding.continueCorrelatedRequest({
-          ...correlation,
-          url: request.url,
-          method: request.method.toUpperCase(),
-          headers: { ...request.headers },
-        }, { continueWithHeaders: request.continueWithHeaders })
+        try {
+          await input.gateway.browserBinding.continueCorrelatedRequest({
+            ...correlation,
+            url: request.url,
+            method: request.method.toUpperCase(),
+            headers: { ...request.headers },
+          }, { continueWithHeaders: request.continueWithHeaders })
+        } catch (error) {
+          if (currentResolver !== undefined && typeof correlation.requestId === 'string') {
+            currentResolver.remaining.set(correlation.requestId, (currentResolver.remaining.get(correlation.requestId) ?? 0) + 1)
+            currentResolver.consumed.set(
+              correlation.requestId, Math.max(0, (currentResolver.consumed.get(correlation.requestId) ?? 1) - 1),
+            )
+          }
+          throw error
+        }
       })
       const commandLine = await this.driver.actualCommandLine()
       verifyActualCommandLine(commandLine, options, profileDir)
@@ -224,11 +302,21 @@ export class ControlledBrowserHost {
         runId: input.runId,
         gatewaySessionMeasurementDigest: measurement.gatewaySessionMeasurementDigest,
         executeWithCorrelation: async <T>(correlation: RequestCorrelation, operation: () => Promise<T>) => {
-          if (closed || currentCorrelation !== undefined) {
+          if (closed || currentCorrelation !== undefined || currentResolver !== undefined) {
             throw browserHostError('E2E_BROWSER_SESSION_BUSY', 'Browser session 已关闭或存在并发 Action')
           }
           currentCorrelation = structuredClone(correlation)
           try { return await operation() } finally { currentCorrelation = undefined }
+        },
+        executeWithCorrelations: async <T>(
+          correlations: readonly ActionRequestCorrelation[],
+          operation: () => Promise<T>,
+        ) => {
+          if (closed || currentCorrelation !== undefined || currentResolver !== undefined) {
+            throw browserHostError('E2E_BROWSER_SESSION_BUSY', 'Browser session 已关闭或存在并发 Action')
+          }
+          currentResolver = createActionRequestResolver(correlations)
+          try { return await operation() } finally { currentResolver = undefined }
         },
       })
       return session
@@ -324,6 +412,7 @@ class PlaywrightBrowserHostDriver implements BrowserHostDriver {
         isNavigationRequest: request.isNavigationRequest(),
         isMainFrame: request.frame() === this.page.mainFrame(),
         resourceType: request.resourceType(),
+        ...(request.redirectedFrom() === null ? {} : { redirectedFromUrl: request.redirectedFrom()!.url() }),
         continueWithHeaders: async (headers) => await route.continue({ headers }),
         abort: async () => await route.abort('blockedbyclient'),
       })

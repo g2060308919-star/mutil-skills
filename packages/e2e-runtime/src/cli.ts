@@ -6,8 +6,21 @@ import {
   digestText,
   type ApprovalGrantSubject,
 } from '@mutil-skills/e2e-contracts'
+import {
+  EncryptedQuarantine,
+  InMemoryQuarantineAuditLog,
+  PatternPrivacyScanner,
+  createTrustedCompilerReadiness,
+} from '@mutil-skills/e2e-engine'
+import {
+  createTrustedCompilerProjectorTrust,
+  projectCompilerInputFromArtifacts,
+} from '@mutil-skills/e2e-playwright-runtime'
 import { homedir } from 'node:os'
-import type { Readable, Writable } from 'node:stream'
+import { randomUUID } from 'node:crypto'
+import { mkdir } from 'node:fs/promises'
+import { join } from 'node:path'
+import { Readable, type Writable } from 'node:stream'
 import {
   installRuntime as installRuntimeDefault,
   type InstallRuntimeOptions,
@@ -31,6 +44,7 @@ import {
 } from './runtime-doctor.js'
 import { isExactRuntimeVersion } from './runtime-manifest.js'
 import { E2ERuntimeHost } from './runtime-host.js'
+import { ProjectPublisher } from './project-publisher.js'
 import { RuntimeRunStore, type RuntimeRunSnapshot } from './run-store.js'
 import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js'
 import { assertSameProjectIdentity, resolveProjectIdentity } from './project-identity.js'
@@ -40,7 +54,18 @@ import { installChromium as installChromiumDefault, type InstallChromiumOptions 
 import {
   bootstrapInstalledBrowserRuntime,
   createProductionBrowserCapabilities,
+  createProductionInjectionBrowserCapability,
+  createProductionWriteBrowserCapability,
 } from './runtime-browser-wiring.js'
+import { RuntimeQuarantineSecretProvider } from './quarantine-secret-provider.js'
+import { createProductionEvidenceQuarantine } from './runtime-evidence-quarantine.js'
+import { RuntimeFinalizationMaterialSealer,
+  authorizeRuntimeFinalizationMaterialSealer } from './runtime-finalization-material-sealer.js'
+import { ProductionFinalizationMaterialProvider } from './production-finalization-material-provider.js'
+import { ProductionGenerationFinalizer } from './production-generation-finalizer.js'
+import { RegressionPublisher } from './regression-publisher.js'
+import { GenerationAssembler } from './generation-assembler.js'
+import { runtimeLayout } from './runtime-layout.js'
 import {
   MAX_SECRET_BYTES,
   SECRET_REF_PATTERN,
@@ -48,7 +73,9 @@ import {
 } from './secret-contract.js'
 import {
   computeRuntimeApprovalSubjectDigest,
+  openRuntimeArtifactStoreAuthority,
   startRuntimeAuthorityHost,
+  type RuntimeArtifactStoreAuthority,
   type RuntimeAuthorityHost,
   type RuntimeAuthoritySession,
 } from './authority-host.js'
@@ -102,6 +129,12 @@ export interface RuntimeCliDependencies {
   }) => Promise<CliSecretBroker>
   installChromium?: (options: InstallChromiumOptions) => Promise<unknown>
   bootstrapBrowserRuntime?: typeof bootstrapInstalledBrowserRuntime
+  projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
+  /**
+   * 仅供已安装 Runtime 的隔离验收宿主注入与审批使用同一持久 Authority；
+   * 普通 CLI 始终使用 openRuntimeArtifactStoreAuthority 的生产默认实现。
+   */
+  openArtifactStoreAuthority?: typeof openRuntimeArtifactStoreAuthority
 }
 
 export async function runCli(
@@ -115,6 +148,25 @@ export async function runCli(
   if (arguments_.length === 1 && arguments_[0] === '--version') {
     await writeText(stdout, `${RUNTIME_PACKAGE_VERSION}\n`)
     return 0
+  }
+
+  if (arguments_[0] === 'report') {
+    if (arguments_.length !== 3 || arguments_[1] !== '--run-id' || !SAFE_ID.test(arguments_[2]!)) {
+      return writeErrorResponse(responseWriter, 'UNKNOWN', new E2EError({
+        code: 'E2E_RUNTIME_REQUEST_INVALID', category: 'input',
+        message: 'report 只接受 --run-id <safe-id>', retryable: false,
+      }))
+    }
+    const requestBytes = Buffer.from(canonicalizeJson({
+      schemaVersion: '1.0.0', requestId: `REPORT-${randomUUID()}`,
+      client: { name: 'repo-e2e-cli', version: RUNTIME_PACKAGE_VERSION },
+      command: 'render-report',
+      projectRoot: (dependencies.currentWorkingDirectory ?? process.cwd)(),
+      payload: { runId: arguments_[2] },
+    }))
+    return await runCli(
+      ['rpc'], Readable.from([requestBytes]), stdout, stderr, dependencies,
+    )
   }
 
   if (arguments_[0] === 'install-runtime' || arguments_[0] === 'uninstall-runtime') {
@@ -249,6 +301,10 @@ export async function runCli(
       ...(projectRoot === undefined ? {} : { projectRoot }),
     })
     let authorityHost: RuntimeAuthorityHost | undefined
+    let artifactAuthority: RuntimeArtifactStoreAuthority | undefined
+    let executionSecretBroker: RuntimeSecretBroker | undefined
+    let quarantineSecretProvider: RuntimeQuarantineSecretProvider | undefined
+    let quarantine: EncryptedQuarantine | undefined
     let response: Awaited<ReturnType<E2ERuntimeHost['handle']>> | undefined
     let processingError: unknown
     try {
@@ -265,6 +321,117 @@ export async function runCli(
       const browserCapabilities = !needsBrowserExecution ? undefined : createProductionBrowserCapabilities({
         homeDir: dependencies.homeDir, installation, authorityHost: getAuthorityHost,
       })
+      let writeExecutor
+      let injectionExecutor
+      let evidenceQuarantine
+      if (request.command === 'execute-run' || request.command === 'finalize-run') {
+        const executionIdentity = await resolveProjectIdentity(request.projectRoot)
+        if (request.command === 'execute-run') executionSecretBroker = await RuntimeSecretBroker.open({
+          homeDir: dependencies.homeDir, projectRoot: executionIdentity.realRoot,
+        })
+        quarantineSecretProvider = await RuntimeQuarantineSecretProvider.createForProject({
+          homeDir: dependencies.homeDir,
+          projectRoot: executionIdentity.realRoot,
+        })
+        quarantine = new EncryptedQuarantine({
+          root: runtimeLayout(dependencies.homeDir).quarantine,
+          secrets: quarantineSecretProvider,
+          audit: new InMemoryQuarantineAuditLog(),
+          now: () => new Date(),
+        })
+        if (request.command === 'execute-run') writeExecutor = createProductionWriteBrowserCapability({
+          homeDir: dependencies.homeDir,
+          installation,
+          authorityHost: getAuthorityHost,
+          secretBroker: executionSecretBroker!,
+        })
+        if (request.command === 'execute-run') injectionExecutor = createProductionInjectionBrowserCapability({
+          homeDir: dependencies.homeDir,
+          installation,
+          authorityHost: getAuthorityHost,
+        })
+        if (request.command === 'execute-run') evidenceQuarantine = createProductionEvidenceQuarantine({ quarantine })
+      }
+      if ((request.command === 'render-report' || request.command === 'finalize-run')
+        && dependencies.projectPublisherFactory === undefined) {
+        artifactAuthority = await (dependencies.openArtifactStoreAuthority
+          ?? openRuntimeArtifactStoreAuthority)({
+          homeDir: dependencies.homeDir, installation, subject: localAuthoritySubject(),
+        })
+      }
+      const projectPublisherFactory = dependencies.projectPublisherFactory ?? (artifactAuthority === undefined
+        ? undefined
+        : (root: string) => new ProjectPublisher({
+            projectRoot: root,
+            scanner: new PatternPrivacyScanner(RUNTIME_PACKAGE_VERSION),
+            authority: artifactAuthority!,
+          }))
+      let generationFinalizer
+      let finalizationMaterialSealer
+      if (request.command === 'finalize-run') {
+        if (artifactAuthority === undefined || quarantine === undefined || projectPublisherFactory === undefined) {
+          throw new E2EError({ code: 'E2E_RUNTIME_FINALIZER_NOT_READY', category: 'environment',
+            message: '生产最终化依赖未就绪', retryable: false })
+        }
+        const snapshot = await runStore.getRun(
+          (await resolveProjectIdentity(request.projectRoot)).digest, request.payload.runId,
+        )
+        if (snapshot === undefined) throw new E2EError({ code: 'E2E_RUNTIME_RUN_NOT_FOUND', category: 'input',
+          message: 'Run 不存在', retryable: false })
+        const tempParent = join(runtimeLayout(dependencies.homeDir).logs, 'regression')
+        await mkdir(tempParent, { recursive: true, mode: 0o700 })
+        const regressionPublisher = await RegressionPublisher.create({
+          issuer: 'e2e-runtime-regression', keyId: `regression-${snapshot.runId}`, tempParent,
+        })
+        const provider = new ProductionFinalizationMaterialProvider({
+          quarantine,
+          authority: artifactAuthority,
+          projectCompilerInput: ({ artifacts }) => {
+            const readinessArtifacts = artifacts.filter((artifact) =>
+              ['prd-manifest', 'prd-diff', 'acceptance-scope'].includes(artifact.artifactType))
+            const readiness = createTrustedCompilerReadiness({
+              artifacts: readinessArtifacts, contractsVersion: '2.0.0',
+              verifyArtifactSignature: artifactAuthority!.verifySignature,
+              verifyDecisionReceipt: artifactAuthority!.verifyDecisionReceipt,
+            })
+            const trust = createTrustedCompilerProjectorTrust({
+              artifactAuthority: { material: artifactAuthority!.artifactVerifierMaterial,
+                expectedPublicKeyDigest: artifactAuthority!.artifactVerifierMaterial.publicKeyDigest },
+              approvalFreshnessAuthority: { material: artifactAuthority!.approvalFreshnessVerifierMaterial,
+                expectedPublicKeyDigest: artifactAuthority!.approvalFreshnessVerifierMaterial.publicKeyDigest },
+              readiness,
+            })
+            return projectCompilerInputFromArtifacts({
+              artifacts: artifacts.filter((artifact) => [
+                'prd-manifest', 'prd-diff', 'acceptance-scope', 'project-policy',
+                'requirement-model', 'coverage-universe', 'test-cases', 'browser-action-map',
+                'execution-contract', 'run-bundle', 'approval-grants',
+              ].includes(artifact.artifactType)),
+              playwrightVersion: '1.61.1', trust,
+            })
+          },
+        })
+        const assembler = new GenerationAssembler({
+          reportPresentation: { title: 'E2E 验收报告', injectionBoundary: '由材料提供者绑定。',
+            recommendations: [], regressionCommand: 'npx playwright test',
+            browser: { version: '1.61.1', channel: 'chromium' } },
+          gatewayVerifier: () => false, sanitizerVerifier: () => false,
+          privacyReviewVerifier: () => false, regressionDiscoveryVerifier: () => false,
+          attemptProofVerifier: () => false,
+        })
+        const publisher = projectPublisherFactory(request.projectRoot)
+        generationFinalizer = new ProductionGenerationFinalizer({
+          materialProvider: provider, regressionPublisher, assembler,
+          projectPublisher: publisher as ProjectPublisher, quarantine,
+        }).capability()
+        finalizationMaterialSealer = authorizeRuntimeFinalizationMaterialSealer(
+          new RuntimeFinalizationMaterialSealer({
+            quarantine, authority: artifactAuthority,
+            runtimeVersion: RUNTIME_PACKAGE_VERSION, contractsVersion: '0.1.0',
+            engineVersion: '0.1.0', playwrightVersion: '1.61.1',
+          }),
+        )
+      }
       const host = new E2ERuntimeHost({
         installation,
         doctor: async () => await (dependencies.runRuntimeDoctor ?? runRuntimeDoctorDefault)({
@@ -276,11 +443,19 @@ export async function runCli(
           preflightExecutor: browserCapabilities.preflight,
           readExecutor: browserCapabilities.read,
         }),
+        ...(writeExecutor === undefined ? {} : { writeExecutor }),
+        ...(injectionExecutor === undefined ? {} : { injectionExecutor }),
+        ...(evidenceQuarantine === undefined ? {} : { evidenceQuarantine }),
+        ...(generationFinalizer === undefined ? {} : { generationFinalizer }),
+        ...(finalizationMaterialSealer === undefined ? {} : { finalizationMaterialSealer }),
         ...(request.command !== 'open-approval' ? {} : {
           authorityHostFactory: async () => {
             return await getAuthorityHost()
           },
           presentUserPresenceUrl: async (url: string) => await writeText(stderr, `${url}\n`),
+        }),
+        ...(projectPublisherFactory === undefined ? {} : {
+          projectPublisherFactory,
         }),
       })
       response = await host.handle(request, requestBytes)
@@ -288,8 +463,17 @@ export async function runCli(
       processingError = error
     }
     const cleanupErrors: unknown[] = []
+    if (executionSecretBroker !== undefined) {
+      try { await executionSecretBroker.close() } catch (error) { cleanupErrors.push(error) }
+    }
+    if (quarantineSecretProvider !== undefined) {
+      try { quarantineSecretProvider.close() } catch (error) { cleanupErrors.push(error) }
+    }
     if (authorityHost !== undefined) {
       try { await authorityHost.close() } catch (error) { cleanupErrors.push(error) }
+    }
+    if (artifactAuthority !== undefined) {
+      try { await artifactAuthority.close() } catch (error) { cleanupErrors.push(error) }
     }
     try { await runStore.close() } catch (error) { cleanupErrors.push(error) }
     if (cleanupErrors.length > 0) {

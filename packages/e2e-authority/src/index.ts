@@ -9,6 +9,12 @@ export {
 } from './trusted-approval-freshness.js'
 export * from './attempt-event-verifier.js'
 export * from './sqlite-state-store.js'
+export {
+  authoritySnapshotMac,
+  type AuthorityStateAnchorPoint,
+  type AuthorityStateAnchorRecord,
+  type TrustedMonotonicAuthorityStateAnchor,
+} from './authority-state-anchor.js'
 export * from './local-lease-authority.js'
 export * from './authenticated-rpc.js'
 export {

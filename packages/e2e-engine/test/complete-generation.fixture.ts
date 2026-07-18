@@ -4,7 +4,7 @@ import { canonicalizeJson, digestApprovalProjection, digestArtifactContent, dige
   digestDecisionSubject, projectLineageDecisionSubject, projectScopeDecisionSubject,
   computeRegressionSourceSetDigest, type DecisionReceipt, type DecisionReceiptVerificationBinding,
   type RegressionDiscoveryAttestation, type RegressionDiscoverySubject,
-  type AttemptEventAuthorityProof, type ExecutionOutcomeReceipt } from '@mutil-skills/e2e-contracts'
+  type AttemptEventAuthorityProof, type ExecutionOutcomeReceipt, type RuntimeProvenance } from '@mutil-skills/e2e-contracts'
 import { createSanitizerAttestationVerifier, LocalSanitizerAuthority,
   appendAttemptEvent, type BuildCompleteGenerationInput, type CompleteGenerationAuthority } from '../src/index.js'
 import type { SanitizerPolicy } from '@mutil-skills/e2e-contracts'
@@ -14,6 +14,17 @@ const d = (value: string) => digestText('fixture/v1', value)
 const context = {
   assetId: 'ASSET-1', generationId: 'GEN-1', prdRevision: d('prd'),
   engineVersion: '1.0.0', createdAt: '2026-07-12T00:00:00.000Z', fencingToken: 7,
+}
+const provenance: RuntimeProvenance = {
+  runtimeVersion: '0.0.0', runtimeInstallationDigest: d('runtime-installation'), protocolVersion: '1.0.0',
+  contractsVersion: '0.0.0', engineVersion: context.engineVersion, playwrightVersion: '1.0.0',
+  chromiumDigest: d('browser-executable'), gatewayPolicyDigest: d('runtime-policy'),
+  authorityPublicKeyDigest: d('authority-public-key'),
+  authorityStateProtectionLevel: 'local-crash-integrity', projectIdentityDigest: d('project-identity'),
+  sourceRevisionDigest: context.prdRevision, sourceRepositoryIndependent: true,
+  isolationProofDigest: digestText('runtime-isolation-proof/v1', canonicalizeJson([
+    { id: 'TRUSTED-CHROME-EXECUTABLE', digest: d('browser-executable') },
+  ])),
 }
 const authorityKeys = generateKeyPairSync('ed25519')
 const freshnessKeys = generateKeyPairSync('ed25519')
@@ -262,7 +273,8 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       browserMatrix: [{ browserId: 'CHROMIUM', channel: 'chromium', viewportId: 'DESKTOP' }],
       identities: [{ identityId: 'IDENTITY-1', roleIds: ['USER'], secretRef: 'SECRET-REF-1' }],
       caseQueue: [{ ordinal: 0, caseId: 'CASE-1' }],
-      actionIntents: [{ actionId: 'ACTION-1', effect: 'read', intentDigest: d('intent') }],
+      actionIntents: [{ actionId: 'ACTION-1', effect: 'read', intentDigest: d('intent'), requestIds: [] }],
+      readHttpRequests: [],
       dataNeeds: [], manualProcedures: [], evidencePolicyDigest: sanitizationRecord.policyDigest,
       runtimeIsolation: null, unresolvedItems: [],
     }),
@@ -285,7 +297,8 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       actions: [{ caseId: 'CASE-1', stepId: 'STEP-1', actionId: 'ACTION-1', pageIdentityId: 'PAGE-1',
         locatorCandidates: [{ strategy: 'role', value: 'main', confidence: 1 }],
         playwrightAction: 'page.goto', waits: [], oracleIds: ['ORACLE-1'], effect: 'read',
-        capabilities: [{ operation: 'dom-read', capabilityId: 'CAPABILITY-1' }] }], unmappedSteps: [], discoveredRisks: [],
+        capabilities: [{ operation: 'dom-read', capabilityId: 'CAPABILITY-1' }], requestIds: [] }],
+      unmappedSteps: [], discoveredRisks: [],
     }),
     'regression-manifest': draft('run/regression-manifest.json', {
       testDomain: regressionSubject.testDomain, executionProfile: regressionSubject.executionProfile,
@@ -342,7 +355,7 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
   drafts['run-bundle'].content.allInputRefs = fixtureApprovalInputRefs(drafts)
   const runBundleDigest = predictedContentDigest('run-bundle', drafts['run-bundle'])
   const subject = {
-    schemaVersion: '2.0.0', assetId: context.assetId, prdRevision: context.prdRevision,
+    schemaVersion: '2.1.0', assetId: context.assetId, prdRevision: context.prdRevision,
     scopeDigest: digestApprovalProjection('acceptance-scope', drafts['acceptance-scope'].content),
     requirementModelDigest: digestApprovalProjection('requirement-model', drafts['requirement-model'].content),
     coveragePolicyDigest: d('coverage-policy'),
@@ -354,7 +367,8 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
     runBundleProjectionDigest: digestApprovalProjection('run-bundle', drafts['run-bundle'].content),
     environment: 'test', baseOrigin: 'https://example.test', actor: 'USER',
     discoveryGrantId: 'DISCOVERY-1', preflightDigest: d('authority-preflight'),
-    actions: [{ actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1, requestIds: [] }],
   }
   const capabilities = drafts['run-bundle'].content.signedCapabilities
   const receiptBody = {
@@ -377,7 +391,7 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
   } }] }
 
   const result: BuildCompleteGenerationInput = {
-    context: { ...context }, drafts,
+    context: { ...context }, drafts, provenance: { ...provenance },
     reportPresentation: {
       title: 'E2E 验收报告', injectionBoundary: '本代没有浏览器注入结果。', recommendations: ['执行 CASE-1。'],
       regressionCommand: 'npx playwright test', browser: { version: '1.0.0', channel: 'chromium' },
@@ -668,8 +682,10 @@ function predictedContentDigest(artifactType: string, artifactDraft: any): strin
 }
 
 function predictedContentDigestFor(contextValue: BuildCompleteGenerationInput['context'], artifactType: string, artifactDraft: any): string {
-  const schemaVersion = ['approval-grants', 'browser-preflight', 'browser-action-map', 'run-bundle', 'project-policy']
-    .includes(artifactType) ? '2.0.0' : '1.0.0'
+  const schemaVersion = artifactType === 'browser-action-map' ? '2.1.0'
+    : artifactType === 'execution-contract' ? '1.1.0'
+      : ['approval-grants', 'browser-preflight', 'run-bundle', 'project-policy']
+          .includes(artifactType) ? '2.0.0' : '1.0.0'
   const envelope = {
     artifactId: `ARTIFACT-${artifactType.toUpperCase()}`, artifactType, schemaVersion,
     engineVersion: contextValue.engineVersion, assetId: contextValue.assetId, prdRevision: contextValue.prdRevision,

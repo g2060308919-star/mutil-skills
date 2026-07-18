@@ -8,14 +8,15 @@ const digest = (value: string) => digestText('discovery-test/v1', value)
 
 function subject(): DiscoveryApprovalSubject {
   return {
-    schemaVersion: '1.0.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest('prd'), scopeDigest: digest('scope'),
+    schemaVersion: '1.1.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest('prd'), scopeDigest: digest('scope'),
     environment: 'test', baseOrigin: 'https://test.example.com', actor: 'auditor',
     expectedPageIdentity: {
       url: 'https://test.example.com/orders', title: '订单', heading: '订单列表',
       ariaSignals: ['main:订单列表'],
     },
     bootstrapIntentsDigest: digest('bootstrap-intents'),
-    actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation', maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation', maxUses: 1, requestIds: [] }],
   }
 }
 
@@ -25,14 +26,15 @@ function readSubject(
   preflightDigest: string,
 ): ReadApprovalSubject {
   return {
-    schemaVersion: '2.0.0', assetId: discovery.assetId, prdRevision: discovery.prdRevision,
+    schemaVersion: '2.1.0', assetId: discovery.assetId, prdRevision: discovery.prdRevision,
     scopeDigest: discovery.scopeDigest, requirementModelDigest: digest('model'),
     coveragePolicyDigest: digest('coverage'), universeDigest: digest('universe'),
     caseDigest: digest('case'), actionMapDigest: digest('actions'), policyDigest: digest('policy'),
     executionContractDigest: digest('execution'), runBundleProjectionDigest: digest('run-bundle'),
     environment: discovery.environment, baseOrigin: discovery.baseOrigin, actor: discovery.actor,
     discoveryGrantId, preflightDigest,
-    actions: [{ actionId: 'ACTION-READ', operation: 'dom-read', maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-READ', operation: 'dom-read', maxUses: 1, requestIds: [] }],
   }
 }
 
@@ -101,7 +103,7 @@ describe('LocalApprovalAuthority discovery grants', () => {
     })
 
     expect(grant.subject.expectedPageIdentity.url).toBe('https://test.example.com/orders')
-    expect(grant.capabilities[0]!.targetUrl).toBe('https://test.example.com/orders')
+    expect(grant.capabilities[0]).toMatchObject({ targetUrl: 'https://test.example.com/orders' })
   })
 
   test('拒绝写操作、空 actor、跨 origin 页面和过长 TTL', async () => {
@@ -111,11 +113,14 @@ describe('LocalApprovalAuthority discovery grants', () => {
     const invalidSubjects = [
       { ...subject(), actor: '' },
       { ...subject(), expectedPageIdentity: { ...subject().expectedPageIdentity, url: 'https://evil.example.com/orders' } },
-      { ...subject(), actions: [{ actionId: 'ACTION-WRITE', operation: 'write' as 'local-navigation', maxUses: 1 }] },
+      { ...subject(), actions: [{
+        actionId: 'ACTION-WRITE', operation: 'write' as 'local-navigation', maxUses: 1 as const, requestIds: [],
+      }] },
     ]
     for (const candidate of invalidSubjects) {
       await expect(authority.issueDiscoveryGrant({
-        subject: candidate, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
+        subject: candidate as DiscoveryApprovalSubject,
+        approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
       })).rejects.toMatchObject({ code: 'E2E_APPROVAL_DISCOVERY_SCOPE_INVALID' })
     }
     await expect(authority.issueDiscoveryGrant({

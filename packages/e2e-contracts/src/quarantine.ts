@@ -26,7 +26,8 @@ export const QuarantineRunManifestSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
   runId: z.string().min(1).max(128),
   keyId: z.string().min(1).max(256),
-  status: z.enum(['open', 'privacy-unlocked']),
+  status: z.enum(['open', 'privacy-unlocked', 'committed-pending-erasure']),
+  generationDigest: DigestSchema.optional(),
   privacyUnlock: z.object({
     grantId: z.string().min(1),
     approverSubject: z.string().min(1),
@@ -41,6 +42,12 @@ export const QuarantineRunManifestSchema = z.object({
   }
   if (manifest.status === 'privacy-unlocked' && manifest.privacyUnlock === undefined) {
     context.addIssue({ code: 'custom', message: 'privacy-unlocked manifest requires privacyUnlock', path: ['privacyUnlock'] })
+  }
+  if (manifest.status === 'committed-pending-erasure' && manifest.generationDigest === undefined) {
+    context.addIssue({ code: 'custom', message: 'committed manifest requires generationDigest', path: ['generationDigest'] })
+  }
+  if (manifest.status !== 'committed-pending-erasure' && manifest.generationDigest !== undefined) {
+    context.addIssue({ code: 'custom', message: 'uncommitted manifest cannot contain generationDigest', path: ['generationDigest'] })
   }
 })
 
@@ -58,7 +65,7 @@ export interface QuarantineAuditEvent {
   runId: string
   actorSubject: string
   actorRoles: string[]
-  action: 'create' | 'write' | 'read' | 'decrypt' | 'destroy' | 'expire' | 'recovery-unlock' | 'recovery-destroy'
+  action: 'create' | 'write' | 'read' | 'decrypt' | 'publication-committed' | 'destroy' | 'expire' | 'recovery-unlock' | 'recovery-destroy'
   decision: 'allowed' | 'denied'
   reasonCode: string
   targetDigest?: string

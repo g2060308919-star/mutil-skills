@@ -17,6 +17,7 @@ describe('renderCompleteReport', () => {
       '覆盖 Universe 与指标', '排除、N/A、Manual、Declined 与 Blocked', '端到端追踪矩阵',
       '真实链路结果', '故障注入结果', 'Case 详情', 'Network Gateway 审计', '浏览器健康发现',
       '诊断、自愈与重试', '写入副作用与清理', '回归资产与独立执行', '剩余风险与建议动作',
+      'Runtime 与隔离证明',
     ]
     let previous = -1
     for (const heading of headings) {
@@ -38,6 +39,10 @@ describe('renderCompleteReport', () => {
     expect(report.html).toContain('业务失败（已观测）')
     expect(report.markdown).toContain('REQ-1')
     expect(report.markdown).toContain('evidence/CASE-REAL-1.png')
+    expect(report.markdown).toContain('Runtime installation：sha256:')
+    expect(report.markdown).toContain('源码仓库独立：是')
+    expect(report.markdown).not.toMatch(/\/(?:Users|home|private|tmp)\//)
+    expect(report.html).not.toMatch(/\/(?:Users|home|private|tmp)\//)
   })
 
   test('HTML 支持可访问筛选、原生展开与打印，且不加载远程资源', () => {

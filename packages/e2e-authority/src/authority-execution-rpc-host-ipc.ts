@@ -33,7 +33,7 @@ export interface AuthorityExecutionHostConfig {
 }
 
 const CONTROL_TYPES = new Set([
-  'enroll-identity', 'open-approval-session', 'finalize-approval', 'recover-approval',
+  'enroll-identity', 'open-approval-session', 'finalize-approval', 'finalize-decision', 'recover-approval',
   'activate-grant', 'ack-finalization',
 ])
 

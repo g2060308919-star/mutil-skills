@@ -7,7 +7,12 @@ import {
   type ReversibleWriteCapability,
   type SignedWriteGrant,
 } from '@mutil-skills/e2e-contracts'
-import { LocalGatewayAuditSigner, ReversibleWriteGateway, digestJsonHttpPayload } from '../src/index.js'
+import {
+  LocalGatewayAuditSigner,
+  ReversibleWriteGateway,
+  digestBinaryHttpPayload,
+  digestJsonHttpPayload,
+} from '../src/index.js'
 
 const targetFingerprint = digestText('fixture-resource/v1', 'order:100')
 const payload = { orderId: 100, decision: 'approve' }
@@ -78,6 +83,27 @@ function dependencies() {
 }
 
 describe('ReversibleWriteGateway', () => {
+  test('template intent 只接受 Runtime 解析后摘要完全一致的 payload，且必须完整绑定', async () => {
+    const { grant, capability } = fixture()
+    const body = Buffer.from('{"token":"runtime-secret"}')
+    capability.requests = [{
+      ...capability.requests[0]!, intentId: 'INTENT-TEMPLATE', method: 'POST',
+      payload: { kind: 'template', templateDigest: digestText('template/v1', 'SECRET.API') },
+    }]
+    grant.capabilities = [capability]
+    const deps = dependencies()
+    expect(() => new ReversibleWriteGateway({
+      grant, currentSubject: grant.subject, capability, attemptId: 'ATTEMPT-1', attemptContext, ...deps,
+    })).toThrow(/template intent/)
+    const gateway = new ReversibleWriteGateway({
+      grant, currentSubject: grant.subject, capability, attemptId: 'ATTEMPT-1', attemptContext, ...deps,
+      resolvedTemplatePayloadDigests: { 'INTENT-TEMPLATE': digestBinaryHttpPayload(body) },
+    })
+    await expect(gateway.decide({
+      method: 'POST', url: 'https://test.example.com/api/orders/100', body,
+      contentType: 'application/json',
+    })).resolves.toMatchObject({ decision: 'forward', intentId: 'INTENT-TEMPLATE' })
+  })
   test('Gateway 使用独立当前计划主体复验，主体变化时不允许请求离开', async () => {
     const { grant, capability } = fixture()
     const deps = dependencies()

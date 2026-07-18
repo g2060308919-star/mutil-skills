@@ -413,6 +413,8 @@ npm exec --yes --package=@mutil-skills/e2e-runtime@<exact-version> -- repo-e2e i
 
 > **Task 7 最终安全审查 Errata（2026-07-17，覆盖上段 WebSocket 透传表述）**：Mockttp 的 WebSocket 消息事件只能事后观察，无法证明 client/inbound frame 在转发前经过 `ProtocolGuard`；因此 Task 7 对正确 token/capability 的 WebSocket 也 fail closed，返回 `E2E_GATEWAY_WEBSOCKET_BRIDGE_UNAVAILABLE`，不连接上游且不创建 reservation。支持 WebSocket 必须等待受控逐帧 bridge 能在转发前拒绝 client frame、执行 inbound 消息/字节上限并在 close 时 complete。Gateway audit finalize 必须先冻结接入、drain in-flight 并等待 child terminal/write settlement；write complete/unknown/close/child-exit 在首个 await 前原子 claim 单一终态，多步 request sequence 未全部 transport observed 与 policy-complete 时不得 finalize。
 
+> **Task 9 协议支持边界 Errata（2026-07-17，覆盖“首发支持 WebSocket/SSE”的旧表述）**：Task 9 复核确认，在 Mockttp `4.4.2` 上无法以事后 message event 实现转发前逐帧策略；现有 SSE policy 也没有把 reservation 终态绑定到真实 stream close/abort。首发生产能力因此限定为 HTTP/HTTPS、显式逐跳 Redirect 与 Beacon；WebSocket/SSE 必须在上游连接或转发前以稳定 reason code 阻塞，不消费授权，并进入报告 `cannotClaim`。独立 bridge 完成 client-frame pre-forward deny、inbound pre-forward limits、close→complete、abort→unknown 以及真实浏览器/上游矩阵之前，不得恢复支持声明。
+
 ### 9.1 职责
 
 `@mutil-skills/e2e-gateway` 继续提供 policy、canonical request、effect 和审计逻辑；新增 Runtime 内的 `gateway-proxy-host.ts` 只负责生产传输：
@@ -443,6 +445,8 @@ Gateway 使用每安装独立、本地保存的 CA material，为每 Run 生成�
 ### 9.4 威胁边界说明
 
 本设计防御 PRD、页面、生成候选、项目依赖和受控测试进程；不声称防御已完全控制当前 OS 用户账号或 root 的攻击者。同一 OS 用户证明的报告范围仍是“本地个人 Authority”，不得描述为组织级不可抵赖。
+
+> **Spec Errata（2026-07-18，Task 9 Authority 状态复审）**：Authority snapshot 的 HMAC 与 SQLite revision 只能认证内容并检测 DB 单独回滚；默认本地 anchor 使用单一有界高水位，只提供 `local-crash-integrity`，anchor 缺失、序列断裂、DB/anchor 不精确相等均失败关闭，不再用数据库自动补齐。它与 DB 和状态密钥属于同一 UID 信任域，符合本节“不防御已完全控制当前 OS 用户”的边界，不能被报告为同 UID 反回滚或组织级不可抵赖。实现必须提供同步、线性化的 `TrustedMonotonicAuthorityStateAnchor` seam；只有部署方显式注入权限和介质独立、声明 `trusted-monotonic` 的 provider，才可提升该项证明等级。reservation 与 RPC 终态幂等记录不得通过淘汰改变历史语义，必须持久有界或在容量耗尽时失败关闭。
 
 ## 10. Browser、Compiler 与宿主资源隔离
 

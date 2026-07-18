@@ -26,6 +26,8 @@ import {
   type VerdictInput,
   type AttemptEventAuthorityProof,
   type ExecutionOutcomeReceipt,
+  RuntimeProvenanceSchema,
+  type RuntimeProvenance,
 } from '@mutil-skills/e2e-contracts'
 import {
   computeFinalizationSnapshotDigest,
@@ -39,6 +41,7 @@ import {
 } from './generation-audit.js'
 import { computeVerdict, type VerdictDependencies } from './verdict.js'
 import { deriveBrowserCannotClaim } from './browser-claims.js'
+import { deriveRuntimeProvenanceCannotClaim } from './runtime-provenance-claims.js'
 import { auditPersistedAttemptFacts, createPersistedAttemptVerdictDependencies,
   type PersistedAttemptProjection } from './persisted-attempt-audit.js'
 import { types as utilTypes } from 'node:util'
@@ -99,6 +102,8 @@ export interface CompleteGenerationFile {
 
 export interface BuildCompleteGenerationInput {
   context: CompleteGenerationContext
+  /** Runtime Host 在隔离边界内测量并冻结的事实，不接受项目侧推导。 */
+  provenance: RuntimeProvenance
   drafts: Record<FactArtifactType, CompleteArtifactDraft>
   reportPresentation: ReportPresentation
   authority: CompleteGenerationAuthority
@@ -133,7 +138,7 @@ const FACT_TYPES = ARTIFACT_TYPES.filter(
 export function buildCompleteGeneration(candidate: BuildCompleteGenerationInput): CompleteGenerationBuild {
   const input = snapshotCompleteGenerationInput(candidate)
   assertExactKeys(input as unknown as Record<string, unknown>, [
-    'context', 'drafts', 'reportPresentation', 'authority',
+    'context', 'provenance', 'drafts', 'reportPresentation', 'authority',
     'gatewayVerifier', 'sanitizerVerifier', 'privacyReviewVerifier', 'regressionDiscoveryVerifier', 'verdictDependencies',
     'attemptProofVerifier', 'executionOutcomeVerifier',
   ], 'E2E_COMPLETE_GENERATION_INPUT_KEYS_INVALID')
@@ -175,7 +180,7 @@ export function buildCompleteGeneration(candidate: BuildCompleteGenerationInput)
     attemptAudit, input.verdictDependencies?.verifyManualResult,
   )
   const terminal = computeVerdict(verdictInput, verdictDependencies)
-  const finalReport = createFinalReport(input, artifacts, verdictInput, terminal, attemptAudit.selected)
+  const finalReport = renderFinalReport(input, artifacts, verdictInput, terminal, attemptAudit.selected)
   artifacts.push(finalReport)
   artifactPaths[finalReport.artifactId] = 'run/final-report.json'
 
@@ -208,6 +213,7 @@ export function buildCompleteGeneration(candidate: BuildCompleteGenerationInput)
   const manifestDraft: CompleteArtifactDraft = {
     relativePath: 'generation-manifest.json', dependencies: [], graph: { defines: [], references: [] },
     content: {
+      runtimeProvenance: input.provenance,
       generationId: input.context.generationId,
       fencingToken: input.context.fencingToken,
       finalizationSnapshotDigest,
@@ -229,6 +235,7 @@ export function buildCompleteGeneration(candidate: BuildCompleteGenerationInput)
     .sort((left, right) => left.path.localeCompare(right.path))
   const validationInput: CompleteGenerationBuild['validationInput'] = {
     artifactPaths,
+    runtimeProvenance: input.provenance,
     verdictInput,
     verdictInputPath,
     verdictDependencies: input.verdictDependencies?.verifyManualResult
@@ -265,7 +272,7 @@ function snapshotCompleteGenerationInput(candidate: unknown): BuildCompleteGener
   assertPlainDataTree(candidate, '$')
   const source = candidate as BuildCompleteGenerationInput
   assertExactKeys(source as unknown as Record<string, unknown>, [
-    'context', 'drafts', 'reportPresentation', 'authority',
+    'context', 'provenance', 'drafts', 'reportPresentation', 'authority',
     'gatewayVerifier', 'sanitizerVerifier', 'privacyReviewVerifier', 'regressionDiscoveryVerifier', 'verdictDependencies',
     'attemptProofVerifier', 'executionOutcomeVerifier',
   ], 'E2E_COMPLETE_GENERATION_INPUT_KEYS_INVALID')
@@ -282,12 +289,14 @@ function snapshotCompleteGenerationInput(candidate: unknown): BuildCompleteGener
   const verifyManualResult = source.verdictDependencies?.verifyManualResult?.bind(source.verdictDependencies)
   let cloned: {
     context: CompleteGenerationContext
+    provenance: RuntimeProvenance
     drafts: BuildCompleteGenerationInput['drafts']
     reportPresentation: ReportPresentation
   }
   try {
     cloned = structuredClone({
       context: source.context,
+      provenance: source.provenance,
       drafts: source.drafts,
       reportPresentation: source.reportPresentation,
     })
@@ -297,6 +306,7 @@ function snapshotCompleteGenerationInput(candidate: unknown): BuildCompleteGener
   }
   return {
     ...cloned,
+    provenance: RuntimeProvenanceSchema.parse(cloned.provenance),
     authority: { signArtifactDigest, verifyArtifactSignature, verifyApprovalFreshnessReceipt, verifyDecisionReceipt },
     gatewayVerifier,
     sanitizerVerifier,
@@ -365,8 +375,12 @@ function createArtifact(
 ): Record<string, unknown> {
   const base: Record<string, unknown> = {
     artifactId, artifactType,
-    schemaVersion: ['final-report', 'cleanup-results', 'approval-grants', 'browser-preflight',
-      'browser-action-map', 'run-bundle', 'project-policy', 'browser-evidence',
+    schemaVersion: artifactType === 'final-report' ? '3.0.0'
+      : artifactType === 'generation-manifest' ? '2.0.0'
+      : artifactType === 'execution-contract' ? '1.1.0'
+      : artifactType === 'browser-action-map' ? '2.1.0'
+      : ['cleanup-results', 'approval-grants', 'browser-preflight',
+      'run-bundle', 'project-policy', 'browser-evidence',
       'acceptance-scope', 'prd-diff', 'regression-manifest', 'workflow-events', 'browser-results'].includes(artifactType) ? '2.0.0' : '1.0.0',
     engineVersion: input.context.engineVersion, assetId: input.context.assetId,
     prdRevision: input.context.prdRevision, generationId: input.context.generationId,
@@ -386,7 +400,7 @@ function createArtifact(
   return { ...base, contentDigest, signatures }
 }
 
-function createFinalReport(
+function renderFinalReport(
   input: BuildCompleteGenerationInput,
   artifacts: ArtifactDocument[],
   verdictInput: VerdictInput,
@@ -510,8 +524,13 @@ function createFinalReport(
   const trustedCompilerExecution = content('browser-results').trustedCompilerExecution
   if (!trustedCompilerExecution) throw new Error('E2E_TRUSTED_COMPILER_EXECUTION_FACT_REQUIRED')
   const report: FinalReportContent = {
+    runtimeProvenance: input.provenance,
     ...terminal,
-    cannotClaim: [...new Set([...terminal.cannotClaim, ...browserCannotClaim])].sort(),
+    cannotClaim: [...new Set([
+      ...terminal.cannotClaim,
+      ...browserCannotClaim,
+      ...deriveRuntimeProvenanceCannotClaim(input.provenance),
+    ])].sort(),
     verdictInputDigest: digestText('verdict-input/v2', canonicalizeJson(verdictInput)),
     scope: scopeContent.includedReqCandidates.map((item) => ({ id: item.reqId, digest: artifact('acceptance-scope').contentDigest })),
     traceability, realResults, injectionResults,

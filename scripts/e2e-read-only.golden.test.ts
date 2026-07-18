@@ -233,13 +233,14 @@ describe('PRD-driven read-only golden path', () => {
         runtimePolicyDigest: gatewayPolicyDigest, decisions, blockedCase })
       if (decisions.lineageDecision.status !== 'approved') throw new Error('Golden lineage 未批准')
       const discoverySubject = {
-        schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
+        schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
         scopeDigest: approvalProjection.scopeDigest, environment: 'test' as const, baseOrigin: fixtureOrigin, actor: 'auditor',
         expectedPageIdentity: {
           url: `${fixtureOrigin}/orders`, title: '订单', heading: '订单列表', ariaSignals: ['main:订单列表'],
         },
         bootstrapIntentsDigest: modelDigest,
-        actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation' as const, maxUses: 1 }],
+        requests: [],
+        actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
       }
       const discoveryGrant = await authority.issueDiscoveryGrant({
         subject: discoverySubject, approver: { subject: 'os-user:golden', roles: ['e2e-approver'] },
@@ -253,14 +254,15 @@ describe('PRD-driven read-only golden path', () => {
       if (preflight.status !== 'ready' || !preflight.preflightDigest) throw new Error('Discovery preflight 未 ready')
       const grant = await authority.issueReadGrant({
         subject: {
-          schemaVersion: '2.0.0', assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
+          schemaVersion: '2.1.0', assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
           ...approvalProjection,
           environment: 'test', baseOrigin: fixtureOrigin, actor: 'auditor',
           discoveryGrantId: discoveryGrant.grantId, preflightDigest: preflight.preflightDigest,
+          requests: [],
           actions: [
-            { actionId: 'ACTION-READ-1', operation: 'local-navigation', maxUses: 1 },
-            { actionId: 'ACTION-READ-1', operation: 'dom-read', maxUses: 1 },
-            { actionId: 'ACTION-READ-1', operation: 'screenshot', maxUses: 1 },
+            { actionId: 'ACTION-READ-1', operation: 'local-navigation', maxUses: 1, requestIds: [] },
+            { actionId: 'ACTION-READ-1', operation: 'dom-read', maxUses: 1, requestIds: [] },
+            { actionId: 'ACTION-READ-1', operation: 'screenshot', maxUses: 1, requestIds: [] },
           ],
         },
         approver: { subject: 'os-user:golden', roles: ['e2e-approver'] },

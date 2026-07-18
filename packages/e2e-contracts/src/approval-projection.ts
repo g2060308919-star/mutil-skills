@@ -61,13 +61,16 @@ function actionMapProjection(content: unknown): unknown {
       }
       assertExactKeys(action, [
         'caseId', 'stepId', 'actionId', 'pageIdentityId', 'locatorCandidates', 'playwrightAction',
-        'waits', 'oracleIds', 'effect', 'capabilities',
+        'waits', 'oracleIds', 'effect', 'capabilities', 'requestIds',
+        ...(action.runtimeHttpActionDigest === undefined ? [] : ['runtimeHttpActionDigest']),
       ], 'browser-action-map.actions[]')
       return {
         caseId: action.caseId, stepId: action.stepId, actionId: action.actionId,
         pageIdentityId: action.pageIdentityId, locatorCandidates: action.locatorCandidates,
         playwrightAction: action.playwrightAction, waits: action.waits, oracleIds: action.oracleIds,
-        effect: action.effect,
+        effect: action.effect, requestIds: action.requestIds,
+        ...(action.runtimeHttpActionDigest === undefined
+          ? {} : { runtimeHttpActionDigest: action.runtimeHttpActionDigest }),
         capabilities: action.capabilities.map((capability) => {
           if (!isRecord(capability)) throw new Error('E2E_APPROVAL_PROJECTION_CAPABILITY_INVALID')
           assertExactKeys(capability, ['operation', 'capabilityId'], 'browser-action-map.actions[].capabilities[]')

@@ -7,6 +7,7 @@ import {
   RuntimeAuthorityHost,
   computeRuntimeApprovalSubjectDigest,
   loadRuntimeApprovalAssets,
+  openRuntimeArtifactStoreAuthority,
   startRuntimeAuthorityHost,
 } from '../src/authority-host.js'
 import type { RuntimeRunSnapshot } from '../src/run-store.js'
@@ -17,6 +18,27 @@ import { runCli } from '../src/cli.js'
 import { createRuntimeTestRoots } from './fixtures.js'
 
 const installationDigest = `sha256:${'a'.repeat(64)}`
+
+test('production artifact authority reopens the persistent Authority identity for signing and verification', async () => {
+  const roots = await createRuntimeTestRoots()
+  const installation = {
+    ...runtimeInstallation(), versionRoot: roots.source, entrypoint: `${roots.source}/runtime-host.js`,
+  }
+  const subject = `local:uid:${process.getuid!()}`
+  const first = await openRuntimeArtifactStoreAuthority({
+    homeDir: roots.home, installation, subject,
+  })
+  const signature = first.signDigest(`sha256:${'6'.repeat(64)}`)
+  expect(first.verifySignature(signature)).toBe(true)
+  await first.close()
+
+  const reopened = await openRuntimeArtifactStoreAuthority({
+    homeDir: roots.home, installation, subject,
+  })
+  expect(reopened.verifySignature(signature)).toBe(true)
+  await reopened.close()
+  await rm(roots.root, { recursive: true, force: true })
+})
 
 test('Runtime Authority adapter can only open and wait for child-owned sessions', async () => {
   const enrollmentBearer = 'a'.repeat(43)
@@ -1025,6 +1047,9 @@ test('default rpc production wiring starts a real Authority child and closes it 
       statePath: `${authorityDirectory}/approval.sqlite`, stateEncryptionKey: stateKey,
       testWorkspaceRoots: [installation.versionRoot],
       approvalIdentities: [{ subject, roles: ['e2e-approver'] }],
+      manualIdentities: [{ subject, roles: [
+        'scope-approver', 'lineage-approver', 'privacy-approver',
+      ] }],
     })
     await authority.createWebAuthnCredentialRepository().insert({
       id: 'CRED-REAL-CHILD', publicKey: Buffer.from([1, 2, 3]).toString('base64url'),

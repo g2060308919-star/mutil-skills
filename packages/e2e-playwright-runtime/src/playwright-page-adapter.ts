@@ -47,15 +47,38 @@ export class PlaywrightPageAdapter implements BrowserPageAdapter {
   }
 
   async domSnapshot(): Promise<string> {
-    const session = await this.page.context().newCDPSession(this.page)
-    try {
-      const snapshot = await session.send('DOMSnapshot.captureSnapshot', {
-        computedStyles: [], includeDOMRects: false, includePaintOrder: false,
-      })
-      const serialized = canonicalizeJson(snapshot)
-      if (Buffer.byteLength(serialized, 'utf8') > 4 * 1024 * 1024) throw evidenceLimit('dom')
-      return serialized
-    } finally { await session.detach() }
+    // 只捕获 sanitizer 能严格解释的结构化 DOM；输入值、脚本、样式和任意属性
+    // 从源头不进入 raw evidence。隐私区域由页面显式 data-e2e-privacy 标记，
+    // sanitizer 仍会独立执行字段白名单与高敏模式扫描。
+    const snapshot = await this.page.evaluate(() => {
+      let nodes = 0
+      const visit = (element: Element, depth: number): Record<string, unknown> => {
+        nodes += 1
+        if (nodes > 10_000 || depth > 64) throw new Error('E2E_RUNTIME_DOM_STRUCTURE_LIMIT')
+        const privacy = element.getAttribute('data-e2e-privacy')
+        const attributes: Record<string, string> = {}
+        for (const name of ['role', 'aria-label', 'data-testid']) {
+          const value = element.getAttribute(name)
+          if (value !== null) attributes[name] = value.slice(0, 16 * 1024)
+        }
+        const directText = [...element.childNodes]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent ?? '').join(' ').trim().slice(0, 16 * 1024)
+        return {
+          tag: element.tagName.toLowerCase(),
+          attributes,
+          ...(directText === '' ? {} : { text: directText, assertionRelevant: true }),
+          ...(element.hasAttribute('hidden') || element.getAttribute('aria-hidden') === 'true'
+            ? { hidden: true } : {}),
+          ...(['pii', 'secret'].includes(privacy ?? '') ? { privacy } : {}),
+          children: [...element.children].map((child) => visit(child, depth + 1)),
+        }
+      }
+      return { format: 'dom-tree/1', roots: [visit(document.documentElement, 0)] }
+    })
+    const serialized = canonicalizeJson(snapshot)
+    if (Buffer.byteLength(serialized, 'utf8') > 4 * 1024 * 1024) throw evidenceLimit('dom')
+    return serialized
   }
 }
 

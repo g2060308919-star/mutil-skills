@@ -233,12 +233,13 @@ describe('PRD-driven reversible-write golden path', () => {
       })
       if (decisions.lineageDecision.status !== 'approved') throw new Error('Golden lineage 未批准')
       const discoverySubject = {
-        schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
+        schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
         scopeDigest: approvalProjection.scopeDigest, environment: 'test' as const, baseOrigin: fixtureOrigin,
         actor: 'operator', expectedPageIdentity: {
           url: `${fixtureOrigin}/orders/100`, title: '订单审批', heading: '订单 100', ariaSignals: ['main:订单 100'],
         }, bootstrapIntentsDigest: modelDigest,
-        actions: [{ actionId: 'ACTION-PREFLIGHT-WRITE', operation: 'local-navigation' as const, maxUses: 1 }],
+        requests: [],
+        actions: [{ actionId: 'ACTION-PREFLIGHT-WRITE', operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
       }
       const discoveryGrant = await approvalAuthority.issueDiscoveryGrant({
         subject: discoverySubject, approver: { subject: 'os-user:golden', roles: ['e2e-approver'] },
@@ -687,12 +688,13 @@ describe('PRD-driven reversible-write golden path', () => {
       const adapter = new PlaywrightPageAdapter(page)
       const projectionDigest = (name: string) => digestText('unknown-write-projection/v1', name)
       const discoverySubject = {
-        schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-UNKNOWN', prdRevision: targetFingerprint,
+        schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-UNKNOWN', prdRevision: targetFingerprint,
         scopeDigest: projectionDigest('scope'), environment: 'test' as const, baseOrigin: fixtureOrigin,
         actor: 'operator', expectedPageIdentity: {
           url: `${fixtureOrigin}/orders/200`, title: '订单审批', heading: '订单 200', ariaSignals: ['main:订单 200'],
         }, bootstrapIntentsDigest: projectionDigest('bootstrap'),
-        actions: [{ actionId: 'ACTION-PREFLIGHT-UNKNOWN', operation: 'local-navigation' as const, maxUses: 1 }],
+        requests: [],
+        actions: [{ actionId: 'ACTION-PREFLIGHT-UNKNOWN', operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
       }
       const discoveryGrant = await authority.issueDiscoveryGrant({
         subject: discoverySubject, approver: { subject: 'os-user:unknown', roles: ['e2e-approver'] },

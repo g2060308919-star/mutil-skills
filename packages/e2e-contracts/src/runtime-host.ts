@@ -112,6 +112,12 @@ const commandSchemas = [
     projectRoot: z.string().min(1),
     payload: RunIdPayloadSchema,
   }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('finalize-run'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema,
+  }).strict(),
 ] as const
 
 export const RuntimeRequestEnvelopeSchema = z.discriminatedUnion('command', commandSchemas)

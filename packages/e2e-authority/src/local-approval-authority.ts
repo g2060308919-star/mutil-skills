@@ -10,6 +10,8 @@ import {
   ApprovalGrantSubjectSchema,
   ApprovalFreshnessReceiptSchema,
   ApprovalFreshnessVerifierMaterialSchema,
+  LegacyDiscoveryApprovalSubjectV10Schema,
+  LegacyReadApprovalSubjectV20Schema,
   LegacyWriteApprovalSubjectV23Schema,
   LegacyWriteHttpIntentV23Schema,
   WriteApprovalSubjectV2Schema,
@@ -96,13 +98,20 @@ import {
 } from './trusted-approval-freshness.js'
 import {
   createCipheriv, createDecipheriv, createPrivateKey, createPublicKey, generateKeyPairSync,
-  randomBytes, randomUUID, sign, verify, type KeyObject,
+  randomBytes, randomUUID, sign, timingSafeEqual, verify, type KeyObject,
 } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import {
   SqliteSnapshotStore,
   type SqliteStateDirectoryIdentity,
 } from './sqlite-state-store.js'
+import {
+  AuthorityStateAnchor,
+  authoritySnapshotMac,
+  type AuthorityStateAnchorProvider,
+  type AuthorityStateAnchorPoint,
+  type TrustedMonotonicAuthorityStateAnchor,
+} from './authority-state-anchor.js'
 import {
   parseApprovalExecutionBinding,
   trustWriteApprovalClient,
@@ -153,7 +162,10 @@ interface DecryptedAuthorityPrivateKeys {
 }
 
 interface AuthorityPersistentSnapshot {
-  schemaVersion: '2.4.0'
+  schemaVersion: '2.7.0'
+  stateRevision: number
+  stateDigest: string
+  stateMac: string
   issuer: string
   keyId: string
   identityDigest: string
@@ -169,9 +181,20 @@ interface AuthorityPersistentSnapshot {
   revoked: Array<[string, string]>
   uses: Array<[string, number]>
   reservations: Array<[string, CapabilityReservation]>
+  reservationRpcBindings: Array<[string, ReservationRpcOwnerBinding]>
   completedPreflights: Array<[string, { grantId: string; subject: DiscoveryApprovalSubject; status: DiscoveryPreflightOutcome['status'] }]>
   manualResultIds: string[]
   attemptLogs: Array<[string, { chainDigest: string; events: AttemptEvent[]; lastTimestamp: number }]>
+}
+
+export interface ReservationRpcOwnerClaim {
+  clientId: string
+  approvalContext: CanonicalApprovalContext
+}
+
+export interface ReservationRpcOwnerBinding extends ReservationRpcOwnerClaim {
+  signedDigest: string
+  signature: string
 }
 
 interface StoredGrantFinalization {
@@ -190,6 +213,7 @@ interface StoredAcknowledgedFinalization {
 }
 
 const MAX_GRANT_FINALIZATIONS = 1_024
+const MAX_RESERVATION_RECORDS = 16_384
 
 /**
  * Discovery preflight receipt 的 canonical digest。Runtime 只能用它预计算待提交
@@ -230,6 +254,7 @@ export class LocalApprovalAuthority {
   readonly #attemptKeyId: string
   readonly #stateStore?: SqliteSnapshotStore
   readonly #stateEncryptionKey?: Buffer
+  readonly #stateAnchor?: AuthorityStateAnchorProvider
   readonly #identityDigest: string
   readonly #authenticateApproverSession: (
     sessionRef: string,
@@ -243,6 +268,7 @@ export class LocalApprovalAuthority {
   readonly #revoked = new Map<string, string>()
   readonly #uses = new Map<string, number>()
   readonly #reservations = new Map<string, CapabilityReservation>()
+  readonly #reservationRpcBindings = new Map<string, ReservationRpcOwnerBinding>()
   readonly #completedPreflights = new Map<string, {
     grantId: string; subject: DiscoveryApprovalSubject; status: DiscoveryPreflightOutcome['status']
   }>()
@@ -252,13 +278,15 @@ export class LocalApprovalAuthority {
   readonly #manualIdentities = new Map<string, ApproverIdentity>()
   readonly #webAuthnCredentials = new Map<string, StoredWebAuthnCredential>()
   readonly #webAuthnReceipts = new Map<string, StoredWebAuthnApprovalReceipt>()
+  #closed = false
 
   private constructor(options: LocalApprovalAuthorityOptions, privateKey: KeyObject, publicKey: KeyObject,
     freshnessPrivateKey: KeyObject, freshnessPublicKey: KeyObject,
     privacyReviewPrivateKey: KeyObject, privacyReviewPublicKey: KeyObject,
     decisionPrivateKey: KeyObject, decisionPublicKey: KeyObject,
     attemptPrivateKey: KeyObject, attemptPublicKey: KeyObject,
-    stateStore?: SqliteSnapshotStore, stateEncryptionKey?: Buffer) {
+    stateStore?: SqliteSnapshotStore, stateEncryptionKey?: Buffer,
+    stateAnchor?: AuthorityStateAnchorProvider) {
     this.#issuer = options.issuer
     this.#keyId = options.keyId
     this.#now = options.now
@@ -278,6 +306,7 @@ export class LocalApprovalAuthority {
     this.#attemptKeyId = `${options.keyId}:attempt-event`
     this.#stateStore = stateStore
     this.#stateEncryptionKey = stateEncryptionKey
+    this.#stateAnchor = stateAnchor
     this.#identityDigest = authorityIdentityDigest(options)
     this.#authenticateApproverSession = options.authenticateApproverSession ?? (() => undefined)
   }
@@ -300,23 +329,50 @@ export class LocalApprovalAuthority {
     stateEncryptionKey: Uint8Array
     testWorkspaceRoots: string[]
     expectedStateDirectory?: SqliteStateDirectoryIdentity
+    /**
+     * 可选的独立可信单调 provider；所有权随 open 转移并在 Authority.close() 时关闭。
+     * 未提供时只启用同 UID 本地 crash/integrity anchor，不能声明抵抗整体状态回滚。
+     */
+    trustedStateAnchor?: TrustedMonotonicAuthorityStateAnchor
   }): Promise<LocalApprovalAuthority> {
     const stateEncryptionKey = Buffer.from(options.stateEncryptionKey)
     if (stateEncryptionKey.byteLength !== 32) {
+      stateEncryptionKey.fill(0)
       throw authorityError('E2E_AUTHORITY_STATE_ENCRYPTION_KEY_INVALID', 'Authority 状态加密密钥必须为 32 bytes')
     }
-    const store = new SqliteSnapshotStore(options.statePath, `approval:${options.issuer}:${options.keyId}`, {
-      forbiddenRoots: options.testWorkspaceRoots,
-      ...(options.expectedStateDirectory === undefined
-        ? {} : { expectedStateDirectory: options.expectedStateDirectory }),
-    })
-    const primary = generateKeyPairSync('ed25519')
+    let store: SqliteSnapshotStore
+    try {
+      store = new SqliteSnapshotStore(options.statePath, `approval:${options.issuer}:${options.keyId}`, {
+        forbiddenRoots: options.testWorkspaceRoots,
+        ...(options.expectedStateDirectory === undefined
+          ? {} : { expectedStateDirectory: options.expectedStateDirectory }),
+      })
+    } catch (error) {
+      stateEncryptionKey.fill(0)
+      throw error
+    }
+    let stateAnchor: AuthorityStateAnchorProvider
+    try {
+      if (options.trustedStateAnchor !== undefined
+        && options.trustedStateAnchor.securityLevel !== 'trusted-monotonic') {
+        throw authorityError(
+          'E2E_AUTHORITY_TRUSTED_ANCHOR_LEVEL_INVALID',
+          'trustedStateAnchor 必须由独立信任域实现并声明 trusted-monotonic',
+        )
+      }
+      stateAnchor = options.trustedStateAnchor ?? new AuthorityStateAnchor(
+        options.statePath, `approval:${options.issuer}:${options.keyId}`, stateEncryptionKey)
+    } catch (error) {
+      throwWithAuthorityCleanup(error, store, options.trustedStateAnchor, stateEncryptionKey)
+    }
+    try {
+      const primary = generateKeyPairSync('ed25519')
     const freshness = generateKeyPairSync('ed25519')
     const privacyReview = generateKeyPairSync('ed25519')
     const decision = generateKeyPairSync('ed25519')
     const attempt = generateKeyPairSync('ed25519')
-    const initial: AuthorityPersistentSnapshot = {
-      schemaVersion: '2.4.0', issuer: options.issuer, keyId: options.keyId,
+    const initial = {
+      schemaVersion: '2.6.0', issuer: options.issuer, keyId: options.keyId,
       identityDigest: authorityIdentityDigest(options),
       privateKeys: {
         primary: encryptPrivateKey(primary.privateKey, stateEncryptionKey, 'primary'),
@@ -328,7 +384,7 @@ export class LocalApprovalAuthority {
       webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey),
       webAuthnReceipts: encryptWebAuthnReceipts([], stateEncryptionKey),
       grants: [], grantFinalizations: [], acknowledgedFinalizations: [],
-      revoked: [], uses: [], reservations: [], completedPreflights: [],
+      revoked: [], uses: [], reservations: [], reservationRpcBindings: [], completedPreflights: [],
       manualResultIds: [], attemptLogs: [],
     }
     store.initialize(canonicalizeJson(initial))
@@ -337,44 +393,59 @@ export class LocalApprovalAuthority {
       migrated: boolean
       privateKeys: DecryptedAuthorityPrivateKeys
     }
-    try {
-      loaded = loadAuthoritySnapshot(store.begin(), stateEncryptionKey)
-      if (loaded.migrated) store.commit(canonicalizeJson(loaded.snapshot))
-      else store.rollback()
+      try {
+        const versioned = store.beginVersioned()
+        loaded = loadAuthoritySnapshot(versioned.snapshot, stateEncryptionKey, versioned.revision)
+        if (loaded.migrated) {
+          if (stateAnchor.read() !== undefined) {
+            throw authorityError('E2E_AUTHORITY_STATE_ROLLBACK_DETECTED', '旧 Authority DB 与既有单调 anchor 冲突')
+          }
+          store.commit(canonicalizeJson(loaded.snapshot))
+          stateAnchor.initialize(anchorPoint(loaded.snapshot))
+        } else {
+          store.rollback()
+          verifyAuthorityStateAnchor(stateAnchor, loaded.snapshot)
+        }
+      } catch (error) {
+        store.rollback()
+        throw error
+      }
+      const snapshot = loaded.snapshot
+      if (snapshot.issuer !== options.issuer || snapshot.keyId !== options.keyId
+        || snapshot.identityDigest !== authorityIdentityDigest(options)) {
+        throw authorityError('E2E_AUTHORITY_STATE_IDENTITY_MISMATCH', '持久 Authority 的 issuer、keyId 或可信身份注册表不匹配')
+      }
+      const {
+        primary: primaryPrivate,
+        freshness: freshnessPrivate,
+        privacyReview: privacyPrivate,
+        decision: decisionPrivate,
+        attempt: attemptPrivate,
+      } = loaded.privateKeys
+      const authority = new LocalApprovalAuthority(
+        options, primaryPrivate, createPublicKey(primaryPrivate), freshnessPrivate, createPublicKey(freshnessPrivate),
+        privacyPrivate, createPublicKey(privacyPrivate), decisionPrivate, createPublicKey(decisionPrivate),
+        attemptPrivate, createPublicKey(attemptPrivate), store, stateEncryptionKey, stateAnchor,
+      )
+      authority.#registerIdentities(options)
+      authority.#hydrateState(snapshot)
+      return authority
     } catch (error) {
-      store.rollback()
-      store.close()
-      stateEncryptionKey.fill(0)
-      throw error
+      throwWithAuthorityCleanup(error, store, stateAnchor, stateEncryptionKey)
     }
-    const snapshot = loaded.snapshot
-    if (snapshot.issuer !== options.issuer || snapshot.keyId !== options.keyId
-      || snapshot.identityDigest !== authorityIdentityDigest(options)) {
-      store.close()
-      stateEncryptionKey.fill(0)
-      throw authorityError('E2E_AUTHORITY_STATE_IDENTITY_MISMATCH', '持久 Authority 的 issuer、keyId 或可信身份注册表不匹配')
-    }
-    const {
-      primary: primaryPrivate,
-      freshness: freshnessPrivate,
-      privacyReview: privacyPrivate,
-      decision: decisionPrivate,
-      attempt: attemptPrivate,
-    } = loaded.privateKeys
-    const authority = new LocalApprovalAuthority(
-      options, primaryPrivate, createPublicKey(primaryPrivate), freshnessPrivate, createPublicKey(freshnessPrivate),
-      privacyPrivate, createPublicKey(privacyPrivate), decisionPrivate, createPublicKey(decisionPrivate),
-      attemptPrivate, createPublicKey(attemptPrivate), store, stateEncryptionKey,
-    )
-    authority.#registerIdentities(options)
-    authority.#hydrateState(snapshot)
-    return authority
   }
 
   close(): void {
+    if (this.#closed) return
     if (this.#activeStateTransactions !== 0) throw authorityError('E2E_AUTHORITY_STATE_BUSY', 'Authority 事务进行中不能关闭')
-    this.#stateStore?.close()
-    this.#stateEncryptionKey?.fill(0)
+    this.#closed = true
+    const errors = cleanupAuthorityResources(this.#stateStore, this.#stateAnchor, this.#stateEncryptionKey)
+    if (errors.length === 1) throw errors[0]
+    if (errors.length > 1) throw new AggregateError(errors, 'E2E_AUTHORITY_CLOSE_FAILED')
+  }
+
+  get stateProtectionLevel(): 'ephemeral' | AuthorityStateAnchorProvider['securityLevel'] {
+    return this.#stateAnchor?.securityLevel ?? 'ephemeral'
   }
 
   createWriteExecutionClient(approvalContext: CanonicalApprovalContext): TrustedWriteApprovalClient {
@@ -688,16 +759,22 @@ export class LocalApprovalAuthority {
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
       expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
-      capabilities: subject.actions.map((action): DiscoveryCapability => ({
-        capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'), transport: 'browser-local',
-        effect: 'read', actionId: action.actionId, operation: action.operation,
-        targetUrl: subject.expectedPageIdentity.url, actor: subject.actor,
-        expectedPageIdentityDigest: digestText(
-          'expected-page-identity/v1', canonicalizeJson(subject.expectedPageIdentity),
-        ),
-        bootstrapIntentsDigest: subject.bootstrapIntentsDigest,
-        maxUses: action.maxUses,
-      })),
+      capabilities: subject.actions.map((action): DiscoveryCapability => action.operation === 'http-request'
+        ? {
+            capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'), transport: 'http',
+            effect: 'read', actionId: action.actionId, operation: 'http-request',
+            requestIds: action.requestIds, maxUses: action.maxUses,
+          }
+        : {
+            capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'), transport: 'browser-local',
+            effect: 'read', actionId: action.actionId, operation: action.operation,
+            targetUrl: subject.expectedPageIdentity.url, actor: subject.actor,
+            expectedPageIdentityDigest: digestText(
+              'expected-page-identity/v1', canonicalizeJson(subject.expectedPageIdentity),
+            ),
+            bootstrapIntentsDigest: subject.bootstrapIntentsDigest,
+            maxUses: action.maxUses,
+          }),
       revocationSequence: 0,
     }
     const grant: SignedDiscoveryGrant = {
@@ -751,15 +828,17 @@ export class LocalApprovalAuthority {
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
       expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
-      capabilities: request.subject.actions.map((action): ReadCapability => ({
-        capabilityId: randomUUID(),
-        nonce: randomBytes(32).toString('hex'),
-        transport: 'browser-local',
-        effect: 'read',
-        actionId: action.actionId,
-        operation: action.operation,
-        maxUses: action.maxUses,
-      })),
+      capabilities: subject.actions.map((action): ReadCapability => action.operation === 'http-request'
+        ? {
+            capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'), transport: 'http',
+            effect: 'read', actionId: action.actionId, operation: 'http-request',
+            requestIds: action.requestIds, maxUses: action.maxUses,
+          }
+        : {
+            capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'),
+            transport: 'browser-local', effect: 'read', actionId: action.actionId,
+            operation: action.operation, maxUses: action.maxUses,
+          }),
       revocationSequence: 0,
     }
     const signature = signPayload(grantWithoutSignature, this.#privateKey)
@@ -1202,6 +1281,7 @@ export class LocalApprovalAuthority {
     actionId: string
     attemptId: string
     attemptContext?: AttemptExecutionContext
+    rpcOwnerBinding?: ReservationRpcOwnerClaim
   }): Promise<CapabilityReservation> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
       return await this.#withStateMutation(() => this.reserveForSubject(input))
@@ -1232,6 +1312,7 @@ export class LocalApprovalAuthority {
             'Discovery reservation 重试与原 grant/capability/action/subject 绑定不一致',
           )
         }
+        this.#requireSameRpcOwnerBinding(existing.reservationId, input.rpcOwnerBinding)
         return immutableSnapshot(existing)
       }
     }
@@ -1243,6 +1324,7 @@ export class LocalApprovalAuthority {
       actionId: input.actionId,
       attemptId: input.attemptId,
       attemptContext: input.attemptContext,
+      rpcOwnerBinding: input.rpcOwnerBinding,
     })
   }
 
@@ -1304,9 +1386,12 @@ export class LocalApprovalAuthority {
     actionId: string
     attemptId: string
     attemptContext?: AttemptExecutionContext
+    rpcOwnerBinding?: ReservationRpcOwnerClaim
   }): Promise<CapabilityReservation> {
     const grant = this.#grants.get(input.grantId)
     if (!grant) throw authorityError('E2E_APPROVAL_GRANT_UNKNOWN', 'Grant 不存在')
+    const rpcOwnerClaim = input.rpcOwnerBinding === undefined
+      ? undefined : parseReservationRpcOwnerClaim(input.rpcOwnerBinding, grant.approvalContext)
     const decision = await this.verify(grant)
     if (!decision.allowed) throw authorityError(decision.code, decision.reason)
     const capability = grant.capabilities.find((item) => item.capabilityId === input.capabilityId && item.actionId === input.actionId)
@@ -1317,6 +1402,12 @@ export class LocalApprovalAuthority {
         || input.attemptContext.prdRevision !== grant.subject.prdRevision
         || Object.values(input.attemptContext).some((value) => !value))) {
       throw authorityError('E2E_APPROVAL_ATTEMPT_CONTEXT_INVALID', '写 capability reservation 必须绑定完整同代 Attempt 上下文')
+    }
+    if (this.#reservations.size >= MAX_RESERVATION_RECORDS) {
+      throw authorityError(
+        'E2E_APPROVAL_RESERVATION_CAPACITY_EXCEEDED',
+        'Authority reservation/tombstone 已达到持久安全上限；必须由受信运维归档后再继续',
+      )
     }
 
     const key = `${grant.grantId}:${capability.capabilityId}`
@@ -1335,21 +1426,68 @@ export class LocalApprovalAuthority {
       reservedAt: this.#now().toISOString(),
     }
     this.#reservations.set(reservation.reservationId, reservation)
+    if (rpcOwnerClaim !== undefined) {
+      this.#reservationRpcBindings.set(reservation.reservationId,
+        this.#issueReservationRpcOwnerBinding(reservation.reservationId, rpcOwnerClaim))
+    }
     return { ...reservation }
   }
 
-  async markUnknown(reservationId: string, observation: string): Promise<void> {
+  getReservationRpcBinding(reservationId: string): ReservationRpcOwnerBinding | undefined {
+    if (this.#stateStore && !this.#stateContext.getStore()) {
+      return this.#withStateReadSync(() => this.getReservationRpcBinding(reservationId))
+    }
+    const binding = this.#reservationRpcBindings.get(reservationId)
+    return binding === undefined ? undefined : immutableSnapshot(binding)
+  }
+
+  #requireSameRpcOwnerBinding(
+    reservationId: string,
+    input: ReservationRpcOwnerClaim | undefined,
+  ): void {
+    const existing = this.#reservationRpcBindings.get(reservationId)
+    if (existing === undefined && input === undefined) return
+    if (existing === undefined || input === undefined
+      || existing.clientId !== input.clientId
+      || canonicalizeJson(existing.approvalContext) !== canonicalizeJson(
+        parseReservationRpcOwnerClaim(input, existing.approvalContext).approvalContext)) {
+      throw authorityError('E2E_APPROVAL_RESERVATION_RPC_OWNER_MISMATCH', 'Reservation RPC owner 绑定不一致')
+    }
+  }
+
+  #issueReservationRpcOwnerBinding(
+    reservationId: string,
+    claim: ReservationRpcOwnerClaim,
+  ): ReservationRpcOwnerBinding {
+    const signedDigest = reservationRpcOwnerDigest(reservationId, claim)
+    return {
+      ...immutableSnapshot(claim), signedDigest,
+      signature: sign(null, reservationRpcOwnerProofPayload(this.#issuer, this.#decisionKeyId, signedDigest),
+        this.#decisionPrivateKey).toString('base64url'),
+    }
+  }
+
+  async markUnknown(reservationId: string, observation: string): Promise<string> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
       return await this.#withStateMutation(() => this.markUnknown(reservationId, observation))
     }
     const reservation = this.#reservations.get(reservationId)
     if (!reservation) throw authorityError('E2E_APPROVAL_RESERVATION_UNKNOWN', 'Reservation 不存在')
-    if (reservation.status !== 'reserved') throw authorityError('E2E_APPROVAL_RESERVATION_FINAL', 'Reservation 已进入终态')
+    if (typeof observation !== 'string' || observation.length < 1 || observation.length > 16 * 1024) {
+      throw authorityError('E2E_APPROVAL_OBSERVATION_INVALID', 'Observation 无效')
+    }
+    if (reservation.status === 'unknown' && reservation.observation === observation) {
+      return reservationTerminalReceipt(reservation, 'unknown')
+    }
+    if (reservation.status !== 'reserved') {
+      throw authorityError('E2E_APPROVAL_RESERVATION_FINAL', 'Reservation 终态与本次 observation 不一致')
+    }
     reservation.status = 'unknown'
     reservation.observation = observation
+    return reservationTerminalReceipt(reservation, 'unknown')
   }
 
-  async complete(reservationId: string, outcomeDigest: string): Promise<void> {
+  async complete(reservationId: string, outcomeDigest: string): Promise<string> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
       return await this.#withStateMutation(() => this.complete(reservationId, outcomeDigest))
     }
@@ -1358,9 +1496,15 @@ export class LocalApprovalAuthority {
     }
     const reservation = this.#reservations.get(reservationId)
     if (!reservation) throw authorityError('E2E_APPROVAL_RESERVATION_UNKNOWN', 'Reservation 不存在')
-    if (reservation.status !== 'reserved') throw authorityError('E2E_APPROVAL_RESERVATION_FINAL', 'Reservation 已进入终态')
+    if (reservation.status === 'completed' && reservation.outcomeDigest === outcomeDigest) {
+      return reservationTerminalReceipt(reservation, 'completed')
+    }
+    if (reservation.status !== 'reserved') {
+      throw authorityError('E2E_APPROVAL_RESERVATION_FINAL', 'Reservation 终态与本次 outcome 不一致')
+    }
     reservation.status = 'completed'
     reservation.outcomeDigest = outcomeDigest
+    return reservationTerminalReceipt(reservation, 'completed')
   }
 
   getReservation(reservationId: string): CapabilityReservation | undefined {
@@ -1369,6 +1513,41 @@ export class LocalApprovalAuthority {
     }
     const reservation = this.#reservations.get(reservationId)
     return reservation ? { ...reservation } : undefined
+  }
+
+  getGrantApprovalContext(grantId: string): CanonicalApprovalContext | undefined {
+    if (this.#stateStore && !this.#stateContext.getStore()) {
+      return this.#withStateReadSync(() => this.getGrantApprovalContext(grantId))
+    }
+    const grant = this.#grants.get(grantId)
+    return grant ? immutableSnapshot(grant.approvalContext) : undefined
+  }
+
+  findReservation(query: {
+    reservationId?: string
+    attemptId?: string
+    grantId: string
+    capabilityId: string
+    actionId: string
+  }): CapabilityReservation | undefined {
+    if (this.#stateStore && !this.#stateContext.getStore()) {
+      return this.#withStateReadSync(() => this.findReservation(query))
+    }
+    const usesReservationId = query.reservationId !== undefined && query.attemptId === undefined
+    const usesAttemptId = query.attemptId !== undefined && query.reservationId === undefined
+    if ((!usesReservationId && !usesAttemptId)
+      || ![query.grantId, query.capabilityId, query.actionId].every((value) => typeof value === 'string' && value.length > 0)) {
+      throw authorityError('E2E_APPROVAL_RESERVATION_QUERY_INVALID', 'Reservation 查询必须指定且仅指定 reservationId 或 attemptId')
+    }
+    const matches = [...this.#reservations.values()].filter((reservation) =>
+      (usesReservationId ? reservation.reservationId === query.reservationId : reservation.attemptId === query.attemptId)
+      && reservation.grantId === query.grantId
+      && reservation.capabilityId === query.capabilityId
+      && reservation.actionId === query.actionId)
+    if (matches.length > 1) {
+      throw authorityError('E2E_APPROVAL_RESERVATION_QUERY_AMBIGUOUS', '稳定 attempt 查询命中多个 Reservation')
+    }
+    return matches[0] ? immutableSnapshot(matches[0]) : undefined
   }
 
   appendAttemptEvent(input: {
@@ -1387,6 +1566,18 @@ export class LocalApprovalAuthority {
     const logKey = canonicalizeJson(context)
     const initialChainDigest = digestText('attempt-chain-initial/v2', canonicalizeJson(context))
     const existing = this.#attemptLogs.get(logKey)
+    const persistedAtSequence = existing?.events[eventCore.sequence - 1]
+    if (persistedAtSequence !== undefined) {
+      const { eventDigest, authorityProof, ...persistedCore } = persistedAtSequence
+      if (canonicalizeJson(persistedCore) !== canonicalizeJson(eventCore)) {
+        throw authorityError('E2E_ATTEMPT_AUTHORITY_LOG_REPLAY_MISMATCH',
+          'Attempt 事件 sequence 已存在但内容不同')
+      }
+      return { event: immutableSnapshot(persistedAtSequence),
+        eventChainDigest: digestText('attempt-event-chain/v1', canonicalizeJson({
+          previous: persistedAtSequence.previousChainDigest, event: eventDigest,
+        })) }
+    }
     const expectedSequence = (existing?.events.length ?? 0) + 1
     const expectedPrevious = existing?.chainDigest ?? initialChainDigest
     if (eventCore.sequence !== expectedSequence) {
@@ -1777,12 +1968,18 @@ export class LocalApprovalAuthority {
   async #withStateMutation<T>(operation: () => Promise<T>): Promise<T> {
     if (!this.#stateStore || this.#stateContext.getStore()) return await operation()
     return await this.#stateStore.runExclusive(async () => {
-      this.#hydrateState(parseAuthoritySnapshot(this.#stateStore!.begin()))
+      const versioned = this.#stateStore!.beginVersioned()
+      const current = parseAuthoritySnapshot(versioned.snapshot, this.#issuer,
+        this.#decisionKeyId, this.#decisionPublicKey, this.#stateEncryptionKey!, versioned.revision)
+      verifyAuthorityStateAnchor(this.#stateAnchor!, current)
+      this.#hydrateState(current)
       this.#activeStateTransactions += 1
       try {
         return await this.#stateContext.run(true, async () => {
           const result = await operation()
-          this.#stateStore!.commit(canonicalizeJson(this.#persistentSnapshot()))
+          const next = this.#persistentSnapshot(versioned.revision + 1)
+          this.#stateStore!.commit(canonicalizeJson(next))
+          this.#stateAnchor!.compareAndAdvance(anchorPoint(current), anchorPoint(next))
           return result
         })
       } catch (error) {
@@ -1797,12 +1994,18 @@ export class LocalApprovalAuthority {
   #withStateMutationSync<T>(operation: () => T): T {
     if (!this.#stateStore || this.#stateContext.getStore()) return operation()
     return this.#stateStore.runExclusiveSync(() => {
-      this.#hydrateState(parseAuthoritySnapshot(this.#stateStore!.begin()))
+      const versioned = this.#stateStore!.beginVersioned()
+      const current = parseAuthoritySnapshot(versioned.snapshot, this.#issuer,
+        this.#decisionKeyId, this.#decisionPublicKey, this.#stateEncryptionKey!, versioned.revision)
+      verifyAuthorityStateAnchor(this.#stateAnchor!, current)
+      this.#hydrateState(current)
       this.#activeStateTransactions += 1
       try {
         return this.#stateContext.run(true, () => {
           const result = operation()
-          this.#stateStore!.commit(canonicalizeJson(this.#persistentSnapshot()))
+          const next = this.#persistentSnapshot(versioned.revision + 1)
+          this.#stateStore!.commit(canonicalizeJson(next))
+          this.#stateAnchor!.compareAndAdvance(anchorPoint(current), anchorPoint(next))
           return result
         })
       } catch (error) {
@@ -1817,7 +2020,11 @@ export class LocalApprovalAuthority {
   async #withStateRead<T>(operation: () => Promise<T>): Promise<T> {
     if (!this.#stateStore || this.#stateContext.getStore()) return await operation()
     return await this.#stateStore.runExclusive(async () => {
-      this.#hydrateState(parseAuthoritySnapshot(this.#stateStore!.begin()))
+      const versioned = this.#stateStore!.beginVersioned()
+      const current = parseAuthoritySnapshot(versioned.snapshot, this.#issuer,
+        this.#decisionKeyId, this.#decisionPublicKey, this.#stateEncryptionKey!, versioned.revision)
+      verifyAuthorityStateAnchor(this.#stateAnchor!, current)
+      this.#hydrateState(current)
       this.#activeStateTransactions += 1
       try {
         return await this.#stateContext.run(true, operation)
@@ -1831,7 +2038,11 @@ export class LocalApprovalAuthority {
   #withStateReadSync<T>(operation: () => T): T {
     if (!this.#stateStore || this.#stateContext.getStore()) return operation()
     return this.#stateStore.runExclusiveSync(() => {
-      this.#hydrateState(parseAuthoritySnapshot(this.#stateStore!.begin()))
+      const versioned = this.#stateStore!.beginVersioned()
+      const current = parseAuthoritySnapshot(versioned.snapshot, this.#issuer,
+        this.#decisionKeyId, this.#decisionPublicKey, this.#stateEncryptionKey!, versioned.revision)
+      verifyAuthorityStateAnchor(this.#stateAnchor!, current)
+      this.#hydrateState(current)
       this.#activeStateTransactions += 1
       try {
         return this.#stateContext.run(true, operation)
@@ -1842,9 +2053,9 @@ export class LocalApprovalAuthority {
     })
   }
 
-  #persistentSnapshot(): AuthorityPersistentSnapshot {
-    return {
-      schemaVersion: '2.4.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
+  #persistentSnapshot(revision: number): AuthorityPersistentSnapshot {
+    return signAuthoritySnapshot({
+      schemaVersion: '2.7.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
       privateKeys: {
         primary: encryptPrivateKey(this.#privateKey, this.#stateEncryptionKey!, 'primary'),
         freshness: encryptPrivateKey(this.#freshnessPrivateKey, this.#stateEncryptionKey!, 'freshness'),
@@ -1863,9 +2074,11 @@ export class LocalApprovalAuthority {
       grants: [...this.#grants.entries()], grantFinalizations: [...this.#grantFinalizations.entries()],
       acknowledgedFinalizations: [...this.#acknowledgedFinalizations.entries()],
       revoked: [...this.#revoked.entries()], uses: [...this.#uses.entries()],
-      reservations: [...this.#reservations.entries()], completedPreflights: [...this.#completedPreflights.entries()],
+      reservations: [...this.#reservations.entries()],
+      reservationRpcBindings: [...this.#reservationRpcBindings.entries()],
+      completedPreflights: [...this.#completedPreflights.entries()],
       manualResultIds: [...this.#manualResultIds], attemptLogs: [...this.#attemptLogs.entries()],
-    }
+    }, revision, this.#stateEncryptionKey!)
   }
 
   #hydrateState(snapshot: AuthorityPersistentSnapshot): void {
@@ -1879,6 +2092,7 @@ export class LocalApprovalAuthority {
     replaceMap(this.#revoked, snapshot.revoked)
     replaceMap(this.#uses, snapshot.uses)
     replaceMap(this.#reservations, snapshot.reservations)
+    replaceMap(this.#reservationRpcBindings, snapshot.reservationRpcBindings)
     replaceMap(this.#completedPreflights, snapshot.completedPreflights)
     this.#manualResultIds.clear()
     for (const id of snapshot.manualResultIds) this.#manualResultIds.add(id)
@@ -1997,17 +2211,97 @@ function decryptPrivateKey(value: EncryptedPrivateKey, encryptionKey: Buffer, ke
   } finally { plaintext.fill(0) }
 }
 
-function parseAuthoritySnapshot(value: string): AuthorityPersistentSnapshot {
+function parseAuthoritySnapshot(
+  value: string,
+  issuer: string,
+  decisionKeyId: string,
+  decisionPublicKey: KeyObject,
+  stateEncryptionKey: Buffer,
+  revision: number,
+): AuthorityPersistentSnapshot {
   let parsed: unknown
   try { parsed = JSON.parse(value) } catch {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 不是合法 JSON')
   }
-  return parseCurrentAuthoritySnapshot(parsed)
+  const snapshot = parseCurrentAuthoritySnapshot(parsed)
+  verifyAuthoritySnapshotProof(snapshot, revision, stateEncryptionKey)
+  validateReservationRpcBindingCryptography(snapshot, issuer, decisionKeyId, decisionPublicKey)
+  return snapshot
+}
+
+function signAuthoritySnapshot(
+  candidate: Record<string, unknown>,
+  revision: number,
+  stateEncryptionKey: Buffer,
+): AuthorityPersistentSnapshot {
+  if (!Number.isSafeInteger(revision) || revision < 1) corruptSnapshot()
+  const { stateRevision: _revision, stateDigest: _digest, stateMac: _mac, ...unsigned } = candidate
+  const stateDigest = digestText('authority-state-snapshot/v1', canonicalizeJson(unsigned))
+  return parseCurrentAuthoritySnapshot({ ...unsigned, stateRevision: revision, stateDigest,
+    stateMac: authoritySnapshotMac(stateEncryptionKey, { revision, snapshotDigest: stateDigest }) })
+}
+
+function verifyAuthoritySnapshotProof(
+  snapshot: AuthorityPersistentSnapshot,
+  revision: number,
+  stateEncryptionKey: Buffer,
+): void {
+  const { stateRevision, stateDigest, stateMac, ...unsigned } = snapshot
+  const expectedDigest = digestText('authority-state-snapshot/v1', canonicalizeJson(unsigned))
+  const expectedMac = Buffer.from(authoritySnapshotMac(stateEncryptionKey, {
+    revision: stateRevision, snapshotDigest: stateDigest,
+  }), 'base64url')
+  const actualMac = Buffer.from(stateMac, 'base64url')
+  if (stateRevision !== revision || stateDigest !== expectedDigest
+    || actualMac.byteLength !== expectedMac.byteLength || !timingSafeEqual(actualMac, expectedMac)) {
+    throw authorityError('E2E_AUTHORITY_STATE_AUTHENTICATION_FAILED', 'Authority snapshot 摘要、MAC 或 SQLite revision 不闭合')
+  }
+}
+
+function verifyAuthorityStateAnchor(
+  anchor: AuthorityStateAnchorProvider,
+  snapshot: AuthorityPersistentSnapshot,
+): void {
+  const high = anchor.read()
+  if (high === undefined) {
+    throw authorityError('E2E_AUTHORITY_STATE_ANCHOR_MISSING', '当前 Authority snapshot 缺少单调 anchor')
+  }
+  if (high.revision !== snapshot.stateRevision || high.snapshotDigest !== snapshot.stateDigest) {
+    throw authorityError('E2E_AUTHORITY_STATE_ROLLBACK_DETECTED', 'Authority SQLite 状态与外部单调高水位不精确闭合')
+  }
+}
+
+function anchorPoint(snapshot: AuthorityPersistentSnapshot): AuthorityStateAnchorPoint {
+  return { revision: snapshot.stateRevision, snapshotDigest: snapshot.stateDigest }
+}
+
+function cleanupAuthorityResources(
+  store: SqliteSnapshotStore | undefined,
+  anchor: AuthorityStateAnchorProvider | undefined,
+  key: Buffer | undefined,
+): unknown[] {
+  const errors: unknown[] = []
+  try { store?.close() } catch (error) { errors.push(error) }
+  try { anchor?.close() } catch (error) { errors.push(error) }
+  key?.fill(0)
+  return errors
+}
+
+function throwWithAuthorityCleanup(
+  cause: unknown,
+  store: SqliteSnapshotStore | undefined,
+  anchor: AuthorityStateAnchorProvider | undefined,
+  key: Buffer | undefined,
+): never {
+  const errors = cleanupAuthorityResources(store, anchor, key)
+  if (errors.length > 0) throw new AggregateError([cause, ...errors], 'E2E_AUTHORITY_OPEN_CLEANUP_FAILED')
+  throw cause
 }
 
 function loadAuthoritySnapshot(
   value: string,
   stateEncryptionKey: Buffer,
+  revision: number,
 ): {
   snapshot: AuthorityPersistentSnapshot
   migrated: boolean
@@ -2042,26 +2336,30 @@ function loadAuthoritySnapshot(
   }
   if (policy.hasReceipts) {
     decryptWebAuthnReceipts(parsed.webAuthnReceipts as EncryptedPrivateKey, stateEncryptionKey)
-    if (version === '2.4.0') {
-      return { snapshot: parsed as unknown as AuthorityPersistentSnapshot, migrated: false, privateKeys }
+    if (version === '2.7.0') {
+      const snapshot = parsed as unknown as AuthorityPersistentSnapshot
+      verifyAuthoritySnapshotProof(snapshot, revision, stateEncryptionKey)
+      return { snapshot, migrated: false, privateKeys }
     }
-    const migrationSource = policy.hasApprovalContext && policy.writeContract === 'legacy-v23'
+    const writeCompatible = policy.hasApprovalContext && policy.writeContract === 'legacy-v23'
       ? migrateLegacyWriteGrants(parsed)
       : parsed
+    const migrationSource = migrateLegacyReservationOwners(writeCompatible)
     return {
-      snapshot: parseCurrentAuthoritySnapshot({
+      snapshot: signAuthoritySnapshot({
         ...migrationSource,
-        schemaVersion: '2.4.0',
+        schemaVersion: '2.7.0',
         ...(version === '2.2.0' ? { grantFinalizations: [] } : {}),
-        acknowledgedFinalizations: [],
-      }),
+        ...(version === '2.2.0' || version === '2.3.0' ? { acknowledgedFinalizations: [] } : {}),
+        reservationRpcBindings: [],
+      }, revision + 1, stateEncryptionKey),
       migrated: true,
       privateKeys,
     }
   }
-  const snapshot = parseCurrentAuthoritySnapshot({
+  const snapshot = signAuthoritySnapshot({
     ...parsed,
-    schemaVersion: '2.4.0',
+    schemaVersion: '2.7.0',
     grants: [],
     grantFinalizations: [],
     acknowledgedFinalizations: [],
@@ -2069,13 +2367,14 @@ function loadAuthoritySnapshot(
       [grantId, 'legacy-approval-context-migration'] as [string, string]),
     uses: [],
     reservations: [],
+    reservationRpcBindings: [],
     completedPreflights: [],
     attemptLogs: [],
     ...(version === '2.0.0'
       ? { webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey) }
       : {}),
     webAuthnReceipts: encryptWebAuthnReceipts([], stateEncryptionKey),
-  })
+  }, revision + 1, stateEncryptionKey)
   return { snapshot, migrated: true, privateKeys }
 }
 
@@ -2125,6 +2424,10 @@ function migrateLegacyWriteGrants(snapshot: Record<string, unknown>): Record<str
       .filter(([key]) => !removedCapabilityKeys.has(key)),
     reservations: (snapshot.reservations as Array<[string, { grantId: string }]>)
       .filter(([, reservation]) => !incompatibleGrantIds.has(reservation.grantId)),
+    ...(Array.isArray(snapshot.reservationRpcBindings) ? {
+      reservationRpcBindings: (snapshot.reservationRpcBindings as Array<[string, unknown]>)
+        .filter(([reservationId]) => !removedReservationIds.has(reservationId)),
+    } : {}),
     completedPreflights: (snapshot.completedPreflights as Array<[string, { grantId: string }]>)
       .filter(([, preflight]) => !incompatibleGrantIds.has(preflight.grantId)),
     attemptLogs: (snapshot.attemptLogs as AuthorityPersistentSnapshot['attemptLogs'])
@@ -2132,15 +2435,28 @@ function migrateLegacyWriteGrants(snapshot: Record<string, unknown>): Record<str
   }
 }
 
+function migrateLegacyReservationOwners(snapshot: Record<string, unknown>): Record<string, unknown> {
+  const reservations = (snapshot.reservations as Array<[string, Record<string, unknown>]>).map(
+    ([reservationId, reservation]) => reservation.status === 'reserved'
+      ? [reservationId, {
+        ...reservation,
+        status: 'unknown',
+        observation: 'legacy-reservation-owner-migration-effect-unknown',
+      }] as [string, Record<string, unknown>]
+      : [reservationId, reservation] as [string, Record<string, unknown>],
+  )
+  return { ...snapshot, reservations, reservationRpcBindings: [] }
+}
+
 function parseCurrentAuthoritySnapshot(parsed: unknown): AuthorityPersistentSnapshot {
-  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.4.0') {
+  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.7.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
-  parseAuthoritySnapshotStructure(parsed, authoritySnapshotPolicy('2.4.0'))
+  parseAuthoritySnapshotStructure(parsed, authoritySnapshotPolicy('2.7.0'))
   return parsed as unknown as AuthorityPersistentSnapshot
 }
 
-type AuthoritySnapshotVersion = '2.0.0' | '2.1.0' | '2.2.0' | '2.3.0' | '2.4.0'
+type AuthoritySnapshotVersion = '2.0.0' | '2.1.0' | '2.2.0' | '2.3.0' | '2.4.0' | '2.5.0' | '2.6.0' | '2.7.0'
 type StoredWriteContract = 'legacy-v23' | 'current'
 
 interface AuthoritySnapshotPolicy {
@@ -2150,6 +2466,9 @@ interface AuthoritySnapshotPolicy {
   hasApprovalContext: boolean
   hasGrantFinalizations: boolean
   hasAcknowledgedFinalizations: boolean
+  hasReservationRpcBindings: boolean
+  authenticatedReservationRpcBindings: boolean
+  authenticatedSnapshot: boolean
   writeContract: StoredWriteContract
 }
 
@@ -2158,22 +2477,50 @@ function authoritySnapshotPolicy(version: unknown): AuthoritySnapshotPolicy {
     case '2.0.0': return {
       schemaVersion: version, hasCredentials: false, hasReceipts: false, hasApprovalContext: false,
       hasGrantFinalizations: false, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
+      hasReservationRpcBindings: false, authenticatedReservationRpcBindings: false,
+      authenticatedSnapshot: false,
     }
     case '2.1.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: false, hasApprovalContext: false,
       hasGrantFinalizations: false, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
+      hasReservationRpcBindings: false, authenticatedReservationRpcBindings: false,
+      authenticatedSnapshot: false,
     }
     case '2.2.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
       hasGrantFinalizations: false, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
+      hasReservationRpcBindings: false, authenticatedReservationRpcBindings: false,
+      authenticatedSnapshot: false,
     }
     case '2.3.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
       hasGrantFinalizations: true, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
+      hasReservationRpcBindings: false, authenticatedReservationRpcBindings: false,
+      authenticatedSnapshot: false,
     }
     case '2.4.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
       hasGrantFinalizations: true, hasAcknowledgedFinalizations: true, writeContract: 'current',
+      hasReservationRpcBindings: false, authenticatedReservationRpcBindings: false,
+      authenticatedSnapshot: false,
+    }
+    case '2.5.0': return {
+      schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
+      hasGrantFinalizations: true, hasAcknowledgedFinalizations: true, writeContract: 'current',
+      hasReservationRpcBindings: true, authenticatedReservationRpcBindings: false,
+      authenticatedSnapshot: false,
+    }
+    case '2.6.0': return {
+      schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
+      hasGrantFinalizations: true, hasAcknowledgedFinalizations: true, writeContract: 'current',
+      hasReservationRpcBindings: true, authenticatedReservationRpcBindings: true,
+      authenticatedSnapshot: false,
+    }
+    case '2.7.0': return {
+      schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
+      hasGrantFinalizations: true, hasAcknowledgedFinalizations: true, writeContract: 'current',
+      hasReservationRpcBindings: true, authenticatedReservationRpcBindings: true,
+      authenticatedSnapshot: true,
     }
     default:
       throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 版本未知或旧结构无效')
@@ -2191,13 +2538,20 @@ function parseAuthoritySnapshotStructure(
     || typeof candidate.issuer !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.issuer)
     || typeof candidate.keyId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(candidate.keyId)
     || typeof candidate.identityDigest !== 'string' || !isDigest(candidate.identityDigest)
+    || (policy.authenticatedSnapshot && (
+      typeof candidate.stateRevision !== 'number' || !Number.isSafeInteger(candidate.stateRevision)
+      || candidate.stateRevision < 1 || typeof candidate.stateDigest !== 'string'
+      || !isDigest(candidate.stateDigest) || typeof candidate.stateMac !== 'string'
+      || !/^[A-Za-z0-9_-]{43}$/.test(candidate.stateMac)))
     || !privateKeys || Object.keys(privateKeys).sort().join('\0')
       !== ['attempt', 'decision', 'freshness', 'primary', 'privacyReview'].join('\0')
     || Object.values(privateKeys).some((key) => !isEncryptedBlob(key))
     || (policy.hasCredentials && !isEncryptedBlob(candidate.webAuthnCredentials))
     || (policy.hasReceipts && !isEncryptedBlob(candidate.webAuthnReceipts))
     || !Array.isArray(candidate.grants) || !Array.isArray(candidate.revoked) || !Array.isArray(candidate.uses)
-    || !Array.isArray(candidate.reservations) || !Array.isArray(candidate.completedPreflights)
+    || !Array.isArray(candidate.reservations) || candidate.reservations.length > MAX_RESERVATION_RECORDS
+    || !Array.isArray(candidate.completedPreflights)
+    || (policy.hasReservationRpcBindings && !Array.isArray(candidate.reservationRpcBindings))
     || !Array.isArray(candidate.manualResultIds) || !Array.isArray(candidate.attemptLogs)) {
     corruptSnapshot()
   }
@@ -2259,16 +2613,44 @@ function parseAuthoritySnapshotStructure(
       corruptSnapshot()
     }
   })
-  parseUniqueTuples(candidate.uses, 'use', (key, count) => {
+  const uses = parseUniqueTuples(candidate.uses, 'use', (key, count) => {
     if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0
       || ![...grantMap.values()].some((grant) => grant.capabilities.some((capability) =>
         `${grant.grantId}:${capability.capabilityId}` === key))) corruptSnapshot()
   })
+  const useMap = new Map(uses.map(([key, count]) => [key, count as number]))
   const reservations = parseUniqueTuples(candidate.reservations, 'reservation', (key, value) => {
     validateStoredReservation(key, value, grantMap)
   })
   const reservationMap = new Map(reservations.map(([key, value]) =>
     [key, value as unknown as CapabilityReservation]))
+  const reservationCounts = new Map<string, number>()
+  for (const reservation of reservationMap.values()) {
+    const key = `${reservation.grantId}:${reservation.capabilityId}`
+    reservationCounts.set(key, (reservationCounts.get(key) ?? 0) + 1)
+  }
+  for (const grant of grantMap.values()) {
+    for (const capability of grant.capabilities) {
+      const key = `${grant.grantId}:${capability.capabilityId}`
+      const count = reservationCounts.get(key) ?? 0
+      if ((useMap.get(key) ?? 0) !== count || count > capability.maxUses) corruptSnapshot()
+    }
+  }
+  if (policy.hasReservationRpcBindings) {
+    parseUniqueTuples(candidate.reservationRpcBindings as unknown[], 'reservation RPC binding', (key, value) => {
+      const reservation = reservationMap.get(key)
+      const grant = reservation === undefined ? undefined : grantMap.get(reservation.grantId)
+      if (grant === undefined) corruptSnapshot()
+      try {
+        if (policy.authenticatedReservationRpcBindings) {
+          parseReservationRpcOwnerBinding(key, value, grant.approvalContext)
+        } else {
+          parseReservationRpcOwnerClaim(value, grant.approvalContext)
+        }
+      }
+      catch { corruptSnapshot() }
+    })
+  }
   parseUniqueTuples(candidate.completedPreflights, 'preflight', (key, value) => {
     validateStoredPreflight(key, value, grantMap)
   })
@@ -2289,6 +2671,8 @@ function hasExactSnapshotKeys(
     ...(policy.hasReceipts ? ['webAuthnReceipts'] : []),
     ...(policy.hasGrantFinalizations ? ['grantFinalizations'] : []),
     ...(policy.hasAcknowledgedFinalizations ? ['acknowledgedFinalizations'] : []),
+    ...(policy.hasReservationRpcBindings ? ['reservationRpcBindings'] : []),
+    ...(policy.authenticatedSnapshot ? ['stateDigest', 'stateMac', 'stateRevision'] : []),
   ].sort()
   return Object.keys(candidate).sort().join('\0') === keys.join('\0')
 }
@@ -2360,7 +2744,10 @@ function validateStoredGrantStructure(grant: Record<string, unknown>, policy: Au
   }
   for (const capability of grant.capabilities) {
     if (!isPlainSnapshot(capability)) corruptSnapshot()
-    requireExactKeys(capability, keySets[kind])
+    const capabilityKeys = (kind === 'discovery' || kind === 'read') && capability.transport === 'http'
+      ? ['actionId', 'capabilityId', 'effect', 'maxUses', 'nonce', 'operation', 'requestIds', 'transport']
+      : keySets[kind]
+    requireExactKeys(capability, capabilityKeys)
     if (typeof capability.capabilityId !== 'string' || typeof capability.actionId !== 'string'
       || typeof capability.nonce !== 'string' || !/^[a-f0-9]{64}$/.test(capability.nonce)
       || typeof capability.maxUses !== 'number' || !Number.isSafeInteger(capability.maxUses)
@@ -2376,17 +2763,17 @@ function validateStoredGrantSubject(
   value: unknown,
   writeContract: StoredWriteContract = 'current',
 ): StoredGrantKind {
+  const discovery = DiscoveryApprovalSubjectSchema.safeParse(value)
+  if (discovery.success) return 'discovery'
+  const legacyDiscovery = LegacyDiscoveryApprovalSubjectV10Schema.safeParse(value)
+  if (legacyDiscovery.success) return 'discovery'
   const read = ReadApprovalSubjectSchema.safeParse(value)
   if (read.success) return 'read'
+  const legacyRead = LegacyReadApprovalSubjectV20Schema.safeParse(value)
+  if (legacyRead.success) return 'read'
   if (validateStoredWriteSubject(value, writeContract)) return 'write'
   if (!isPlainSnapshot(value) || !Array.isArray(value.actions) || value.actions.length === 0) corruptSnapshot()
   try {
-    if ('expectedPageIdentity' in value) {
-      requireExactKeys(value, ['actions', 'actor', 'assetId', 'baseOrigin', 'bootstrapIntentsDigest', 'environment',
-        'expectedPageIdentity', 'prdRevision', 'schemaVersion', 'scopeDigest'])
-      validateDiscoverySubject(value as unknown as DiscoveryApprovalSubject)
-      return 'discovery'
-    }
     const first = value.actions[0]
     if (!isPlainSnapshot(first)) corruptSnapshot()
     if ('response' in first) {
@@ -2446,6 +2833,12 @@ function validateStoredReservation(
   if (value.outcomeDigest !== undefined && (typeof value.outcomeDigest !== 'string' || !isDigest(value.outcomeDigest))) {
     corruptSnapshot()
   }
+  if ((value.status === 'reserved' && (value.observation !== undefined || value.outcomeDigest !== undefined))
+    || (value.status === 'completed' && (typeof value.outcomeDigest !== 'string'
+      || !isDigest(value.outcomeDigest) || value.observation !== undefined))
+    || (value.status === 'unknown' && (typeof value.observation !== 'string'
+      || value.observation.length < 1 || value.observation.length > 16 * 1024
+      || value.outcomeDigest !== undefined))) corruptSnapshot()
 }
 
 function validateStoredPreflight(key: string, value: unknown, grants: Map<string, SignedGrant>): void {
@@ -2569,6 +2962,34 @@ function validateSnapshotCryptography(
         }
       } catch { corruptSnapshot() }
     }
+  }
+  if (snapshot.schemaVersion === '2.6.0' || snapshot.schemaVersion === '2.7.0') {
+    validateReservationRpcBindingCryptography(
+      snapshot as unknown as AuthorityPersistentSnapshot,
+      snapshot.issuer as string,
+      `${snapshot.keyId as string}:decision`,
+      createPublicKey(keys.decision),
+    )
+  }
+}
+
+function validateReservationRpcBindingCryptography(
+  snapshot: AuthorityPersistentSnapshot,
+  issuer: string,
+  decisionKeyId: string,
+  decisionPublicKey: KeyObject,
+): void {
+  const grants = new Map(snapshot.grants)
+  const reservations = new Map(snapshot.reservations)
+  for (const [reservationId, raw] of snapshot.reservationRpcBindings) {
+    const reservation = reservations.get(reservationId)
+    const grant = reservation === undefined ? undefined : grants.get(reservation.grantId)
+    if (!grant) corruptSnapshot()
+    const binding = parseReservationRpcOwnerBinding(reservationId, raw, grant.approvalContext)
+    try {
+      if (!verify(null, reservationRpcOwnerProofPayload(issuer, decisionKeyId, binding.signedDigest),
+        decisionPublicKey, Buffer.from(binding.signature, 'base64url'))) corruptSnapshot()
+    } catch { corruptSnapshot() }
   }
 }
 
@@ -2977,6 +3398,78 @@ function authorityError(code: string, message: string): E2EError {
   return new E2EError({ code, category: 'decision', message, retryable: false })
 }
 
+function reservationTerminalReceipt(
+  reservation: CapabilityReservation,
+  terminalStatus: 'completed' | 'unknown',
+): string {
+  return digestText('authority-reservation-terminal-receipt/v1', canonicalizeJson({
+    reservationId: reservation.reservationId,
+    grantId: reservation.grantId,
+    capabilityId: reservation.capabilityId,
+    actionId: reservation.actionId,
+    attemptId: reservation.attemptId,
+    terminalStatus,
+    ...(terminalStatus === 'completed'
+      ? { outcomeDigest: reservation.outcomeDigest }
+      : { observation: reservation.observation }),
+  }))
+}
+
+function parseReservationRpcOwnerClaim(
+  value: unknown,
+  expectedApprovalContext: CanonicalApprovalContext,
+): ReservationRpcOwnerClaim {
+  if (!isPlainSnapshot(value)) throw invalidReservationRpcOwnerBinding()
+  if (Object.keys(value).sort().join('\0') !== ['approvalContext', 'clientId'].join('\0')) {
+    throw invalidReservationRpcOwnerBinding()
+  }
+  const context = CanonicalApprovalContextSchema.safeParse(value.approvalContext)
+  if (typeof value.clientId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.clientId)
+    || !context.success
+    || canonicalizeJson(context.data) !== canonicalizeJson(expectedApprovalContext)) {
+    throw invalidReservationRpcOwnerBinding()
+  }
+  return { clientId: value.clientId, approvalContext: context.data }
+}
+
+function parseReservationRpcOwnerBinding(
+  reservationId: string,
+  value: unknown,
+  expectedApprovalContext: CanonicalApprovalContext,
+): ReservationRpcOwnerBinding {
+  if (!isPlainSnapshot(value)
+    || Object.keys(value).sort().join('\0')
+      !== ['approvalContext', 'clientId', 'signature', 'signedDigest'].join('\0')) {
+    throw invalidReservationRpcOwnerBinding()
+  }
+  const claim = parseReservationRpcOwnerClaim({
+    clientId: value.clientId,
+    approvalContext: value.approvalContext,
+  }, expectedApprovalContext)
+  if (typeof value.signedDigest !== 'string' || !isDigest(value.signedDigest)
+    || value.signedDigest !== reservationRpcOwnerDigest(reservationId, claim)
+    || !isCanonicalBase64Url(value.signature, 64)) throw invalidReservationRpcOwnerBinding()
+  return { ...claim, signedDigest: value.signedDigest, signature: value.signature as string }
+}
+
+function reservationRpcOwnerDigest(reservationId: string, claim: ReservationRpcOwnerClaim): string {
+  return digestText('authority-reservation-rpc-owner/v1', canonicalizeJson({
+    reservationId,
+    clientId: claim.clientId,
+    approvalContext: claim.approvalContext,
+  }))
+}
+
+function reservationRpcOwnerProofPayload(issuer: string, keyId: string, signedDigest: string): Buffer {
+  return Buffer.from(canonicalizeJson({
+    purpose: 'authority-reservation-rpc-owner/v1', issuer, keyId, signedDigest,
+  }))
+}
+
+function invalidReservationRpcOwnerBinding(): E2EError {
+  return authorityError('E2E_APPROVAL_RESERVATION_RPC_OWNER_INVALID', 'Reservation RPC owner 绑定无效')
+}
+
 function validateDiscoverySubject(subject: DiscoveryApprovalSubject): void {
   let baseOrigin: URL
   let pageUrl: URL
@@ -2989,11 +3482,11 @@ function validateDiscoverySubject(subject: DiscoveryApprovalSubject): void {
   const actionsValid = Array.isArray(subject.actions) && subject.actions.length > 0
     && new Set(subject.actions.map((action) => action.actionId)).size === subject.actions.length
     && subject.actions.every((action) => /^[A-Za-z0-9._:-]{1,256}$/.test(action.actionId)
-      && ['dom-read', 'screenshot', 'local-navigation'].includes(action.operation)
+      && ['dom-read', 'screenshot', 'local-navigation', 'http-request'].includes(action.operation)
       && Number.isSafeInteger(action.maxUses) && action.maxUses === 1)
   const identity = subject.expectedPageIdentity
   if (
-    subject.schemaVersion !== '1.0.0'
+    subject.schemaVersion !== '1.1.0'
     || !/^[A-Za-z0-9._:/-]{1,256}$/.test(subject.assetId)
     || !['local', 'test', 'staging', 'production'].includes(subject.environment)
     || !/^[A-Za-z0-9._:-]{1,256}$/.test(subject.actor)

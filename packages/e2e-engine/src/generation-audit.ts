@@ -38,10 +38,13 @@ import {
   digestCleanupPlanDefinition,
   digestRuntimeIsolationPolicy,
   type CleanupPlanDefinition,
+  RuntimeProvenanceSchema,
+  type RuntimeProvenance,
 } from '@mutil-skills/e2e-contracts'
 import { computeVerdict, type VerdictDependencies } from './verdict.js'
 import { auditPersistedAttemptFacts, createPersistedAttemptVerdictDependencies } from './persisted-attempt-audit.js'
 import { auditBrowserExecutionBinding, deriveBrowserCannotClaim } from './browser-claims.js'
+import { deriveRuntimeProvenanceCannotClaim } from './runtime-provenance-claims.js'
 import { constants } from 'node:fs'
 import { open, readdir, realpath } from 'node:fs/promises'
 import { join, relative, sep } from 'node:path'
@@ -581,9 +584,82 @@ export interface SemanticArtifact {
   schemaVersion?: string
   generationId?: string
   prdRevision?: string
+  engineVersion?: string
   contentDigest?: string
   createdAt?: string
   content: unknown
+}
+
+/**
+ * 不信任 report/manifest 的互相抄写：分别解析两份 provenance，再与 Host 冻结测量及
+ * generation 中可独立复算的 Gateway、Browser、Engine、isolation 事实逐项核对。
+ */
+export function auditRuntimeProvenanceBinding(
+  artifacts: SemanticArtifact[],
+  hostMeasurement: RuntimeProvenance,
+): { valid: boolean; findings: Array<{ code: string; ref: string }> } {
+  const findings: Array<{ code: string; ref: string }> = []
+  const byType = new Map(artifacts.map((artifact) => [artifact.artifactType, artifact]))
+  const report = byType.get('final-report')
+  const manifest = byType.get('generation-manifest')
+  const expected = RuntimeProvenanceSchema.safeParse(hostMeasurement)
+  const reportValue = isPlainObject(report?.content)
+    ? RuntimeProvenanceSchema.safeParse(report.content.runtimeProvenance) : undefined
+  const manifestValue = isPlainObject(manifest?.content)
+    ? RuntimeProvenanceSchema.safeParse(manifest.content.runtimeProvenance) : undefined
+  if (!expected.success) findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_HOST_INVALID', ref: 'host' })
+  if (!reportValue?.success) findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_REPORT_INVALID', ref: 'final-report' })
+  if (!manifestValue?.success) findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_MANIFEST_INVALID', ref: 'generation-manifest' })
+  if (!expected.success || !reportValue?.success || !manifestValue?.success) {
+    return { valid: false, findings }
+  }
+  if (!safeCanonicalEquals(reportValue.data, manifestValue.data)) {
+    findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_CROSS_ARTIFACT_MISMATCH', ref: 'runtimeProvenance' })
+  }
+  if (!safeCanonicalEquals(reportValue.data, expected.data)) {
+    findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_HOST_MISMATCH', ref: 'runtimeProvenance' })
+  }
+
+  const provenance = reportValue.data
+  const gateway = byType.get('gateway-audit')
+  const regression = byType.get('regression-manifest')
+  const preflight = byType.get('browser-preflight')
+  const execution = byType.get('execution-contract')
+  const gatewayContent = isPlainObject(gateway?.content) ? gateway.content : {}
+  const regressionContent = isPlainObject(regression?.content) ? regression.content : {}
+  const preflightContent = isPlainObject(preflight?.content) ? preflight.content : {}
+  const executionContent = isPlainObject(execution?.content) ? execution.content : {}
+  const toolchain = objectAt(regressionContent, 'toolchain')
+  const chromium = arrayAt(preflightContent, 'sandboxChecks')
+    .find((check) => stringAt(check, 'id') === 'TRUSTED-CHROME-EXECUTABLE')
+  const sandboxChecks = arrayAt(preflightContent, 'sandboxChecks')
+  if (provenance.engineVersion !== report?.engineVersion
+    || provenance.engineVersion !== manifest?.engineVersion) {
+    findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_ENGINE_MISMATCH', ref: 'engineVersion' })
+  }
+  if (provenance.sourceRevisionDigest !== report?.prdRevision
+    || provenance.sourceRevisionDigest !== manifest?.prdRevision) {
+    findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_SOURCE_REVISION_MISMATCH', ref: 'sourceRevisionDigest' })
+  }
+  if (provenance.playwrightVersion !== stringAt(toolchain, 'playwrightVersion')) {
+    findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_PLAYWRIGHT_MISMATCH', ref: 'playwrightVersion' })
+  }
+  if (!chromium || provenance.chromiumDigest !== stringAt(chromium, 'digest')) {
+    findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_CHROMIUM_MISMATCH', ref: 'chromiumDigest' })
+  }
+  if (provenance.gatewayPolicyDigest !== stringAt(gatewayContent, 'policyDigest')) {
+    findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_GATEWAY_MISMATCH', ref: 'gatewayPolicyDigest' })
+  }
+  const expectedIsolationProof = safeDigestJson('runtime-isolation-proof/v1', sandboxChecks)
+  if (provenance.isolationProofDigest !== expectedIsolationProof) {
+    findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_ISOLATION_MISMATCH', ref: 'isolationProofDigest' })
+  }
+  const isolation = executionContent.runtimeIsolation
+  if (isPlainObject(isolation)
+    && provenance.authorityPublicKeyDigest !== stringAt(isolation, 'authorityRpcPublicKeyDigest')) {
+    findings.push({ code: 'E2E_GENERATION_RUNTIME_PROVENANCE_AUTHORITY_MISMATCH', ref: 'authorityPublicKeyDigest' })
+  }
+  return { valid: findings.length === 0, findings }
 }
 
 export interface SemanticAuditFinding { code: string; artifactId: string; ref: string }
@@ -787,9 +863,9 @@ export function auditArtifactSemantics(
   const gatewayInstanceId = stringAt(objectAt(gateway, 'gatewayInstance'), 'instanceId')
   const gatewayCheck = arrayAt(content('browser-preflight'), 'gatewayChecks')
     .find((item) => stringAt(item, 'id') === gatewayInstanceId)
+  const executedGatewayPolicyDigest = stringAt(gateway, 'policyDigest')
   if (v2ApprovalFacts && (stringAt(runBundle, 'runtimePolicyDigest') !== approvedRuntimePolicyDigest
-    || stringAt(gateway, 'policyDigest') !== approvedRuntimePolicyDigest
-    || stringAt(gatewayCheck ?? {}, 'digest') !== approvedRuntimePolicyDigest)) {
+    || stringAt(gatewayCheck ?? {}, 'digest') !== executedGatewayPolicyDigest)) {
     add('E2E_GENERATION_GATEWAY_POLICY_BINDING_MISMATCH', 'gateway-audit', approvedRuntimePolicyDigest)
   }
 
@@ -1616,6 +1692,7 @@ export interface ValidateGenerationInput {
   verdictInput?: VerdictInput
   verdictInputPath?: string
   verdictDependencies?: VerdictDependencies
+  runtimeProvenance?: RuntimeProvenance
   verifyAttemptEventProof?(proof: AttemptEventAuthorityProof): boolean
   verifyAuthoritySignature?(artifact: ArtifactDocument): boolean
   verifyManifestRootSignature?(
@@ -1651,6 +1728,13 @@ export function validateGeneration(input: ValidateGenerationInput): {
 } {
   const findings: CompleteGenerationFinding[] = []
   const artifacts: ArtifactDocument[] = []
+  const hasFinalReportCandidate = input.artifactCandidates.some((candidate) =>
+    isPlainObject(candidate) && candidate.artifactType === 'final-report')
+  const verdictInputInvalid = input.verdictInput !== undefined
+    && !VerdictInputSchema.safeParse(input.verdictInput).success
+  if (hasFinalReportCandidate && verdictInputInvalid) {
+    add('E2E_GENERATION_VERDICT_INPUT_INVALID', 'final-report')
+  }
 
   for (const [index, candidate] of input.artifactCandidates.entries()) {
     try {
@@ -1684,6 +1768,15 @@ export function validateGeneration(input: ValidateGenerationInput): {
   }
   for (const type of ARTIFACT_TYPES) {
     if (!byType.has(type)) add('E2E_GENERATION_ARTIFACT_TYPE_MISSING', type)
+  }
+
+  if (byType.has('final-report') || byType.has('generation-manifest')) {
+    if (input.runtimeProvenance === undefined) {
+      add('E2E_GENERATION_RUNTIME_PROVENANCE_HOST_MISSING', 'runtimeProvenance')
+    } else {
+      auditRuntimeProvenanceBinding(artifacts, input.runtimeProvenance).findings
+        .forEach((finding) => add(finding.code, finding.ref))
+    }
   }
 
   const attemptAudit = auditPersistedAttemptFacts(artifacts, input.verifyAttemptEventProof)
@@ -1787,7 +1880,7 @@ export function validateGeneration(input: ValidateGenerationInput): {
     else {
       const parsedVerdictInput = VerdictInputSchema.safeParse(input.verdictInput)
       if (!parsedVerdictInput.success) {
-        add('E2E_GENERATION_VERDICT_INPUT_INVALID', finalReport.artifactId)
+        if (!verdictInputInvalid) add('E2E_GENERATION_VERDICT_INPUT_INVALID', finalReport.artifactId)
       } else {
       const verdictInput = parsedVerdictInput.data
       if (verdictInput.assetId !== finalReport.assetId
@@ -1812,6 +1905,7 @@ export function validateGeneration(input: ValidateGenerationInput): {
       const projectPolicyContent = byType.get('project-policy')?.content as Record<string, unknown> ?? {}
       const executionContractContent = byType.get('execution-contract')?.content as Record<string, unknown> ?? {}
       const browserResultsContent = byType.get('browser-results')?.content as Record<string, unknown> ?? {}
+      const parsedReportProvenance = RuntimeProvenanceSchema.safeParse(report.runtimeProvenance)
       const expectedCannotClaim = [...new Set([...expected.cannotClaim, ...deriveBrowserCannotClaim({
         approved: arrayAt(projectPolicyContent, 'browserMatrix').map((item) => ({
           browserId: stringAt(item, 'browserId'), required: item.required === true,
@@ -1820,7 +1914,9 @@ export function validateGeneration(input: ValidateGenerationInput): {
           browserId: stringAt(item, 'browserId'),
         })),
         executed: stringsAt(browserResultsContent, 'executedBrowserIds'),
-      })])].sort()
+      }), ...(parsedReportProvenance.success
+        ? deriveRuntimeProvenanceCannotClaim(parsedReportProvenance.data)
+        : [])])].sort()
       const verdictInputDigest = digestText('verdict-input/v2', canonicalizeJson(verdictInput))
       if (report.verdictInputDigest !== verdictInputDigest) {
         add('E2E_GENERATION_VERDICT_INPUT_DIGEST_MISMATCH', finalReport.artifactId)

@@ -73,14 +73,17 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
       transports: ['internal'], subject: approver.subject,
     })
     const discoverySubject = {
-      schemaVersion: '1.0.0' as const, assetId: snapshot.assetId,
+      schemaVersion: '1.1.0' as const, assetId: snapshot.assetId,
       prdRevision: snapshot.artifactDigests['prd-source']!, scopeDigest: snapshot.artifactDigests.scope!,
       environment: 'test' as const, baseOrigin: 'https://test.example.com', actor: 'operator',
       expectedPageIdentity: {
         url: 'https://test.example.com/orders/1', title: 'Order', heading: 'Order 1', ariaSignals: ['main'],
       },
       bootstrapIntentsDigest: digest('bootstrap'),
-      actions: [{ actionId: 'DISCOVERY-REAL', operation: 'local-navigation' as const, maxUses: 1 }],
+      requests: [],
+      actions: [{
+        actionId: 'DISCOVERY-REAL', operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
+      }],
     }
     const discovery = await seedAuthority.issueDiscoveryGrant({
       subject: discoverySubject, approvalSessionRef: 'seed-session', ttlMs: 120_000,

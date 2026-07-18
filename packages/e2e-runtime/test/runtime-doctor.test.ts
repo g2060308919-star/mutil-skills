@@ -1,4 +1,6 @@
 import { RuntimeDoctorReportSchema, canonicalizeJson } from '@mutil-skills/e2e-contracts'
+import { cp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { describe, expect, test } from 'vitest'
 import { runCli } from '../src/cli.js'
@@ -12,6 +14,10 @@ import {
   type RuntimeProbe,
 } from '../src/runtime-doctor.js'
 import type { RuntimeInstallation } from '../src/runtime-discovery.js'
+import { inspectRuntimeInstallation } from '../src/runtime-discovery.js'
+import { installRuntime } from '../src/runtime-installer.js'
+import { openRuntimeArtifactStoreAuthority } from '../src/authority-host.js'
+import { createRuntimeTestRoots } from './fixtures.js'
 
 const digest = `sha256:${'a'.repeat(64)}`
 const installation: RuntimeInstallation = {
@@ -45,20 +51,23 @@ describe('Runtime doctor', () => {
     expect(report.ready).toBe(false)
   })
 
-  test('runs the fixed registry without claiming later capabilities are installed', async () => {
+  test('missing Runtime bytes cannot be reported as passed from an injected installation object', async () => {
     const report = await runRuntimeDoctor({ installation, homeDir: '/safe/home' })
 
     expect(Object.keys(report.probes)).toEqual(RUNTIME_DOCTOR_PROBE_NAMES)
-    expect(report.probes.installation?.status).toBe('passed')
-    expect(report.probes['version-closure']?.status).toBe('passed')
-    expect(report.probes['source-independence']?.status).toBe('passed')
+    expect(report.probes.installation?.status).toBe('blocked')
+    expect(report.probes['version-closure']?.status).toBe('blocked')
+    expect(report.probes['source-independence']?.status).toBe('blocked')
+    for (const name of ['installation', 'version-closure', 'source-independence'] as const) {
+      expect(report.probes[name]?.proofDigest).toBeUndefined()
+    }
     for (const name of RUNTIME_DOCTOR_PROBE_NAMES.slice(3)
       .filter((name) => !['authority', 'artifact-fs', 'chromium'].includes(name))) {
-      expect(report.probes[name]).toMatchObject({ status: 'not-installed' })
+      expect(['not-installed', 'blocked']).toContain(report.probes[name]?.status)
     }
     expect(['not-installed', 'blocked']).toContain(report.probes.chromium?.status)
     for (const name of ['authority', 'artifact-fs'] as const) {
-      expect(['passed', 'blocked']).toContain(report.probes[name]?.status)
+      expect(['not-installed', 'blocked']).toContain(report.probes[name]?.status)
       if (report.probes[name]?.status === 'passed') {
         expect(report.probes[name]?.proofDigest).toMatch(/^sha256:[a-f0-9]{64}$/)
       }
@@ -87,6 +96,49 @@ describe('Runtime doctor', () => {
     expect(RuntimeDoctorReportSchema.parse(report)).toEqual(report)
     expect(calls).toEqual(RUNTIME_DOCTOR_PROBE_NAMES)
     expect(report.ready).toBe(true)
+  })
+
+  test('真实 Authority、Artifact、Quarantine 与 Report 探针不再是永久占位', async () => {
+    const roots = await createRuntimeTestRoots()
+    try {
+      const source = join(roots.source, 'closure')
+      const packageRoot = join(source, 'node_modules', '@mutil-skills', 'e2e-runtime')
+      await mkdir(join(packageRoot, 'dist', 'src', 'bin'), { recursive: true })
+      await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+        name: '@mutil-skills/e2e-runtime', version: '0.1.0',
+      }))
+      await writeFile(join(packageRoot, 'dist', 'src', 'bin', 'repo-e2e.js'), '#!/usr/bin/env node\n')
+      await installRuntime({
+        homeDir: roots.home, version: '0.1.0',
+        installClosure: async ({ stagingPrefix }) => await cp(source, stagingPrefix, { recursive: true }),
+      })
+      const installed = await inspectRuntimeInstallation({ homeDir: roots.home })
+      const authority = await openRuntimeArtifactStoreAuthority({
+        homeDir: roots.home,
+        installation: installed,
+        subject: `local:uid:${process.getuid!()}`,
+      })
+      await authority.close()
+
+      const report = await runRuntimeDoctor({
+        installation: installed,
+        homeDir: roots.home,
+        probes: {
+          gateway: passedProbe('E2E_GATEWAY_OK'),
+          chromium: passedProbe('E2E_CHROMIUM_OK'),
+          isolation: passedProbe('E2E_ISOLATION_OK'),
+        },
+      })
+
+      expect(report.probes.authority?.status).toBe('passed')
+      expect(report.probes['artifact-fs']?.status).toBe('passed')
+      expect(report.probes.quarantine?.status).toBe('passed')
+      expect(report.probes.report?.status).toBe('passed')
+      expect(report.probes['approval-presence']).toMatchObject({
+        status: 'not-installed', reasonCode: 'E2E_APPROVAL_IDENTITY_NOT_ENROLLED',
+      })
+      expect(report.ready).toBe(false)
+    } finally { await rm(roots.root, { recursive: true, force: true }) }
   })
 
   test('sanitizes a thrown probe and continues the remaining registry', async () => {
@@ -197,7 +249,8 @@ describe('Runtime doctor', () => {
     expect(exitCode).toBe(3)
     expect(stdout.text()).toBe('')
     expect(stderr.text()).toContain('探针\t状态\t原因代码\t修复建议')
-    expect(stderr.text()).toContain('installation\t通过\tE2E_RUNTIME_INSTALLATION_OK')
+    const installationProbe = report.probes.installation!
+    expect(stderr.text()).toContain(`installation\t阻塞\t${installationProbe.reasonCode}`)
     const authority = report.probes.authority!
     const authorityStatus = authority.status === 'passed' ? '通过' : '阻塞'
     expect(stderr.text()).toContain(`authority\t${authorityStatus}\t${authority.reasonCode}`)
@@ -233,7 +286,7 @@ describe('Runtime doctor', () => {
     expect(exitCode).toBe(3)
     expect(report).toMatchObject({
       ready: false,
-      runtimeVersion: '0.0.0',
+      runtimeVersion: '0.1.0',
       installationDigest: `sha256:${'0'.repeat(64)}`,
       probes: {
         installation: {
@@ -356,6 +409,12 @@ async function allPassedReport() {
     })
   }
   return runRuntimeDoctor({ installation, homeDir: '/safe/home', probes })
+}
+
+function passedProbe(reasonCode: string): RuntimeProbe {
+  return async () => ({
+    status: 'passed', reasonCode, proofDigest: digest, remediation: '无需处理',
+  })
 }
 
 function captureWritable(): { stream: Writable; text: () => string } {

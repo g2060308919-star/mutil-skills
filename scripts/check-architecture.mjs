@@ -7,6 +7,8 @@ const failures = []
 await assertNoDomainTermsInCore()
 await assertSkillsHaveNoRuntimeImports()
 await assertLowLevelE2EPackagesHaveNoRuntimeImports()
+await assertRecoveryHasNoExecutionImports()
+await assertHostCannotAcceptRawWriteRecovery()
 await assertFoundationHasNoBin()
 await assertWorkspacePackages()
 
@@ -63,6 +65,26 @@ async function assertLowLevelE2EPackagesHaveNoRuntimeImports() {
         failures.push(`low-level E2E package imports runtime in ${file}`)
       }
     }
+  }
+}
+
+async function assertRecoveryHasNoExecutionImports() {
+  const file = join(root, 'packages/e2e-runtime/src/runtime-recovery.ts')
+  const text = await readFile(file, 'utf8')
+  const forbidden = /(?:from\s*|import\s*\(\s*)['"][^'"]*(?:browser-host|gateway|playwright|trusted-action-runner)[^'"]*['"]/i
+  if (forbidden.test(text)) failures.push(`runtime recovery imports Browser/Gateway execution capability in ${file}`)
+}
+
+async function assertHostCannotAcceptRawWriteRecovery() {
+  const file = join(root, 'packages/e2e-runtime/src/runtime-host.ts')
+  const text = await readFile(file, 'utf8')
+  if (/writeRecovery\??\s*:/.test(text)
+    || /from ['"]\.\/runtime-recovery\.js['"]/.test(text)) {
+    failures.push('Runtime Host 不得接受裸 write recovery；必须注入完整 production capability')
+  }
+  if (!text.includes('recoverRuntimeProductionWrite')
+    || !text.includes('RuntimeWriteProductionCapability')) {
+    failures.push('Runtime Host 必须通过 runtime-write-production capability 接入恢复链')
   }
 }
 

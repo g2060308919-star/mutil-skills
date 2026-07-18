@@ -353,6 +353,7 @@ describe('versioned runtime installer', () => {
       'install',
       '--ignore-scripts',
       '--omit=dev',
+      '--no-bin-links',
       '--no-audit',
       '--no-fund',
       '--save-exact',

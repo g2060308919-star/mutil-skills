@@ -3,7 +3,10 @@ import type { ReversibleWriteGateway } from '@mutil-skills/e2e-gateway'
 import type { ExecutionOutcomeReceipt } from '@mutil-skills/e2e-contracts'
 import { GatewayWriteStateCoordinator } from '../src/gateway-write-state.js'
 import { freezeDrainAndFinalize } from '../src/gateway-finalization.js'
-import { websocketUnsupportedDisposition } from '../src/gateway-websocket-transport.js'
+import {
+  sseUnsupportedDisposition,
+  websocketUnsupportedDisposition,
+} from '../src/gateway-websocket-transport.js'
 
 describe('Gateway write 终态协调器', () => {
   test('finalize 在首个 await 前 claim，child-exit unknown 只能等待同一终态', async () => {
@@ -151,6 +154,15 @@ test.each(['pass-through', 'http-response', 'connection-reset', 'timeout'] as co
     })
   },
 )
+
+test('SSE 在真实 stream 终态桥完成前固定阻塞且不消费 reservation', () => {
+  expect(sseUnsupportedDisposition()).toEqual({
+    status: 501,
+    code: 'E2E_GATEWAY_SSE_BRIDGE_UNAVAILABLE',
+    reserveCapability: false,
+    auditDecision: 'blocked',
+  })
+})
 
 function fakeWriteGateway(
   completeWithExecutionOutcome: (...args: any[]) => Promise<ExecutionOutcomeReceipt>,

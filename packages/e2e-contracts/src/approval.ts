@@ -1,38 +1,24 @@
-export interface DiscoveryApprovalSubject {
-  schemaVersion: '1.0.0'
-  assetId: string
-  prdRevision: string
-  scopeDigest: string
-  environment: 'local' | 'test' | 'staging' | 'production'
-  baseOrigin: string
-  actor: string
-  expectedPageIdentity: {
-    url: string
-    title: string
-    heading: string
-    ariaSignals: string[]
-  }
-  bootstrapIntentsDigest: string
-  actions: Array<{
-    actionId: string
-    operation: 'dom-read' | 'screenshot' | 'local-navigation'
-    maxUses: number
-  }>
-}
+import type {
+  DiscoveryApprovalSubjectV11,
+  LegacyDiscoveryApprovalSubjectV10,
+} from './approval-subject.js'
+import type {
+  LegacyReadApprovalSubjectV20,
+  ReadApprovalSubjectV21,
+} from './approval-freshness.js'
+import type {
+  CanonicalDiscoveryCapability,
+  CanonicalReadCapability,
+} from './signed-grant.js'
 
-export interface DiscoveryCapability {
-  capabilityId: string
-  nonce: string
-  transport: 'browser-local'
-  effect: 'read'
-  actionId: string
-  operation: DiscoveryApprovalSubject['actions'][number]['operation']
-  targetUrl: string
-  actor: string
-  expectedPageIdentityDigest: string
-  bootstrapIntentsDigest: string
-  maxUses: number
-}
+export type CanonicalDiscoveryApprovalSubject = DiscoveryApprovalSubjectV11
+/** 当前签发与执行协议只接受 canonical v1.1 subject。 */
+export type DiscoveryApprovalSubject = CanonicalDiscoveryApprovalSubject
+/** 仅供历史状态读取/迁移入口使用；迁移完成前不得进入签发、验签或执行接口。 */
+export type DiscoveryApprovalSubjectMigrationInput =
+  | LegacyDiscoveryApprovalSubjectV10
+  | CanonicalDiscoveryApprovalSubject
+export type DiscoveryCapability = CanonicalDiscoveryCapability
 
 export interface CanonicalApprovalContext {
   schemaVersion: '1.0.0'
@@ -74,44 +60,16 @@ export interface DiscoveryPreflightOutcome {
   }
 }
 
-export interface ReadApprovalSubject {
-  schemaVersion: '2.0.0'
-  assetId: string
-  prdRevision: string
-  scopeDigest: string
-  requirementModelDigest: string
-  coveragePolicyDigest: string
-  universeDigest: string
-  caseDigest: string
-  actionMapDigest: string
-  policyDigest: string
-  executionContractDigest: string
-  runBundleProjectionDigest: string
-  environment: 'local' | 'test' | 'staging' | 'production'
-  baseOrigin: string
-  actor: string
-  discoveryGrantId: string
-  preflightDigest: string
-  actions: Array<{
-    actionId: string
-    operation: 'dom-read' | 'screenshot' | 'local-navigation'
-    maxUses: number
-  }>
-}
+export type CanonicalReadApprovalSubject = ReadApprovalSubjectV21
+/** 当前签发与执行协议只接受 canonical v2.1 subject。 */
+export type ReadApprovalSubject = CanonicalReadApprovalSubject
+/** 仅供历史状态读取/迁移入口使用；迁移完成前不得进入签发、验签或执行接口。 */
+export type ReadApprovalSubjectMigrationInput = LegacyReadApprovalSubjectV20 | CanonicalReadApprovalSubject
+export type ReadCapability = CanonicalReadCapability
 
 export interface ApproverIdentity {
   subject: string
   roles: string[]
-}
-
-export interface ReadCapability {
-  capabilityId: string
-  nonce: string
-  transport: 'browser-local'
-  effect: 'read'
-  actionId: string
-  operation: ReadApprovalSubject['actions'][number]['operation']
-  maxUses: number
 }
 
 export interface SignedReadGrant {
@@ -134,6 +92,7 @@ export type CanonicalPayload =
   | { kind: 'no-body' }
   | { kind: 'json'; digest: string }
   | { kind: 'binary'; digest: string }
+  | { kind: 'template'; templateDigest: string }
 
 export interface HttpIntent {
   intentId: string
@@ -142,6 +101,7 @@ export interface HttpIntent {
   exactPath: string
   query: Array<[string, string]>
   payload: CanonicalPayload
+  headers?: Array<{ name: string; value: string }>
   targetFingerprint: string
   maxRequests: number
   expectedOrder: number

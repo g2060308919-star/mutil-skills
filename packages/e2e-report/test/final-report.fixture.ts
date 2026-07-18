@@ -2,11 +2,19 @@ const digest = (character: string) => `sha256:${character.repeat(64)}`
 const valueMetric = { status: 'value', numerator: 1, denominator: 2, percentage: 50 }
 
 export const finalReportFixture = {
-  artifactId: 'FINAL-REPORT-1', artifactType: 'final-report', schemaVersion: '2.0.0', engineVersion: '2.0.0',
+  artifactId: 'FINAL-REPORT-1', artifactType: 'final-report', schemaVersion: '3.0.0', engineVersion: '2.0.0',
   assetId: 'PRODUCT/PRD-1', prdRevision: digest('a'), generationId: 'GEN-1',
   createdAt: '2026-07-12T00:00:00.000Z', contentDigest: digest('b'), signatures: [], dependencies: [],
   graph: { defines: [], references: [] },
   content: {
+    runtimeProvenance: {
+      runtimeVersion: '0.0.0', runtimeInstallationDigest: digest('a'), protocolVersion: '1.0.0',
+      contractsVersion: '0.0.0', engineVersion: '2.0.0', playwrightVersion: '1.61.1',
+      chromiumDigest: digest('b'), gatewayPolicyDigest: digest('c'), authorityPublicKeyDigest: digest('d'),
+      authorityStateProtectionLevel: 'local-crash-integrity',
+      projectIdentityDigest: digest('e'), sourceRevisionDigest: digest('f'), sourceRepositoryIndependent: true,
+      isolationProofDigest: digest('0'),
+    },
     verdictRuleVersion: '2.0.0', verdictInputDigest: digest('c'), verdict: 'safety-blocked',
     reasonCodes: ['E2E_GATEWAY_AUDIT_INVALID'], cannotClaim: ['不能宣称全部必要 Case 已可靠执行'],
     businessFailuresObserved: [], advisoryFailures: [],

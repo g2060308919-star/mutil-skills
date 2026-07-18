@@ -31,11 +31,19 @@ describe('TrustedReadActionProjector', () => {
         url: 'https://test.example.com/orders', title: '订单', heading: '订单列表', role: 'auditor',
       },
       expectedText: '页面显示待审核订单',
-      correlation: {
-        method: 'GET', channel: 'http', capabilityId: 'CAP-NAV',
-        ruleId: expect.stringMatching(/^sha256:/), bodyDigest: expect.stringMatching(/^sha256:/),
-      },
     })
+    expect((action as any).requestCorrelations).toEqual([
+      expect.objectContaining({
+        requestId: 'REQUEST-PAGE', method: 'GET', url: 'https://test.example.com/orders',
+        channel: 'http', actionId: 'ACTION-1', capabilityId: 'CAP-HTTP',
+        ruleId: expect.stringMatching(/^sha256:/),
+      }),
+      expect.objectContaining({
+        requestId: 'REQUEST-API', method: 'GET', url: 'https://test.example.com/api/orders',
+        channel: 'http', actionId: 'ACTION-1', capabilityId: 'CAP-HTTP',
+        ruleId: expect.stringMatching(/^sha256:/),
+      }),
+    ])
   })
 
   test('rejects caller-supplied or absent preflight facts instead of trusting the read grant alone', () => {
@@ -85,6 +93,17 @@ describe('TrustedReadActionProjector', () => {
 
 export function projectionFixture() {
   const installationDigest = d('installation')
+  const pageRequest = {
+    requestId: 'REQUEST-PAGE', method: 'GET' as const, url: 'https://test.example.com/orders',
+    headers: [], bodyDigest: d('empty-body'), redirectPolicy: { mode: 'deny' as const },
+  }
+  const apiRequest = {
+    requestId: 'REQUEST-API', method: 'GET' as const, url: 'https://test.example.com/api/orders',
+    headers: [{ name: 'accept', value: 'application/json' }], bodyDigest: d('empty-body'),
+    redirectPolicy: { mode: 'deny' as const },
+  }
+  const readRequests = [pageRequest, apiRequest]
+  const requestIds = readRequests.map((request) => request.requestId)
   const testCases = artifact('test-cases', {
     cases: [{
       caseId: 'CASE-1', revision: 1, obligationIds: ['OBL-1'], title: '订单列表', actor: 'auditor',
@@ -100,7 +119,8 @@ export function projectionFixture() {
     environment: 'test', baseOrigin: 'https://test.example.com',
     browserMatrix: [{ browserId: 'chromium', channel: 'chromium', viewportId: 'desktop' }],
     identities: [], caseQueue: [{ ordinal: 0, caseId: 'CASE-1' }],
-    actionIntents: [{ actionId: 'ACTION-1', effect: 'read', intentDigest: d('intent') }],
+    actionIntents: [{ actionId: 'ACTION-1', effect: 'read', intentDigest: d('intent'), requestIds }],
+    readHttpRequests: readRequests,
     dataNeeds: [], manualProcedures: [], evidencePolicyDigest: d('evidence-policy'),
     runtimeIsolation: null, unresolvedItems: [],
   })
@@ -115,18 +135,21 @@ export function projectionFixture() {
         { operation: 'local-navigation', capabilityId: 'CAP-NAV' },
         { operation: 'dom-read', capabilityId: 'CAP-DOM' },
         { operation: 'screenshot', capabilityId: 'CAP-SHOT' },
+        { operation: 'http-request', capabilityId: 'CAP-HTTP' },
       ],
+      requestIds,
     }],
     unmappedSteps: [], discoveredRisks: [],
   })
   const discoverySubject: DiscoveryApprovalSubject = {
-    schemaVersion: '1.0.0', assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
+    schemaVersion: '1.1.0', assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
     environment: 'test', baseOrigin: 'https://test.example.com', actor: 'auditor',
     expectedPageIdentity: {
       url: 'https://test.example.com/orders', title: '订单', heading: '订单列表', ariaSignals: [],
     },
     bootstrapIntentsDigest: d('bootstrap'),
-    actions: [{ actionId: 'PREFLIGHT-1', operation: 'local-navigation', maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'PREFLIGHT-1', operation: 'local-navigation', maxUses: 1, requestIds: [] }],
   }
   const discoveryDigest = canonicalGrantApprovalSubjectDigest(discoverySubject)
   const discoveryGrant: SignedDiscoveryGrant = {
@@ -147,16 +170,18 @@ export function projectionFixture() {
     revocationSequence: 0, signature: 'A'.repeat(86),
   }
   const readSubject: ReadApprovalSubject = {
-    schemaVersion: '2.0.0', assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
+    schemaVersion: '2.1.0', assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
     requirementModelDigest: d('model'), coveragePolicyDigest: d('coverage-policy'), universeDigest: d('universe'),
     caseDigest: testCases.contentDigest, actionMapDigest: actionMap.contentDigest, policyDigest: d('policy'),
     executionContractDigest: executionContract.contentDigest, runBundleProjectionDigest: d('run-bundle'),
     environment: 'test', baseOrigin: 'https://test.example.com', actor: 'auditor',
     discoveryGrantId: 'DISCOVERY-1', preflightDigest: d('preflight'),
+    requests: readRequests,
     actions: [
-      { actionId: 'ACTION-1', operation: 'local-navigation', maxUses: 1 },
-      { actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1 },
-      { actionId: 'ACTION-1', operation: 'screenshot', maxUses: 1 },
+      { actionId: 'ACTION-1', operation: 'local-navigation', maxUses: 1, requestIds: [] },
+      { actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1, requestIds: [] },
+      { actionId: 'ACTION-1', operation: 'screenshot', maxUses: 1, requestIds: [] },
+      { actionId: 'ACTION-1', operation: 'http-request', maxUses: 1, requestIds },
     ],
   }
   const readDigest = canonicalGrantApprovalSubjectDigest(readSubject)
@@ -168,6 +193,8 @@ export function projectionFixture() {
     capabilities: [
       capability('CAP-NAV', 'local-navigation'), capability('CAP-DOM', 'dom-read'),
       capability('CAP-SHOT', 'screenshot'),
+      { capabilityId: 'CAP-HTTP', nonce: '4'.repeat(64), transport: 'http', effect: 'read',
+        actionId: 'ACTION-1', operation: 'http-request', requestIds, maxUses: 1 },
     ],
     revocationSequence: 0, signature: 'A'.repeat(86),
   }
@@ -195,7 +222,8 @@ export function projectionFixture() {
 }
 
 function artifact(type: 'test-cases' | 'execution-contract' | 'browser-action-map', content: unknown): ArtifactDocument {
-  const schemaVersion = type === 'browser-action-map' ? '2.0.0' : '1.0.0'
+  const schemaVersion = type === 'browser-action-map' ? '2.1.0'
+    : type === 'execution-contract' ? '1.1.0' : '1.0.0'
   const document: Record<string, unknown> = {
     artifactId: `ARTIFACT-${type}`, artifactType: type, schemaVersion, engineVersion: '0.1.0',
     assetId: 'ASSET-1', prdRevision: d('prd'), generationId: 'RUN-1',

@@ -165,12 +165,13 @@ async function executeRevision(input: {
   try {
     const page = new PlaywrightPageAdapter(await browser.newPage())
     const discoverySubject = {
-      schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: input.prdRevision,
+      schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: input.prdRevision,
       scopeDigest: input.prdRevision, environment: 'test' as const, baseOrigin: input.fixtureOrigin, actor: 'auditor',
       expectedPageIdentity: { url: `${input.fixtureOrigin}/orders`, title: '订单', heading: '订单列表',
         ariaSignals: ['main:订单列表'] },
       bootstrapIntentsDigest: input.prdRevision,
-      actions: [{ actionId: preflightActionId, operation: 'local-navigation' as const, maxUses: 1 }],
+      requests: [],
+      actions: [{ actionId: preflightActionId, operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
     }
     const discoveryGrant = await input.authority.issueDiscoveryGrant({
       subject: discoverySubject, approver: { subject: 'os-user:lineage-golden', roles: ['e2e-approver'] },
@@ -184,17 +185,18 @@ async function executeRevision(input: {
     if (preflight.status !== 'ready' || !preflight.preflightDigest) throw new Error('Lineage preflight 未 ready')
     const grant = await input.authority.issueReadGrant({
       subject: {
-        schemaVersion: '2.0.0', assetId: 'PRODUCT-PRD-1', prdRevision: input.prdRevision,
+        schemaVersion: '2.1.0', assetId: 'PRODUCT-PRD-1', prdRevision: input.prdRevision,
         scopeDigest: input.prdRevision, requirementModelDigest: input.prdRevision,
         coveragePolicyDigest: input.prdRevision, universeDigest: input.prdRevision,
         caseDigest: input.prdRevision, actionMapDigest: input.prdRevision, policyDigest: input.prdRevision,
         executionContractDigest: input.prdRevision, runBundleProjectionDigest: input.prdRevision,
         environment: 'test', baseOrigin: input.fixtureOrigin, actor: 'auditor',
         discoveryGrantId: discoveryGrant.grantId, preflightDigest: preflight.preflightDigest,
+        requests: [],
         actions: [
-          { actionId, operation: 'local-navigation', maxUses: 1 },
-          { actionId, operation: 'dom-read', maxUses: 1 },
-          { actionId, operation: 'screenshot', maxUses: 1 },
+          { actionId, operation: 'local-navigation', maxUses: 1, requestIds: [] },
+          { actionId, operation: 'dom-read', maxUses: 1, requestIds: [] },
+          { actionId, operation: 'screenshot', maxUses: 1, requestIds: [] },
         ],
       },
       approver: { subject: 'os-user:lineage-golden', roles: ['e2e-approver'] },

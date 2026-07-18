@@ -11,7 +11,8 @@
     { "path": "../e2e-engine" },
     { "path": "../e2e-authority" },
     { "path": "../e2e-gateway" },
-    { "path": "../e2e-playwright-runtime" }
+    { "path": "../e2e-playwright-runtime" },
+    { "path": "../e2e-report" }
   ],
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

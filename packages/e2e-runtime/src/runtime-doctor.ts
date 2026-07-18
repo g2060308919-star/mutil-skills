@@ -1,11 +1,22 @@
 import {
+  ArtifactSchemaRegistry,
   RuntimeDoctorProbeSchema,
   RuntimeDoctorReportSchema,
+  canonicalizeJson,
+  digestText,
 } from '@mutil-skills/e2e-contracts'
-import type { RuntimeInstallation } from './runtime-discovery.js'
+import { lstat } from 'node:fs/promises'
+import { join } from 'node:path'
+import { inspectRuntimeInstallation, type RuntimeInstallation } from './runtime-discovery.js'
 import { discoverTrustedPython } from './trusted-python.js'
 import { inspectChromiumInstallation } from './browser-installer.js'
 import { inspectRuntimeCapabilityProof } from './runtime-capability-proof.js'
+import {
+  deriveRuntimeQuarantineMasterKey,
+  openRuntimeArtifactStoreAuthority,
+} from './authority-host.js'
+import { runtimeLayout } from './runtime-layout.js'
+import { renderCompleteReport } from '@mutil-skills/e2e-report'
 
 export const RUNTIME_DOCTOR_PROBE_NAMES = [
   'installation',
@@ -28,6 +39,7 @@ export type RuntimeDoctorReport = ReturnType<typeof RuntimeDoctorReportSchema.pa
 export interface RuntimeProbeContext {
   installation: RuntimeInstallation
   homeDir: string
+  authorityInspection?: Promise<RuntimeAuthorityInspection>
 }
 
 export type RuntimeProbe = (context: RuntimeProbeContext) => Promise<RuntimeDoctorProbe>
@@ -103,11 +115,8 @@ const DEFAULT_RUNTIME_PROBES: Record<RuntimeDoctorProbeName, RuntimeProbe> = {
   installation: verifiedInstallationProbe('E2E_RUNTIME_INSTALLATION_OK'),
   'version-closure': verifiedInstallationProbe('E2E_RUNTIME_VERSION_CLOSURE_OK'),
   'source-independence': verifiedInstallationProbe('E2E_RUNTIME_SOURCE_INDEPENDENCE_OK'),
-  authority: trustedPythonProbe('E2E_AUTHORITY_TRUSTED_PYTHON_OK'),
-  'approval-presence': notInstalledProbe(
-    'E2E_APPROVAL_PRESENCE_NOT_INSTALLED',
-    '初始化需要用户在场的审批能力',
-  ),
+  authority: authorityProbe,
+  'approval-presence': approvalPresenceProbe,
   gateway: capabilityProofProbe('gateway'),
   chromium: async ({ homeDir, installation }) => {
     try {
@@ -131,18 +140,212 @@ const DEFAULT_RUNTIME_PROBES: Record<RuntimeDoctorProbeName, RuntimeProbe> = {
     }
   },
   isolation: capabilityProofProbe('isolation'),
-  'artifact-fs': trustedPythonProbe('E2E_ARTIFACT_FS_TRUSTED_PYTHON_OK'),
-  quarantine: notInstalledProbe('E2E_QUARANTINE_NOT_INSTALLED', '初始化加密 quarantine 存储'),
-  report: notInstalledProbe('E2E_REPORT_NOT_INSTALLED', '安装 Report Runtime'),
+  'artifact-fs': artifactAuthorityProbe,
+  quarantine: quarantineProbe,
+  report: reportProbe,
+}
+
+interface RuntimeAuthorityInspection {
+  credentialCount: number
+  proofDigest: string
+  stateProtectionLevel: 'local-crash-integrity' | 'trusted-monotonic'
+}
+
+async function authorityProbe(context: RuntimeProbeContext): Promise<RuntimeDoctorProbe> {
+  try {
+    const inspected = await inspectRuntimeAuthority(context)
+    return {
+      status: 'passed', reasonCode: 'E2E_AUTHORITY_STATE_AND_SIGNING_OK',
+      proofDigest: inspected.proofDigest,
+      remediation: inspected.stateProtectionLevel === 'trusted-monotonic'
+        ? '无需处理'
+        : '当前为本地 crash/integrity 保护；若威胁模型包含同 UID 整体回滚，请配置独立可信单调锚',
+    }
+  } catch (error) {
+    return authorityFailure(error)
+  }
+}
+
+async function approvalPresenceProbe(context: RuntimeProbeContext): Promise<RuntimeDoctorProbe> {
+  try {
+    const inspected = await inspectRuntimeAuthority(context)
+    return inspected.credentialCount > 0 ? {
+      status: 'passed', reasonCode: 'E2E_APPROVAL_IDENTITY_ENROLLED',
+      proofDigest: inspected.proofDigest, remediation: '无需处理',
+    } : {
+      status: 'not-installed', reasonCode: 'E2E_APPROVAL_IDENTITY_NOT_ENROLLED',
+      remediation: '使用 repo-e2e identity enroll 完成本机 WebAuthn identity 登记',
+    }
+  } catch (error) {
+    return authorityFailure(error)
+  }
+}
+
+async function artifactAuthorityProbe(context: RuntimeProbeContext): Promise<RuntimeDoctorProbe> {
+  try {
+    const inspected = await inspectRuntimeAuthority(context)
+    return {
+      status: 'passed', reasonCode: 'E2E_ARTIFACT_AUTHORITY_OK',
+      proofDigest: inspected.proofDigest, remediation: '无需处理',
+    }
+  } catch (error) {
+    return authorityFailure(error)
+  }
+}
+
+async function quarantineProbe(context: RuntimeProbeContext): Promise<RuntimeDoctorProbe> {
+  try {
+    await requireVerifiedInstallation(context)
+    await inspectRuntimeAuthority(context)
+    const derived = await deriveRuntimeQuarantineMasterKey(context.homeDir)
+    try {
+      if (derived.masterKey.byteLength !== 32) throw new Error('E2E_QUARANTINE_KEY_DERIVATION_FAILED')
+    } finally { derived.clear() }
+    return {
+      status: 'passed', reasonCode: 'E2E_QUARANTINE_KEY_PROVIDER_OK',
+      proofDigest: digestText('runtime-doctor-quarantine/v1', canonicalizeJson({
+        installationDigest: context.installation.installationDigest,
+        storage: 'git-outside-encrypted',
+      })),
+      remediation: '无需处理',
+    }
+  } catch (error) {
+    return doctorCapabilityFailure(error, 'E2E_QUARANTINE_NOT_INSTALLED',
+      '先安装 Runtime、初始化 Authority 并再次运行 doctor')
+  }
+}
+
+async function reportProbe(context: RuntimeProbeContext): Promise<RuntimeDoctorProbe> {
+  try {
+    await requireVerifiedInstallation(context)
+    if (typeof renderCompleteReport !== 'function' || ArtifactSchemaRegistry['final-report'] === undefined) {
+      throw new Error('E2E_REPORT_RUNTIME_INVALID')
+    }
+    return {
+      status: 'passed', reasonCode: 'E2E_REPORT_RUNTIME_OK',
+      proofDigest: digestText('runtime-doctor-report/v1', canonicalizeJson({
+        installationDigest: context.installation.installationDigest,
+        reportSchema: 'final-report',
+      })),
+      remediation: '无需处理',
+    }
+  } catch (error) {
+    return doctorCapabilityFailure(error, 'E2E_REPORT_NOT_INSTALLED',
+      '重新安装精确版本 Runtime 以恢复 Report 闭包')
+  }
+}
+
+async function inspectRuntimeAuthority(context: RuntimeProbeContext): Promise<RuntimeAuthorityInspection> {
+  context.authorityInspection ??= inspectRuntimeAuthorityOnce(context)
+  return await context.authorityInspection
+}
+
+async function inspectRuntimeAuthorityOnce(context: RuntimeProbeContext): Promise<RuntimeAuthorityInspection> {
+  await requireVerifiedInstallation(context)
+  const layout = runtimeLayout(context.homeDir)
+  await Promise.all([
+    requirePrivateNode(layout.authority, 'directory', 0o700),
+    requirePrivateNode(join(layout.authority, 'state.key'), 'file', 0o600),
+    requirePrivateNode(join(layout.authority, 'approval.sqlite'), 'file', 0o600),
+  ])
+  const subject = typeof process.getuid === 'function' ? `local:uid:${process.getuid()}` : undefined
+  if (subject === undefined) throw new Error('E2E_RUNTIME_PLATFORM_UNSUPPORTED')
+  const authority = await openRuntimeArtifactStoreAuthority({
+    homeDir: context.homeDir, installation: context.installation, subject,
+  })
+  try {
+    const canary = digestText('runtime-doctor-authority-canary/v1', context.installation.installationDigest)
+    const signature = authority.signDigest(canary)
+    if (!authority.verifySignature(signature)) throw new Error('E2E_ARTIFACT_AUTHORITY_CANARY_FAILED')
+    return {
+      credentialCount: authority.credentialCount,
+      stateProtectionLevel: authority.stateProtectionLevel,
+      proofDigest: digestText('runtime-doctor-authority-proof/v1', canonicalizeJson({
+        installationDigest: context.installation.installationDigest,
+        issuer: signature.issuer,
+        keyId: signature.keyId,
+        stateProtectionLevel: authority.stateProtectionLevel,
+      })),
+    }
+  } finally { await authority.close() }
+}
+
+async function requireVerifiedInstallation(context: RuntimeProbeContext): Promise<void> {
+  const inspected = await inspectRuntimeInstallation({ homeDir: context.homeDir })
+  if (inspected.installationDigest !== context.installation.installationDigest
+    || inspected.versionRoot !== context.installation.versionRoot
+    || inspected.entrypoint !== context.installation.entrypoint) {
+    throw new Error('E2E_RUNTIME_DOCTOR_INSTALLATION_MISMATCH')
+  }
+}
+
+async function requirePrivateNode(
+  path: string,
+  kind: 'file' | 'directory',
+  mode: number,
+): Promise<void> {
+  const stat = await lstat(path)
+  const correctKind = kind === 'file' ? stat.isFile() : stat.isDirectory()
+  if (!correctKind || stat.isSymbolicLink() || (stat.mode & 0o777) !== mode
+    || (kind === 'file' && stat.nlink !== 1)
+    || (typeof process.getuid === 'function' && stat.uid !== process.getuid())) {
+    throw new Error('E2E_AUTHORITY_STATE_NODE_INSECURE')
+  }
+}
+
+function authorityFailure(error: unknown): RuntimeDoctorProbe {
+  return doctorCapabilityFailure(error, 'E2E_AUTHORITY_NOT_INSTALLED',
+    '先运行 install-browser 初始化 Authority；如已初始化则保留现场并修复状态完整性')
+}
+
+function doctorCapabilityFailure(
+  error: unknown,
+  missingCode: string,
+  remediation: string,
+): RuntimeDoctorProbe {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    && typeof error.code === 'string' ? error.code
+    : error instanceof Error && /^E2E_[A-Z0-9_]+$/.test(error.message) ? error.message : undefined
+  const missing = code === 'ENOENT' || code === 'E2E_RUNTIME_NOT_INSTALLED'
+  return {
+    status: missing ? 'not-installed' : 'blocked',
+    reasonCode: missing ? missingCode : code ?? 'E2E_RUNTIME_DOCTOR_CAPABILITY_INVALID',
+    remediation,
+  }
 }
 
 function verifiedInstallationProbe(reasonCode: string): RuntimeProbe {
-  return async ({ installation }) => ({
-    status: 'passed',
-    reasonCode,
-    proofDigest: installation.installationDigest,
-    remediation: '无需处理',
-  })
+  return async ({ installation, homeDir }) => {
+    try {
+      const inspected = await inspectRuntimeInstallation({ homeDir })
+      if (inspected.version !== installation.version
+        || inspected.protocolMajor !== installation.protocolMajor
+        || inspected.versionRoot !== installation.versionRoot
+        || inspected.entrypoint !== installation.entrypoint
+        || inspected.installationDigest !== installation.installationDigest
+        || inspected.sourceRepositoryIndependent !== true) {
+        return {
+          status: 'blocked',
+          reasonCode: 'E2E_RUNTIME_DOCTOR_INSTALLATION_MISMATCH',
+          remediation: 'Runtime 实际安装与 doctor 输入不一致；重新发现或重新安装 Runtime',
+        }
+      }
+      return {
+        status: 'passed',
+        reasonCode,
+        proofDigest: inspected.installationDigest,
+        remediation: '无需处理',
+      }
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        && typeof error.code === 'string' ? error.code : 'E2E_RUNTIME_INSTALLATION_INSPECTION_FAILED'
+      return {
+        status: 'blocked',
+        reasonCode: code,
+        remediation: 'Runtime 安装缺失或完整性验证失败；重新安装 Runtime 后再次运行 doctor',
+      }
+    }
+  }
 }
 
 function notInstalledProbe(reasonCode: string, remediation: string): RuntimeProbe {
