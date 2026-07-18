@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { cp, mkdir, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -90,7 +90,7 @@ export async function runCrossRepoRuntimeGolden(input: {
     rm(join(input.project, 'package-lock.json'), { force: true }),
   ])
   const harness = join(harnessRoot, 'runner.mjs')
-  const { stdout, stderr } = await exec(process.execPath, [harness], input.project,
+  const { stdout, stderr } = await execWithLiveStderr(process.execPath, [harness], input.project,
     childRuntimeEnvironment({
       home: input.home,
       runtimePackageRoot: installedRuntimePackageRoot,
@@ -153,8 +153,12 @@ async function installPackedRuntime(input: {
     }
     const sourceBrowser = join(sourceHome, '.mutil-skills', 'runtime', 'e2e', 'browsers')
     const targetBrowser = join(home, '.mutil-skills', 'runtime', 'e2e', 'browsers')
+    const sourceAuthority = join(sourceHome, '.mutil-skills', 'e2e', 'authority')
+    const targetAuthority = join(home, '.mutil-skills', 'e2e', 'authority')
     await cp(sourceBrowser, targetBrowser, { recursive: true, force: true, dereference: false, preserveTimestamps: true })
+    await cp(sourceAuthority, targetAuthority, { recursive: true, force: true, dereference: false, preserveTimestamps: true })
     await chmod(targetBrowser, 0o700)
+    await chmod(targetAuthority, 0o700)
     const proof = await inspectRuntimeCapabilityProof({ homeDir: sourceHome,
       runtimeInstallationDigest: sourceInstallation.installationDigest })
     const targetState = join(home, '.mutil-skills', 'e2e', 'state')
@@ -182,6 +186,38 @@ async function exec(
 ): Promise<{ stdout: string; stderr: string }> {
   return await execFileAsync(executable, arguments_, {
     cwd, env, timeout, maxBuffer: 20 * 1024 * 1024,
+  })
+}
+
+async function execWithLiveStderr(
+  executable: string,
+  arguments_: string[],
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  timeout: number,
+): Promise<{ stdout: string; stderr: string }> {
+  return await new Promise((resolvePromise, reject) => {
+    const child = spawn(executable, arguments_, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk
+      process.stderr.write(chunk)
+    })
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM')
+      reject(new Error('跨仓 Runtime child 超时'))
+    }, timeout)
+    child.once('error', (error) => { clearTimeout(timer); reject(error) })
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer)
+      if (signal !== null || code !== 0) {
+        reject(new Error(`跨仓 Runtime child 失败:${signal ?? code}:${sanitize(stderr)}`))
+      } else resolvePromise({ stdout, stderr })
+    })
   })
 }
 

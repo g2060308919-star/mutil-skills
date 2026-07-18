@@ -1,4 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import { lstat, readFile, unlink } from 'node:fs/promises'
+import { join } from 'node:path'
 import { E2EError } from '@mutil-skills/e2e-contracts'
 
 export interface BrowserProfileOwnerProcess {
@@ -14,6 +16,12 @@ export interface BrowserProfileSupervisorHandle {
 
 export interface BrowserProfileSupervisor {
   start(profileDir: string): Promise<BrowserProfileSupervisorHandle>
+}
+
+export interface BrowserProfileSupervisorTimeouts {
+  readyMs?: number
+  stopGraceMs?: number
+  killWaitMs?: number
 }
 
 const CHILD_SOURCE = String.raw`
@@ -59,11 +67,20 @@ setInterval(() => {}, 1000)
 `
 
 export class NodeBrowserProfileSupervisor implements BrowserProfileSupervisor {
+  constructor(private readonly timeouts: BrowserProfileSupervisorTimeouts = {}) {}
+
   async start(profileDir: string): Promise<BrowserProfileSupervisorHandle> {
     const child = spawn(process.execPath, ['-e', CHILD_SOURCE, String(process.pid), profileDir], {
       stdio: ['ignore', 'pipe', 'ignore'], env: {},
     })
-    const ready = await readReady(child)
+    let ready: { pid: number; startIdentity: string }
+    try {
+      ready = await readReady(child, this.timeouts.readyMs ?? 5_000)
+    } catch (error) {
+      await terminateAndReap(child, this.timeouts)
+      await removeOwnedLock(profileDir, child.pid)
+      throw error
+    }
     let stopped = false
     return Object.freeze({
       ownerProcess: { role: 'supervisor' as const, pid: ready.pid, startIdentity: ready.startIdentity },
@@ -71,18 +88,21 @@ export class NodeBrowserProfileSupervisor implements BrowserProfileSupervisor {
         if (stopped) return
         stopped = true
         if (child.exitCode !== null || child.signalCode !== null) return
-        child.kill('SIGTERM')
-        await waitForExit(child)
+        await terminateAndReap(child, this.timeouts)
+        await removeOwnedLock(profileDir, ready.pid, ready.startIdentity)
       },
     })
   }
 }
 
-async function readReady(child: ChildProcess): Promise<{ pid: number; startIdentity: string }> {
+async function readReady(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<{ pid: number; startIdentity: string }> {
   if (child.stdout === null) throw supervisorError('supervisor stdout 不可用')
   return await new Promise((resolve, reject) => {
     let buffer = ''
-    const timer = setTimeout(() => reject(supervisorError('supervisor ready 超时')), 5_000)
+    const timer = setTimeout(() => reject(supervisorError('supervisor ready 超时')), timeoutMs)
     const fail = (error: unknown) => { clearTimeout(timer); reject(error) }
     child.once('error', fail)
     child.once('exit', (code) => fail(supervisorError(`supervisor ready 前退出: ${code}`)))
@@ -103,16 +123,63 @@ async function readReady(child: ChildProcess): Promise<{ pid: number; startIdent
   })
 }
 
-async function waitForExit(child: ChildProcess): Promise<void> {
+async function terminateAndReap(
+  child: ChildProcess,
+  timeouts: BrowserProfileSupervisorTimeouts,
+): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(supervisorError('supervisor stop 超时')), 5_000)
-    child.once('error', (error) => { clearTimeout(timer); reject(error) })
-    child.once('exit', () => { clearTimeout(timer); resolve() })
+  child.kill('SIGTERM')
+  if (await exitsWithin(child, timeouts.stopGraceMs ?? 5_000)) return
+  child.kill('SIGKILL')
+  if (await exitsWithin(child, timeouts.killWaitMs ?? 5_000)) return
+  throw supervisorError('supervisor SIGKILL 后仍未退出')
+}
+
+async function exitsWithin(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true
+  return await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => { cleanup(); resolve(false) }, timeoutMs)
+    const finish = () => { cleanup(); resolve(true) }
+    const cleanup = () => {
+      clearTimeout(timer)
+      child.off('exit', finish)
+    }
+    // `error` 只说明 spawn/kill API 失败，不证明 OS 进程已经退出。只有 exit
+    // 事件或同步 exitCode/signalCode 才能授权删除 owned lock。
+    child.once('exit', finish)
   })
+}
+
+async function removeOwnedLock(
+  profileDir: string,
+  expectedPid: number | undefined,
+  expectedStartIdentity?: string,
+): Promise<void> {
+  if (expectedPid === undefined) return
+  const lockPath = join(profileDir, '.supervisor.lock')
+  try {
+    const stat = await lstat(lockPath)
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) {
+      throw supervisorError('残留 supervisor lock 不是私有普通文件')
+    }
+    const parsed = JSON.parse(await readFile(lockPath, 'utf8')) as Record<string, unknown>
+    if (parsed.pid !== expectedPid
+      || typeof parsed.startIdentity !== 'string'
+      || (expectedStartIdentity !== undefined && parsed.startIdentity !== expectedStartIdentity)) {
+      throw supervisorError('残留 supervisor lock 与已回收子进程不匹配')
+    }
+    await unlink(lockPath)
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return
+    throw error
+  }
 }
 
 function supervisorError(message: string): E2EError {
   return new E2EError({ code: 'E2E_BROWSER_PROFILE_SUPERVISOR_FAILED', category: 'safety',
     message: `E2E_BROWSER_PROFILE_SUPERVISOR_FAILED: ${message}`, retryable: false })
+}
+
+function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error && error.code === code
 }

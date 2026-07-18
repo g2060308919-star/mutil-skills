@@ -18,7 +18,7 @@ authority-confirmed，禁止标题相似度或模型猜测。
 
 ## 调用的确定性 API
 
-Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`；来源读取结果与语义候选通过 `create-run`/`submit-candidate` 交给 Runtime，Skill 不自行计算摘要。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态；来源读取结果与语义候选通过 `create-run`/`submit-candidate` 交给 Runtime，Skill 不自行计算摘要。
 
 Runtime 内部必须调用 Contracts parse/migrate、`E2EEngine.ingest()`、Authority 来源签名和 Engine `transition()`；摘要、Revision
 只采用 API 返回值。Lineage 决定必须由登记的 `lineage-approver` 通过专用 Decision key 签发

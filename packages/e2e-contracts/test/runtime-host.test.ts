@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'vitest'
-import { RuntimeRequestEnvelopeSchema } from '../src/runtime-host.js'
+import {
+  RuntimeRequestEnvelopeSchema,
+  RuntimeResponseEnvelopeSchema,
+  RuntimeStatusResultSchema,
+} from '../src/runtime-host.js'
 
 const doctorRequest = {
   schemaVersion: '1.0.0',
@@ -147,5 +151,25 @@ describe('Runtime Host contracts', () => {
         payload: { ...resumeRunRequest.payload, decision },
       }).success).toBe(false)
     }
+  })
+
+  test('get-status 公共投影严格拒绝未知字段，通用响应拒绝非 JSON result', () => {
+    const result = {
+      runId: 'RUN-1', assetId: 'ASSET-1', projectIdentityDigest: `sha256:${'1'.repeat(64)}`,
+      runtimeInstallationDigest: `sha256:${'2'.repeat(64)}`, generationId: 'RUN-1',
+      prdRevision: `sha256:${'3'.repeat(64)}`,
+      workflow: { current: 'created', sequence: 0, eventChainDigest: `sha256:${'4'.repeat(64)}` },
+      artifactDigests: { 'prd-source': `sha256:${'3'.repeat(64)}` }, state: 'created',
+      nextEdge: { command: 'submit-candidate', from: 'created', expectedState: 'created' },
+      verifiedDigests: { workflowEventChain: `sha256:${'4'.repeat(64)}` },
+      minimumMissingInput: ['prd-request'],
+    }
+    expect(RuntimeStatusResultSchema.parse(result)).toEqual(result)
+    expect(RuntimeStatusResultSchema.safeParse({ ...result, guessedVerdict: 'accepted' }).success).toBe(false)
+    expect(RuntimeResponseEnvelopeSchema.safeParse({
+      schemaVersion: '1.0.0', requestId: 'REQ-1',
+      runtime: { version: '0.1.0', installationDigest: `sha256:${'5'.repeat(64)}` },
+      ok: true, result: { callback: () => undefined },
+    }).success).toBe(false)
   })
 })

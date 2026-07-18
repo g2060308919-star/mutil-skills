@@ -517,7 +517,10 @@ function expectRuntimeError(parse: () => unknown, code: string, category?: strin
   }
 }
 
-function successResponse(requestId = 'REQ-1', result: unknown = {}): RuntimeResponseEnvelope {
+function successResponse(
+  requestId = 'REQ-1',
+  result: RuntimeResponseEnvelope['result'] = {},
+): RuntimeResponseEnvelope {
   return {
     schemaVersion: '1.0.0',
     requestId,

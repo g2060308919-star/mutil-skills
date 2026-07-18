@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { ArtifactTypeSchema } from './artifacts.js'
-import { WorkflowNodeSchema } from './workflow.js'
+import { WorkflowNodeSchema, WorkflowStateSchema } from './workflow.js'
 import { ApprovalGrantSubjectSchema, canonicalGrantApprovalType } from './approval-subject.js'
 import { ManualResultDraftSchema } from './manual-result.js'
 
@@ -174,6 +174,31 @@ export const RuntimeDoctorReportSchema = z.object({
   probes: z.record(RuntimeDoctorProbeSchema),
 }).strict()
 
+export const RuntimeStatusNextEdgeSchema = z.object({
+  command: z.enum([
+    'submit-candidate', 'open-approval', 'run-preflight', 'prepare-manual-result',
+    'finalize-manual-result-role', 'execute-run', 'resume-run', 'finalize-run', 'render-report',
+  ]),
+  from: WorkflowNodeSchema,
+  expectedState: WorkflowNodeSchema,
+}).strict()
+
+export const RuntimeStatusResultSchema = z.object({
+  runId: SafeIdSchema,
+  assetId: SafeIdSchema,
+  projectIdentityDigest: DigestSchema,
+  runtimeInstallationDigest: DigestSchema,
+  generationId: SafeIdSchema,
+  prdRevision: DigestSchema,
+  workflow: WorkflowStateSchema,
+  artifactDigests: z.record(DigestSchema),
+  state: WorkflowNodeSchema,
+  nextEdge: RuntimeStatusNextEdgeSchema.nullable(),
+  verifiedDigests: z.record(DigestSchema),
+  minimumMissingInput: z.array(z.string().min(1)).max(32),
+  pendingDecision: JsonValueSchema.optional(),
+}).strict()
+
 export const RuntimeResponseEnvelopeSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
   requestId: SafeIdSchema,
@@ -182,7 +207,7 @@ export const RuntimeResponseEnvelopeSchema = z.object({
     installationDigest: DigestSchema,
   }).strict(),
   ok: z.boolean(),
-  result: z.unknown().optional(),
+  result: JsonValueSchema.optional(),
   error: RuntimeErrorSchema.optional(),
 }).strict().superRefine((value, context) => {
   if (value.ok === (value.error !== undefined) || value.ok !== (value.result !== undefined)) {
@@ -198,6 +223,8 @@ export type RuntimeResponseEnvelope = z.infer<typeof RuntimeResponseEnvelopeSche
 export type RuntimeError = z.infer<typeof RuntimeErrorSchema>
 export type RuntimeDoctorProbe = z.infer<typeof RuntimeDoctorProbeSchema>
 export type RuntimeDoctorReport = z.infer<typeof RuntimeDoctorReportSchema>
+export type RuntimeStatusNextEdge = z.infer<typeof RuntimeStatusNextEdgeSchema>
+export type RuntimeStatusResult = z.infer<typeof RuntimeStatusResultSchema>
 
 function isPlainJsonObject(value: unknown): value is Record<string, JsonValue> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)

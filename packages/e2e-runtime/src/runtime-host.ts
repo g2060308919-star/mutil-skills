@@ -3,6 +3,7 @@ import {
   ArtifactSchemaRegistry,
   RuntimeDoctorReportSchema,
   RuntimeResponseEnvelopeSchema,
+  RuntimeStatusResultSchema,
   SignedGrantSchema,
   canonicalizeJson,
   digestArtifactContent,
@@ -45,7 +46,10 @@ import {
   computeRuntimeApprovalSubjectDigest,
   type RuntimeAuthorityHost,
 } from './authority-host.js'
-import { bindManualResultDraftToRuntimeSnapshot } from './runtime-manual-results.js'
+import {
+  bindManualResultDraftToRuntimeSnapshot,
+  bindManualResultToRuntimeSnapshot,
+} from './runtime-manual-results.js'
 import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js'
 import {
   assertRuntimeReadSnapshotReady,
@@ -288,7 +292,7 @@ export class E2ERuntimeHost {
         requestDigest,
         (snapshot) => {
           this.requireInstallation(snapshot)
-          return this.successResponse(request.requestId, statusResult(snapshot))
+          return this.successResponse(request.requestId, statusResult(snapshot, this.dependencies.now()))
         },
         lock,
       )
@@ -1823,8 +1827,9 @@ function createRunResult(snapshot: RuntimeRunSnapshot): Record<string, unknown> 
   }
 }
 
-function statusResult(snapshot: RuntimeRunSnapshot): Record<string, unknown> {
-  return {
+function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, unknown> {
+  const projection = runtimeStatusProjection(snapshot, now)
+  return RuntimeStatusResultSchema.parse({
     runId: snapshot.runId,
     assetId: snapshot.assetId,
     projectIdentityDigest: snapshot.projectIdentityDigest,
@@ -1833,8 +1838,161 @@ function statusResult(snapshot: RuntimeRunSnapshot): Record<string, unknown> {
     prdRevision: snapshot.artifactDigests['prd-source'],
     workflow: snapshot.workflow,
     artifactDigests: snapshot.artifactDigests,
+    ...projection,
     ...(snapshot.pendingDecision === undefined ? {} : { pendingDecision: snapshot.pendingDecision }),
+  })
+}
+
+const STATUS_COMMAND_BY_STATE: Partial<Record<WorkflowNode,
+{ command: import('@mutil-skills/e2e-contracts').RuntimeStatusNextEdge['command']; missing: string[] }>> = {
+  created: { command: 'submit-candidate', missing: ['prd-request'] },
+  'source-frozen': { command: 'submit-candidate', missing: ['acceptance-scope'] },
+  'awaiting-scope-approval': { command: 'open-approval', missing: ['scope-or-lineage-decision'] },
+  'scope-approved': { command: 'submit-candidate', missing: ['requirement-model'] },
+  modeled: { command: 'submit-candidate', missing: ['coverage-universe'] },
+  'coverage-audited': { command: 'open-approval', missing: ['discovery-approval'] },
+  'discovery-approved': { command: 'run-preflight', missing: ['browser-preflight'] },
+  'preflight-readonly': { command: 'submit-candidate', missing: ['browser-action-map'] },
+  'binding-draft': { command: 'submit-candidate', missing: ['test-cases', 'execution-contract'] },
+  'lease-reserved': { command: 'open-approval', missing: ['execution-approval'] },
+  'awaiting-execution-approval': { command: 'open-approval', missing: ['execution-approval'] },
+  'execution-approved': { command: 'submit-candidate', missing: ['regression-manifest'] },
+  compiled: { command: 'execute-run', missing: ['trusted-browser-execution'] },
+  'running-real': { command: 'resume-run', missing: ['execution-recovery-decision'] },
+  'running-injection': { command: 'resume-run', missing: ['execution-recovery-decision'] },
+  diagnosing: { command: 'finalize-run', missing: [] },
+  finalizing: { command: 'finalize-run', missing: ['same-finalization-request'] },
+  'pending-decision': { command: 'resume-run', missing: ['authority-decision'] },
+  accepted: { command: 'render-report', missing: [] },
+  rejected: { command: 'render-report', missing: [] },
+  incomplete: { command: 'render-report', missing: [] },
+}
+
+function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
+  state: WorkflowNode
+  nextEdge: import('@mutil-skills/e2e-contracts').RuntimeStatusNextEdge | null
+  verifiedDigests: Record<string, string>
+  minimumMissingInput: string[]
+} {
+  const current = snapshot.workflow.current
+  const intent = STATUS_COMMAND_BY_STATE[current]
+  const missing = current === 'diagnosing'
+    ? runtimeFinalizationMissingInputs(snapshot, now)
+    : intent?.missing.filter((item) => snapshot.artifactDigests[item] === undefined) ?? []
+  return {
+    state: current,
+    nextEdge: intent === undefined ? null : {
+      command: intent.command,
+      from: current,
+      expectedState: current,
+    },
+    verifiedDigests: {
+      runtimeInstallation: snapshot.runtimeInstallationDigest,
+      workflowEventChain: snapshot.workflow.eventChainDigest,
+      ...snapshot.artifactDigests,
+    },
+    minimumMissingInput: missing,
   }
+}
+
+const FINALIZATION_EXTERNAL_TYPES = [
+  'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation',
+  'acceptance-scope', 'requirement-model', 'interaction-flow', 'coverage-universe',
+  'test-cases', 'design-audit', 'execution-contract', 'browser-action-map',
+  'regression-manifest',
+] as const satisfies readonly ArtifactType[]
+
+function runtimeFinalizationMissingInputs(snapshot: RuntimeRunSnapshot, now: Date): string[] {
+  if (snapshot.trustedExecutionFacts['finalization-material'] !== undefined) return []
+  const missing = FINALIZATION_EXTERNAL_TYPES
+    .filter((type) => snapshot.frozenArtifacts[type] === undefined)
+    .map((type) => `artifact:${type}`)
+  if (missing.length > 0) return missing
+
+  const reads = Object.values(snapshot.executionResults?.readEnvironment ?? {})
+  const writes = Object.values(snapshot.executionResults?.realEnvironment ?? {})
+  const injections = Object.values(snapshot.executionResults?.gatewayInjection ?? {})
+  if (reads.length + writes.length !== 1) missing.push('exactly-one-real-execution-result')
+  if (reads.length === 1) {
+    if (injections.length > 0) missing.push('write-baseline-for-injection')
+    for (const fact of [
+      'browser-preflight', 'signed-discovery-grant', 'signed-execution-grant',
+      'finalization-execution-facts', 'quarantined-evidence',
+    ]) {
+      if (snapshot.trustedExecutionFacts[fact] === undefined) missing.push(`trusted-fact:${fact}`)
+    }
+  }
+  if (writes.length === 1) {
+    const write = runtimeRecord(writes[0])
+    if (write?.finalizationFacts === undefined) missing.push('trusted-fact:write-finalization-facts')
+    const cleanup = runtimeRecord(write?.cleanup)
+    if (cleanup === undefined || !['verified-clean', 'failed', 'unknown'].includes(String(cleanup.status))) {
+      missing.push('write-cleanup-terminal-result')
+    }
+  }
+  if (injections.length > 1) missing.push('exactly-one-injection-result')
+  if (injections.length === 1) {
+    const injection = runtimeRecord(injections[0])
+    if (writes.length !== 1) missing.push('real-write-baseline-for-injection')
+    if (injection?.finalizationFacts === undefined) missing.push('trusted-fact:injection-finalization-facts')
+  }
+  missing.push(...runtimeManualResultMissingInputs(snapshot, now))
+  return [...new Set(missing)].sort()
+}
+
+function runtimeManualResultMissingInputs(snapshot: RuntimeRunSnapshot, now: Date): string[] {
+  try {
+    const coverage = runtimeRecord(snapshot.frozenArtifacts['coverage-universe']?.content)
+    const execution = runtimeRecord(snapshot.frozenArtifacts['execution-contract']?.content)
+    if (coverage === undefined || execution === undefined) return ['manual-result-binding-artifacts']
+    const obligations = runtimeRecords(coverage.obligations)
+      .filter((obligation) => runtimeRecord(obligation.disposition)?.kind === 'manual')
+    const procedures = runtimeRecords(execution.manualProcedures)
+    const raw = snapshot.trustedExecutionFacts['manual-results-by-id']
+    const resultMap = raw === undefined ? {} : runtimeRecord(raw)
+    if (resultMap === undefined) return ['manual-results-valid']
+    if (obligations.length === 0 && procedures.length === 0 && Object.keys(resultMap).length === 0) return []
+    if (obligations.length === 0 || procedures.length === 0 || Object.keys(resultMap).length === 0) {
+      return obligations.length === 0 ? ['manual-obligation-definition']
+        : obligations.map((obligation) => `manual-result:${String(obligation.obligationId)}`)
+    }
+    const procedureIds = procedures.map((procedure) => String(procedure.manualProcedureId))
+    if (new Set(procedureIds).size !== procedureIds.length) return ['manual-procedures-unique']
+    const results = Object.entries(resultMap).map(([manualResultId, candidate]) => {
+      const result = bindManualResultToRuntimeSnapshot(snapshot, candidate, now)
+      if (result.manualResultId !== manualResultId) throw new Error('manual result key mismatch')
+      return result
+    })
+    const obligationIds = new Set(obligations.map((obligation) => String(obligation.obligationId)))
+    const missing: string[] = []
+    for (const obligation of obligations) {
+      const disposition = runtimeRecord(obligation.disposition)
+      const obligationId = String(obligation.obligationId)
+      const procedureId = String(disposition?.manualProcedureId)
+      const matches = results.filter((result) => result.obligationIds.includes(obligationId))
+      if (!procedureIds.includes(procedureId)) missing.push(`manual-procedure:${procedureId}`)
+      if (matches.length !== 1 || matches[0]?.manualProcedureId !== procedureId) {
+        missing.push(`manual-result:${obligationId}`)
+      }
+    }
+    if (results.some((result) => result.obligationIds.some((id) => !obligationIds.has(id)))) {
+      missing.push('manual-result-binding')
+    }
+    return missing
+  } catch {
+    return ['manual-results-valid']
+  }
+}
+
+function runtimeRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined
+}
+
+function runtimeRecords(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.map(runtimeRecord).filter((item): item is Record<string, unknown> => item !== undefined)
+    : []
 }
 
 function decodeUtf8(bytes: Uint8Array, label: string): string {

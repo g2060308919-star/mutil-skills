@@ -14,7 +14,7 @@ Discovery/Execution ApprovalSubject 展示内容、待决定的 effect、环境/
 
 ## 调用的确定性 API
 
-Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`。审批必须通过 `open-approval` 让 Runtime 打开 WebAuthn session；不得把 `approved: true` 当作审批，Skill 不得直接打开 Authority 或传递 secret value。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态。审批必须通过 `open-approval` 让 Runtime 打开 WebAuthn session；不得把 `approved: true` 当作审批，Skill 不得直接打开 Authority 或传递 secret value。
 
 Runtime 内部必须调用 Contracts 计算 `approval projection`；使用 `LocalApprovalAuthority.open({ statePath, stateEncryptionKey, testWorkspaceRoots })` 打开持久 Authority。`stateEncryptionKey` 必须由 Git 外 Secret Provider 提供且恰为 32 bytes，`statePath` 必须位于全部测试工作区之外。Authority 基于可信身份注册表和已认证会话签发短期 capability/grant 与专用 `freshness receipt`；Runtime 再调用 Engine `validateGeneration()`/`transition()`。freshness proof 使用独立签名 purpose/key，不能由通用 Artifact 签名代替。
 

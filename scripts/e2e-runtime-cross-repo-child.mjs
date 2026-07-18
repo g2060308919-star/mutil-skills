@@ -1,8 +1,8 @@
 import { randomBytes } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { Readable, Writable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
 import { runtimeReadOnlyFixture } from './fixture.js'
 
@@ -50,16 +50,16 @@ const [{ LocalGatewayAuditVerifier, verifyGatewayPublicationAudit }, {
   installedPackage('e2e-gateway'),
   installedPackage('e2e-playwright-runtime'),
 ])
-const [{ runCli }, { inspectRuntimeInstallation }, { runRuntimeDoctor },
+const [{ inspectRuntimeInstallation },
   { runtimeProductionSanitizerPolicyDigest }, { inspectChromiumInstallation },
   { ControlledBrowserHost, getControlledBrowserSessionBinding },
   { startGatewayProxyHostForRuntime }, { runtimeLayout }, { RuntimeRunStore },
-  { resolveProjectIdentity }, { TrustedReadActionProjector }] = await Promise.all([
-  runtimeModule('cli'), runtimeModule('runtime-discovery'), runtimeModule('runtime-doctor'),
+  { resolveProjectIdentity }, { TrustedReadActionProjector }, { openRuntimeArtifactStoreAuthority }] = await Promise.all([
+  runtimeModule('runtime-discovery'),
   runtimeModule('runtime-finalization-material-sealer'),
   runtimeModule('browser-installer'), runtimeModule('browser-host'),
   runtimeModule('gateway-proxy-host'), runtimeModule('runtime-layout'), runtimeModule('run-store'),
-  runtimeModule('project-identity'), runtimeModule('trusted-action-runner'),
+  runtimeModule('project-identity'), runtimeModule('trusted-action-runner'), runtimeModule('authority-host'),
 ])
 
 await Promise.all([
@@ -165,41 +165,7 @@ const authorityAdapter = {
   async close() {},
 }
 
-const artifactAuthority = {
-  credentialCount: 1,
-  stateProtectionLevel: 'local-crash-integrity',
-  artifactVerifierMaterial: approvalAuthority.artifactVerifierMaterial,
-  approvalFreshnessVerifierMaterial: approvalAuthority.approvalFreshnessVerifierMaterial,
-  decisionVerifierMaterial: approvalAuthority.decisionVerifierMaterial,
-  privacyReviewVerifierMaterial: approvalAuthority.privacyReviewVerifierMaterial,
-  attemptEventVerifierMaterial: approvalAuthority.attemptEventVerifierMaterial,
-  signDigest: (digest) => approvalAuthority.signArtifactDigest(digest),
-  verifySignature: (signature) => approvalAuthority.verifyArtifactSignature(signature),
-  signArtifactDigest: (digest) => approvalAuthority.signArtifactDigest(digest),
-  verifyArtifactSignature: (signature, digest) => approvalAuthority.verifyArtifactSignature(signature, digest),
-  verifyApprovalFreshnessReceipt: (receipt, binding) =>
-    approvalAuthority.verifyApprovalFreshnessReceipt({ receipt, ...binding }),
-  verifyDecisionReceipt: (receipt, binding) => approvalAuthority.verifyDecisionReceipt(receipt, binding),
-  verifyPrivacyReviewReceipt: (receipt, binding) => approvalAuthority.verifyPrivacyReviewReceipt(receipt, binding),
-  issueApprovalFreshnessReceipt: (input) => approvalAuthority.issueApprovalFreshnessReceipt(input),
-  appendAttemptEvent: (input) => approvalAuthority.appendAttemptEvent(input),
-  async close() {},
-}
-
-const dependencies = {
-  homeDir,
-  installRuntime: async () => { throw new Error('unused installRuntime') },
-  uninstallRuntime: async () => { throw new Error('unused uninstallRuntime') },
-  inspectRuntimeInstallation: async () => installation,
-  runRuntimeDoctor: async () => {
-    const report = await runRuntimeDoctor({ installation, homeDir })
-    return { ...report, ready: ['gateway', 'chromium', 'isolation'].every(
-      (probe) => report.probes[probe]?.status === 'passed',
-    ) }
-  },
-  startAuthorityHost: async () => authorityAdapter,
-  openArtifactStoreAuthority: async () => artifactAuthority,
-}
+let artifactAuthority
 
 try {
   const doctor = await invoke('DOCTOR-CROSS-REPO', 'doctor', {})
@@ -261,6 +227,11 @@ try {
     throw new Error(`final generation verdict:${finalized.terminalVerdict}`)
   }
   await invoke('REPORT-CROSS-REPO', 'render-report', { runId })
+  artifactAuthority = await openRuntimeArtifactStoreAuthority({
+    homeDir,
+    installation,
+    subject: `local:uid:${process.getuid()}`,
+  })
   const publishedRegression = await executePublishedRegression({
     authoritativeGatewayAuditDigest: executed.gatewayAuditDigest,
   })
@@ -282,11 +253,13 @@ try {
   await Promise.allSettled([
     rpcHttp.close(),
     Promise.resolve().then(() => approvalAuthority.close()),
+    ...(artifactAuthority === undefined ? [] : [Promise.resolve().then(() => artifactAuthority.close())]),
     new Promise((resolve, reject) => fixtureServer.close((error) => error ? reject(error) : resolve())),
   ])
 }
 
 async function executePublishedRegression(input) {
+  if (artifactAuthority === undefined) throw new Error('E2E_RUNTIME_ARTIFACT_AUTHORITY_NOT_OPEN')
   const activeRoot = join(
     projectRoot, '.biztest', 'assets', 'ASSET-ORDER-1', 'generations', runId,
   )
@@ -486,19 +459,53 @@ async function invoke(requestId, command, payload) {
   const request = RuntimeRequestEnvelopeSchema.parse({
     schemaVersion: '1.0.0', requestId,
     client: { name: 'runtime-cross-repo', version: '1.0.0' },
-    command, projectRoot, payload,
+    command, ...(command === 'doctor' ? {} : { projectRoot }), payload,
   })
-  const stdout = new CaptureStream()
-  const stderr = new CaptureStream()
-  const exitCode = await runCli(['rpc'], Readable.from([canonicalizeJson(request)]), stdout, stderr, dependencies)
-  const output = stdout.text().trim()
+  const { exitCode, stdout, stderr } = await invokeFixedLauncher(canonicalizeJson(request))
+  const output = stdout.trim()
   const lines = output.split('\n')
-  if (lines.length !== 1) throw new Error(`Runtime RPC wrote ${lines.length} lines:${stderr.text()}`)
+  if (lines.length !== 1) throw new Error(`Runtime RPC wrote ${lines.length} lines:${stderr}`)
   const response = RuntimeResponseEnvelopeSchema.parse(JSON.parse(output))
   if (exitCode !== 0 || !response.ok || !response.result || typeof response.result !== 'object') {
-    throw new Error(`Runtime RPC failed:${stderr.text()}:${output}`)
+    throw new Error(`Runtime RPC failed:${stderr}:${output}`)
   }
   return response.result
+}
+
+async function invokeFixedLauncher(requestJson) {
+  const launcher = join(homeDir, '.mutil-skills', 'bin', 'repo-e2e')
+  const child = spawn(launcher, ['rpc'], {
+    cwd: projectRoot,
+    env: {
+      HOME: homeDir,
+      PATH: '/usr/bin:/bin',
+      ...(process.env.TMPDIR === undefined ? {} : { TMPDIR: process.env.TMPDIR }),
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', (chunk) => { stdout += chunk })
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk
+    process.stderr.write(chunk)
+  })
+  child.stdin.end(requestJson)
+  const exitCode = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM')
+      reject(new Error('E2E_RUNTIME_LAUNCHER_RPC_TIMEOUT'))
+    }, 180_000)
+    child.once('error', (error) => { clearTimeout(timer); reject(error) })
+    child.once('exit', (code, signal) => {
+      clearTimeout(timer)
+      if (signal !== null) reject(new Error(`E2E_RUNTIME_LAUNCHER_SIGNAL:${signal}`))
+      else resolve(code ?? 70)
+    })
+  })
+  return { exitCode, stdout, stderr }
 }
 
 function requiredString(record, key) {
@@ -518,13 +525,4 @@ async function listen(server) {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', resolve)
   })
-}
-
-class CaptureStream extends Writable {
-  #chunks = []
-  _write(chunk, encoding, callback) {
-    this.#chunks.push(typeof chunk === 'string' ? Buffer.from(chunk, encoding) : Buffer.from(chunk))
-    callback()
-  }
-  text() { return Buffer.concat(this.#chunks).toString('utf8') }
 }

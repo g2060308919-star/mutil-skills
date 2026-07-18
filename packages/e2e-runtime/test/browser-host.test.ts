@@ -31,6 +31,22 @@ describe('Controlled Browser Host', () => {
     await expect(access(`${profileDir}/.supervisor.lock`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  test('supervisor 忽略 SIGTERM 时升级 SIGKILL、回收进程并删除自己的残留 lock', async () => {
+    const roots = await createRuntimeTestRoots()
+    const profileDir = `${roots.source}/stopped-supervisor-profile`
+    await mkdir(profileDir, { mode: 0o700 })
+    const supervisor = await new NodeBrowserProfileSupervisor({
+      stopGraceMs: 25,
+      killWaitMs: 2_000,
+    }).start(profileDir)
+
+    process.kill(supervisor.ownerProcess.pid, 'SIGSTOP')
+    await supervisor.stop()
+
+    expect(() => process.kill(supervisor.ownerProcess.pid, 0)).toThrow(expect.objectContaining({ code: 'ESRCH' }))
+    await expect(access(`${profileDir}/.supervisor.lock`)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   test('uses a closed fixed launch profile without caller args/env/profile', () => {
     const options = chromiumLaunchOptions({
       executablePath: '/runtime/browsers/chromium',

@@ -14,7 +14,7 @@ Projector 只输出不可伪造的 `TrustedCompilerInput` token；其中只有�
 
 ## 调用的确定性 API
 
-Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`；编译、隔离 discovery、固定 Playwright 与 Browser launcher 均由 Runtime 内部托管，Skill 不执行 `npx`、低层命令或生成源码。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态；编译、隔离 discovery、固定 Playwright 与 Browser launcher 均由 Runtime 内部托管，Skill 不执行 `npx`、低层命令或生成源码。
 
 Runtime 内部必须依次调用 `projectCompilerInputFromArtifacts()`、受信确定性 Compiler、独立 Discovery Authority、真实本地 Playwright CLI 固定的 `test --list --reporter=json` 离线质量门、`prepareTrustedCompilerRun()`、Contracts 校验和 Engine readiness 审计。可恢复写回归还必须由 Runtime 调用 `createTrustedCompilerControlledWriteLauncher()`、loopback Controlled Write Bridge 与 fresh-run launcher。
 

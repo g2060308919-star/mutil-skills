@@ -110,6 +110,10 @@ describe('E2E skill package', () => {
     }
     expect(text).toContain('`"command":"resume-run"`')
     expect(text).toContain('`"command":"render-report"`')
+    expect(text).toContain('`prepare-manual-result`')
+    expect(text).toContain('`finalize-manual-result-role`')
+    expect(text).toContain('`finalize-run`')
+    expect(text).toContain('每个业务命令成功后必须立即调用 `get-status`')
     expect(text).toContain('拒绝未知字段')
     expect(text).toContain('不得把 `approved: true` 当作审批')
   })
@@ -122,6 +126,9 @@ describe('E2E skill package', () => {
     expect(diagnosis).toContain('`"command":"resume-run"`')
     expect(transaction).toContain('`"command":"resume-run"`')
     expect(report).toContain('`"command":"render-report"`')
+    expect(report).toContain('`prepare-manual-result`')
+    expect(report).toContain('`finalize-manual-result-role`')
+    expect(report).toContain('`finalize-run`')
     expect(report).not.toContain('Skill 自行渲染')
   })
 

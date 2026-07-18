@@ -21,9 +21,9 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 
 除 Doctor 外，唯一可执行入口是 `~/.mutil-skills/bin/repo-e2e rpc`。Skill 必须以参数数组直接启动固定绝对路径，不使用 shell，不拼接 PRD、路径、selector 或 secret。每次只构造一个协议 `1.0.0` 的严格 `RuntimeRequestEnvelope`，请求 JSON 只经标准输入写入；标准输出只接受一个严格 `RuntimeResponseEnvelope`。这就是本 Skill 唯一允许的 **JSON stdin/stdout** 协议。
 
-`ok:true` 时，命令专用 `result` 必须拒绝未知字段，并提供公共投影：`state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`。Skill 只原样转述这些字段，不补值、不猜测下一边、不自行计算摘要。`ok:false` 时只转述 `error.code/category/terminalState/resumeState/details`；响应版本、requestId、Runtime 身份或字段闭包不合法时进入 `environment-blocked`，不得把传输成功当业务成功。
+`ok:true` 时先按该命令的结果契约读取业务结果；每个业务命令成功后必须立即调用 `get-status`，发送新的严格请求。只有 `get-status` 的 `result` 是公共状态投影，并且必须严格拒绝未知字段、完整提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`。Skill 只原样转述该投影，不补值、不猜测下一边、不自行计算摘要。`ok:false` 时只转述 `error.code/category/terminalState/resumeState/details`；响应版本、requestId、Runtime 身份或字段闭包不合法时进入 `environment-blocked`，不得把传输成功当业务成功。
 
-真实命令包括 `create-run`、`submit-candidate`、`open-approval`、`run-preflight`、`execute-run`、`get-status`、`"command":"resume-run"` 和 `"command":"render-report"`。恢复必须发送新的严格 `resume-run` envelope；报告必须发送新的严格 `render-report` envelope，不能把读取状态、重新执行或 Skill 自行渲染冒充这两个命令。审批只认 Runtime 打开的 WebAuthn session 与签名结果，不得把 `approved: true` 当作审批；secret 只传 `secretRef`，绝不传 secret value。
+真实命令包括 `create-run`、`submit-candidate`、`open-approval`、`run-preflight`、`execute-run`、`prepare-manual-result`、`finalize-manual-result-role`、`finalize-run`、`get-status`、`"command":"resume-run"` 和 `"command":"render-report"`。恢复必须发送新的严格 `resume-run` envelope；人工 obligation 必须先 `prepare-manual-result`，再由 executor 与不同 reviewer 依次调用 `finalize-manual-result-role` 完成两次 Runtime 打开的 WebAuthn session；进入 `diagnosing` 且所需自动、人工和 N/A 事实齐全后发送 `finalize-run`，成功后再发送 `render-report`。不能把读取状态、重新执行或 Skill 自行渲染冒充恢复、最终化或报告命令。审批只认 Runtime 打开的 WebAuthn session 与签名结果，不得把 `approved: true` 当作审批；secret 只传 `secretRef`，绝不传 secret value。
 
 ## 权威状态决策
 

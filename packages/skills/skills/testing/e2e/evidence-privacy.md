@@ -14,7 +14,7 @@ project evidence/privacy policy、`browser-results`、raw evidence refs、scanne
 
 ## 调用的确定性 API
 
-Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`；证据读取、脱敏、扫描、隔离与隐私复核均由 Runtime 内部执行，Skill 不接触原始 secret 或证据 bytes。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态；证据读取、脱敏、扫描、隔离与隐私复核均由 Runtime 内部执行，Skill 不接触原始 secret 或证据 bytes。
 
 Runtime 内部必须调用加密 Evidence Vault、分类型 Sanitizer、scanner canary、`LocalSanitizerAuthority` 深接口、Authority privacy unlock/review 和 Engine evidence audit。调用方只能提交 raw bytes、evidence ID 与发布路径；不得提交任意 `SanitizationRecord` 请求签名。
 

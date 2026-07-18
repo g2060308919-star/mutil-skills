@@ -14,7 +14,7 @@
 
 ## 调用的确定性 API
 
-Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`；Gateway policy、认证 RPC、请求计数和签名审计均由 Runtime Host 托管，Skill 不获得旁路网络入口。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态；Gateway policy、认证 RPC、请求计数和签名审计均由 Runtime Host 托管，Skill 不获得旁路网络入口。
 
 Runtime 内部必须调用独立 Gateway install/reserve/forward-or-inject/finalize API；canonical URL、nonce 消费、计数和签名由 Contracts/Gateway 完成。可恢复写 finalize 必须由 Gateway 从自身持有的 reservation、完整 Capability/批准请求集合和独立 executionSessionId 计数派生事实，签发专用 `ExecutionOutcomeReceipt`；不得接受 Runner 自报 opaque outcomeDigest 或只落一个不可复算的 request-set digest。
 

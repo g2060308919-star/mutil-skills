@@ -14,7 +14,7 @@
 
 ## 调用的确定性 API
 
-Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`；下列机制均为 Runtime 内部责任，不是 Skill 可直接导入的低层接口。中断事务恢复必须发送真实的 `"command":"resume-run"`，不得以重新提交或文本建议冒充恢复。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态；下列机制均为 Runtime 内部责任，不是 Skill 可直接导入的低层接口。中断事务恢复必须发送真实的 `"command":"resume-run"`，不得以重新提交或文本建议冒充恢复。
 
 Runtime 内部必须调用完整 publication auditor、Artifact Store commit/recover/gc、Authority/Attempt Authority 验签、Contracts migration 和 Engine publication transition。正式运行的 Approval Authority 与 Lease Authority 必须从各自受保护的 SQLite 持久状态打开，而不是在进程内重新生成状态。
 

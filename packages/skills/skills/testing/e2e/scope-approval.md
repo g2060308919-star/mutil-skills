@@ -16,7 +16,7 @@
 
 ## 调用的确定性 API
 
-Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`；决定展示与签名只能通过 Runtime 的 `open-approval` 完成，聊天文本不是审批证明。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态；决定展示与签名只能通过 Runtime 的 `open-approval` 完成，聊天文本不是审批证明。
 
 Runtime 内部必须调用 Contracts 对六类范围事实做严格 `scope-decision-subject/v1` 投影；该投影明确排除
 `scopeDecision` 自身。Runtime 调用独立 Authority，由登记的 `scope-approver` 使用专用 Decision key 签发

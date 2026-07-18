@@ -14,7 +14,7 @@ DiscoveryCapability、`test-cases`、`execution-contract`、环境/origin、角�
 
 ## 调用的确定性 API
 
-Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。成功 `result` 必须拒绝未知字段并包含 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`；受控 Chromium、Gateway 与状态机均由 Runtime 内部调用。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态；受控 Chromium、Gateway 与状态机均由 Runtime 内部调用。
 
 Runtime 内部必须调用受控 Chromium 的只读 preflight/binding API、Gateway bootstrap policy、Contracts parse 和 Engine `transition()`。
 

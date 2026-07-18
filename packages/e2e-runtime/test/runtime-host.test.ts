@@ -197,6 +197,13 @@ describe('E2ERuntimeHost', () => {
       runId: createdResult.runId,
       assetId: 'ASSET-1',
       workflow: { current: 'created', sequence: 0 },
+      state: 'created',
+      nextEdge: { command: 'submit-candidate', from: 'created', expectedState: 'created' },
+      verifiedDigests: {
+        runtimeInstallation: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        workflowEventChain: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      },
+      minimumMissingInput: ['prd-request'],
     })
 
     const copied = join(fixture.roots.root, 'project-copy')

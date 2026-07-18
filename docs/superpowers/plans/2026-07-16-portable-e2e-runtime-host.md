@@ -96,7 +96,7 @@
 - Produces test helper: `createRuntimeTestRoots(): Promise<{ root: string; home: string; project: string; source: string }>`。
 - Consumes: `WorkflowNodeSchema`、`ArtifactTypeSchema`、`E2EError`、`canonicalizeJson()`。
 
-- [ ] **Step 1: 写协议严格性失败测试**
+- [x] **Step 1: 写协议严格性失败测试**
 
 ```ts
 import { describe, expect, test } from 'vitest'
@@ -131,13 +131,13 @@ describe('Runtime Host contracts', () => {
 })
 ```
 
-- [ ] **Step 2: 运行协议测试并确认 RED**
+- [x] **Step 2: 运行协议测试并确认 RED**
 
 Run: `npx vitest run packages/e2e-contracts/test/runtime-host.test.ts`
 
 Expected: FAIL，提示 `../src/runtime-host.js` 不存在。
 
-- [ ] **Step 3: 实现完整 request/response Schema**
+- [x] **Step 3: 实现完整 request/response Schema**
 
 ```ts
 import { z } from 'zod'
@@ -255,7 +255,7 @@ export type RuntimeResponseEnvelope = z.infer<typeof RuntimeResponseEnvelopeSche
 
 同时从 `packages/e2e-contracts/src/index.ts` 导出 `runtime-host.js`。
 
-- [ ] **Step 4: 创建 Runtime workspace 与最小 CLI 协议适配器**
+- [x] **Step 4: 创建 Runtime workspace 与最小 CLI 协议适配器**
 
 `packages/e2e-runtime/package.json` 初始版本保持与当前内部包一致的 `0.0.0`，最终任务统一升级：
 
@@ -299,7 +299,7 @@ process.exitCode = exitCode
 
 `src/protocol.ts` 必须用 `RuntimeRequestEnvelopeSchema.safeParse()`，把 JSON/Schema 错误映射为 `E2E_RUNTIME_REQUEST_INVALID`，并按 Spec 映射退出码 0/2/3/4/5/70。`src/cli.ts` 首片只实现 `--version` 与 `rpc` 解码；合法但尚未具备 Host 的命令统一返回 `E2E_RUNTIME_NOT_INSTALLED`/`environment-blocked`，不得抛 stack。
 
-- [ ] **Step 5: 接入 workspace 引用和架构规则**
+- [x] **Step 5: 接入 workspace 引用和架构规则**
 
 在根 `tsconfig.base.json`/`vitest.config.ts` 增加 `@mutil-skills/e2e-runtime` alias，在根 `tsconfig.json` 增加 project reference，在 `assertWorkspacePackages()` 增加 `e2e-runtime`。新增架构检查：`packages/skills/src` 和 `packages/skills/skills` 不得出现 `@mutil-skills/e2e-*` import；低层 E2E 包不得 import `@mutil-skills/e2e-runtime`。
 
@@ -307,7 +307,7 @@ Run: `npm install --package-lock-only`
 
 Expected: lockfile登记 `packages/e2e-runtime`，不下载 Chromium。
 
-- [ ] **Step 6: 运行 GREEN 验证**
+- [x] **Step 6: 运行 GREEN 验证**
 
 Run: `npx vitest run packages/e2e-contracts/test/runtime-host.test.ts packages/e2e-runtime/test/protocol.test.ts`
 
@@ -317,7 +317,7 @@ Run: `npm run typecheck && npm run lint:architecture`
 
 Expected: PASS。
 
-- [ ] **Step 7: 提交协议和 package 骨架**
+- [x] **Step 7: 提交协议和 package 骨架**
 
 ```bash
 git add packages/e2e-contracts packages/e2e-runtime tsconfig.base.json tsconfig.json vitest.config.ts scripts/check-architecture.mjs package-lock.json
@@ -347,7 +347,7 @@ git commit -m "feat(e2e): add runtime host protocol"
 - Produces: `runtimeLayout(homeDir)`、`installRuntime(options)`、`uninstallRuntime(options)`、`inspectRuntimeInstallation(options)`、`RuntimeInstallation`。
 - Produces injection seam: `ProductionClosureInstaller.install({ prefix, packageSpec, env }): Promise<void>`；单测不得联网。
 
-- [ ] **Step 1: 写安装安全与原子切换失败测试**
+- [x] **Step 1: 写安装安全与原子切换失败测试**
 
 ```ts
 import { chmod, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
@@ -421,13 +421,13 @@ describe('versioned runtime installer', () => {
 })
 ```
 
-- [ ] **Step 2: 运行安装测试并确认 RED**
+- [x] **Step 2: 运行安装测试并确认 RED**
 
 Run: `npx vitest run packages/e2e-runtime/test/runtime-installer.test.ts`
 
 Expected: FAIL，提示 installer 模块不存在。
 
-- [ ] **Step 3: 实现固定布局和 manifest 闭包**
+- [x] **Step 3: 实现固定布局和 manifest 闭包**
 
 ```ts
 export interface RuntimeLayout {
@@ -463,7 +463,7 @@ export function runtimeLayout(homeDir: string): RuntimeLayout {
 
 `runtime-manifest.ts` 必须按 POSIX relative path 排序枚举 version root 内除自身外的全部普通文件；遇到 symlink、socket、device、hardlink count 异常或路径越界即拒绝。每条记录为 `{ path, byteLength, digest }`，根摘要使用 `digestText('e2e-runtime-installation/v1', canonicalizeJson(records))`。
 
-- [ ] **Step 4: 实现安装事务**
+- [x] **Step 4: 实现安装事务**
 
 `installRuntime()` 必须依次执行 owner/mode 检查、排他锁、同文件系统 staging、精确 package closure 安装、manifest 重算、fsync、rename、`current.json` 原子切换和 launcher 更新。生产 `installClosure` 使用当前 bootstrap 的 `process.execPath + process.env.npm_execpath`，cwd 指向 staging，参数固定为：
 
@@ -482,7 +482,16 @@ const npmArguments = [
 
 env 只保留 `HOME`、`PATH`、`TMPDIR`、`npm_config_registry` 和必要 TLS CA 配置；删除 `INIT_CWD`、`NODE_OPTIONS`、`NODE_PATH`、`npm_config_prefix` 与项目 cwd。相同 version 已存在时，只有 installation digest 完全一致才幂等成功。
 
-- [ ] **Step 5: 实现固定 Launcher 与 discovery**
+安装锁不得只记录 PID，也不得依赖 mtime 猜测 stale。创建 `install.lock` 与 staging 前，installer
+必须先持久化 `install-owner.json`，绑定 PID、OS/process start identity、owner nonce、phase、精确版本、
+installation digest intent，以及 Runtime root 的 canonical path/dev/inode。新 installer/CLI `install-runtime`
+遇到残留事务时，仅在证明 owner 已死亡、owner/lock binding 完全一致、root/inode 未变，且目标版本要么
+不存在、要么通过完整 manifest 验证并与 digest intent 一致后恢复。活 owner、PID 复用、marker 缺失、
+binding 不匹配、symlink/path swap 或发布状态不唯一一律返回
+`E2E_RUNTIME_INSTALL_RECOVERY_BLOCKED`。恢复先把本事务 staging/lock/owner 原子 rename 到同文件系统隔离区，
+写入 durable tombstone，再删除隔离区；已验证发布版本只保留，不得作为 staging 删除。
+
+- [x] **Step 5: 实现固定 Launcher 与 discovery**
 
 Launcher 读取并严格校验 `current.json`，重算关键入口摘要，确认入口 realpath 位于 version root，然后用 `process.execPath` 和绝对 `dist/src/bin/repo-e2e.js` 启动。`inspectRuntimeInstallation()` 返回：
 
@@ -499,13 +508,13 @@ export interface RuntimeInstallation {
 
 测试在项目 `node_modules/@mutil-skills/e2e-runtime` 写入会抛错的恶意入口，并设置 `NODE_PATH`；discovery 仍必须解析 temp HOME 下的绝对 version root。
 
-- [ ] **Step 6: 实现显式卸载并接入 CLI**
+- [x] **Step 6: 实现显式卸载并接入 CLI**
 
 `uninstallRuntime()` 只接受 exact version；持有同一 `install.lock` 后重新验证 owner marker、目标 version realpath、完整 manifest 和普通文件闭包。目标是 current 时必须同时给出 `activateVersion`，且 replacement 已安装、manifest 有效、协议兼容；先原子切换 `current.json`/launcher，再删除目标目录。默认保留 state、quarantine、authority、logs 和 Chromium；Runtime 卸载接口不得接受删除这些目录的开关。
 
 `repo-e2e uninstall-runtime --version <exact> [--activate <exact>]` 只执行上述版本卸载。raw quarantine 与 Authority identity 的销毁命令不在首发 CLI 实现范围内，CLI 必须明确拒绝把 `--purge-state`、`--purge-quarantine` 或 `--purge-identity` 混入卸载。
 
-- [ ] **Step 7: 接入 CLI 安装命令并验证**
+- [x] **Step 7: 接入 CLI 安装命令并验证**
 
 `repo-e2e install-runtime --version <exact>` 调用 installer；缺失/非 exact semver 返回 exit 2。安装成功只输出版本、installation digest 和固定 launcher 路径，不输出 npm cache 路径。
 
@@ -517,7 +526,7 @@ Run: `npm run typecheck && npm run lint:architecture`
 
 Expected: PASS。
 
-- [ ] **Step 8: 提交安装、卸载与 discovery**
+- [x] **Step 8: 提交安装、卸载与 discovery**
 
 ```bash
 git add packages/e2e-runtime
@@ -543,7 +552,7 @@ git commit -m "feat(e2e): install isolated runtime versions"
 - Produces: `buildChildEnvironment()`、`ProcessSupervisor.spawn()`、`runRuntimeDoctor()`。
 - Probe interface: `RuntimeProbe = (context: RuntimeProbeContext) => Promise<RuntimeDoctorProbe>`。
 
-- [ ] **Step 1: 写 env canary 和 Doctor 聚合失败测试**
+- [x] **Step 1: 写 env canary 和 Doctor 聚合失败测试**
 
 ```ts
 import { describe, expect, test } from 'vitest'
@@ -577,13 +586,13 @@ test('doctor is ready only when every required probe passes', () => {
 })
 ```
 
-- [ ] **Step 2: 运行测试并确认 RED**
+- [x] **Step 2: 运行测试并确认 RED**
 
 Run: `npx vitest run packages/e2e-runtime/test/environment-policy.test.ts packages/e2e-runtime/test/runtime-doctor.test.ts`
 
 Expected: FAIL，模块不存在。
 
-- [ ] **Step 3: 实现最小 env 与进程监督器**
+- [x] **Step 3: 实现最小 env 与进程监督器**
 
 `buildChildEnvironment()` 必须从空对象构建，并对 runtime bin path 做 realpath/allowlist；不允许调用方追加任意 env。`ProcessSupervisor.spawn()` 固定接口：
 
@@ -606,13 +615,13 @@ export interface SupervisedProcessHandle {
 
 实现必须确认 entrypoint realpath 位于 installation version root，使用 `process.execPath` 启动 JS；先 IPC shutdown，超时后 SIGTERM，再超时后返回 `E2E_RUNTIME_CHILD_STOP_TIMEOUT`。不得用 shell。
 
-- [ ] **Step 4: 实现 Doctor probe registry**
+- [x] **Step 4: 实现 Doctor probe registry**
 
 `runRuntimeDoctor()` 固定执行并聚合 11 项：installation、version-closure、source-independence、authority、approval-presence、gateway、chromium、isolation、artifact-fs、quarantine、report。尚未进入后续任务的能力必须返回明确 `not-installed`，不能用 `passed` 占位；probe 抛错映射到稳定 reason code，不泄漏 stack。
 
 `doctor --json` stdout 只写 `RuntimeDoctorReportSchema` JSON。普通 `doctor` 在 stderr 输出中文表格，stdout 保持空。
 
-- [ ] **Step 5: 运行 GREEN 验证**
+- [x] **Step 5: 运行 GREEN 验证**
 
 Run: `npx vitest run packages/e2e-runtime/test/environment-policy.test.ts packages/e2e-runtime/test/process-supervisor.test.ts packages/e2e-runtime/test/runtime-doctor.test.ts`
 
@@ -622,7 +631,7 @@ Run: `npm run typecheck && npm run lint:architecture`
 
 Expected: PASS。
 
-- [ ] **Step 6: 提交 Process/Doctor 切片**
+- [x] **Step 6: 提交 Process/Doctor 切片**
 
 ```bash
 git add packages/e2e-runtime
@@ -650,7 +659,7 @@ git commit -m "feat(e2e): add runtime health and process supervision"
 - Produces: `resolveProjectIdentity()`、`RuntimeRunStore.open()`、`migrateRuntimeRunSnapshot()`、`E2ERuntimeHost.handle()`。
 - Run snapshot key: `projectIdentityDigest + runId`；request replay key: `requestId + requestDigest`。
 
-- [ ] **Step 1: 写 project copy/replay/状态跳跃失败测试**
+- [x] **Step 1: 写 project copy/replay/状态跳跃失败测试**
 
 ```ts
 import { mkdir, writeFile } from 'node:fs/promises'
@@ -700,13 +709,13 @@ test('run lock and hash-chained journal fail closed on concurrent or tampered st
 })
 ```
 
-- [ ] **Step 2: 运行测试并确认 RED**
+- [x] **Step 2: 运行测试并确认 RED**
 
 Run: `npx vitest run packages/e2e-runtime/test/project-identity.test.ts packages/e2e-runtime/test/run-store.test.ts`
 
 Expected: FAIL，模块不存在。
 
-- [ ] **Step 3: 实现项目身份和 rebind**
+- [x] **Step 3: 实现项目身份和 rebind**
 
 `resolveProjectIdentity()` 必须 realpath 项目根，lstat 逐级拒绝 symlink，读取严格 `.biztest/project.json`，对以下结构做 canonical digest：
 
@@ -722,7 +731,7 @@ export interface ProjectIdentity {
 
 digest input 固定为 `{ realRoot, device, inode, logicalProjectId }`，domain 为 `e2e-project-identity/v1`。generation 只保存 digest。`project rebind` 要求 Task 5 的 user-presence receipt；Task 4 先实现内部 `rebindProjectIdentity(input, verifyUserPresence)`，验证回调为 false 时拒绝。
 
-- [ ] **Step 4: 实现 Run Store**
+- [x] **Step 4: 实现 Run Store**
 
 使用 `SqliteSnapshotStore`，state path 必须位于用户级 state root 且显式把项目 root 作为 forbidden root。Run snapshot 严格结构：
 
@@ -748,7 +757,7 @@ Run lock 使用 SQLite lease row + 进程 nonce，不依赖项目内 lockfile；
 
 `migrateRuntimeRunSnapshot()` 先解析 snapshot 的 `schemaVersion`。首发只接受当前 `1.0.0` 并 canonical round-trip；未来同 major 迁移必须在显式 registry 中以纯函数逐版本执行、重复执行结果相同，并在写回前保存原摘要。未知版本、缺迁移器或 protocol major 不兼容统一返回 `migration-required`/`E2E_RUNTIME_STATE_MIGRATION_REQUIRED`；active generation 永不因 Runtime 升级被重写。单测覆盖当前版本 round-trip、未知 minor/major 阻塞和迁移器幂等。
 
-- [ ] **Step 5: 实现 Host `create-run/get-status/submit-candidate` 基础链**
+- [x] **Step 5: 实现 Host `create-run/get-status/submit-candidate` 基础链**
 
 ```ts
 export interface RuntimeHostDependencies {
@@ -772,7 +781,7 @@ export class E2ERuntimeHost {
 
 `submitCandidate()` 先按 `ArtifactSchemaRegistry[artifactType]` 解析，再重算 content digest；candidate 的 assetId、prdRevision、generationId 与当前 Run 不一致即拒绝。每次只允许 Engine 图中的一条合法边。没有对应审批/执行事实时保持原状态并返回最小缺失项。
 
-- [ ] **Step 6: 运行 GREEN 验证**
+- [x] **Step 6: 运行 GREEN 验证**
 
 Run: `npx vitest run packages/e2e-runtime/test/project-identity.test.ts packages/e2e-runtime/test/run-store.test.ts packages/e2e-runtime/test/runtime-state-migration.test.ts packages/e2e-runtime/test/runtime-host.test.ts`
 
@@ -782,7 +791,7 @@ Run: `npm run typecheck && npm run lint:architecture`
 
 Expected: PASS。
 
-- [ ] **Step 7: 提交持久 Host 基础**
+- [x] **Step 7: 提交持久 Host 基础**
 
 ```bash
 git add packages/e2e-runtime
@@ -832,13 +841,13 @@ git commit -m "feat(e2e): persist runtime runs by project identity"
 - Produces: `WebAuthnUserPresenceAuthority`、`startWebAuthnApprovalServer()`、Authority process handle 的 `enrollIdentity()` / `openApprovalSession()`。
 - Produces Runtime adapter: `RuntimeAuthorityHost.enroll()`、`RuntimeAuthorityHost.requestApproval()`、`RuntimeAuthorityHost.close()`。
 
-- [ ] **Step 1: 安装并锁定 WebAuthn 官方依赖**
+- [x] **Step 1: 安装并锁定 WebAuthn 官方依赖**
 
 Run: `npm install --workspace @mutil-skills/e2e-authority @simplewebauthn/server@13.3.2 @simplewebauthn/browser@13.3.0`
 
 Expected: `packages/e2e-authority/package.json` 和 lockfile 固定 13.3.x 实际版本；不引用 CDN。
 
-- [ ] **Step 2: 写 challenge 错绑、重放和无 UV 失败测试**
+- [x] **Step 2: 写 challenge 错绑、重放和无 UV 失败测试**
 
 ```ts
 import { describe, expect, test } from 'vitest'
@@ -896,13 +905,13 @@ test('rejects a response without verified user presence', async () => {
 
 `createForTest()` 和 `registerTestCredential()` 只从测试源路径导入，不从 package `index.ts`/`exports` 导出。
 
-- [ ] **Step 3: 运行测试并确认 RED**
+- [x] **Step 3: 运行测试并确认 RED**
 
 Run: `npx vitest run packages/e2e-authority/test/webauthn-user-presence.test.ts`
 
 Expected: FAIL，模块不存在。
 
-- [ ] **Step 4: 实现 WebAuthn identity 与 session 验证**
+- [x] **Step 4: 实现 WebAuthn identity 与 session 验证**
 
 生产实现必须调用：
 
@@ -927,7 +936,7 @@ const authentication = await verifyAuthenticationResponse({
 
 credential state 包含 `id/publicKey/counter/transports/subject`，随 Authority `2.1.0` snapshot 加密持久化；真实旧版 `2.0.0` snapshot 通过事务迁移补入空 credential state，未知或非精确结构失败关闭。challenge 最长 5 分钟，单次消费，绑定 runId、approval type、subject digest、installation digest、origin；验证后使用完整 credential 作为期望值执行原子 CAS，counter 必须严格递增。注册使用原子 insert 拒绝并发重复 credential。注册选项固定 `attestationType:'none'`、`userVerification:'required'`、`supportedAlgorithmIDs:[-7,-257]`。
 
-- [ ] **Step 5: 实现 loopback 静态审批页**
+- [x] **Step 5: 实现 loopback 静态审批页**
 
 Server 只绑定 `127.0.0.1`，每次 session 生成随机 port 和 32-byte bearer。bearer 只放在 URL fragment，浏览器立即从地址栏移除；不得进入 query、Cookie、Referer 或 session payload。静态 GET 只提供当前 Runtime package 内的固定 bytes；私有 `/session` 和 `/submit` 必须使用规范 base64url `Authorization: Bearer` 且按 session 隔离。POST body 上限 64KiB，所有响应 `cache-control:no-store`、CSP `default-src 'self'`。页面从本地 `/simplewebauthn-browser.js` 加载 bundle，展示 Authority 生成的不可编辑摘要，再调用 `startRegistration()`/`startAuthentication()`。
 
@@ -935,7 +944,7 @@ Server 只绑定 `127.0.0.1`，每次 session 生成随机 port 和 32-byte bear
 
 测试必须验证 remote address、错误 origin、错误 bearer、过大 body、过期 challenge 和第二次 POST 全部拒绝。
 
-- [ ] **Step 6: 扩展 Authority 子进程控制面**
+- [x] **Step 6: 扩展 Authority 子进程控制面**
 
 `AuthorityExecutionRpcProcessHandle` 增加：
 
@@ -951,7 +960,7 @@ openApprovalSession(input: {
 
 Authority child 内部把已完成 WebAuthn session 映射为绑定 subject/run/type/digests/origin/expiry 的一次性私有 receipt，并在 `authenticateApproverSession` 精确匹配后消费；Runtime parent 只能创建 session/取得 URL，不能取得 receipt 或提交“通过”结果。每个 session 只允许一个 waiter；子进程 error/exit/disconnect 必须有界拒绝全部 waiter。子进程 shutdown 时撤销所有未消费 challenge。
 
-- [ ] **Step 7: 接入 Runtime 人类命令和 Host**
+- [x] **Step 7: 接入 Runtime 人类命令和 Host**
 
 `repo-e2e identity enroll` 创建 enrollment URL；`repo-e2e approve --run-id <id> --type <scope|lineage|discovery|execution|privacy>` 使用显式 type，从 Run Store 重算 approval subject 后创建 approval URL，不允许从 workflow 猜测审批类型。两者把 URL 输出到 stderr 并等待 Authority callback；RPC `open-approval` 生产默认接线必须真实启动 Authority，其他 RPC 命令不得启动它，且不能携带 credential response 或 approved 字段。用户在场返回后重新解析并核对项目 real root、device/inode、logical project ID 和 digest，再重新取得 Run lease。
 
@@ -963,7 +972,7 @@ Run: `npm run typecheck && npm run lint:architecture`
 
 Expected: PASS。
 
-- [ ] **Step 8: 提交 WebAuthn Authority**
+- [x] **Step 8: 提交 WebAuthn Authority**
 
 ```bash
 git add packages/e2e-authority packages/e2e-runtime package-lock.json
@@ -1400,6 +1409,8 @@ git commit -m "feat(e2e): run declarative read cases in isolated chromium"
 
 > **Task 9 协议支持边界 Errata（2026-07-17）**：Mockttp `4.4.2` 的 WebSocket message 事件发生在 frame 已经转发之后，不能作为安全门；现有 `ProtocolGuard` 的 SSE reservation 也没有绑定真实流关闭/中断终态。首发因此只生产支持显式签名闭包内的 HTTP/HTTPS、逐跳 Redirect 和 Beacon。WebSocket 在握手前固定返回 `E2E_GATEWAY_WEBSOCKET_BRIDGE_UNAVAILABLE`、不连接上游且不消费 reservation；SSE 固定返回 `E2E_GATEWAY_SSE_BRIDGE_UNAVAILABLE`。Skill、报告与发行说明不得宣称两者已执行。只有独立受控桥能在上游发送前拒绝 client frame、在下游发送前核对 inbound 限额，并把 close/abort 与 Authority complete/unknown 闭合后，才允许升级支持声明。
 
+> **Task 9 崩溃恢复 Errata（2026-07-18）**：verified cleanup 的 `cleanupPreparedDigest` 必须先于 Authority Lease release 持久化到 WriteAttempt；若崩溃发生在 release 成功与 `leaseTerminalReceipt` 落盘之间，恢复器只能通过 maintenance `lease.query` 重建既有 Authority 终态回执，且 released Lease 的 cleanup digest 必须与 durable checkpoint 完全一致。checkpoint 缺失或不一致一律失败关闭，不得把 released Lease 改写为 quarantine。过期或已撤销 Grant 只能经持久签名 Grant 与 exact recovery binding 激活独立 `recoveryOnly` registration；其 allowlist 仅包含 reservation query/markUnknown 与 lease query/quarantine，complete/release、verify/reserve、新执行和普通 terminal RPC 全部拒绝。所有路由必须先验证 registration/recovery binding，再读取 Authority reservation/Lease 状态，避免未授权存在性 oracle。
+
 **Files:**
 - Create: `packages/e2e-runtime/test/write-runtime-flow.test.ts`
 - Create: `packages/e2e-runtime/test/injection-runtime-flow.test.ts`
@@ -1500,7 +1511,14 @@ WebSocket/SSE/Beacon action 继续走 `ProtocolGuard`；Service Worker 保持 bl
 Host 开始写 action 前把 reservation/action/attempt 记入 Run Store；完成后写 outcome digest。`RuntimeRecoveryCoordinator.recover()` 固定按以下顺序执行，并把每步摘要追加到 Task 4 hash-chained journal：
 
 1. 重验 Runtime installation、state owner/mode 和 Run journal；
-2. 清理只属于当前 owner marker 的失效 loopback endpoint、browser profile lock 和安装 staging；
+2. 清理只属于当前 write-attempt owner marker 的失效 loopback endpoint 和 browser profile lock；
+   Runtime 安装 staging 不得进入 write-attempt registry；它属于全局 installer 事务，必须由 installer
+   独立的持久 owner marker、进程启动身份、root/inode binding 和崩溃恢复协议管理；
+   Browser profile 不得以 `SingletonLock` 是否存在作为死亡证明。Browser Host 在调用 Chromium 前启动
+   受控 supervisor，并在 profile owner marker 中持久化 phase、supervisor PID/start identity、profile
+   parent canonical path/dev/inode 与 profile dev/inode；supervisor 活跃、PID 复用或身份不可判定时均阻断。
+   只有 supervisor 明确死亡且所有 path/inode binding 仍匹配时，恢复器才可把整个 profile 在固定 parent
+   下原子 rename 隔离，再删除并由 owned-resource registry 写 cleaned tombstone；
 3. 读取 Authority reservation，把缺 outcome 的写请求 `markUnknown()`，隔离 lease；
 4. 调用现有 Artifact Store recovery，并重验 active/staged generation；
 5. 重验 frozen artifact digest、Engine `resumeState` 和可达 resume edge；
@@ -1990,18 +2008,18 @@ Run: `git diff --check && git status --short`
 
 Expected: 无空白错误；只包含本计划范围内的待提交变更。
 
-- [ ] **Step 8: 执行最终代码审查**
+- [x] **Step 8: 执行最终代码审查**
 
 使用 `code-review` 对从 `c156f6e` 到当前 HEAD 的实现做 Standards + Intent 双轴审查。必须处理所有 P0/P1；P2 若不修复必须记录明确理由。再次运行受影响测试，不以此前结果代替变更后的验证。
 
-- [ ] **Step 9: 提交版本、Golden 和文档**
+- [x] **Step 9: 提交版本、Golden 和文档**
 
 ```bash
 git add package.json package-lock.json packages scripts README.md CHANGELOG.md
 git commit -m "test(e2e): prove portable runtime from packed artifacts"
 ```
 
-- [ ] **Step 10: 最终工作区与提交核对**
+- [x] **Step 10: 最终工作区与提交核对**
 
 Run: `git status --short && git log --oneline c156f6e..HEAD`
 
