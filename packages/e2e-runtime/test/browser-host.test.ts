@@ -1,4 +1,4 @@
-import { access, mkdir, rm } from 'node:fs/promises'
+import { access, mkdir, readFile, rm } from 'node:fs/promises'
 import { describe, expect, test, vi } from 'vitest'
 import { createRuntimeTestRoots } from './fixtures.js'
 import {
@@ -6,11 +6,31 @@ import {
   chromiumLaunchOptions,
   getControlledBrowserSessionBinding,
   type BrowserHostDriver,
+  type BrowserProfileSupervisor,
 } from '../src/browser-host.js'
+import {
+  authorizeRuntimeWriteProduction,
+  createRuntimeWriteOwnedResourceLifecycle,
+} from '../src/runtime-write-production.js'
+import { createRuntimeOwnedResourceMarker } from '../src/write-attempt.js'
+import { NodeBrowserProfileSupervisor } from '../src/browser-profile-supervisor.js'
 
 const digest = (character: string) => `sha256:${character.repeat(64)}`
 
 describe('Controlled Browser Host', () => {
+  test('生产 supervisor 在 Browser 启动前持有 owner lock，确认停止后删除 lock', async () => {
+    const roots = await createRuntimeTestRoots()
+    const profileDir = `${roots.source}/supervised-profile`
+    await mkdir(profileDir, { mode: 0o700 })
+    const supervisor = await new NodeBrowserProfileSupervisor().start(profileDir)
+    expect(supervisor.ownerProcess).toMatchObject({
+      role: 'supervisor', pid: expect.any(Number), startIdentity: expect.any(String),
+    })
+    await expect(access(`${profileDir}/.supervisor.lock`)).resolves.toBeUndefined()
+    await supervisor.stop()
+    await expect(access(`${profileDir}/.supervisor.lock`)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   test('uses a closed fixed launch profile without caller args/env/profile', () => {
     const options = chromiumLaunchOptions({
       executablePath: '/runtime/browsers/chromium',
@@ -80,6 +100,65 @@ describe('Controlled Browser Host', () => {
       TMPDIR: `${launchInput.profileDir}/tmp`,
     })
     await session.close()
+  })
+
+  test('生产 profile 在 mkdir 前持久登记，正常关闭删除后才写 cleaned tombstone', async () => {
+    const roots = await createRuntimeTestRoots()
+    const driver = fakeDriver()
+    let activeRecord: any
+    const complete = vi.fn(async (input: any) => ({
+      ...activeRecord, revision: 2, status: 'cleaned' as const,
+      cleanupReceiptDigest: input.cleanupReceiptDigest,
+    }))
+    const register = vi.fn(async (record: any) => {
+      await expect(access(record.descriptor.profileDir)).rejects.toMatchObject({ code: 'ENOENT' })
+      activeRecord = { ...record, revision: 1, status: 'active' as const }
+      return activeRecord
+    })
+    const marker = createRuntimeOwnedResourceMarker({
+      runtimeInstallationDigest: digest('a'), projectIdentityDigest: digest('b'),
+      runId: 'RUN-WRITE-PROFILE', attemptId: 'ATTEMPT-WRITE-PROFILE', ownerNonce: 'OWNER-1',
+    })
+    const lifecycle = createRuntimeWriteOwnedResourceLifecycle(authorizeRuntimeWriteProduction({
+      recovery: { recover: vi.fn() }, ownedResources: { register, complete }, prepareCleanup: vi.fn(),
+    }), marker, () => new Date('2026-07-18T00:00:00.000Z'))
+    const order: string[] = []
+    const originalLaunch = driver.launch.getMockImplementation()!
+    driver.launch.mockImplementation(async (profile: string, options: Parameters<BrowserHostDriver['launch']>[1]) => {
+      order.push('browser-launch')
+      await originalLaunch(profile, options)
+    })
+    const stop = vi.fn(async () => { order.push('supervisor-stop') })
+    const supervisor: BrowserProfileSupervisor = {
+      start: vi.fn(async () => {
+        order.push('supervisor-start')
+        return { ownerProcess: { role: 'supervisor' as const, pid: 4242, startIdentity: 'test-start:100' }, stop }
+      }),
+    }
+    const session = await new ControlledBrowserHost(driver, { profileSupervisor: supervisor }).open({
+      homeDir: roots.home, runId: marker.runId, installation: installation(),
+      gateway: gateway(vi.fn(async () => ({ approved: true, denied: true, proofDigest: digest('c') }))),
+      ownedResourceLifecycle: lifecycle,
+    })
+    const owner = JSON.parse(await readFile(`${driver.launchInput!.profileDir}/.owner.json`, 'utf8'))
+    expect(owner).toMatchObject({
+      schemaVersion: '1.0.0', kind: 'browser-profile-lock', ownerMarker: marker,
+      descriptorDigest: expect.stringMatching(/^sha256:/),
+      phase: 'launched',
+      profileParent: { canonicalPath: expect.any(String), device: expect.stringMatching(/^\d+$/), inode: expect.stringMatching(/^\d+$/) },
+      profile: { device: expect.stringMatching(/^\d+$/), inode: expect.stringMatching(/^\d+$/) },
+      ownerProcess: { role: 'supervisor', pid: 4242, startIdentity: 'test-start:100' },
+    })
+    expect(order).toEqual(['supervisor-start', 'browser-launch'])
+    expect(register).toHaveBeenCalledOnce()
+    await session.close()
+    await expect(access(driver.launchInput!.profileDir)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({
+      resourceId: expect.stringMatching(/^browser-profile-lock:/), expectedRevision: 1,
+      ownerMarkerDigest: marker.markerDigest, cleanupReceiptDigest: expect.stringMatching(/^sha256:/),
+    }))
+    expect(stop).toHaveBeenCalledOnce()
+    expect(order).toEqual(['supervisor-start', 'browser-launch', 'supervisor-stop'])
   })
 
   test('action-scoped resolver 仅关联已签页面/API 请求一次，并拒绝未知、重复与跨 action 请求', async () => {

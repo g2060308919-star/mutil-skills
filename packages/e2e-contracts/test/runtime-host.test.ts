@@ -38,6 +38,19 @@ const executionSubject = {
   actions: [{ actionId: 'ACTION-1', origin: 'wss://test.example.com', path: '/events',
     maxInboundMessages: 1, maxBytes: 1024 }],
 }
+const manualDraft = {
+  schemaVersion: '1.0.0', manualResultId: 'MANUAL-1', runId: 'RUN-1', assetId: 'ASSET-1',
+  prdRevision: `sha256:${'1'.repeat(64)}`, generationId: 'RUN-1',
+  runtimeInstallationDigest: `sha256:${'2'.repeat(64)}`, manualProcedureId: 'MANUAL-PROCEDURE-1',
+  caseIds: ['CASE-MANUAL-1'], obligationIds: ['COV-MANUAL-1'],
+  requirementModelDigest: `sha256:${'3'.repeat(64)}`,
+  executor: { subject: 'manual:executor', roles: ['e2e-manual-executor'] },
+  reviewer: { subject: 'manual:reviewer', roles: ['e2e-manual-reviewer'] },
+  startedAt: '2026-07-18T01:00:00.000Z', finishedAt: '2026-07-18T01:05:00.000Z', outcome: 'passed',
+  steps: [{ stepId: 'MANUAL-STEP-1', instructionDigest: `sha256:${'4'.repeat(64)}`,
+    outcome: 'passed', observation: '人工验证通过', evidenceDigests: [`sha256:${'5'.repeat(64)}`] }],
+  evidenceDigests: [`sha256:${'5'.repeat(64)}`], expiresAt: '2026-07-19T01:05:00.000Z',
+}
 
 describe('Runtime Host contracts', () => {
   test('accepts the exact doctor envelope', () => {
@@ -55,6 +68,26 @@ describe('Runtime Host contracts', () => {
       command: 'open-approval',
       projectRoot: '/tmp/project',
       payload: { runId: 'RUN-1', approvalType: 'execution', approved: true },
+    }).success).toBe(false)
+  })
+
+  test('manual result commands accept only a draft and a role transition, never approval booleans or session proofs', () => {
+    const prepare = {
+      ...doctorRequest, command: 'prepare-manual-result', projectRoot: '/tmp/project',
+      payload: { runId: 'RUN-1', draft: manualDraft },
+    }
+    const finalize = {
+      ...doctorRequest, command: 'finalize-manual-result-role', projectRoot: '/tmp/project',
+      payload: { runId: 'RUN-1', manualResultId: 'MANUAL-1',
+        draftDigest: `sha256:${'6'.repeat(64)}`, role: 'executor' },
+    }
+    expect(RuntimeRequestEnvelopeSchema.safeParse(prepare).success).toBe(true)
+    expect(RuntimeRequestEnvelopeSchema.safeParse(finalize).success).toBe(true)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...prepare, payload: { ...prepare.payload, approved: true },
+    }).success).toBe(false)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...finalize, payload: { ...finalize.payload, approvalSessionRef: 'CALLER-SESSION' },
     }).success).toBe(false)
   })
 

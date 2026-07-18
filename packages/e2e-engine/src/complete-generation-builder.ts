@@ -5,6 +5,8 @@ import {
   digestArtifactContent,
   digestBytes,
   digestText,
+  deriveExecutionResultId,
+  migrateLegacyBrowserResultIdentities,
   parseArtifactDocument,
   type ArtifactDocument,
   type ArtifactSignature,
@@ -153,6 +155,9 @@ export function buildCompleteGeneration(candidate: BuildCompleteGenerationInput)
   ], 'E2E_COMPLETE_GENERATION_BROWSER_PRESENTATION_KEYS_INVALID')
   assertContext(input.context)
   assertExactDraftTypes(input.drafts)
+  input.drafts['browser-results'].content = migrateLegacyBrowserResultIdentities(
+    input.drafts['browser-results'].content as { caseResults: unknown[] },
+  )
   const artifactPaths: Record<string, string> = {}
   const artifacts: ArtifactDocument[] = []
 
@@ -412,13 +417,20 @@ function renderFinalReport(
   const content = <T extends ArtifactType>(type: T): ArtifactOf<T>['content'] =>
     artifact(type).content as unknown as ArtifactOf<T>['content']
   const cases = content('test-cases').cases
-  const results = new Map(content('browser-results').caseResults
+  const browserResults = [...content('browser-results').caseResults]
+    .sort((left, right) => left.resultId!.localeCompare(right.resultId!))
+  const results = new Map(browserResults.map((result) => [result.resultId!, result]))
+  const realResultsByCase = new Map(browserResults
+    .filter((result) => result.mode === 'real-environment')
     .map((result) => [result.caseId, result]))
   const evidence = new Map(content('browser-evidence').artifacts
     .map((item) => [item.evidenceId, item]))
-  const reportCases = cases.filter((item) => item.status === 'active').map((testCase) => {
-    const result = results.get(testCase.caseId)
-    return {
+  const reportCases = cases.filter((item) => item.status === 'active').flatMap((testCase) => {
+    const domainResults = browserResults.filter((result) => result.caseId === testCase.caseId)
+    const projected = domainResults.length > 0 ? domainResults : [undefined]
+    return projected.map((result) => ({
+      resultId: result?.resultId ?? deriveExecutionResultId(testCase.caseId, 'real-environment'),
+      ...(result?.baselineResultId ? { baselineResultId: result.baselineResultId } : {}),
       caseId: testCase.caseId, title: testCase.title,
       executionMode: result?.mode === 'gateway-injection'
         ? 'browser-injection' as const : 'real-environment' as const,
@@ -436,19 +448,20 @@ function renderFinalReport(
           evidenceLinks,
         }
       }),
-    }
+    }))
   })
   const realResults = reportCases.filter((item) => item.executionMode === 'real-environment')
-    .filter((item) => results.has(item.caseId))
-    .map((item) => ({ id: item.caseId, digest: results.get(item.caseId)!.eventChainDigest }))
+    .filter((item) => results.has(item.resultId))
+    .map((item) => ({ id: item.resultId, digest: results.get(item.resultId)!.eventChainDigest }))
   const injectionResults = reportCases.filter((item) => item.executionMode === 'browser-injection')
-    .filter((item) => results.has(item.caseId))
-    .map((item) => ({ id: item.caseId, digest: results.get(item.caseId)!.eventChainDigest }))
+    .filter((item) => results.has(item.resultId))
+    .map((item) => ({ id: item.resultId, digest: results.get(item.resultId)!.eventChainDigest }))
   const regressionDigest = byType.get('regression-manifest')!.contentDigest
   const grantContent = content('approval-grants')
   const scopeContent = content('acceptance-scope')
   const diffContent = content('prd-diff')
   const gateway = content('gateway-audit')
+  const reportGateway = projectReportGatewayAudit(gateway)
   const executionApprovalStatus = grantContent.grants.some((grant) => grant.status === 'revoked')
     ? 'revoked' as const : grantContent.grants.some((grant) => grant.status === 'expired')
       ? 'expired' as const : grantContent.grants.some((grant) => grant.status === 'denied')
@@ -473,7 +486,7 @@ function renderFinalReport(
         const testCase = casesById.get(caseId)
         if (!testCase) continue
         addEdge(obligation.obligationId, caseId, 'implemented-by')
-        const result = results.get(caseId)
+        const result = realResultsByCase.get(caseId)
         for (const step of testCase.steps) {
           addEdge(caseId, step.stepId, 'executes')
           const stepResult = result?.stepResults.find((item) => item.stepId === step.stepId)
@@ -580,15 +593,15 @@ function renderFinalReport(
     injectionBoundary: input.reportPresentation.injectionBoundary,
     gatewayAudit: {
       status: verdictInput.gatewayAudit.status,
-      digest: gateway.signedCounters.digest,
-      forwarded: gateway.signedCounters.forwarded, blocked: gateway.signedCounters.blocked,
-      injected: gateway.signedCounters.injected, findings: [],
+      digest: reportGateway.digest,
+      forwarded: reportGateway.forwarded, blocked: reportGateway.blocked,
+      injected: reportGateway.injected, findings: [],
     },
     browserHealth: content('browser-preflight').checks.filter((check) => check.status === 'failed')
       .map((check) => ({ code: check.code, severity: 'high' as const, ref: check.digest })),
     diagnostics: attemptSelections.map((selection) => {
       const diagnosis = content('diagnosis').caseDiagnoses.find((item) => item.caseId === selection.caseId)
-      return { caseId: selection.caseId, category: diagnosis?.category ?? 'not-required',
+      return { resultId: selection.resultId, caseId: selection.caseId, category: diagnosis?.category ?? 'not-required',
       selectedAttemptId: selection.attemptId,
       rationale: diagnosis?.digest ?? selection.eventChainDigest,
       attempts: selection.attempts.map((attempt) => ({
@@ -600,7 +613,7 @@ function renderFinalReport(
       })),
     }}),
     sideEffects: content('browser-action-map').actions.map((action) => {
-      const caseResult = results.get(action.caseId)
+      const caseResult = realResultsByCase.get(action.caseId)
       const stepResult = caseResult?.stepResults.find((step) => step.actionId === action.actionId)
       return {
         actionId: action.actionId, effect: action.effect, status: stepResult?.status ?? 'not-executed',
@@ -615,7 +628,7 @@ function renderFinalReport(
       executionProfile: content('regression-manifest').executionProfile,
       generationId: input.context.generationId, manifestDigest: regressionDigest,
       command: input.reportPresentation.regressionCommand,
-      caseIds: reportCases.map((item) => item.caseId),
+      caseIds: [...new Set(reportCases.map((item) => item.caseId))],
       trustedCompiler: {
         compilerInputDigest: regressionAttestation.compilerInputDigest,
         compilerVersion: regressionAttestation.compilerVersion,
@@ -638,6 +651,31 @@ function renderFinalReport(
   return ArtifactSchemaRegistry['final-report'].parse(
     createArtifact(input, 'final-report', artifactIdFor('final-report'), draft),
   ) as ArtifactDocument
+}
+
+function projectReportGatewayAudit(gateway: Record<string, any>): {
+  digest: string; forwarded: number; blocked: number; injected: number
+} {
+  const sessions = Array.isArray(gateway.sessions) ? gateway.sessions as Array<Record<string, any>> : []
+  if (sessions.length === 0) return {
+    digest: gateway.signedCounters.digest,
+    forwarded: gateway.signedCounters.forwarded,
+    blocked: gateway.signedCounters.blocked,
+    injected: gateway.signedCounters.injected,
+  }
+  const projection = sessions.map((session) => ({
+    resultId: session.resultId, domain: session.domain,
+    digest: session.audit.signedCounters.digest,
+    forwarded: session.audit.signedCounters.forwarded,
+    blocked: session.audit.signedCounters.blocked,
+    injected: session.audit.signedCounters.injected,
+  })).sort((left, right) => left.resultId.localeCompare(right.resultId))
+  return {
+    digest: digestText('gateway-audit-sessions/v1', canonicalizeJson(projection)),
+    forwarded: projection.reduce((sum, item) => sum + item.forwarded, 0),
+    blocked: projection.reduce((sum, item) => sum + item.blocked, 0),
+    injected: projection.reduce((sum, item) => sum + item.injected, 0),
+  }
 }
 
 interface ReportDispositionSources {

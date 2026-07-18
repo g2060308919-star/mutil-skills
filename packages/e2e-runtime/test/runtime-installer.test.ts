@@ -1,4 +1,5 @@
-import { chmod, mkdir, readFile, realpath, stat, symlink, writeFile } from 'node:fs/promises'
+import { canonicalizeJson } from '@mutil-skills/e2e-contracts'
+import { chmod, lstat, mkdir, readFile, readdir, realpath, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { createRuntimeTestRoots } from './fixtures.js'
@@ -7,6 +8,7 @@ import {
   ProductionClosureInstaller,
   installRuntime,
   installRuntimeWithOperations,
+  recoverRuntimeInstallTransaction,
   runtimeInstallerOperations,
   type InstallRuntimeOptions,
   type RuntimeInstallerOperations,
@@ -395,7 +397,141 @@ describe('versioned runtime installer', () => {
       homeDir: roots.home, version: '0.0.0', activateVersion: '0.0.1',
     })).rejects.toThrow(/E2E_RUNTIME_REPLACEMENT_NOT_VERIFIED/)
   })
+
+  test.each([
+    { phase: 'prepared', lock: false, staging: false },
+    { phase: 'locked', lock: true, staging: false },
+    { phase: 'staging', lock: true, staging: true },
+  ] as const)('安全恢复 installer kill-point: $phase', async ({ phase, lock, staging }) => {
+    const fixture = await staleInstallTransactionFixture({ phase, lock, staging })
+    await expect(recoverRuntimeInstallTransaction(fixture.layout, {
+      inspectOwnerProcess: async () => ({ status: 'dead' }),
+    })).resolves.toMatchObject({ status: 'recovered', outcome: 'aborted' })
+    await expect(stat(fixture.ownerPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(fixture.lockPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(fixture.stagingPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readdir(fixture.tombstones)).toHaveLength(1)
+  })
+
+  test.each([
+    { label: '活 owner', startIdentity: 'boot-a:100' },
+    { label: 'PID 复用', startIdentity: 'boot-b:999' },
+  ])('$label 一律阻止 installer 恢复', async ({ startIdentity }) => {
+    const fixture = await staleInstallTransactionFixture({ phase: 'staging', lock: true, staging: true })
+    await expect(recoverRuntimeInstallTransaction(fixture.layout, {
+      inspectOwnerProcess: async () => ({ status: 'alive', startIdentity }),
+    })).rejects.toThrow(/E2E_RUNTIME_INSTALL_RECOVERY_BLOCKED/)
+    await expect(stat(fixture.ownerPath)).resolves.toMatchObject({})
+    await expect(stat(fixture.stagingPath)).resolves.toMatchObject({})
+  })
+
+  test('marker 缺失或 lock binding 不匹配时 fail closed', async () => {
+    const missing = await staleInstallTransactionFixture({ phase: 'locked', lock: true, staging: false })
+    const ownerBytes = await readFile(missing.ownerPath)
+    await import('node:fs/promises').then(({ unlink }) => unlink(missing.ownerPath))
+    await expect(recoverRuntimeInstallTransaction(missing.layout, {
+      inspectOwnerProcess: async () => ({ status: 'dead' }),
+    })).rejects.toThrow(/E2E_RUNTIME_INSTALL_RECOVERY_BLOCKED/)
+    await writeFile(missing.ownerPath, ownerBytes, { mode: 0o600 })
+    const lock = JSON.parse(await readFile(missing.lockPath, 'utf8'))
+    lock.ownerNonce = 'f'.repeat(64)
+    await writeFile(missing.lockPath, `${canonicalizeJson(lock)}\n`, { mode: 0o600 })
+    await expect(recoverRuntimeInstallTransaction(missing.layout, {
+      inspectOwnerProcess: async () => ({ status: 'dead' }),
+    })).rejects.toThrow(/E2E_RUNTIME_INSTALL_RECOVERY_BLOCKED/)
+  })
+
+  test('staging symlink/path swap 时阻止恢复且不删除外部目录', async () => {
+    const fixture = await staleInstallTransactionFixture({ phase: 'staging', lock: true, staging: false })
+    const outside = join(fixture.roots.source, 'outside-canary')
+    await mkdir(outside)
+    await writeFile(join(outside, 'keep'), 'keep')
+    await symlink(outside, fixture.stagingPath)
+    await expect(recoverRuntimeInstallTransaction(fixture.layout, {
+      inspectOwnerProcess: async () => ({ status: 'dead' }),
+    })).rejects.toThrow(/E2E_RUNTIME_INSTALL_RECOVERY_BLOCKED/)
+    expect(await readFile(join(outside, 'keep'), 'utf8')).toBe('keep')
+  })
+
+  test('发布完成后残留 marker 只回收事务元数据，不删除已验证版本', async () => {
+    const roots = await createRuntimeTestRoots()
+    const installed = await installFixture(roots.source, roots.home, '0.0.0', 'published')
+    const fixture = await staleInstallTransactionFixture({
+      roots, phase: 'published', lock: true, staging: false,
+      targetVersion: '0.0.0', installationDigestIntent: installed.installationDigest,
+    })
+    await expect(recoverRuntimeInstallTransaction(fixture.layout, {
+      inspectOwnerProcess: async () => ({ status: 'dead' }),
+    })).resolves.toMatchObject({ status: 'recovered', outcome: 'published-preserved' })
+    await expect(stat(join(fixture.layout.versions, '0.0.0'))).resolves.toMatchObject({})
+  })
+
+  test('install-runtime 入口自动安全恢复已证明死亡的旧事务', async () => {
+    const fixture = await staleInstallTransactionFixture({ phase: 'staging', lock: true, staging: true })
+    await expect(installFixture(
+      fixture.roots.source, fixture.roots.home, '0.1.0', 'automatic-recovery',
+    )).resolves.toMatchObject({ version: '0.1.0' })
+    expect(await readdir(fixture.tombstones)).toHaveLength(1)
+  })
+
+  test('正常安装在创建 staging 前已持久化 owner marker 与精确 lock binding', async () => {
+    const roots = await createRuntimeTestRoots()
+    const source = join(roots.source, 'owner-before-staging')
+    const packageRoot = join(source, 'node_modules', '@mutil-skills', 'e2e-runtime')
+    await mkdir(join(packageRoot, 'dist', 'src', 'bin'), { recursive: true })
+    await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+      name: '@mutil-skills/e2e-runtime', version: '0.0.0',
+    }))
+    await writeFile(join(packageRoot, 'dist', 'src', 'bin', 'repo-e2e.js'), '#!/usr/bin/env node\n')
+    await installRuntime({ homeDir: roots.home, version: '0.0.0', installClosure: async ({ stagingPrefix }) => {
+      const layout = runtimeLayout(roots.home)
+      const owner = JSON.parse(await readFile(join(layout.root, 'install-owner.json'), 'utf8'))
+      const lock = JSON.parse(await readFile(layout.installLock, 'utf8'))
+      expect(owner).toMatchObject({ phase: 'staging', targetVersion: '0.0.0', installationDigestIntent: 'pending' })
+      const { phase: _phase, installationDigestIntent: _digest, ...binding } = owner
+      expect(lock).toEqual(binding)
+      const { cp } = await import('node:fs/promises')
+      await cp(source, stagingPrefix, { recursive: true })
+    } })
+    await expect(stat(join(runtimeLayout(roots.home).root, 'install-owner.json')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(runtimeLayout(roots.home).installLock)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
 })
+
+async function staleInstallTransactionFixture(input: {
+  phase: 'prepared' | 'locked' | 'staging' | 'published'
+  lock: boolean
+  staging: boolean
+  roots?: Awaited<ReturnType<typeof createRuntimeTestRoots>>
+  targetVersion?: string
+  installationDigestIntent?: string
+}) {
+  const roots = input.roots ?? await createRuntimeTestRoots()
+  if (input.roots === undefined) await installFixture(roots.source, roots.home, '0.0.9', 'root-bootstrap')
+  const layout = runtimeLayout(roots.home)
+  const rootRealpath = await realpath(layout.root)
+  const rootIdentity = await lstat(layout.root)
+  const stagingName = '.staging-00000000-0000-4000-8000-000000000099'
+  const binding = {
+    schemaVersion: '1.0.0', ownerUid: process.getuid!(), pid: 2_147_483_647,
+    processStartIdentity: 'boot-a:100', ownerNonce: 'a'.repeat(64),
+    runtimeRoot: { canonicalPath: rootRealpath, device: String(rootIdentity.dev), inode: String(rootIdentity.ino) },
+    stagingName, targetVersion: input.targetVersion ?? '0.1.0',
+  }
+  const marker = {
+    ...binding, phase: input.phase,
+    installationDigestIntent: input.installationDigestIntent ?? 'pending',
+  }
+  const ownerPath = join(layout.root, 'install-owner.json')
+  const lockPath = layout.installLock
+  const stagingPath = join(layout.root, stagingName)
+  const tombstones = join(layout.root, 'install-recovery-tombstones')
+  await writeFile(ownerPath, `${canonicalizeJson(marker)}\n`, { mode: 0o600 })
+  if (input.lock) await writeFile(lockPath, `${canonicalizeJson(binding)}\n`, { mode: 0o600 })
+  if (input.staging) await mkdir(stagingPath, { mode: 0o700 })
+  return { roots, layout, ownerPath, lockPath, stagingPath, tombstones }
+}
 
 async function installFixture(
   sourceRoot: string,

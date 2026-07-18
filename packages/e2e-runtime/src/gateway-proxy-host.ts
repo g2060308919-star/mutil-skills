@@ -20,10 +20,10 @@ import { request as httpRequest } from 'node:http'
 import { connect as connectTcp } from 'node:net'
 import { connect as connectTls } from 'node:tls'
 import { constants } from 'node:fs'
-import { lstat, open, readFile, realpath, type FileHandle } from 'node:fs/promises'
+import { lstat, mkdir, open, readFile, realpath, rename, rm, type FileHandle } from 'node:fs/promises'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { generateCACertificate, generateSPKIFingerprint } from 'mockttp'
 import {
@@ -42,6 +42,8 @@ import { GatewayWriteStateCoordinator } from './gateway-write-state.js'
 import { websocketUnsupportedDisposition } from './gateway-websocket-transport.js'
 import { freezeDrainAndFinalize } from './gateway-finalization.js'
 import { discoverTrustedPython, reverifyTrustedPython, type TrustedPythonRuntime } from './trusted-python.js'
+import type { RuntimeOwnedResourceRecord } from './runtime-owned-resource-registry.js'
+import type { RuntimeWriteOwnedResourceLifecycle } from './runtime-write-production.js'
 
 const START_TIMEOUT_MS = 10_000
 const STOP_TIMEOUT_MS = 5_000
@@ -87,6 +89,10 @@ export interface GatewayProxyStartOptions {
   authorityRoot: string
   approvedRequests: ApprovedGatewayRequest[]
   policyObjects?: GatewayProxyPolicyObjects
+  ownedResource?: {
+    markerPath: string
+    lifecycle: RuntimeWriteOwnedResourceLifecycle
+  }
 }
 
 interface TestControl {
@@ -232,6 +238,33 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
     entrypointBytes.fill(0)
     throw error
   }
+  const gatewaySessionNonce = randomBytes(32).toString('hex')
+  let ownedResource: RuntimeOwnedResourceRecord | undefined
+  let ownedMarker: GatewayOwnedResourceMarker | undefined
+  try {
+    if (options.ownedResource !== undefined) {
+      if (!isAbsolute(options.ownedResource.markerPath)) {
+        throw gatewayHostError('E2E_GATEWAY_OWNER_MARKER_PATH_INVALID')
+      }
+      const descriptor = Object.freeze({
+        schemaVersion: '1.0.0' as const,
+        markerPath: options.ownedResource.markerPath,
+        sessionNonce: gatewaySessionNonce,
+      })
+      ownedResource = await options.ownedResource.lifecycle.register('loopback-endpoint', descriptor)
+      ownedMarker = {
+        schemaVersion: '1.0.0', kind: 'loopback-endpoint', phase: 'prepared',
+        ownerMarker: ownedResource.ownerMarker,
+        descriptorDigest: ownedResource.descriptorDigest,
+        sessionNonce: gatewaySessionNonce,
+      }
+      await writeGatewayOwnedMarker(options.ownedResource.markerPath, ownedMarker, true)
+    }
+  } catch (error) {
+    entrypointBytes.fill(0)
+    await ca.directoryHandle.close().catch(() => undefined)
+    throw error
+  }
   let child: ChildProcess
   try {
     await reverifyTrustedPython(ca.python)
@@ -250,6 +283,16 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
     entrypointBytes.fill(0)
     await ca.directoryHandle.close().catch(() => undefined)
     throw error
+  }
+  if (ownedMarker !== undefined) {
+    ownedMarker = { ...ownedMarker, phase: 'spawned', pid: child.pid! }
+    try { await writeGatewayOwnedMarker(options.ownedResource!.markerPath, ownedMarker) }
+    catch (error) {
+      entrypointBytes.fill(0)
+      child.kill('SIGKILL')
+      await ca.directoryHandle.close().catch(() => undefined)
+      throw error
+    }
   }
   try {
     await ca.directoryHandle.close()
@@ -373,6 +416,10 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
       caKeyPath: 'key.pem', caCertPath: 'cert.pem', rules: allRules,
     }, START_TIMEOUT_MS)
     const endpoint = parseReadyEndpoint(ready)
+    if (ownedMarker !== undefined) {
+      ownedMarker = { ...ownedMarker, phase: 'listening', endpoint }
+      await writeGatewayOwnedMarker(options.ownedResource!.markerPath, ownedMarker)
+    }
     const measurementBase = {
       runId: options.runId,
       policyDigest: projection.policyDigest,
@@ -414,6 +461,25 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
           try { await writeState.settleAllUnknown('gateway-child-disconnected-before-response') }
           catch (error) { errors.push(error) }
           try { await ipc.close() } catch (error) { errors.push(error) }
+          if (errors.length === 0 && ownedResource !== undefined && options.ownedResource !== undefined) {
+            try {
+              if (!await isLoopbackEndpointClosed(endpoint)) throw gatewayHostError(
+                'E2E_GATEWAY_ENDPOINT_CLOSE_UNCONFIRMED',
+              )
+              await assertGatewayOwnedMarker(options.ownedResource.markerPath, ownedMarker!)
+              await rm(options.ownedResource.markerPath, { force: true })
+              await options.ownedResource.lifecycle.complete(
+                ownedResource,
+                digestText('runtime-gateway-endpoint-cleanup/v1', canonicalizeJson({
+                  resourceId: ownedResource.resourceId,
+                  descriptorDigest: ownedResource.descriptorDigest,
+                  endpoint,
+                  pid: child.pid,
+                  sessionNonce: gatewaySessionNonce,
+                })),
+              )
+            } catch (error) { errors.push(error) }
+          }
           closed = true
           sessionKey.fill(0)
           for (const rule of allRules) rule.actionToken = ''
@@ -440,12 +506,9 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
           for (const existing of Object.keys(headers)) if (existing.toLowerCase() === name) delete headers[existing]
           headers[name] = value
         }
-        if (rule.channel === 'websocket') headers['proxy-authorization'] = `Mutil ${rule.actionToken}`
-        else {
-          headers['x-mutil-e2e-action-token'] = rule.actionToken
-          headers['x-mutil-e2e-action-id'] = rule.actionId
-          headers['x-mutil-e2e-capability-id'] = rule.capabilityId
-        }
+        headers['x-mutil-e2e-action-token'] = rule.actionToken
+        headers['x-mutil-e2e-action-id'] = rule.actionId
+        headers['x-mutil-e2e-capability-id'] = rule.capabilityId
         try {
           await continuation.continueWithHeaders(headers)
         } finally {
@@ -519,6 +582,81 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
     await ipc.forceClose().catch(() => undefined)
     throw error
   }
+}
+
+interface GatewayOwnedResourceMarker {
+  schemaVersion: '1.0.0'
+  kind: 'loopback-endpoint'
+  phase: 'prepared' | 'spawned' | 'listening'
+  ownerMarker: RuntimeOwnedResourceRecord['ownerMarker']
+  descriptorDigest: string
+  sessionNonce: string
+  pid?: number
+  endpoint?: string
+}
+
+async function writeGatewayOwnedMarker(
+  markerPath: string,
+  marker: GatewayOwnedResourceMarker,
+  exclusive = false,
+): Promise<void> {
+  const parent = dirname(markerPath)
+  await mkdir(parent, { recursive: true, mode: 0o700 })
+  const parentMetadata = await lstat(parent)
+  if (!parentMetadata.isDirectory() || parentMetadata.isSymbolicLink()
+    || (parentMetadata.mode & 0o777) !== 0o700
+    || (typeof process.getuid === 'function' && parentMetadata.uid !== process.getuid())
+    || await realpath(parent) !== parent) throw gatewayHostError('E2E_GATEWAY_OWNER_MARKER_PATH_INVALID')
+  if (exclusive) {
+    const handle = await open(markerPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
+    try {
+      await handle.writeFile(`${canonicalizeJson(marker)}\n`)
+      await handle.chmod(0o600)
+      await handle.sync()
+    } finally { await handle.close() }
+    return
+  }
+  const temporary = `${markerPath}.tmp-${randomUUID()}`
+  const handle = await open(temporary,
+    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
+  try {
+    await handle.writeFile(`${canonicalizeJson(marker)}\n`)
+    await handle.chmod(0o600)
+    await handle.sync()
+  } finally { await handle.close() }
+  try { await rename(temporary, markerPath) }
+  catch (error) { await rm(temporary, { force: true }).catch(() => undefined); throw error }
+}
+
+async function assertGatewayOwnedMarker(
+  markerPath: string,
+  expected: GatewayOwnedResourceMarker,
+): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>>
+  try { handle = await open(markerPath, constants.O_RDONLY | constants.O_NOFOLLOW) }
+  catch (error) { throw gatewayHostError('E2E_GATEWAY_OWNER_MARKER_MISMATCH') }
+  try {
+    const metadata = await handle.stat()
+    if (!metadata.isFile() || metadata.nlink !== 1 || (metadata.mode & 0o777) !== 0o600
+      || (typeof process.getuid === 'function' && metadata.uid !== process.getuid())
+      || (await handle.readFile('utf8')).trim() !== canonicalizeJson(expected)) {
+      throw gatewayHostError('E2E_GATEWAY_OWNER_MARKER_MISMATCH')
+    }
+  } finally { await handle.close() }
+}
+
+async function isLoopbackEndpointClosed(endpoint: string): Promise<boolean> {
+  const url = new URL(endpoint)
+  return await new Promise<boolean>((resolvePromise) => {
+    const socket = connectTcp({ host: url.hostname, port: Number(url.port) })
+    const timer = setTimeout(() => { socket.destroy(); resolvePromise(false) }, 500)
+    socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolvePromise(false) })
+    socket.once('error', (error: NodeJS.ErrnoException) => {
+      clearTimeout(timer)
+      resolvePromise(error.code === 'ECONNREFUSED')
+    })
+  })
 }
 
 function accountDecision(
@@ -695,6 +833,7 @@ function createParentIpc(
       if (child.exitCode !== null || child.signalCode !== null) return
       try { await call('shutdown', null, STOP_TIMEOUT_MS) }
       catch (error) {
+        await forceClose().catch(() => undefined)
         if (terminalError) throw terminalError
         throw error
       }
@@ -866,11 +1005,17 @@ async function openWebSocketThroughProxyForTest(
   const rule = [...rules.values()].find((candidate) => candidate.actionId === correlation.actionId
     && candidate.capabilityId === correlation.capabilityId && candidate.channel === 'websocket')
   const key = randomBytes(16).toString('base64')
+  const proxyTarget = new URL(target.href)
+  proxyTarget.protocol = target.protocol === 'wss:' ? 'https:' : 'http:'
   const raw = [
-    `GET ${target.href} HTTP/1.1`, `Host: ${target.host}`,
+    `GET ${proxyTarget.href} HTTP/1.1`, `Host: ${target.host}`,
     'Connection: Upgrade', 'Upgrade: websocket', 'Sec-WebSocket-Version: 13',
     `Sec-WebSocket-Key: ${key}`,
-    ...(correlation.authorized === false ? [] : [`Proxy-Authorization: Mutil ${rule?.actionToken ?? 'invalid'}`]),
+    ...(correlation.authorized === false ? [] : [
+      `X-Mutil-E2E-Action-Token: ${rule?.actionToken ?? 'invalid'}`,
+      `X-Mutil-E2E-Action-Id: ${correlation.actionId}`,
+      `X-Mutil-E2E-Capability-Id: ${correlation.capabilityId}`,
+    ]),
     '', '',
   ].join('\r\n')
   const response = await exchangeRaw(proxy, raw, true)

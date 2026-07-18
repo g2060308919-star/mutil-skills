@@ -1,6 +1,7 @@
 import {
   ArtifactSchemaRegistry,
   ArtifactTypeSchema,
+  ManualResultSchema,
   SignedGrantSchema,
   AssetIdSchema,
   canonicalizeJson,
@@ -84,6 +85,7 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
   const allowed = new Set([
     'signed-discovery-grant', 'signed-execution-grant', 'browser-preflight',
     'finalization-material', 'finalization-execution-facts', 'quarantined-evidence',
+    'manual-results-by-id',
   ])
   if (Object.keys(facts).length > allowed.size) context.addIssue({ code: 'custom', message: '可信执行事实数量超限' })
   for (const [key, value] of Object.entries(facts)) {
@@ -114,6 +116,12 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
       })
       continue
     }
+    if (key === 'manual-results-by-id') {
+      if (!isTrustedManualResultSet(value)) context.addIssue({
+        code: 'custom', path: [key], message: '可信 ManualResult 集合非法或 key 错绑',
+      })
+      continue
+    }
     const parsed = SignedGrantSchema.safeParse(value)
     const isDiscovery = parsed.success
       && parsed.data.approvalContext.approvalType === 'discovery'
@@ -130,6 +138,14 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
   }
 })
 
+function isTrustedManualResultSet(value: unknown): boolean {
+  if (!plain(value) || Object.keys(value).length > 10_000) return false
+  return Object.entries(value).every(([manualResultId, candidate]) => {
+    const parsed = ManualResultSchema.safeParse(candidate)
+    return parsed.success && parsed.data.manualResultId === manualResultId
+  })
+}
+
 function isPersistedFinalizationMaterialEnvelope(value: unknown): boolean {
   if (!plain(value)) return false
   return Object.keys(value).sort().join('\0') === [
@@ -144,18 +160,36 @@ function isPersistedFinalizationMaterialEnvelope(value: unknown): boolean {
 
 function isFinalizationExecutionFacts(value: unknown): boolean {
   if (!plain(value)) return false
+  if (isDomainFactContainer(value)) {
+    return Object.values(value.realEnvironment).every(isFinalizationExecutionFacts)
+      && Object.values(value.gatewayInjection).every(isFinalizationExecutionFacts)
+  }
   const keys = Object.keys(value).sort().join('\0')
   const writeKeys = [
     'browserMeasurements', 'cleanup', 'executionOutcomeReceipt', 'executionOutcomeVerifierMaterial',
     'gatewayAudit', 'gatewayAuditVerifierMaterial', 'isolationMeasurements',
   ].sort().join('\0')
+  const boundWriteKeys = [
+    'browserMeasurements', 'cleanup', 'executionGrant', 'executionOutcomeReceipt',
+    'executionOutcomeVerifierMaterial', 'gatewayAudit', 'gatewayAuditVerifierMaterial',
+    'isolationMeasurements',
+  ].sort().join('\0')
   const readKeys = [
     'browserMeasurements', 'gatewayAudit', 'gatewayAuditVerifierMaterial', 'isolationMeasurements',
   ].sort().join('\0')
-  return (keys === writeKeys || keys === readKeys) && Object.values(value).every(plainJsonTree)
+  const injectionKeys = [
+    'browserMeasurements', 'executionGrant', 'gatewayAudit', 'gatewayAuditVerifierMaterial',
+    'isolationMeasurements',
+  ].sort().join('\0')
+  return (keys === writeKeys || keys === boundWriteKeys || keys === readKeys || keys === injectionKeys)
+    && Object.values(value).every(plainJsonTree)
 }
 
 function isQuarantinedEvidenceFacts(value: unknown): boolean {
+  if (plain(value) && isDomainFactContainer(value)) {
+    return Object.values(value.realEnvironment).every(isQuarantinedEvidenceFacts)
+      && Object.values(value.gatewayInjection).every(isQuarantinedEvidenceFacts)
+  }
   if (!plain(value) || Object.keys(value).sort().join('\0')
     !== ['attemptId', 'records', 'runId', 'schemaVersion'].sort().join('\0')
     || value.schemaVersion !== '1.0.0' || typeof value.runId !== 'string'
@@ -174,6 +208,16 @@ function isQuarantinedEvidenceFacts(value: unknown): boolean {
     types.add(String(record.evidenceType))
   }
   return types.size === 2
+}
+
+function isDomainFactContainer(value: Record<string, unknown>): value is Record<string, unknown> & {
+  schemaVersion: '2.0.0'; realEnvironment: Record<string, unknown>; gatewayInjection: Record<string, unknown>
+} {
+  return Object.keys(value).sort().join('\0')
+    === ['gatewayInjection', 'realEnvironment', 'schemaVersion'].sort().join('\0')
+    && value.schemaVersion === '2.0.0' && plain(value.realEnvironment) && plain(value.gatewayInjection)
+    && [...Object.keys(value.realEnvironment), ...Object.keys(value.gatewayInjection)]
+      .every((key) => /^RESULT-(?:REAL|INJECTION)-[a-f0-9]{64}$/.test(key))
 }
 
 function plainJsonTree(value: unknown, depth = 0): boolean {

@@ -117,6 +117,8 @@ function assertRuntimeFactsBound(input: FinalizeRuntimeGenerationInput): void {
     || input.regression.compilerInputDigest !== input.regression.discoveryAttestation.compilerInputDigest
     || input.regression.sourceSetDigest !== input.regression.discoveryAttestation.sourceSetDigest
     || canonicalizeJson(input.regression.caseIds) !== canonicalizeJson(listResult.caseIds)
+    || input.regression.verifierMaterial === undefined
+    || canonicalizeJson(regression.discoveryVerifierMaterial) !== canonicalizeJson(input.regression.verifierMaterial)
     || input.regression.files.length !== regressionFiles.length) {
     throw assemblerError('E2E_GENERATION_ASSEMBLER_REGRESSION_UNBOUND')
   }

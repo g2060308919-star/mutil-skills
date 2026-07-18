@@ -55,8 +55,10 @@ import {
   type PrivacyUnlockGrant,
   ManualResultDraftSchema,
   ManualResultSchema,
+  ManualResultUserPresenceProofSchema,
   type ManualResult,
   type ManualResultDraft,
+  type ManualResultUserPresenceProof,
   type ManualResultVerification,
   type ReadCapability,
   type ReversibleWriteCapability,
@@ -132,6 +134,7 @@ const MAX_PRIVACY_UNLOCK_TTL_MS = 15 * 60 * 1000
 const MAX_INJECTION_RESPONSE_BODY_BYTES = 64 * 1024
 const MAX_INJECTION_HEADER_VALUE_BYTES = 8 * 1024
 const MAX_MANUAL_RESULT_VALIDITY_MS = 30 * 24 * 60 * 60 * 1000
+const MAX_PENDING_MANUAL_RESULTS = 10_000
 const MAX_PRIVACY_REVIEW_AGE_MS = 24 * 60 * 60 * 1000
 export interface LocalApprovalAuthorityOptions {
   issuer: string
@@ -144,6 +147,29 @@ export interface LocalApprovalAuthorityOptions {
     sessionRef: string,
     expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string },
   ) => StoredWebAuthnApprovalReceipt | undefined | Promise<StoredWebAuthnApprovalReceipt | undefined>
+  /** Manual 双角色签署的独立 OS/WebAuthn 会话认证边界。 */
+  authenticateManualApproverSession?: (
+    sessionRef: string,
+    expected: {
+      approvalType: 'manual-executor' | 'manual-reviewer'
+      subjectDigest: string
+      runId: string
+      installationDigest: string
+    },
+  ) => StoredWebAuthnApprovalReceipt | undefined | Promise<StoredWebAuthnApprovalReceipt | undefined>
+}
+
+interface PendingManualResult {
+  draft: ManualResultDraft
+  draftDigest: string
+  preparationFinalizationId: string
+  preparationRequestDigest: string
+  executorPresence?: ManualResultUserPresenceProof
+  executorFinalizationId?: string
+  executorRequestDigest?: string
+  reviewerFinalizationId?: string
+  reviewerRequestDigest?: string
+  issuedResult?: ManualResult
 }
 
 interface EncryptedPrivateKey {
@@ -162,7 +188,7 @@ interface DecryptedAuthorityPrivateKeys {
 }
 
 interface AuthorityPersistentSnapshot {
-  schemaVersion: '2.7.0'
+  schemaVersion: '2.8.0'
   stateRevision: number
   stateDigest: string
   stateMac: string
@@ -184,6 +210,7 @@ interface AuthorityPersistentSnapshot {
   reservationRpcBindings: Array<[string, ReservationRpcOwnerBinding]>
   completedPreflights: Array<[string, { grantId: string; subject: DiscoveryApprovalSubject; status: DiscoveryPreflightOutcome['status'] }]>
   manualResultIds: string[]
+  pendingManualResults: Array<[string, PendingManualResult]>
   attemptLogs: Array<[string, { chainDigest: string; events: AttemptEvent[]; lastTimestamp: number }]>
 }
 
@@ -260,6 +287,15 @@ export class LocalApprovalAuthority {
     sessionRef: string,
     expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string },
   ) => StoredWebAuthnApprovalReceipt | undefined | Promise<StoredWebAuthnApprovalReceipt | undefined>
+  readonly #authenticateManualApproverSession: (
+    sessionRef: string,
+    expected: {
+      approvalType: 'manual-executor' | 'manual-reviewer'
+      subjectDigest: string
+      runId: string
+      installationDigest: string
+    },
+  ) => StoredWebAuthnApprovalReceipt | undefined | Promise<StoredWebAuthnApprovalReceipt | undefined>
   readonly #stateContext = new AsyncLocalStorage<boolean>()
   #activeStateTransactions = 0
   readonly #grants = new Map<string, SignedGrant>()
@@ -274,6 +310,7 @@ export class LocalApprovalAuthority {
   }>()
   readonly #attemptLogs = new Map<string, { chainDigest: string; events: AttemptEvent[]; lastTimestamp: number }>()
   readonly #manualResultIds = new Set<string>()
+  readonly #pendingManualResults = new Map<string, PendingManualResult>()
   readonly #approvalIdentities = new Map<string, ApproverIdentity>()
   readonly #manualIdentities = new Map<string, ApproverIdentity>()
   readonly #webAuthnCredentials = new Map<string, StoredWebAuthnCredential>()
@@ -309,6 +346,7 @@ export class LocalApprovalAuthority {
     this.#stateAnchor = stateAnchor
     this.#identityDigest = authorityIdentityDigest(options)
     this.#authenticateApproverSession = options.authenticateApproverSession ?? (() => undefined)
+    this.#authenticateManualApproverSession = options.authenticateManualApproverSession ?? (() => undefined)
   }
 
   static create(options: LocalApprovalAuthorityOptions): LocalApprovalAuthority {
@@ -712,6 +750,33 @@ export class LocalApprovalAuthority {
       }
       const decision = this.#verifyGrant(grant)
       if (!decision.allowed) throw authorityError(decision.code, decision.reason)
+      return structuredClone(grant.approvalContext)
+    })
+  }
+
+  /**
+   * 仅供 crash recovery 激活 maintenance RPC。允许已过期/已撤销 Grant，但仍要求：
+   * schema、签名、持久化 Grant 全量字节与 execution binding 完全一致。
+   */
+  async activatePersistedGrantForRecovery(input: {
+    grant: SignedGrant
+    approvalBinding: ApprovalExecutionBinding
+  }): Promise<CanonicalApprovalContext> {
+    if (!this.#stateStore) throw authorityError('E2E_APPROVAL_PERSISTENCE_REQUIRED', '恢复激活 Grant 需要持久 Authority')
+    return await this.#withStateRead(async () => {
+      const parsed = SignedGrantSchema.safeParse(immutableSnapshot(input.grant))
+      if (!parsed.success) throw authorityError('E2E_APPROVAL_GRANT_INVALID', 'SignedGrant 结构无效')
+      const grant = parsed.data as SignedGrant
+      const approvalBinding = parseApprovalExecutionBinding(input.approvalBinding)
+      if (!sameApprovalExecutionBinding(grant.approvalContext, approvalBinding)) {
+        throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', 'SignedGrant 与 Runtime 可信绑定不一致')
+      }
+      const stored = this.#grants.get(grant.grantId)
+      if (stored === undefined || canonicalizeJson(stored) !== canonicalizeJson(grant)) {
+        throw authorityError('E2E_APPROVAL_GRANT_STATE_MISMATCH', 'SignedGrant 与当前 Authority 持久存储态不一致')
+      }
+      const signatureDecision = this.#verifyGrantSignature(grant)
+      if (!signatureDecision.allowed) throw authorityError(signatureDecision.code, signatureDecision.reason)
       return structuredClone(grant.approvalContext)
     })
   }
@@ -1873,29 +1938,139 @@ export class LocalApprovalAuthority {
     }
   }
 
-  async issueManualResult(input: { draft: ManualResultDraft }): Promise<ManualResult> {
+  async prepareManualResult(input: {
+    draft: ManualResultDraft
+    finalizationId: string
+    requestDigest: string
+  }): Promise<{
+    manualResultId: string
+    draftDigest: string
+    nextRole: 'executor'
+  }> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
-      return await this.#withStateMutation(() => this.issueManualResult(input))
+      return await this.#withStateMutation(() => this.prepareManualResult(input))
     }
     const parsed = ManualResultDraftSchema.safeParse(input.draft)
     if (!parsed.success) {
       throw authorityError('E2E_MANUAL_RESULT_SCHEMA_INVALID', 'ManualResult 草稿不满足严格契约')
     }
     const draft = parsed.data
+    if (!/^[A-Za-z0-9._:-]{1,256}$/.test(input.finalizationId)
+      || !/^sha256:[a-f0-9]{64}$/.test(input.requestDigest)) {
+      throw authorityError('E2E_MANUAL_RESULT_PREPARE_INPUT_INVALID', 'ManualResult preparation 绑定无效')
+    }
     if (!matchesRegisteredIdentity(draft.executor, this.#manualIdentities.get(draft.executor.subject))
       || !matchesRegisteredIdentity(draft.reviewer, this.#manualIdentities.get(draft.reviewer.subject))) {
       throw authorityError('E2E_MANUAL_IDENTITY_UNTRUSTED', '执行者或复核者不在 Authority 可信主体登记中')
     }
-    const now = this.#now().getTime()
-    const finishedAt = Date.parse(draft.finishedAt)
-    const expiresAt = Date.parse(draft.expiresAt)
-    if (finishedAt > now || expiresAt <= now || expiresAt - finishedAt > MAX_MANUAL_RESULT_VALIDITY_MS) {
-      throw authorityError('E2E_MANUAL_RESULT_VALIDITY_INVALID', 'ManualResult 必须已完成、尚未过期且有效期不超过 30 天')
+    this.#requireCurrentManualDraft(draft)
+    // 热路径保持 O(1)。只有 ID 冲突或容量边界才做一次有界全表清理，
+    // 避免批量 prepare 退化为 O(n²) 并形成 CPU DoS。
+    const draftDigest = manualResultDraftDigest(draft)
+    const existingPending = this.#pendingManualResults.get(draft.manualResultId)
+    if (existingPending !== undefined && existingPending.draftDigest === draftDigest
+      && existingPending.preparationFinalizationId === input.finalizationId
+      && existingPending.preparationRequestDigest === input.requestDigest) {
+      return { manualResultId: draft.manualResultId, draftDigest, nextRole: 'executor' }
     }
-    if (this.#manualResultIds.has(draft.manualResultId)) {
+    if (this.#pendingManualResults.has(draft.manualResultId)
+      || this.#pendingManualResults.size >= MAX_PENDING_MANUAL_RESULTS) {
+      this.#pruneExpiredPendingManualResults()
+    }
+    if (this.#manualResultIds.has(draft.manualResultId)
+      || this.#pendingManualResults.has(draft.manualResultId)) {
       throw authorityError('E2E_MANUAL_RESULT_DUPLICATE', '同一 ManualResult ID 不得重复签发')
     }
-    const signedDigest = digestText('manual-result/v1', canonicalizeJson(draft))
+    if (this.#pendingManualResults.size >= MAX_PENDING_MANUAL_RESULTS) {
+      throw authorityError('E2E_MANUAL_RESULT_CAPACITY_EXHAUSTED', '待签人工结果已达到持久上限')
+    }
+    this.#pendingManualResults.set(draft.manualResultId, { draft, draftDigest,
+      preparationFinalizationId: input.finalizationId,
+      preparationRequestDigest: input.requestDigest })
+    return { manualResultId: draft.manualResultId, draftDigest, nextRole: 'executor' }
+  }
+
+  async finalizeManualResultRole(input: {
+    manualResultId: string
+    draftDigest: string
+    role: 'executor' | 'reviewer'
+    approvalSessionRef: string
+    finalizationId: string
+    requestDigest: string
+  }): Promise<{
+    status: 'awaiting-reviewer'
+    manualResultId: string
+    draftDigest: string
+    nextRole: 'reviewer'
+  } | { status: 'issued'; result: ManualResult }> {
+    if (this.#stateStore && !this.#stateContext.getStore()) {
+      return await this.#withStateMutation(() => this.finalizeManualResultRole(input))
+    }
+    if (!/^[A-Za-z0-9._:-]{1,256}$/.test(input.manualResultId)
+      || !/^sha256:[a-f0-9]{64}$/.test(input.draftDigest)
+      || !/^[A-Za-z0-9._:-]{1,256}$/.test(input.approvalSessionRef)
+      || !/^[A-Za-z0-9._:-]{1,256}$/.test(input.finalizationId)
+      || !/^sha256:[a-f0-9]{64}$/.test(input.requestDigest)) {
+      throw authorityError('E2E_MANUAL_RESULT_FINALIZATION_INVALID', 'ManualResult 签署请求字段无效')
+    }
+    const pending = this.#pendingManualResults.get(input.manualResultId)
+    if (pending === undefined || pending.draftDigest !== input.draftDigest) {
+      throw authorityError('E2E_MANUAL_RESULT_PENDING_NOT_FOUND', '待签 ManualResult 不存在或草稿摘要不匹配')
+    }
+    const recovered = recoverPendingManualRole(pending, input)
+    if (recovered !== undefined) return recovered
+    this.#requireCurrentManualDraft(pending.draft)
+    const expectedRole = pending.executorPresence === undefined ? 'executor' : 'reviewer'
+    if (input.role !== expectedRole) {
+      throw authorityError('E2E_MANUAL_RESULT_ROLE_ORDER_INVALID', 'ManualResult 必须由 executor 后 reviewer 顺序签署')
+    }
+    const actor = input.role === 'executor' ? pending.draft.executor : pending.draft.reviewer
+    const approvalType = input.role === 'executor' ? 'manual-executor' : 'manual-reviewer'
+    const requiredRole = input.role === 'executor' ? 'e2e-manual-executor' : 'e2e-manual-reviewer'
+    const receipt = await this.#authenticateManualApproverSession(input.approvalSessionRef, {
+      approvalType, subjectDigest: pending.draftDigest,
+      runId: pending.draft.runId, installationDigest: pending.draft.runtimeInstallationDigest,
+    })
+    const registered = receipt === undefined ? undefined : this.#manualIdentities.get(receipt.subject)
+    const now = this.#now().getTime()
+    if (receipt === undefined || receipt.approvalType !== approvalType
+      || receipt.subject !== actor.subject || receipt.subjectDigest !== pending.draftDigest
+      || receipt.runId !== pending.draft.runId
+      || receipt.installationDigest !== pending.draft.runtimeInstallationDigest
+      || now < Date.parse(receipt.issuedAt) || now >= Date.parse(receipt.expiresAt)
+      || !matchesRegisteredIdentity(actor, registered) || !registered?.roles.includes(requiredRole)) {
+      throw authorityError(
+        'E2E_MANUAL_RESULT_SESSION_BINDING_MISMATCH',
+        'WebAuthn receipt 未与 ManualResult 草稿、Run、安装、角色及登记身份精确绑定',
+      )
+    }
+    const presence: ManualResultUserPresenceProof = {
+      role: input.role, approvalType, requiredRole, subject: receipt.subject,
+      sessionId: input.approvalSessionRef, runId: receipt.runId,
+      installationDigest: receipt.installationDigest, draftDigest: pending.draftDigest,
+      origin: receipt.origin, issuedAt: receipt.issuedAt, expiresAt: receipt.expiresAt,
+    }
+    if (input.role === 'executor') {
+      const response = {
+        status: 'awaiting-reviewer', manualResultId: input.manualResultId,
+        draftDigest: pending.draftDigest, nextRole: 'reviewer',
+      } as const
+      this.#pendingManualResults.set(input.manualResultId, { ...pending, executorPresence: presence,
+        executorFinalizationId: input.finalizationId, executorRequestDigest: input.requestDigest })
+      return response
+    }
+    if (pending.executorPresence === undefined
+      || pending.executorPresence.subject === presence.subject
+      || pending.executorPresence.sessionId === presence.sessionId
+      || now >= Date.parse(pending.executorPresence.expiresAt)) {
+      throw authorityError('E2E_MANUAL_RESULT_DUAL_CONTROL_INVALID', 'executor 与 reviewer 必须是不同主体和不同会话')
+    }
+    const authorityBinding = {
+      draft: pending.draft,
+      executorPresence: pending.executorPresence,
+      reviewerPresence: presence,
+    }
+    const signedDigest = digestText('manual-result/v2', canonicalizeJson(authorityBinding))
     const authorityProof = {
       issuer: this.#issuer,
       keyId: this.#keyId,
@@ -1903,10 +2078,46 @@ export class LocalApprovalAuthority {
       algorithm: 'Ed25519' as const,
       signedDigest,
       signature: sign(null, manualResultProofPayload(signedDigest), this.#privateKey).toString('base64url'),
+      executorPresence: pending.executorPresence,
+      reviewerPresence: presence,
     }
-    const result = ManualResultSchema.parse({ ...draft, authorityProof })
+    const result = ManualResultSchema.parse({ ...pending.draft, authorityProof })
+    this.#pendingManualResults.set(result.manualResultId, { ...pending,
+      reviewerFinalizationId: input.finalizationId, reviewerRequestDigest: input.requestDigest,
+      issuedResult: result })
     this.#manualResultIds.add(result.manualResultId)
-    return result
+    return { status: 'issued', result }
+  }
+
+  async recoverManualResultRole(input: {
+    manualResultId: string
+    draftDigest: string
+    role: 'executor' | 'reviewer'
+    finalizationId: string
+    requestDigest: string
+  }): Promise<{
+    status: 'awaiting-reviewer'; manualResultId: string; draftDigest: string; nextRole: 'reviewer'
+  } | { status: 'issued'; result: ManualResult } | undefined> {
+    if (this.#stateStore && !this.#stateContext.getStore()) {
+      return await this.#withStateMutation(() => this.recoverManualResultRole(input))
+    }
+    if (!/^[A-Za-z0-9._:-]{1,256}$/.test(input.manualResultId)
+      || !/^sha256:[a-f0-9]{64}$/.test(input.draftDigest)
+      || !/^[A-Za-z0-9._:-]{1,256}$/.test(input.finalizationId)
+      || !/^sha256:[a-f0-9]{64}$/.test(input.requestDigest)) {
+      throw authorityError('E2E_MANUAL_RESULT_FINALIZATION_INVALID', 'ManualResult 恢复请求字段无效')
+    }
+    const pending = this.#pendingManualResults.get(input.manualResultId)
+    if (pending === undefined || pending.draftDigest !== input.draftDigest) return undefined
+    this.#requireCurrentManualDraft(pending.draft)
+    return recoverPendingManualRole(pending, input)
+  }
+
+  async issueManualResult(_input: { draft: ManualResultDraft }): Promise<ManualResult> {
+    throw authorityError(
+      'E2E_MANUAL_RESULT_USER_PRESENCE_REQUIRED',
+      'ManualResult 必须通过 prepareManualResult 与两个独立 WebAuthn session 签署',
+    )
   }
 
   verifyManualResult(candidate: ManualResult): ManualResultVerification {
@@ -1922,7 +2133,16 @@ export class LocalApprovalAuthority {
       || authorityProof.proofScope !== 'local-os-user'
       || authorityProof.algorithm !== 'Ed25519'
     ) return { valid: false, code: 'E2E_MANUAL_RESULT_AUTHORITY_UNKNOWN', impact: 'safety-blocked' }
-    const expectedDigest = digestText('manual-result/v1', canonicalizeJson(draft))
+    const expectedDraftDigest = manualResultDraftDigest(draft)
+    if (authorityProof.executorPresence.draftDigest !== expectedDraftDigest
+      || authorityProof.reviewerPresence.draftDigest !== expectedDraftDigest) {
+      return { valid: false, code: 'E2E_MANUAL_RESULT_SIGNATURE_INVALID', impact: 'safety-blocked' }
+    }
+    const expectedDigest = digestText('manual-result/v2', canonicalizeJson({
+      draft,
+      executorPresence: authorityProof.executorPresence,
+      reviewerPresence: authorityProof.reviewerPresence,
+    }))
     if (authorityProof.signedDigest !== expectedDigest) {
       return { valid: false, code: 'E2E_MANUAL_RESULT_SIGNATURE_INVALID', impact: 'safety-blocked' }
     }
@@ -1944,6 +2164,27 @@ export class LocalApprovalAuthority {
       return { valid: false, code: 'E2E_MANUAL_RESULT_EXPIRED', impact: 'incomplete' }
     }
     return { valid: true }
+  }
+
+  #requireCurrentManualDraft(draft: ManualResultDraft): void {
+    const now = this.#now().getTime()
+    const finishedAt = Date.parse(draft.finishedAt)
+    const expiresAt = Date.parse(draft.expiresAt)
+    if (finishedAt > now || expiresAt <= now || expiresAt - finishedAt > MAX_MANUAL_RESULT_VALIDITY_MS) {
+      throw authorityError('E2E_MANUAL_RESULT_VALIDITY_INVALID', 'ManualResult 必须已完成、尚未过期且有效期不超过 30 天')
+    }
+  }
+
+  #pruneExpiredPendingManualResults(): void {
+    const now = this.#now().getTime()
+    for (const [manualResultId, pending] of this.#pendingManualResults) {
+      const executorExpiresAt = pending.executorPresence === undefined
+        ? Number.POSITIVE_INFINITY : Date.parse(pending.executorPresence.expiresAt)
+      if (pending.issuedResult === undefined
+        && (Date.parse(pending.draft.expiresAt) <= now || executorExpiresAt <= now)) {
+        this.#pendingManualResults.delete(manualResultId)
+      }
+    }
   }
 
   #registerIdentities(options: LocalApprovalAuthorityOptions): void {
@@ -2055,7 +2296,7 @@ export class LocalApprovalAuthority {
 
   #persistentSnapshot(revision: number): AuthorityPersistentSnapshot {
     return signAuthoritySnapshot({
-      schemaVersion: '2.7.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
+      schemaVersion: '2.8.0', issuer: this.#issuer, keyId: this.#keyId, identityDigest: this.#identityDigest,
       privateKeys: {
         primary: encryptPrivateKey(this.#privateKey, this.#stateEncryptionKey!, 'primary'),
         freshness: encryptPrivateKey(this.#freshnessPrivateKey, this.#stateEncryptionKey!, 'freshness'),
@@ -2077,7 +2318,9 @@ export class LocalApprovalAuthority {
       reservations: [...this.#reservations.entries()],
       reservationRpcBindings: [...this.#reservationRpcBindings.entries()],
       completedPreflights: [...this.#completedPreflights.entries()],
-      manualResultIds: [...this.#manualResultIds], attemptLogs: [...this.#attemptLogs.entries()],
+      manualResultIds: [...this.#manualResultIds],
+      pendingManualResults: [...this.#pendingManualResults.entries()],
+      attemptLogs: [...this.#attemptLogs.entries()],
     }, revision, this.#stateEncryptionKey!)
   }
 
@@ -2096,6 +2339,7 @@ export class LocalApprovalAuthority {
     replaceMap(this.#completedPreflights, snapshot.completedPreflights)
     this.#manualResultIds.clear()
     for (const id of snapshot.manualResultIds) this.#manualResultIds.add(id)
+    replaceMap(this.#pendingManualResults, snapshot.pendingManualResults)
     replaceMap(this.#attemptLogs, snapshot.attemptLogs)
     replaceMap(
       this.#webAuthnCredentials,
@@ -2336,10 +2580,13 @@ function loadAuthoritySnapshot(
   }
   if (policy.hasReceipts) {
     decryptWebAuthnReceipts(parsed.webAuthnReceipts as EncryptedPrivateKey, stateEncryptionKey)
-    if (version === '2.7.0') {
+    if (version === '2.8.0') {
       const snapshot = parsed as unknown as AuthorityPersistentSnapshot
       verifyAuthoritySnapshotProof(snapshot, revision, stateEncryptionKey)
       return { snapshot, migrated: false, privateKeys }
+    }
+    if (version === '2.7.0') {
+      verifyAuthoritySnapshotProof(parsed as unknown as AuthorityPersistentSnapshot, revision, stateEncryptionKey)
     }
     const writeCompatible = policy.hasApprovalContext && policy.writeContract === 'legacy-v23'
       ? migrateLegacyWriteGrants(parsed)
@@ -2348,10 +2595,11 @@ function loadAuthoritySnapshot(
     return {
       snapshot: signAuthoritySnapshot({
         ...migrationSource,
-        schemaVersion: '2.7.0',
+        schemaVersion: '2.8.0',
         ...(version === '2.2.0' ? { grantFinalizations: [] } : {}),
         ...(version === '2.2.0' || version === '2.3.0' ? { acknowledgedFinalizations: [] } : {}),
         reservationRpcBindings: [],
+        pendingManualResults: [],
       }, revision + 1, stateEncryptionKey),
       migrated: true,
       privateKeys,
@@ -2359,7 +2607,7 @@ function loadAuthoritySnapshot(
   }
   const snapshot = signAuthoritySnapshot({
     ...parsed,
-    schemaVersion: '2.7.0',
+    schemaVersion: '2.8.0',
     grants: [],
     grantFinalizations: [],
     acknowledgedFinalizations: [],
@@ -2370,6 +2618,7 @@ function loadAuthoritySnapshot(
     reservationRpcBindings: [],
     completedPreflights: [],
     attemptLogs: [],
+    pendingManualResults: [],
     ...(version === '2.0.0'
       ? { webAuthnCredentials: encryptWebAuthnCredentials([], stateEncryptionKey) }
       : {}),
@@ -2449,14 +2698,14 @@ function migrateLegacyReservationOwners(snapshot: Record<string, unknown>): Reco
 }
 
 function parseCurrentAuthoritySnapshot(parsed: unknown): AuthorityPersistentSnapshot {
-  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.7.0') {
+  if (!isPlainSnapshot(parsed) || parsed.schemaVersion !== '2.8.0') {
     throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 结构无效')
   }
-  parseAuthoritySnapshotStructure(parsed, authoritySnapshotPolicy('2.7.0'))
+  parseAuthoritySnapshotStructure(parsed, authoritySnapshotPolicy('2.8.0'))
   return parsed as unknown as AuthorityPersistentSnapshot
 }
 
-type AuthoritySnapshotVersion = '2.0.0' | '2.1.0' | '2.2.0' | '2.3.0' | '2.4.0' | '2.5.0' | '2.6.0' | '2.7.0'
+type AuthoritySnapshotVersion = '2.0.0' | '2.1.0' | '2.2.0' | '2.3.0' | '2.4.0' | '2.5.0' | '2.6.0' | '2.7.0' | '2.8.0'
 type StoredWriteContract = 'legacy-v23' | 'current'
 
 interface AuthoritySnapshotPolicy {
@@ -2469,6 +2718,7 @@ interface AuthoritySnapshotPolicy {
   hasReservationRpcBindings: boolean
   authenticatedReservationRpcBindings: boolean
   authenticatedSnapshot: boolean
+  hasPendingManualResults: boolean
   writeContract: StoredWriteContract
 }
 
@@ -2478,49 +2728,55 @@ function authoritySnapshotPolicy(version: unknown): AuthoritySnapshotPolicy {
       schemaVersion: version, hasCredentials: false, hasReceipts: false, hasApprovalContext: false,
       hasGrantFinalizations: false, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
       hasReservationRpcBindings: false, authenticatedReservationRpcBindings: false,
-      authenticatedSnapshot: false,
+      authenticatedSnapshot: false, hasPendingManualResults: false,
     }
     case '2.1.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: false, hasApprovalContext: false,
       hasGrantFinalizations: false, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
       hasReservationRpcBindings: false, authenticatedReservationRpcBindings: false,
-      authenticatedSnapshot: false,
+      authenticatedSnapshot: false, hasPendingManualResults: false,
     }
     case '2.2.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
       hasGrantFinalizations: false, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
       hasReservationRpcBindings: false, authenticatedReservationRpcBindings: false,
-      authenticatedSnapshot: false,
+      authenticatedSnapshot: false, hasPendingManualResults: false,
     }
     case '2.3.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
       hasGrantFinalizations: true, hasAcknowledgedFinalizations: false, writeContract: 'legacy-v23',
       hasReservationRpcBindings: false, authenticatedReservationRpcBindings: false,
-      authenticatedSnapshot: false,
+      authenticatedSnapshot: false, hasPendingManualResults: false,
     }
     case '2.4.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
       hasGrantFinalizations: true, hasAcknowledgedFinalizations: true, writeContract: 'current',
       hasReservationRpcBindings: false, authenticatedReservationRpcBindings: false,
-      authenticatedSnapshot: false,
+      authenticatedSnapshot: false, hasPendingManualResults: false,
     }
     case '2.5.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
       hasGrantFinalizations: true, hasAcknowledgedFinalizations: true, writeContract: 'current',
       hasReservationRpcBindings: true, authenticatedReservationRpcBindings: false,
-      authenticatedSnapshot: false,
+      authenticatedSnapshot: false, hasPendingManualResults: false,
     }
     case '2.6.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
       hasGrantFinalizations: true, hasAcknowledgedFinalizations: true, writeContract: 'current',
       hasReservationRpcBindings: true, authenticatedReservationRpcBindings: true,
-      authenticatedSnapshot: false,
+      authenticatedSnapshot: false, hasPendingManualResults: false,
     }
     case '2.7.0': return {
       schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
       hasGrantFinalizations: true, hasAcknowledgedFinalizations: true, writeContract: 'current',
       hasReservationRpcBindings: true, authenticatedReservationRpcBindings: true,
-      authenticatedSnapshot: true,
+      authenticatedSnapshot: true, hasPendingManualResults: false,
+    }
+    case '2.8.0': return {
+      schemaVersion: version, hasCredentials: true, hasReceipts: true, hasApprovalContext: true,
+      hasGrantFinalizations: true, hasAcknowledgedFinalizations: true, writeContract: 'current',
+      hasReservationRpcBindings: true, authenticatedReservationRpcBindings: true,
+      authenticatedSnapshot: true, hasPendingManualResults: true,
     }
     default:
       throw authorityError('E2E_AUTHORITY_STATE_CORRUPT', '持久 Authority snapshot 版本未知或旧结构无效')
@@ -2552,6 +2808,8 @@ function parseAuthoritySnapshotStructure(
     || !Array.isArray(candidate.reservations) || candidate.reservations.length > MAX_RESERVATION_RECORDS
     || !Array.isArray(candidate.completedPreflights)
     || (policy.hasReservationRpcBindings && !Array.isArray(candidate.reservationRpcBindings))
+    || (policy.hasPendingManualResults && (!Array.isArray(candidate.pendingManualResults)
+      || candidate.pendingManualResults.length > MAX_PENDING_MANUAL_RESULTS))
     || !Array.isArray(candidate.manualResultIds) || !Array.isArray(candidate.attemptLogs)) {
     corruptSnapshot()
   }
@@ -2656,6 +2914,14 @@ function parseAuthoritySnapshotStructure(
   })
   if (candidate.manualResultIds.some((id) => typeof id !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(id))
     || new Set(candidate.manualResultIds).size !== candidate.manualResultIds.length) corruptSnapshot()
+  if (policy.hasPendingManualResults) {
+    const issued = new Set(candidate.manualResultIds as string[])
+    parseUniqueTuples(candidate.pendingManualResults as unknown[], 'pending manual result', (key, value) => {
+      const pending = parsePendingManualResult(value)
+      if (pending.draft.manualResultId !== key
+        || issued.has(key) !== (pending.issuedResult !== undefined)) corruptSnapshot()
+    })
+  }
   parseUniqueTuples(candidate.attemptLogs, 'attempt log', (key, value) =>
     validateStoredAttemptLog(key, value, grantMap, reservationMap))
 }
@@ -2672,6 +2938,7 @@ function hasExactSnapshotKeys(
     ...(policy.hasGrantFinalizations ? ['grantFinalizations'] : []),
     ...(policy.hasAcknowledgedFinalizations ? ['acknowledgedFinalizations'] : []),
     ...(policy.hasReservationRpcBindings ? ['reservationRpcBindings'] : []),
+    ...(policy.hasPendingManualResults ? ['pendingManualResults'] : []),
     ...(policy.authenticatedSnapshot ? ['stateDigest', 'stateMac', 'stateRevision'] : []),
   ].sort()
   return Object.keys(candidate).sort().join('\0') === keys.join('\0')
@@ -2963,7 +3230,8 @@ function validateSnapshotCryptography(
       } catch { corruptSnapshot() }
     }
   }
-  if (snapshot.schemaVersion === '2.6.0' || snapshot.schemaVersion === '2.7.0') {
+  if (snapshot.schemaVersion === '2.6.0' || snapshot.schemaVersion === '2.7.0'
+    || snapshot.schemaVersion === '2.8.0') {
     validateReservationRpcBindingCryptography(
       snapshot as unknown as AuthorityPersistentSnapshot,
       snapshot.issuer as string,
@@ -3136,7 +3404,8 @@ function parseStoredWebAuthnApprovalReceipt(value: unknown): StoredWebAuthnAppro
   ])
   if (typeof value.subject !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.subject)
     || typeof value.runId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.runId)
-    || !['scope', 'lineage', 'discovery', 'execution', 'privacy'].includes(String(value.approvalType))
+    || !['scope', 'lineage', 'discovery', 'execution', 'privacy',
+      'manual-executor', 'manual-reviewer'].includes(String(value.approvalType))
     || typeof value.subjectDigest !== 'string' || !isDigest(value.subjectDigest)
     || typeof value.installationDigest !== 'string' || !isDigest(value.installationDigest)
     || typeof value.origin !== 'string' || !isCanonicalOrigin(value.origin)
@@ -3144,6 +3413,84 @@ function parseStoredWebAuthnApprovalReceipt(value: unknown): StoredWebAuthnAppro
     || typeof value.expiresAt !== 'string' || !isCanonicalInstant(value.expiresAt)
     || Date.parse(value.expiresAt) <= Date.parse(value.issuedAt)) corruptSnapshot()
   return structuredClone(value) as unknown as StoredWebAuthnApprovalReceipt
+}
+
+function parsePendingManualResult(value: unknown): PendingManualResult {
+  if (!isPlainSnapshot(value)) corruptSnapshot()
+  requireAllowedAndRequiredKeys(value, [
+    'draft', 'draftDigest', 'preparationFinalizationId', 'preparationRequestDigest',
+  ], [
+    'executorPresence', 'executorFinalizationId', 'executorRequestDigest',
+    'reviewerFinalizationId', 'reviewerRequestDigest', 'issuedResult',
+  ])
+  const draft = ManualResultDraftSchema.safeParse(value.draft)
+  if (!draft.success || typeof value.draftDigest !== 'string'
+    || value.draftDigest !== manualResultDraftDigest(draft.data)
+    || typeof value.preparationFinalizationId !== 'string'
+    || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.preparationFinalizationId)
+    || typeof value.preparationRequestDigest !== 'string'
+    || !isDigest(value.preparationRequestDigest)) corruptSnapshot()
+  const base = { draft: draft.data, draftDigest: value.draftDigest,
+    preparationFinalizationId: value.preparationFinalizationId,
+    preparationRequestDigest: value.preparationRequestDigest }
+  if (value.executorPresence === undefined) {
+    if (value.executorFinalizationId !== undefined || value.executorRequestDigest !== undefined
+      || value.reviewerFinalizationId !== undefined || value.reviewerRequestDigest !== undefined
+      || value.issuedResult !== undefined) corruptSnapshot()
+    return base
+  }
+  const presence = ManualResultUserPresenceProofSchema.safeParse(value.executorPresence)
+  if (!presence.success || presence.data.role !== 'executor'
+    || presence.data.approvalType !== 'manual-executor'
+    || presence.data.requiredRole !== 'e2e-manual-executor'
+    || presence.data.subject !== draft.data.executor.subject
+    || presence.data.runId !== draft.data.runId
+    || presence.data.installationDigest !== draft.data.runtimeInstallationDigest
+    || presence.data.draftDigest !== value.draftDigest
+    || typeof value.executorFinalizationId !== 'string'
+    || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.executorFinalizationId)
+    || typeof value.executorRequestDigest !== 'string'
+    || !isDigest(value.executorRequestDigest)) corruptSnapshot()
+  const executor = { ...base, executorPresence: presence.data,
+    executorFinalizationId: value.executorFinalizationId,
+    executorRequestDigest: value.executorRequestDigest }
+  if (value.issuedResult === undefined) {
+    if (value.reviewerFinalizationId !== undefined || value.reviewerRequestDigest !== undefined) corruptSnapshot()
+    return executor
+  }
+  const issued = ManualResultSchema.safeParse(value.issuedResult)
+  if (!issued.success || issued.data.manualResultId !== draft.data.manualResultId
+    || typeof value.reviewerFinalizationId !== 'string'
+    || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.reviewerFinalizationId)
+    || typeof value.reviewerRequestDigest !== 'string' || !isDigest(value.reviewerRequestDigest)) corruptSnapshot()
+  return { ...executor, reviewerFinalizationId: value.reviewerFinalizationId,
+    reviewerRequestDigest: value.reviewerRequestDigest, issuedResult: issued.data }
+}
+
+function recoverPendingManualRole(
+  pending: PendingManualResult,
+  input: { role: 'executor' | 'reviewer'; finalizationId: string; requestDigest: string },
+): {
+  status: 'awaiting-reviewer'; manualResultId: string; draftDigest: string; nextRole: 'reviewer'
+} | { status: 'issued'; result: ManualResult } | undefined {
+  if (input.role === 'executor' && pending.executorFinalizationId !== undefined) {
+    if (pending.executorFinalizationId !== input.finalizationId
+      || pending.executorRequestDigest !== input.requestDigest) {
+      throw authorityError('E2E_MANUAL_RESULT_FINALIZATION_REPLAY_MISMATCH',
+        'executor finalizationId/requestDigest 已绑定不同请求')
+    }
+    return { status: 'awaiting-reviewer', manualResultId: pending.draft.manualResultId,
+      draftDigest: pending.draftDigest, nextRole: 'reviewer' }
+  }
+  if (input.role === 'reviewer' && pending.reviewerFinalizationId !== undefined) {
+    if (pending.reviewerFinalizationId !== input.finalizationId
+      || pending.reviewerRequestDigest !== input.requestDigest || pending.issuedResult === undefined) {
+      throw authorityError('E2E_MANUAL_RESULT_FINALIZATION_REPLAY_MISMATCH',
+        'reviewer finalizationId/requestDigest 已绑定不同请求')
+    }
+    return { status: 'issued', result: pending.issuedResult }
+  }
+  return undefined
 }
 
 function isEncryptedBlob(value: unknown): value is EncryptedPrivateKey {
@@ -3243,6 +3590,10 @@ function signPayload(payload: unknown, privateKey: KeyObject): string {
 
 function manualResultProofPayload(signedDigest: string): Buffer {
   return Buffer.from(canonicalizeJson({ purpose: 'manual-result-authority-proof/v1', signedDigest }))
+}
+
+function manualResultDraftDigest(draft: ManualResultDraft): string {
+  return digestText('manual-result-draft/v1', canonicalizeJson(draft))
 }
 
 function artifactProofPayload(issuer: string, keyId: string, signedDigest: string): Buffer {

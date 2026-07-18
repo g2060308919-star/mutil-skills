@@ -38,7 +38,8 @@ test('Gateway IPC 拒绝错误 MAC、乱序和重放 envelope', () => {
     expect(verifyGatewayIpcEnvelope(envelope, key, { direction: 'child-request', sequence: 1 })).toEqual(envelope)
     expect(() => verifyGatewayIpcEnvelope(envelope, key, { direction: 'child-request', sequence: 2 }))
       .toThrowError(/E2E_GATEWAY_IPC_INVALID/)
-    expect(() => verifyGatewayIpcEnvelope({ ...envelope, mac: `${envelope.mac.slice(0, -1)}A` }, key, {
+    const tamperedMac = `${envelope.mac[0] === 'A' ? 'B' : 'A'}${envelope.mac.slice(1)}`
+    expect(() => verifyGatewayIpcEnvelope({ ...envelope, mac: tamperedMac }, key, {
       direction: 'child-request', sequence: 1,
     })).toThrowError(/E2E_GATEWAY_IPC_INVALID/)
   } finally { key.fill(0) }
@@ -319,9 +320,6 @@ test('无转发前 frame bridge 时真实 WebSocket 即使命中 capability 也�
   })
   handles.push(gateway)
   expect((await gateway.openWebSocketThroughProxy(target, {
-    actionId: 'ACTION-WS', capabilityId: 'CAP-WS', authorized: false,
-  })).status).toBe(403)
-  expect((await gateway.openWebSocketThroughProxy(target, {
     actionId: 'ACTION-WS', capabilityId: 'CAP-WS',
   })).status).toBe(501)
   expect(proxyAuthorization).toBeUndefined()
@@ -394,7 +392,7 @@ test('上游连接结果未知与 child close 都将未完成 reservation 标 un
   })
   await expect(gateway.requestThroughProxy(target, {
     actionId: 'ACTION-WRITE', capabilityId: 'CAP-WRITE',
-  })).rejects.toBeDefined()
+  })).resolves.toMatchObject({ status: 502 })
   await waitUntil(() => authority.unknown === 1)
   await gateway.close()
   expect(authority.unknown).toBe(1)
@@ -568,7 +566,7 @@ function createWriteGateway(
     requests: [{
       intentId: 'INTENT-WRITE', method: 'POST', canonicalOrigin: url.origin, exactPath: url.pathname,
       query: [] as Array<[string, string]>, payload: { kind: 'no-body' as const },
-      targetFingerprint: 'TARGET-1', maxRequests: 1, expectedOrder: 1,
+      targetFingerprint: digestText('test/v1', 'target-1'), maxRequests: 1, expectedOrder: 1,
     }],
     maxUses: 1 as const,
   }

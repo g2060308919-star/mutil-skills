@@ -20,6 +20,8 @@ import { registerAuthenticatedRpcClientFromConfig } from './authority-rpc-sessio
 import {
   parseAuthorityExecutionIncomingEnvelope,
   parseAuthorityExecutionHostConfig,
+  parseManualResultRoleFinalizationInput,
+  parseManualResultRoleRecoveryInput,
   type AuthorityExecutionHostConfig as HostConfig,
 } from './authority-execution-rpc-host-ipc.js'
 import {
@@ -88,12 +90,28 @@ process.on('message', async (incoming: unknown) => {
     await controlQueue.run(async () => await handleFinalizeDecision(message))
     return
   }
+  if (message.type === 'prepare-manual-result') {
+    await controlQueue.run(async () => await handlePrepareManualResult(message))
+    return
+  }
+  if (message.type === 'finalize-manual-result-role') {
+    await controlQueue.run(async () => await handleFinalizeManualResultRole(message))
+    return
+  }
+  if (message.type === 'recover-manual-result-role') {
+    await controlQueue.run(async () => await handleRecoverManualResultRole(message))
+    return
+  }
   if (message.type === 'recover-approval') {
     await controlQueue.run(async () => await handleRecoverApproval(message))
     return
   }
   if (message.type === 'activate-grant') {
     await controlQueue.run(async () => await handleActivateGrant(message))
+    return
+  }
+  if (message.type === 'activate-recovery-grant') {
+    await controlQueue.run(async () => await handleActivateRecoveryGrant(message))
     return
   }
   if (message.type === 'ack-finalization') {
@@ -120,6 +138,9 @@ process.on('message', async (incoming: unknown) => {
         approvalIdentities: config.approval.approvalIdentities,
         manualIdentities: config.approval.manualIdentities,
         authenticateApproverSession: async (sessionId, _expected) => {
+          return await webAuthnAuthority?.authenticateSession(sessionId)
+        },
+        authenticateManualApproverSession: async (sessionId, _expected) => {
           return await webAuthnAuthority?.authenticateSession(sessionId)
         },
       })
@@ -217,7 +238,8 @@ async function handleUserPresenceControl(message: Record<string, any>): Promise<
     }
     const assets = decodeApprovalAssets(hostConfig.userPresence.assets)
     const control = message.type === 'enroll-identity'
-      ? parseEnrollmentInput(message.input, hostConfig.approval.approvalIdentities)
+      ? parseEnrollmentInput(message.input, hostConfig.approval.approvalIdentities,
+        hostConfig.approval.manualIdentities)
       : parseApprovalInput(message.input, hostConfig.userPresence.installationDigest)
     const server = await startWebAuthnApprovalServer({
       authority: webAuthnAuthority,
@@ -247,6 +269,54 @@ async function handleUserPresenceControl(message: Record<string, any>): Promise<
       await server.close().catch(() => undefined)
     })
     sendToParent({ type: 'session-opened', requestId, url: server.url, sessionId: server.sessionId })
+  } catch (error) {
+    sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
+  }
+}
+
+async function handlePrepareManualResult(message: Record<string, any>): Promise<void> {
+  const requestId = parseControlRequestId(message)
+  if (requestId === undefined) return
+  try {
+    if (!approvalAuthority || !isObject(message.input)
+      || Object.keys(message.input).sort().join('\0') !== ['draft', 'finalizationId', 'requestDigest'].join('\0')
+      || typeof message.input.finalizationId !== 'string' || typeof message.input.requestDigest !== 'string') {
+      throw rpcHostError('E2E_MANUAL_RESULT_PREPARE_INPUT_INVALID')
+    }
+    const result = await approvalAuthority.prepareManualResult({ draft: message.input.draft,
+      finalizationId: message.input.finalizationId, requestDigest: message.input.requestDigest })
+    sendToParent({ type: 'manual-result-prepared', requestId, result })
+  } catch (error) {
+    sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
+  }
+}
+
+async function handleRecoverManualResultRole(message: Record<string, any>): Promise<void> {
+  const requestId = parseControlRequestId(message)
+  if (requestId === undefined) return
+  try {
+    const input = parseManualResultRoleRecoveryInput(message.input)
+    if (!approvalAuthority || input === undefined) {
+      throw rpcHostError('E2E_MANUAL_RESULT_FINALIZATION_INVALID')
+    }
+    const result = await approvalAuthority.recoverManualResultRole(input)
+    sendToParent({ type: 'manual-result-role-recovered', requestId, result: result ?? null })
+  } catch (error) {
+    sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
+  }
+}
+
+async function handleFinalizeManualResultRole(message: Record<string, any>): Promise<void> {
+  const requestId = parseControlRequestId(message)
+  if (requestId === undefined) return
+  try {
+    const input = parseManualResultRoleFinalizationInput(message.input)
+    if (!approvalAuthority || input === undefined) {
+      throw rpcHostError('E2E_MANUAL_RESULT_FINALIZATION_INVALID')
+    }
+    const result = await approvalAuthority.finalizeManualResultRole(input)
+    approvalControls.delete(input.approvalSessionRef)
+    sendToParent({ type: 'manual-result-role-finalized', requestId, result })
   } catch (error) {
     sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
   }
@@ -392,6 +462,27 @@ async function handleActivateGrant(message: Record<string, any>): Promise<void> 
   }
 }
 
+async function handleActivateRecoveryGrant(message: Record<string, any>): Promise<void> {
+  const requestId = parseControlRequestId(message)
+  if (requestId === undefined) return
+  try {
+    if (!isObject(message.input)
+      || Object.keys(message.input).sort().join('\0') !== ['approvalBinding', 'grant'].join('\0')
+      || !approvalAuthority || !executionRpc || !hostConfig) throw rpcHostError('E2E_APPROVAL_GRANT_INVALID')
+    const parsed = SignedGrantSchema.safeParse(message.input.grant)
+    if (!parsed.success) throw rpcHostError('E2E_APPROVAL_GRANT_INVALID')
+    const approvalBinding = parseApprovalExecutionBinding(message.input.approvalBinding)
+    if (approvalBinding.approvalType !== 'execution') throw rpcHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
+    const context = await approvalAuthority.activatePersistedGrantForRecovery({
+      grant: parsed.data as SignedGrant, approvalBinding,
+    })
+    registerApprovalGrant(executionRpc, hostConfig, context, true)
+    sendToParent({ type: 'recovery-grant-activated', requestId, result: { activated: true } })
+  } catch (error) {
+    sendToParent({ type: 'control-error', requestId, code: safeCode(error) })
+  }
+}
+
 async function handleAcknowledgeFinalization(message: Record<string, any>): Promise<void> {
   const requestId = parseControlRequestId(message)
   if (requestId === undefined) return
@@ -416,8 +507,12 @@ function registerApprovalGrant(
   rpc: AuthenticatedRpcServer,
   config: HostConfig,
   context: CanonicalApprovalContext,
+  recoveryOnly = false,
 ): void {
-  rpc.updateClientRegistration(config.rpc.clientId, { approvalContext: context })
+  rpc.updateClientRegistration(config.rpc.clientId, {
+    approvalContext: context,
+    ...(recoveryOnly ? { recoveryOnly: true } : {}),
+  })
 }
 
 function sendToParent(message: Record<string, unknown>): void {
@@ -438,13 +533,18 @@ function sendToParentAndWait(message: Record<string, unknown>): Promise<void> {
 function parseEnrollmentInput(
   value: unknown,
   identities: HostConfig['approval']['approvalIdentities'],
+  manualIdentities: HostConfig['approval']['manualIdentities'],
 ): { kind: 'enrollment'; subject: string } {
   if (!isObject(value) || Object.keys(value).join('\0') !== 'subject'
     || typeof value.subject !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(value.subject)) {
     throw rpcHostError('E2E_APPROVAL_ENROLLMENT_INPUT_INVALID')
   }
-  if (!identities?.some((identity) => identity.subject === value.subject
-    && identity.roles.includes('e2e-approver'))) {
+  const isApprovalIdentity = identities?.some((identity) => identity.subject === value.subject
+    && identity.roles.includes('e2e-approver')) === true
+  const isManualIdentity = manualIdentities?.some((identity) => identity.subject === value.subject
+    && (identity.roles.includes('e2e-manual-executor')
+      || identity.roles.includes('e2e-manual-reviewer'))) === true
+  if (!isApprovalIdentity && !isManualIdentity) {
     throw rpcHostError('E2E_APPROVAL_ENROLLMENT_SUBJECT_UNTRUSTED')
   }
   return { kind: 'enrollment', subject: value.subject }
@@ -460,7 +560,9 @@ function parseApprovalInput(
   subjectDigest: string
   installationDigest: string
 } {
-  const approvalTypes: WebAuthnApprovalType[] = ['scope', 'lineage', 'discovery', 'execution', 'privacy']
+  const approvalTypes: WebAuthnApprovalType[] = [
+    'scope', 'lineage', 'discovery', 'execution', 'privacy', 'manual-executor', 'manual-reviewer',
+  ]
   if (!isObject(value)
     || Object.keys(value).sort().join('\0')
       !== ['approvalType', 'installationDigest', 'runId', 'subjectDigest'].join('\0')

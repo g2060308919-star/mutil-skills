@@ -34,7 +34,8 @@ export interface AuthorityExecutionHostConfig {
 
 const CONTROL_TYPES = new Set([
   'enroll-identity', 'open-approval-session', 'finalize-approval', 'finalize-decision', 'recover-approval',
-  'activate-grant', 'ack-finalization',
+  'activate-grant', 'activate-recovery-grant', 'ack-finalization', 'prepare-manual-result', 'finalize-manual-result-role',
+  'recover-manual-result-role',
 ])
 
 export function parseAuthorityExecutionIncomingEnvelope(
@@ -55,6 +56,51 @@ export function parseAuthorityExecutionIncomingEnvelope(
     || typeof value.requestId !== 'string' || !/^[a-f0-9]{32}$/.test(value.requestId)
     || !isRecord(value.input)) return undefined
   return value as Record<string, any> & { type: string }
+}
+
+export function parseManualResultRoleFinalizationInput(value: unknown): {
+  manualResultId: string
+  draftDigest: string
+  role: 'executor' | 'reviewer'
+  approvalSessionRef: string
+  finalizationId: string
+  requestDigest: string
+} | undefined {
+  if (!isRecord(value)
+    || Object.keys(value).sort().join('\0')
+      !== ['approvalSessionRef', 'draftDigest', 'finalizationId', 'manualResultId', 'requestDigest', 'role'].join('\0')
+    || typeof value.manualResultId !== 'string' || !SAFE_ID.test(value.manualResultId)
+    || typeof value.draftDigest !== 'string' || !DIGEST.test(value.draftDigest)
+    || (value.role !== 'executor' && value.role !== 'reviewer')
+    || typeof value.approvalSessionRef !== 'string' || !SAFE_ID.test(value.approvalSessionRef)
+    || typeof value.finalizationId !== 'string' || !SAFE_ID.test(value.finalizationId)
+    || typeof value.requestDigest !== 'string' || !DIGEST.test(value.requestDigest)) {
+    return undefined
+  }
+  return {
+    manualResultId: value.manualResultId, draftDigest: value.draftDigest,
+    role: value.role, approvalSessionRef: value.approvalSessionRef,
+    finalizationId: value.finalizationId, requestDigest: value.requestDigest,
+  }
+}
+
+export function parseManualResultRoleRecoveryInput(value: unknown): {
+  manualResultId: string
+  draftDigest: string
+  role: 'executor' | 'reviewer'
+  finalizationId: string
+  requestDigest: string
+} | undefined {
+  if (!isRecord(value)
+    || Object.keys(value).sort().join('\0')
+      !== ['draftDigest', 'finalizationId', 'manualResultId', 'requestDigest', 'role'].join('\0')
+    || typeof value.manualResultId !== 'string' || !SAFE_ID.test(value.manualResultId)
+    || typeof value.draftDigest !== 'string' || !DIGEST.test(value.draftDigest)
+    || (value.role !== 'executor' && value.role !== 'reviewer')
+    || typeof value.finalizationId !== 'string' || !SAFE_ID.test(value.finalizationId)
+    || typeof value.requestDigest !== 'string' || !DIGEST.test(value.requestDigest)) return undefined
+  return { manualResultId: value.manualResultId, draftDigest: value.draftDigest,
+    role: value.role, finalizationId: value.finalizationId, requestDigest: value.requestDigest }
 }
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/

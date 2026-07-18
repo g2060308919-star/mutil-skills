@@ -179,7 +179,7 @@ describe('Artifact kill-point 与恢复矩阵', () => {
       expect(journal.phase).toBe('committed')
       await publish(store, 'GENERATION-3')
     }
-  })
+  }, 15_000)
 
   test('fencing 与每次 publish journal 原子写的 temp/fsync/rename kill-point 均可恢复', async () => {
     const stages = ['temp-fsync', 'rename', 'parent-fsync']

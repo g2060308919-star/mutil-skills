@@ -2,6 +2,7 @@ import { z } from 'zod'
 import {
   RegressionBlockedCasesSchema,
   RegressionDiscoveryAttestationSchema,
+  RegressionDiscoveryVerifierMaterialSchema,
   RegressionSourceFileSchema,
   RegressionToolchainSchema,
 } from './regression-discovery.js'
@@ -38,6 +39,8 @@ import {
   RuntimeWriteHttpActionSchema,
   digestRuntimeWriteHttpAction,
 } from './runtime-http-action.js'
+import { assertExecutionResultIdentities } from './execution-result-identity.js'
+import { SignedGrantSchema } from './signed-grant.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -535,12 +538,28 @@ const regressionManifestContent = z.object({
   caseMappings: z.array(z.object({ caseId: SafeIdSchema, relativePath: RelativePathSchema, testTitle: NonEmptyTextSchema }).strict()).max(100_000),
   blockedCases: RegressionBlockedCasesSchema,
   deprecatedCases: UniqueIdsSchema,
+  // Compiler 运行前的候选 manifest 尚未产生 Discovery key，故契约层允许缺省；
+  // Production finalization / GenerationAssembler 会强制本代发布资产必须携带并绑定该材料。
+  discoveryVerifierMaterial: RegressionDiscoveryVerifierMaterialSchema.optional(),
   listResult: z.object({
     caseIds: UniqueIdsSchema,
     digest: DigestSchema,
     attestation: RegressionDiscoveryAttestationSchema,
   }).strict(),
-}).strict()
+}).strict().superRefine((content, context) => {
+  const material = content.discoveryVerifierMaterial
+  const attestation = content.listResult.attestation
+  if (material !== undefined && (material.issuer !== attestation.issuer
+    || material.keyId !== attestation.keyId
+    || material.purpose !== attestation.purpose
+    || material.algorithm !== attestation.algorithm)) {
+    context.addIssue({
+      code: 'custom',
+      message: 'Discovery verifier material 必须与本代 attestation 的 issuer/key/purpose/algorithm 一致',
+      path: ['discoveryVerifierMaterial'],
+    })
+  }
+})
 
 const runBundleContent = z.object({
   runId: SafeIdSchema,
@@ -560,6 +579,7 @@ const browserResultsContent = z.object({
   trustedCompilerExecution: TrustedCompilerExecutionFactSchema.optional(),
   executedBrowserIds: UniqueIdsSchema.refine((values) => values.length > 0, '至少需要一个实际执行浏览器'),
   caseResults: z.array(z.object({
+    resultId: SafeIdSchema.optional(),
     caseId: SafeIdSchema,
     attemptId: SafeIdSchema,
     eventChainDigest: DigestSchema,
@@ -578,6 +598,7 @@ const browserResultsContent = z.object({
     gatewayAuditRef: SafeIdSchema,
     evidenceRefs: z.array(SafeIdSchema).max(100_000),
     cleanupRef: SafeIdSchema.optional(),
+    baselineResultId: SafeIdSchema.optional(),
     executionOutcomeReceipts: z.array(ExecutionOutcomeReceiptSchema).max(100_000).optional(),
   }).strict()).max(100_000),
   startedAt: z.string().datetime(),
@@ -602,9 +623,24 @@ const browserResultsContent = z.object({
     }
     })
   })
+  const identitiesPresent = content.caseResults.filter((item) => item.resultId !== undefined).length
+  if (identitiesPresent === 0) {
+    const legacyCaseIds = content.caseResults.map((item) => item.caseId)
+    if (content.caseResults.some((item) => item.mode !== 'real-environment' || item.baselineResultId !== undefined)
+      || new Set(legacyCaseIds).size !== legacyCaseIds.length) {
+      context.addIssue({ code: 'custom', message: '旧 BrowserResult 只能是 caseId 唯一的单 real 域', path: ['caseResults'] })
+    }
+  } else if (identitiesPresent !== content.caseResults.length) {
+    context.addIssue({ code: 'custom', message: 'resultId 不允许部分迁移', path: ['caseResults'] })
+  } else {
+    try { assertExecutionResultIdentities(content.caseResults) }
+    catch (error) {
+      context.addIssue({ code: 'custom', message: error instanceof Error ? error.message : '执行结果身份无效', path: ['caseResults'] })
+    }
+  }
 })
 
-const gatewayAuditContent = z.object({
+const gatewayPublicationAuditContent = z.object({
   gatewayInstance: z.object({ instanceId: SafeIdSchema, version: NonEmptyTextSchema, publicKeyDigest: DigestSchema }).strict(),
   policyDigest: DigestSchema,
   signedCounters: z.object({
@@ -625,10 +661,37 @@ const gatewayAuditContent = z.object({
   }).strict()).max(100_000),
 }).strict()
 
+const gatewayAuditContent = gatewayPublicationAuditContent.extend({
+  sessions: z.array(z.object({
+    resultId: SafeIdSchema,
+    domain: z.enum(['real-environment', 'gateway-injection']),
+    audit: gatewayPublicationAuditContent,
+    verifierMaterial: z.object({
+      issuer: SafeIdSchema, keyId: SafeIdSchema,
+      gatewayInstance: gatewayPublicationAuditContent.shape.gatewayInstance,
+      publicKeySpki: NonEmptyTextSchema,
+    }).strict(),
+    grant: SignedGrantSchema.optional(),
+  }).strict()).min(1).max(100_000).optional(),
+}).strict().superRefine((content, context) => {
+  if (content.sessions === undefined) return
+  const resultIds = content.sessions.map((session) => session.resultId)
+  const domainKeys = content.sessions.map((session) => `${session.resultId}\0${session.domain}`)
+  if (new Set(resultIds).size !== resultIds.length || new Set(domainKeys).size !== domainKeys.length) {
+    context.addIssue({ code: 'custom', path: ['sessions'], message: 'Gateway session resultId/domain 必须唯一' })
+  }
+  content.sessions.forEach((session, index) => {
+    if (session.domain === 'gateway-injection' && session.grant === undefined) {
+      context.addIssue({ code: 'custom', path: ['sessions', index, 'grant'], message: '注入 Gateway session 必须携带独立签名 grant' })
+    }
+  })
+})
+
 const browserEvidenceContent = z.object({
   evidencePolicyDigest: DigestSchema,
   artifacts: z.array(z.object({
     evidenceId: SafeIdSchema,
+    resultId: SafeIdSchema.optional(),
     caseId: SafeIdSchema,
     relativePath: RelativePathSchema,
     digest: DigestSchema,
@@ -747,6 +810,8 @@ export const FinalReportContentSchema = z.object({
     evidencePath: RelativePathSchema,
   }).strict()).max(1_000_000),
   caseDetails: z.array(z.object({
+    resultId: SafeIdSchema,
+    baselineResultId: SafeIdSchema.optional(),
     caseId: SafeIdSchema,
     title: NonEmptyTextSchema,
     executionMode: z.enum(['real-environment', 'browser-injection', 'manual']),
@@ -767,6 +832,7 @@ export const FinalReportContentSchema = z.object({
   gatewayAudit: ReportGatewayAuditSchema,
   browserHealth: ReportFindingListSchema,
   diagnostics: z.array(z.object({
+    resultId: SafeIdSchema,
     caseId: SafeIdSchema,
     category: SafeIdSchema,
     selectedAttemptId: SafeIdSchema.nullable(),
@@ -814,10 +880,31 @@ export const FinalReportContentSchema = z.object({
   }).strict(),
   recommendations: z.array(NonEmptyTextSchema).max(100_000),
 }).strict().superRefine((content, context) => {
-  const casesById = new Map(content.caseDetails.map((item) => [item.caseId, item]))
-  const caseIds = content.caseDetails.map((item) => item.caseId)
-  if (casesById.size !== caseIds.length) {
-    context.addIssue({ code: 'custom', message: 'caseDetails 的 caseId 必须唯一', path: ['caseDetails'] })
+  const casesByResultId = new Map(content.caseDetails.map((item) => [item.resultId, item]))
+  const resultIds = content.caseDetails.map((item) => item.resultId)
+  if (casesByResultId.size !== resultIds.length) {
+    context.addIssue({ code: 'custom', message: 'caseDetails 的 resultId 必须唯一', path: ['caseDetails'] })
+  }
+  const domainKeys = content.caseDetails.map((item) => `${item.caseId}\0${item.executionMode}`)
+  if (new Set(domainKeys).size !== domainKeys.length) {
+    context.addIssue({ code: 'custom', message: 'caseDetails 的 (caseId, executionMode) 必须唯一', path: ['caseDetails'] })
+  }
+  try {
+    assertExecutionResultIdentities(content.caseDetails
+      .filter((item) => item.executionMode !== 'manual')
+      .map((item) => ({
+        resultId: item.resultId,
+        caseId: item.caseId,
+        mode: item.executionMode === 'real-environment' ? 'real-environment' as const : 'gateway-injection' as const,
+        status: item.status,
+        ...(item.baselineResultId === undefined ? {} : { baselineResultId: item.baselineResultId }),
+      })))
+  } catch {
+    context.addIssue({
+      code: 'custom',
+      message: '自动化 Case 必须使用确定性 resultId，且注入结果必须绑定同 Case 已通过的真实基线',
+      path: ['caseDetails'],
+    })
   }
   const approvalKinds = content.approvals.map((item) => item.kind)
   if (new Set(approvalKinds).size !== approvalKinds.length
@@ -836,7 +923,7 @@ export const FinalReportContentSchema = z.object({
       context.addIssue({ code: 'custom', message: '非自动化 obligation 不得引用 Case', path: ['coverageUniverse', 'obligations', obligationIndex, 'caseIds'] })
     }
     for (const [caseIndex, caseId] of obligation.caseIds.entries()) {
-      if (!casesById.has(caseId)) {
+      if (!content.caseDetails.some((item) => item.caseId === caseId)) {
         context.addIssue({ code: 'custom', message: 'obligation 引用了不存在的 Case', path: ['coverageUniverse', 'obligations', obligationIndex, 'caseIds', caseIndex] })
       }
     }
@@ -845,8 +932,13 @@ export const FinalReportContentSchema = z.object({
     ['businessFailuresObserved', 'required'], ['advisoryFailures', 'advisory'],
   ] as const) {
     for (const [failureIndex, caseId] of content[field].entries()) {
-      const testCase = casesById.get(caseId)
-      if (!testCase || testCase.necessity !== expectedNecessity || testCase.status !== 'failed') {
+      const testCase = field === 'businessFailuresObserved'
+        ? content.caseDetails.find((item) => item.caseId === caseId && item.executionMode === 'real-environment')
+        : casesByResultId.get(caseId)
+      const necessityValid = field === 'advisoryFailures'
+        ? testCase?.executionMode === 'browser-injection' || testCase?.necessity === expectedNecessity
+        : testCase?.necessity === expectedNecessity
+      if (!testCase || !necessityValid || testCase.status !== 'failed') {
         context.addIssue({
           code: 'custom', message: `${field} 必须只引用已失败的 ${expectedNecessity} Case`, path: [field, failureIndex],
         })
@@ -856,20 +948,20 @@ export const FinalReportContentSchema = z.object({
   compareReportIds(
     content.realResults.map((item) => item.id),
     content.caseDetails.filter((item) => item.executionMode === 'real-environment'
-      && item.status !== 'not-executed').map((item) => item.caseId),
+      && item.status !== 'not-executed').map((item) => item.resultId),
     ['realResults'],
     'realResults 必须与 real-environment Case 完全一致',
   )
   compareReportIds(
     content.injectionResults.map((item) => item.id),
     content.caseDetails.filter((item) => item.executionMode === 'browser-injection'
-      && item.status !== 'not-executed').map((item) => item.caseId),
+      && item.status !== 'not-executed').map((item) => item.resultId),
     ['injectionResults'],
     'injectionResults 必须与 browser-injection Case 完全一致',
   )
   compareReportIds(
     content.regressionDetails.caseIds,
-    content.caseDetails.filter((item) => item.executionMode !== 'manual').map((item) => item.caseId),
+    [...new Set(content.caseDetails.filter((item) => item.executionMode !== 'manual').map((item) => item.caseId))],
     ['regressionDetails', 'caseIds'],
     'regressionDetails.caseIds 必须覆盖全部自动化 Case 且不得包含手工 Case',
   )
@@ -888,7 +980,8 @@ export const FinalReportContentSchema = z.object({
     }
   }
   for (const [rowIndex, row] of content.traceabilityMatrix.entries()) {
-    const testCase = casesById.get(row.caseId)
+    const testCase = content.caseDetails.find((item) =>
+      item.caseId === row.caseId && item.executionMode === 'real-environment')
     const step = testCase?.steps.find((candidate) => candidate.stepId === row.stepId)
     if (!testCase || !step || !step.evidenceLinks.includes(row.evidencePath)) {
       context.addIssue({
@@ -980,7 +1073,19 @@ const ContentSchemaRegistry = {
   'generation-manifest': generationManifestContent,
 } satisfies Record<ArtifactType, z.ZodTypeAny>
 
-function createArtifactSchema<T extends ArtifactType>(artifactType: T) {
+type ArtifactSchemaShape<T extends ArtifactType> = Omit<
+  typeof ArtifactEnvelopeSchema.shape,
+  'artifactType' | 'schemaVersion' | 'graph'
+> & {
+  artifactType: z.ZodLiteral<T>
+  schemaVersion: z.ZodTypeAny
+  graph: typeof ArtifactGraphSchema
+  content: (typeof ContentSchemaRegistry)[T]
+}
+
+function createArtifactSchema<T extends ArtifactType>(
+  artifactType: T,
+): z.ZodObject<ArtifactSchemaShape<T>, 'strict'> {
   return ArtifactEnvelopeSchema.extend({
     artifactType: z.literal(artifactType),
     schemaVersion: artifactType === 'execution-contract'
@@ -1002,7 +1107,7 @@ function createArtifactSchema<T extends ArtifactType>(artifactType: T) {
       : ArtifactEnvelopeSchema.shape.schemaVersion,
     graph: ArtifactGraphSchema,
     content: ContentSchemaRegistry[artifactType],
-  }).strict()
+  }).strict() as unknown as z.ZodObject<ArtifactSchemaShape<T>, 'strict'>
 }
 
 export const ArtifactSchemaRegistry = Object.fromEntries(

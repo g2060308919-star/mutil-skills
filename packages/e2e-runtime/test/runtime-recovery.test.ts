@@ -1,4 +1,4 @@
-import { digestText } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, digestText, E2EError } from '@mutil-skills/e2e-contracts'
 import { createWorkflow } from '@mutil-skills/e2e-engine'
 import { describe, expect, test } from 'vitest'
 import { RuntimeRecoveryCoordinator } from '../src/runtime-recovery.js'
@@ -29,7 +29,8 @@ describe('RuntimeRecoveryCoordinator', () => {
         } },
         markUnknown: async () => { calls.push('mark-unknown'); return digest('unknown-receipt') },
       },
-      lease: { quarantine: async () => { calls.push('quarantine'); return digest('quarantine-receipt') } },
+      lease: { inspect: async () => ({ status: 'active' as const }),
+        quarantine: async () => { calls.push('quarantine'); return digest('quarantine-receipt') } },
       artifacts: { recover: async () => { calls.push('artifact-recovery'); return verified('artifact') } },
       frozen: { verify: async () => { calls.push('frozen-digest'); return verified('frozen') } },
       resume: { evaluate: async () => { calls.push('resume-edge'); return {
@@ -82,7 +83,8 @@ describe('RuntimeRecoveryCoordinator', () => {
         } },
         markUnknown: async () => digest('must-not-mark'),
       },
-      lease: { quarantine: async () => digest('must-not-quarantine') },
+      lease: { inspect: async () => ({ status: 'active' }),
+        quarantine: async () => digest('must-not-quarantine') },
       artifacts: { recover: async () => { calls.push('must-not-recover'); return verified('artifact') } },
       frozen: { verify: async () => verified('frozen') },
       resume: { evaluate: async () => ({ allowed: false, next: 'blocked', summaryDigest: digest('resume') }) },
@@ -115,7 +117,8 @@ describe('RuntimeRecoveryCoordinator', () => {
         } },
         markUnknown: async () => digest('must-not-mark'),
       },
-      lease: { quarantine: async () => digest('must-not-quarantine') },
+      lease: { inspect: async () => ({ status: 'active' }),
+        quarantine: async () => digest('must-not-quarantine') },
       artifacts: { recover: async () => { calls.push('must-not-recover'); return verified('artifact') } },
       frozen: { verify: async () => verified('frozen') },
       resume: { evaluate: async () => ({ allowed: false, next: 'blocked', summaryDigest: digest('resume') }) },
@@ -154,7 +157,8 @@ describe('RuntimeRecoveryCoordinator', () => {
       resources: { cleanupOwned: async () => ({ status: 'absent', summaryDigest: digest('cleanup') }) },
       reservation: { inspect: async () => ({ status: 'reserved', reservationId: 'RESERVATION-DISCOVERED' }),
         markUnknown: async () => digest('unknown-receipt') },
-      lease: { quarantine: async () => digest('quarantine-receipt') },
+      lease: { inspect: async () => ({ status: 'active' as const }),
+        quarantine: async () => digest('quarantine-receipt') },
       artifacts: { recover: async () => verified('artifact') }, frozen: { verify: async () => verified('frozen') },
       resume: { evaluate: async () => ({ allowed: true, next: 'manual-reconcile', summaryDigest: digest('resume') }) },
       now: () => new Date('2026-07-17T02:00:00.000Z'),
@@ -192,7 +196,8 @@ describe('RuntimeRecoveryCoordinator', () => {
           return digest('unknown-receipt')
         },
       },
-      lease: { quarantine: async () => digest('quarantine-receipt') },
+      lease: { inspect: async () => ({ status: 'active' as const }),
+        quarantine: async () => digest('quarantine-receipt') },
       artifacts: { recover: async () => verified('artifact') }, frozen: { verify: async () => verified('frozen') },
       resume: { evaluate: async () => ({ allowed: true, next: 'manual-reconcile', summaryDigest: digest('resume') }) },
       now: () => new Date('2026-07-17T02:00:00.000Z'),
@@ -222,7 +227,8 @@ describe('RuntimeRecoveryCoordinator', () => {
       resources: { cleanupOwned: async () => ({ status: 'absent' as const, summaryDigest: digest('cleanup') }) },
       reservation: { inspect: async () => ({ status: 'unknown' as const,
         reservationId: 'RESERVATION-RECOVERY-1' }), markUnknown: async () => digest('unknown-receipt') },
-      lease: { quarantine: async (input: { operationId: string; targetFingerprint: string }) => {
+      lease: { inspect: async () => ({ status: 'active' as const }),
+        quarantine: async (input: { operationId: string; targetFingerprint: string }) => {
         quarantineInputs.push(input)
         if (abortAfterFirstQuarantine) {
           abortAfterFirstQuarantine = false
@@ -243,6 +249,253 @@ describe('RuntimeRecoveryCoordinator', () => {
     expect(quarantineInputs).toHaveLength(2)
     expect(quarantineInputs[1]).toEqual(quarantineInputs[0])
     expect(quarantineInputs[0]!.targetFingerprint).toBe(digest('target-fingerprint'))
+    await fixture.store.close()
+  })
+
+  test('Lease 已释放但 terminal checkpoint 落盘前崩溃时，重启查询并复用终态回执且不得改写为 quarantine', async () => {
+    const fixture = await recoveryFixture()
+    const cleanupDigest = digest('verified-cleanup')
+    const cleanupLock = await fixture.store.acquireRunLock(digest('project'), 'RUN-RECOVERY-1')
+    await fixture.store.prepareWriteCleanup({
+      projectIdentityDigest: digest('project'), runId: 'RUN-RECOVERY-1',
+      attemptId: 'ATTEMPT-WRITE-RECOVERY-1', cleanupDigest,
+      preparedAt: '2026-07-17T01:30:00.000Z', lock: cleanupLock,
+    })
+    await cleanupLock.close()
+    const receiptDigest = digestText('authority-lease-terminal-receipt/v1', canonicalizeJson({
+      leaseId: 'LEASE-RECOVERY-1', fencingToken: 17,
+      targetFingerprint: digest('target-fingerprint'), terminalStatus: 'released', cleanupDigest,
+    }))
+    let inspectCalls = 0
+    let quarantineCalls = 0
+    let abortTerminalCheckpoint = true
+    const originalRecordReceipt = fixture.store.recordWriteRecoveryReceipt.bind(fixture.store)
+    fixture.store.recordWriteRecoveryReceipt = async (input) => {
+      if (input.operation === 'leaseTerminal' && abortTerminalCheckpoint) {
+        abortTerminalCheckpoint = false
+        throw new Error('TEST_KILL_AFTER_LEASE_TERMINAL_QUERY')
+      }
+      return await originalRecordReceipt(input)
+    }
+    const dependencies = {
+      runStore: fixture.store,
+      installation: { verify: async () => verified('installation') }, state: { verify: async () => verified('state') },
+      journal: { verify: async () => verified('journal') },
+      resources: { cleanupOwned: async () => ({ status: 'absent' as const, summaryDigest: digest('cleanup') }) },
+      reservation: { inspect: async () => ({ status: 'reserved' as const,
+        reservationId: 'RESERVATION-RECOVERY-1' }), markUnknown: async () => digest('unknown-receipt') },
+      lease: {
+        inspect: async () => { inspectCalls += 1; return {
+          status: 'released' as const, cleanupDigest, receiptDigest,
+        } },
+        quarantine: async () => { quarantineCalls += 1; return digest('must-not-quarantine') },
+      },
+      artifacts: { recover: async () => verified('artifact') }, frozen: { verify: async () => verified('frozen') },
+      resume: { evaluate: async () => ({ allowed: true, next: 'manual-reconcile', summaryDigest: digest('resume') }) },
+      now: () => new Date('2026-07-17T02:00:00.000Z'),
+    }
+    const recoveryInput = { projectIdentityDigest: digest('project'), runId: 'RUN-RECOVERY-1',
+      attemptId: 'ATTEMPT-WRITE-RECOVERY-1' }
+    await expect(new RuntimeRecoveryCoordinator(dependencies).recover(recoveryInput))
+      .rejects.toThrow('TEST_KILL_AFTER_LEASE_TERMINAL_QUERY')
+    await expect(new RuntimeRecoveryCoordinator(dependencies).recover(recoveryInput))
+      .resolves.toMatchObject({ status: 'recovered', writeState: 'effect-unknown', browserCalls: 0 })
+    expect(inspectCalls).toBe(2)
+    expect(quarantineCalls).toBe(0)
+    await expect(fixture.store.getWriteAttempt(digest('project'), 'RUN-RECOVERY-1',
+      'ATTEMPT-WRITE-RECOVERY-1')).resolves.toMatchObject({ recovery: {
+        leaseTerminal: { receiptDigest },
+      } })
+    await fixture.store.close()
+  })
+
+  test.each([
+    ['missing', undefined],
+    ['mismatch', digest('other-cleanup')],
+  ] as const)('Lease 已释放但 cleanupPreparedDigest %s 时 fail closed', async (_case, preparedDigest) => {
+    const fixture = await recoveryFixture()
+    const leaseCleanupDigest = digest('verified-cleanup')
+    if (preparedDigest !== undefined) {
+      const lock = await fixture.store.acquireRunLock(digest('project'), 'RUN-RECOVERY-1')
+      await fixture.store.prepareWriteCleanup({
+        projectIdentityDigest: digest('project'), runId: 'RUN-RECOVERY-1',
+        attemptId: 'ATTEMPT-WRITE-RECOVERY-1', cleanupDigest: preparedDigest,
+        preparedAt: '2026-07-17T01:30:00.000Z', lock,
+      })
+      await lock.close()
+    }
+    let quarantineCalls = 0
+    const coordinator = new RuntimeRecoveryCoordinator({
+      runStore: fixture.store,
+      installation: { verify: async () => verified('installation') }, state: { verify: async () => verified('state') },
+      journal: { verify: async () => verified('journal') },
+      resources: { cleanupOwned: async () => ({ status: 'absent', summaryDigest: digest('cleanup') }) },
+      reservation: { inspect: async () => ({ status: 'reserved', reservationId: 'RESERVATION-RECOVERY-1' }),
+        markUnknown: async () => digest('unknown-receipt') },
+      lease: { inspect: async () => ({ status: 'released', cleanupDigest: leaseCleanupDigest,
+        receiptDigest: digest('released-receipt') }),
+      quarantine: async () => { quarantineCalls += 1; return digest('must-not-quarantine') } },
+      artifacts: { recover: async () => verified('artifact') }, frozen: { verify: async () => verified('frozen') },
+      resume: { evaluate: async () => ({ allowed: true, next: 'must-not-resume', summaryDigest: digest('resume') }) },
+      now: () => new Date('2026-07-17T02:00:00.000Z'),
+    })
+    await expect(coordinator.recover({ projectIdentityDigest: digest('project'), runId: 'RUN-RECOVERY-1',
+      attemptId: 'ATTEMPT-WRITE-RECOVERY-1' })).resolves.toMatchObject({
+      status: 'blocked', reasonCode: 'E2E_RUNTIME_RECOVERY_CLEANUP_CHECKPOINT_MISMATCH', browserCalls: 0,
+    })
+    expect(quarantineCalls).toBe(0)
+    await fixture.store.close()
+  })
+
+  test('outcome-prepared 与 Authority completed 使用同一 terminal receipt 域并恢复为 committed', async () => {
+    const fixture = await recoveryFixture()
+    const outcomeDigest = digest('authority-outcome')
+    const receiptDigest = digestText('authority-reservation-terminal-receipt/v1', canonicalizeJson({
+      reservationId: 'RESERVATION-RECOVERY-1', grantId: 'GRANT-1', capabilityId: 'CAP-1',
+      actionId: 'ACTION-WRITE-RECOVERY-1', attemptId: 'ATTEMPT-WRITE-RECOVERY-1',
+      terminalStatus: 'completed', outcomeDigest,
+    }))
+    const lock = await fixture.store.acquireRunLock(digest('project'), 'RUN-RECOVERY-1')
+    await fixture.store.prepareWriteOutcome({
+      projectIdentityDigest: digest('project'), runId: 'RUN-RECOVERY-1',
+      attemptId: 'ATTEMPT-WRITE-RECOVERY-1', outcomeDigest, receiptDigest,
+      preparedAt: '2026-07-17T01:00:02.000Z', lock,
+    })
+    await lock.close()
+    let markUnknownCalls = 0
+    let quarantineCalls = 0
+    const coordinator = new RuntimeRecoveryCoordinator({
+      runStore: fixture.store,
+      installation: { verify: async () => verified('installation') },
+      state: { verify: async () => verified('state') },
+      journal: { verify: async () => verified('journal') },
+      resources: { cleanupOwned: async () => ({ status: 'absent', summaryDigest: digest('cleanup') }) },
+      reservation: {
+        inspect: async () => ({ status: 'completed', reservationId: 'RESERVATION-RECOVERY-1',
+          outcomeDigest, receiptDigest }),
+        markUnknown: async () => { markUnknownCalls += 1; return digest('must-not-mark') },
+      },
+      lease: { inspect: async () => ({ status: 'active' }),
+        quarantine: async () => { quarantineCalls += 1; return digest('must-not-quarantine') } },
+      artifacts: { recover: async () => verified('artifact') },
+      frozen: { verify: async () => verified('frozen') },
+      resume: { evaluate: async () => ({ allowed: true, next: 'reporting', summaryDigest: digest('resume') }) },
+      now: () => new Date('2026-07-17T02:00:00.000Z'),
+    })
+    await expect(coordinator.recover({ projectIdentityDigest: digest('project'), runId: 'RUN-RECOVERY-1',
+      attemptId: 'ATTEMPT-WRITE-RECOVERY-1' })).resolves.toMatchObject({
+      status: 'recovered', writeState: 'outcome-committed', browserCalls: 0,
+    })
+    expect(markUnknownCalls).toBe(0)
+    expect(quarantineCalls).toBe(0)
+    await fixture.store.close()
+  })
+
+  test.each([
+    'installation',
+    'state',
+    'journal',
+    'resources',
+    'reservation-inspect',
+    'reservation-mark-unknown',
+    'lease-quarantine',
+    'artifacts',
+    'frozen',
+    'resume',
+  ] as const)('%s 外部证明异常时以 fresh context 持久阻断原请求且不调用 Browser', async (failurePoint) => {
+    const fixture = await recoveryFixture()
+    let browserCalls = 0
+    const fail = (point: typeof failurePoint) => {
+      if (point !== failurePoint) return
+      throw new E2EError({
+        code: point === 'artifacts'
+          ? 'E2E_RUNTIME_RECOVERY_STAGED_GENERATION_UNTRUSTED'
+          : `E2E_RUNTIME_RECOVERY_${point.toUpperCase().replaceAll('-', '_')}_PROOF_FAILED`,
+        category: 'safety',
+        message: `${point} proof failed`,
+        retryable: false,
+      })
+    }
+    const coordinator = new RuntimeRecoveryCoordinator({
+      runStore: fixture.store,
+      installation: { verify: async () => { fail('installation'); return verified('installation') } },
+      state: { verify: async () => { fail('state'); return verified('state') } },
+      journal: { verify: async () => { fail('journal'); return verified('journal') } },
+      resources: { cleanupOwned: async () => { fail('resources'); return {
+        status: 'absent', summaryDigest: digest('cleanup'),
+      } } },
+      reservation: {
+        inspect: async () => { fail('reservation-inspect'); return {
+          status: 'reserved', reservationId: 'RESERVATION-RECOVERY-1',
+        } },
+        markUnknown: async () => { fail('reservation-mark-unknown'); return digest('unknown-receipt') },
+      },
+      lease: { inspect: async () => ({ status: 'active' }),
+        quarantine: async () => { fail('lease-quarantine'); return digest('quarantine-receipt') } },
+      artifacts: { recover: async () => { fail('artifacts'); return verified('artifact') } },
+      frozen: { verify: async () => { fail('frozen'); return verified('frozen') } },
+      resume: { evaluate: async () => { fail('resume'); return {
+        allowed: true, next: 'manual-reconcile', summaryDigest: digest('resume'),
+      } } },
+      now: () => new Date('2026-07-17T02:00:00.000Z'),
+    })
+
+    const result = await coordinator.recover({
+      projectIdentityDigest: digest('project'), runId: 'RUN-RECOVERY-1',
+      attemptId: 'ATTEMPT-WRITE-RECOVERY-1',
+    })
+
+    expect(result).toMatchObject({
+      status: 'blocked',
+      reasonCode: failurePoint === 'artifacts'
+        ? 'E2E_RUNTIME_RECOVERY_STAGED_GENERATION_UNTRUSTED'
+        : `E2E_RUNTIME_RECOVERY_${failurePoint.toUpperCase().replaceAll('-', '_')}_PROOF_FAILED`,
+      browserCalls: 0,
+    })
+    expect(browserCalls).toBe(0)
+    await expect(fixture.store.beginRequest('REQUEST-WRITE-RECOVERY', digest('write-request')))
+      .resolves.toMatchObject({ kind: 'replay', response: { ok: false,
+        error: { terminalState: 'safety-blocked' } } })
+    await expect(fixture.store.getRun(digest('project'), 'RUN-RECOVERY-1')).resolves.toMatchObject({
+      workflow: { current: 'safety-blocked' },
+    })
+    await fixture.store.close()
+  })
+
+  test('外部证明异常后若 fresh RunStore context 已不可安全读取则保留异常', async () => {
+    const fixture = await recoveryFixture()
+    const proofError = new E2EError({
+      code: 'E2E_RUNTIME_RECOVERY_INSTALLATION_PROOF_FAILED', category: 'safety',
+      message: 'installation proof failed', retryable: false,
+    })
+    let reads = 0
+    const originalGetRun = fixture.store.getRun.bind(fixture.store)
+    fixture.store.getRun = async (...input) => {
+      reads += 1
+      if (reads > 1) throw new E2EError({
+        code: 'E2E_RUNTIME_JOURNAL_INTEGRITY_FAILED', category: 'safety',
+        message: 'journal cannot be read safely', retryable: false,
+      })
+      return await originalGetRun(...input)
+    }
+    const coordinator = new RuntimeRecoveryCoordinator({
+      runStore: fixture.store,
+      installation: { verify: async () => { throw proofError } },
+      state: { verify: async () => verified('state') }, journal: { verify: async () => verified('journal') },
+      resources: { cleanupOwned: async () => ({ status: 'absent', summaryDigest: digest('cleanup') }) },
+      reservation: { inspect: async () => ({ status: 'absent' }),
+        markUnknown: async () => digest('unknown-receipt') },
+      lease: { inspect: async () => ({ status: 'active' }),
+        quarantine: async () => digest('quarantine-receipt') },
+      artifacts: { recover: async () => verified('artifact') }, frozen: { verify: async () => verified('frozen') },
+      resume: { evaluate: async () => ({ allowed: false, next: 'blocked', summaryDigest: digest('resume') }) },
+      now: () => new Date('2026-07-17T02:00:00.000Z'),
+    })
+
+    await expect(coordinator.recover({ projectIdentityDigest: digest('project'), runId: 'RUN-RECOVERY-1',
+      attemptId: 'ATTEMPT-WRITE-RECOVERY-1' })).rejects.toMatchObject({
+        code: 'E2E_RUNTIME_JOURNAL_INTEGRITY_FAILED',
+      })
     await fixture.store.close()
   })
 })

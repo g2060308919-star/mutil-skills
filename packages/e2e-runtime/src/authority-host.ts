@@ -7,6 +7,8 @@ import {
 } from '@mutil-skills/e2e-authority'
 import {
   ApprovalFinalizationAcknowledgementSchema,
+  ManualResultDraftSchema,
+  ManualResultSchema,
   canonicalizeJson,
   canonicalGrantApprovalSubjectDigest,
   canonicalGrantApprovalType,
@@ -31,6 +33,10 @@ import {
   type ApprovalFreshnessReceipt,
   type AppendAttemptEventInput,
   type AttemptEvent,
+  type ApproverIdentity,
+  type ManualResult,
+  type ManualResultDraft,
+  type ManualResultVerification,
 } from '@mutil-skills/e2e-contracts'
 import type { CompleteGenerationAuthority } from '@mutil-skills/e2e-engine'
 import { constants } from 'node:fs'
@@ -57,7 +63,9 @@ const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 type RuntimeAuthorityProcess = Pick<AuthorityExecutionRpcProcessHandle,
   'enrollIdentity' | 'openApprovalSession' | 'waitForSession' | 'close'> &
   Partial<Pick<AuthorityExecutionRpcProcessHandle,
-    'finalizeApproval' | 'finalizeDecision' | 'recoverApproval' | 'activateGrant' | 'acknowledgeFinalization'
+    'finalizeApproval' | 'finalizeDecision' | 'recoverApproval' | 'activateGrant' | 'activateRecoveryGrant'
+    | 'acknowledgeFinalization'
+    | 'prepareManualResult' | 'finalizeManualResultRole' | 'recoverManualResultRole'
     | 'endpoint' | 'credential' | 'verifierMaterial'>>
 
 export interface RuntimeAuthoritySession {
@@ -77,6 +85,12 @@ export interface RuntimeAuthoritySession {
     decisionId: string
     decisionSubject: DecisionSubject
   }): Promise<DecisionReceipt>
+  finalizeManualResultRole?(): Promise<{
+    status: 'awaiting-reviewer'
+    manualResultId: string
+    draftDigest: string
+    nextRole: 'reviewer'
+  } | { status: 'issued'; result: ManualResult }>
 }
 
 export class RuntimeAuthorityHost {
@@ -133,6 +147,80 @@ export class RuntimeAuthorityHost {
     }, input.approvalType)
   }
 
+  async prepareManualResult(input: {
+    draft: ManualResultDraft
+    finalizationId: string
+    requestDigest: string
+  }): Promise<{
+    manualResultId: string
+    draftDigest: string
+    nextRole: 'executor'
+  }> {
+    this.#requireOpen()
+    if (!this.#process.prepareManualResult) throw authorityHostError('E2E_MANUAL_RESULT_AUTHORITY_NOT_READY')
+    const parsed = ManualResultDraftSchema.safeParse(input.draft)
+    if (!parsed.success || parsed.data.runtimeInstallationDigest !== this.#installationDigest
+      || parsed.data.runId !== parsed.data.generationId || !SAFE_ID.test(input.finalizationId)
+      || !DIGEST.test(input.requestDigest)) {
+      throw authorityHostError('E2E_MANUAL_RESULT_BINDING_INVALID')
+    }
+    const expected = {
+      manualResultId: parsed.data.manualResultId,
+      draftDigest: digestText('manual-result-draft/v1', canonicalizeJson(parsed.data)),
+      nextRole: 'executor' as const,
+    }
+    try {
+      const prepared = await this.#process.prepareManualResult({ draft: parsed.data,
+        finalizationId: input.finalizationId, requestDigest: input.requestDigest })
+      if (canonicalizeJson(prepared) !== canonicalizeJson(expected)) {
+        throw authorityHostError('E2E_MANUAL_RESULT_BINDING_INVALID')
+      }
+      return expected
+    } catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
+  }
+
+  async requestManualResultRole(input: {
+    runId: string
+    manualResultId: string
+    draftDigest: string
+    role: 'executor' | 'reviewer'
+    installationDigest: string
+    finalizationId: string
+    requestDigest: string
+  }): Promise<RuntimeAuthoritySession> {
+    this.#requireOpen()
+    if (!this.#process.finalizeManualResultRole
+      || input.installationDigest !== this.#installationDigest
+      || !SAFE_ID.test(input.runId) || !SAFE_ID.test(input.manualResultId)
+      || !DIGEST.test(input.draftDigest) || !SAFE_ID.test(input.finalizationId)
+      || !DIGEST.test(input.requestDigest)) {
+      throw authorityHostError('E2E_MANUAL_RESULT_BINDING_INVALID')
+    }
+    const approvalType = input.role === 'executor' ? 'manual-executor' : 'manual-reviewer'
+    const reference = await this.#process.openApprovalSession({
+      runId: input.runId, approvalType, subjectDigest: input.draftDigest,
+      installationDigest: input.installationDigest,
+    })
+    return this.#session(reference, undefined, undefined, approvalType, {
+      manualResultId: input.manualResultId, draftDigest: input.draftDigest, role: input.role,
+      finalizationId: input.finalizationId, requestDigest: input.requestDigest,
+    })
+  }
+
+  async recoverManualResultRole(input: {
+    manualResultId: string; draftDigest: string; role: 'executor' | 'reviewer'
+    finalizationId: string; requestDigest: string; installationDigest: string
+  }) {
+    this.#requireOpen()
+    if (!this.#process.recoverManualResultRole || input.installationDigest !== this.#installationDigest
+      || !SAFE_ID.test(input.manualResultId) || !DIGEST.test(input.draftDigest)
+      || !SAFE_ID.test(input.finalizationId) || !DIGEST.test(input.requestDigest)) {
+      throw authorityHostError('E2E_MANUAL_RESULT_BINDING_INVALID')
+    }
+    try { return await this.#process.recoverManualResultRole(input) }
+    catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
+  }
+
   async recoverApproval(input: {
     finalizationId: string
     requestDigest: string
@@ -171,6 +259,19 @@ export class RuntimeAuthorityHost {
     catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
   }
 
+  async activateRecoveryGrant(input: {
+    grant: SignedGrant
+    approvalBinding: ApprovalExecutionBinding
+  }): Promise<void> {
+    this.#requireOpen()
+    if (!this.#process.activateRecoveryGrant) throw authorityHostError('E2E_APPROVAL_ACTIVATE_UNAVAILABLE')
+    if (input.approvalBinding.installationDigest !== this.#installationDigest) {
+      throw authorityHostError('E2E_APPROVAL_SESSION_BINDING_MISMATCH')
+    }
+    try { await this.#process.activateRecoveryGrant(input) }
+    catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
+  }
+
   async acknowledgeFinalization(input: ApprovalFinalizationAcknowledgement): Promise<void> {
     this.#requireOpen()
     const parsed = ApprovalFinalizationAcknowledgementSchema.safeParse(input)
@@ -206,6 +307,8 @@ export class RuntimeAuthorityHost {
     expectedBinding?: ApprovalExecutionBinding,
     finalization?: { finalizationId: string; requestDigest: string },
     approvalType?: WebAuthnApprovalType,
+    manualFinalization?: { manualResultId: string; draftDigest: string; role: 'executor' | 'reviewer';
+      finalizationId: string; requestDigest: string },
   ): RuntimeAuthoritySession {
     let url: URL
     try { url = new URL(reference.url) } catch {
@@ -249,6 +352,34 @@ export class RuntimeAuthorityHost {
           } catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
         },
       }),
+      ...(manualFinalization === undefined ? {} : {
+        finalizeManualResultRole: async () => {
+          if (!this.#process.finalizeManualResultRole) {
+            throw authorityHostError('E2E_MANUAL_RESULT_AUTHORITY_NOT_READY')
+          }
+          try {
+            const finalized = await this.#process.finalizeManualResultRole({
+              ...manualFinalization, approvalSessionRef: reference.sessionId,
+            })
+            if (manualFinalization.role === 'executor') {
+              if (finalized.status !== 'awaiting-reviewer'
+                || finalized.manualResultId !== manualFinalization.manualResultId
+                || finalized.draftDigest !== manualFinalization.draftDigest
+                || finalized.nextRole !== 'reviewer') {
+                throw authorityHostError('E2E_MANUAL_RESULT_BINDING_INVALID')
+              }
+              return finalized
+            }
+            if (finalized.status !== 'issued') throw authorityHostError('E2E_MANUAL_RESULT_BINDING_INVALID')
+            const result = ManualResultSchema.safeParse(finalized.result)
+            if (!result.success || result.data.manualResultId !== manualFinalization.manualResultId
+              || manualResultDraftDigest(result.data) !== manualFinalization.draftDigest) {
+              throw authorityHostError('E2E_MANUAL_RESULT_BINDING_INVALID')
+            }
+            return { status: 'issued' as const, result: result.data }
+          } catch (error) { throw authorityHostError(safeAuthorityErrorCode(error)) }
+        },
+      }),
     })
   }
 
@@ -262,6 +393,7 @@ export async function startRuntimeAuthorityHost(options: {
   installation: RuntimeInstallation
   subject: string
   approvalSessionTtlMs?: number
+  manualIdentities?: ApproverIdentity[]
 }): Promise<RuntimeAuthorityHost> {
   if (!SAFE_ID.test(options.subject)) throw authorityHostError('E2E_APPROVAL_ENROLLMENT_INPUT_INVALID')
   const layout = runtimeLayout(options.homeDir)
@@ -288,9 +420,7 @@ export async function startRuntimeAuthorityHost(options: {
           expectedStateDirectory: prepared.identity,
           testWorkspaceRoots: [options.installation.versionRoot],
           approvalIdentities: [{ subject: options.subject, roles: ['e2e-approver'] }],
-          manualIdentities: [{ subject: options.subject, roles: [
-            'scope-approver', 'lineage-approver', 'privacy-approver',
-          ] }],
+          manualIdentities: mergeManualIdentities(options.subject, options.manualIdentities),
         },
         lease: {
           statePath: 'lease.sqlite',
@@ -358,6 +488,7 @@ export interface RuntimeArtifactStoreAuthority extends CompleteGenerationAuthori
     context: { assetId: string; generationId: string; prdRevision: string; runId: string; caseId: string }
     event: AppendAttemptEventInput
   }): { event: AttemptEvent; eventChainDigest: string }
+  verifyManualResult(result: ManualResult): ManualResultVerification
   close(): Promise<void>
 }
 
@@ -370,6 +501,7 @@ export async function openRuntimeArtifactStoreAuthority(options: {
   homeDir: string
   installation: RuntimeInstallation
   subject: string
+  manualIdentities?: ApproverIdentity[]
 }): Promise<RuntimeArtifactStoreAuthority> {
   if (!SAFE_ID.test(options.subject)) throw authorityHostError('E2E_APPROVAL_ENROLLMENT_INPUT_INVALID')
   const layout = runtimeLayout(options.homeDir)
@@ -390,9 +522,7 @@ export async function openRuntimeArtifactStoreAuthority(options: {
       expectedStateDirectory: prepared.identity,
       testWorkspaceRoots: [options.installation.versionRoot],
       approvalIdentities: [{ subject: options.subject, roles: ['e2e-approver'] }],
-      manualIdentities: [{ subject: options.subject, roles: [
-        'scope-approver', 'lineage-approver', 'privacy-approver',
-      ] }],
+      manualIdentities: mergeManualIdentities(options.subject, options.manualIdentities),
     })
   } catch (error) {
     setupError = error
@@ -452,6 +582,9 @@ export async function openRuntimeArtifactStoreAuthority(options: {
       if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
       return authority.appendAttemptEvent(input)
     },
+    verifyManualResult: (result) => closed
+      ? { valid: false, code: 'E2E_MANUAL_RESULT_AUTHORITY_CLOSED', impact: 'safety-blocked' }
+      : authority.verifyManualResult(result),
     async close() {
       if (closed) return
       closed = true
@@ -825,6 +958,41 @@ function normalizePlatformPathAlias(path: string): string {
     if (path === alias || path.startsWith(`${alias}/`)) return `/private${path}`
   }
   return path
+}
+
+function manualResultDraftDigest(result: ManualResult): string {
+  const { authorityProof: _authorityProof, ...draft } = result
+  return digestText('manual-result-draft/v1', canonicalizeJson(draft))
+}
+
+function mergeManualIdentities(
+  subject: string,
+  configured: ApproverIdentity[] | undefined,
+): ApproverIdentity[] {
+  const identities = new Map<string, Set<string>>([
+    [subject, new Set(['scope-approver', 'lineage-approver', 'privacy-approver'])],
+  ])
+  for (const identity of configured ?? []) {
+    if (!SAFE_ID.test(identity.subject) || identity.roles.length === 0
+      || identity.roles.some((role) => !SAFE_ID.test(role))) {
+      throw authorityHostError('E2E_MANUAL_IDENTITY_REGISTRY_INVALID')
+    }
+    const roles = identities.get(identity.subject) ?? new Set<string>()
+    for (const role of identity.roles) roles.add(role)
+    identities.set(identity.subject, roles)
+  }
+  if (configured !== undefined) {
+    const executors = [...identities].filter(([, roles]) => roles.has('e2e-manual-executor'))
+    const reviewers = [...identities].filter(([, roles]) => roles.has('e2e-manual-reviewer'))
+    if (executors.length === 0 || reviewers.length === 0
+      || [...identities.values()].some((roles) => roles.has('e2e-manual-executor')
+        && roles.has('e2e-manual-reviewer'))) {
+      throw authorityHostError('E2E_MANUAL_IDENTITY_REGISTRY_INVALID')
+    }
+  }
+  return [...identities].sort(([left], [right]) => left.localeCompare(right)).map(([identitySubject, roles]) => ({
+    subject: identitySubject, roles: [...roles].sort(),
+  }))
 }
 
 function authorityHostError(code: string): E2EError {

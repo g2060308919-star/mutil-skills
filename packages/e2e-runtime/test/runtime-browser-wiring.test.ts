@@ -1,11 +1,32 @@
 import { describe, expect, test, vi } from 'vitest'
 import {
   consumeRpcConnectionCredential,
+  createRuntimeFixedHttpWriteEvidence,
   settleRuntimeBrowserResourcesThenRecordProof,
   settleRuntimeBrowserResources,
 } from '../src/runtime-browser-wiring.js'
 
 describe('Runtime browser production wiring cleanup', () => {
+  test('固定 HTTP write 从真实 transport observation 生成可隔离的确定性证据', () => {
+    const result = createRuntimeFixedHttpWriteEvidence({
+      actionId: 'ACTION-WRITE-1',
+      observations: [
+        { status: 201, bodyDigest: `sha256:${'1'.repeat(64)}` },
+        { status: 200, bodyDigest: `sha256:${'2'.repeat(64)}` },
+        { status: 204, bodyDigest: `sha256:${'3'.repeat(64)}` },
+        { status: 404, bodyDigest: `sha256:${'4'.repeat(64)}` },
+      ],
+      matches: [true, true, true, true], cleanupStatus: 'verified-clean',
+      screenshot: Uint8Array.from([137, 80, 78, 71]),
+    })
+
+    expect(result.evidenceId).toBe('EVIDENCE-ACTION-WRITE-1')
+    expect(JSON.parse(Buffer.from(result.evidence.dom).toString('utf8'))).toMatchObject({
+      format: 'dom-tree/1', roots: [{ tag: 'main', assertionRelevant: true }],
+    })
+    expect(Buffer.from(result.evidence.dom).toString('utf8')).not.toContain('SECRET-CANARY')
+    expect(result.evidence.screenshot).toEqual(Uint8Array.from([137, 80, 78, 71]))
+  })
   test('并行尝试全部清理并在主操作同时失败时保留聚合 cause', async () => {
     const calls: string[] = []
     const primary = new Error('primary execution failure')

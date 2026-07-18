@@ -115,6 +115,16 @@ async function handleParentRequest(operation: string, payload: unknown): Promise
 async function registerRules(server: Mockttp, rules: ProjectedGatewayRule[]): Promise<void> {
   await server.on('response', (response) => { inFlightRequests.delete(response.id) })
   await server.on('abort', (request) => { inFlightRequests.delete(request.id) })
+  await server.on<{ downstreamAborted?: boolean }>('rule-event', (event) => {
+    if (event.eventType !== 'passthrough-abort') return
+    inFlightRequests.delete(event.requestId)
+    void callParent('transport-unknown', {
+      requestId: event.requestId,
+      observation: event.eventData.downstreamAborted === true
+        ? 'gateway-downstream-aborted-during-write'
+        : 'gateway-upstream-transport-unknown',
+    }).catch(() => { void shutdown('E2E_GATEWAY_PARENT_DISCONNECTED') })
+  })
   for (const rule of rules) {
     remainingUses.set(rule.ruleId, rule.maxUses)
     if (rule.channel === 'websocket') {
@@ -180,14 +190,17 @@ async function ruleMatches(request: CompletedRequest, rule: ProjectedGatewayRule
   if (!accepting) return false
   inFlightRequests.add(request.id)
   if (rule.channel !== 'websocket' && isSseRequest(request)) return false
-  const proxyAuthorization = request.headers['proxy-authorization']
-  const token = rule.channel === 'websocket' ? proxyAuthorization : request.headers['x-mutil-e2e-action-token']
-  const actionId = rule.channel === 'websocket' ? rule.actionId : request.headers['x-mutil-e2e-action-id']
-  const capabilityId = rule.channel === 'websocket' ? rule.capabilityId : request.headers['x-mutil-e2e-capability-id']
-  const expectedToken = rule.channel === 'websocket' ? `Mutil ${rule.actionToken}` : rule.actionToken
+  const token = request.headers['x-mutil-e2e-action-token']
+  const actionId = request.headers['x-mutil-e2e-action-id']
+  const capabilityId = request.headers['x-mutil-e2e-capability-id']
+  const contentType = singleHeader(request.headers['content-type'])
+  const expectedToken = rule.actionToken
+  const observedUrl = rule.channel === 'websocket'
+    ? normalizeWebSocketProxyUrl(request.url, rule.url)
+    : request.url
   if (typeof token !== 'string' || token !== expectedToken || actionId !== rule.actionId
     || capabilityId !== rule.capabilityId || request.method.toUpperCase() !== rule.method
-    || request.url !== rule.url || !projectedBodyMatches({
+    || observedUrl !== rule.url || !projectedBodyMatches({
       headers: request.headers,
       ...(rule.bodyBase64Url === undefined
         ? { expectedBodyDigest: rule.bodyDigest }
@@ -203,11 +216,23 @@ async function ruleMatches(request: CompletedRequest, rule: ProjectedGatewayRule
     requestId: request.id,
     channel: rule.channel,
     method: request.method,
-    url: request.url,
+    url: observedUrl,
     bodyBase64Url: request.body.buffer.toString('base64url'),
-    contentType: singleHeader(request.headers['content-type']),
+    ...(contentType === undefined ? {} : { contentType }),
   })
   return isRecord(result) && result.allowed === true
+}
+
+function normalizeWebSocketProxyUrl(observed: string, approved: string): string {
+  try {
+    const candidate = new URL(observed)
+    const expected = new URL(approved)
+    if (expected.protocol === 'ws:' && candidate.protocol === 'http:') candidate.protocol = 'ws:'
+    else if (expected.protocol === 'wss:' && candidate.protocol === 'https:') candidate.protocol = 'wss:'
+    return candidate.href
+  } catch {
+    return observed
+  }
 }
 
 function isSseRequest(request: Pick<CompletedRequest, 'headers' | 'method'>): boolean {
@@ -226,11 +251,13 @@ async function waitForDrain(): Promise<void> {
 }
 
 function snapshotRequest(request: CompletedRequest): Record<string, unknown> {
+  const actionId = singleHeader(request.headers['x-mutil-e2e-action-id'])
+  const capabilityId = singleHeader(request.headers['x-mutil-e2e-capability-id'])
   return {
     method: request.method,
     url: request.url,
-    actionId: singleHeader(request.headers['x-mutil-e2e-action-id']),
-    capabilityId: singleHeader(request.headers['x-mutil-e2e-capability-id']),
+    ...(actionId === undefined ? {} : { actionId }),
+    ...(capabilityId === undefined ? {} : { capabilityId }),
   }
 }
 

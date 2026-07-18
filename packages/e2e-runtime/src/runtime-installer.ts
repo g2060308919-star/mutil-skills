@@ -34,6 +34,8 @@ import {
   type RuntimeCurrentPointer,
   type VerifiedRuntimeVersion,
 } from './runtime-manifest.js'
+import { beginRuntimeInstallTransaction } from './runtime-install-recovery.js'
+export { recoverRuntimeInstallTransaction } from './runtime-install-recovery.js'
 
 export interface RuntimeClosureInstallInput {
   stagingPrefix: string
@@ -146,13 +148,15 @@ export async function installRuntimeWithOperations(
   assertExactRuntimeVersion(options.version)
   const layout = runtimeLayout(options.homeDir)
   await prepareOwnedRuntimeRoot(layout)
-  return withRuntimeInstallLock(layout, async () => {
+  const transaction = await beginRuntimeInstallTransaction(layout, options.version)
+  return (async () => {
     await verifyRuntimeRoot(layout)
     await ensurePrivateDirectory(layout.versions)
     await ensurePrivateDirectory(layout.browsers)
-    const stagingPrefix = join(layout.root, `.staging-${randomUUID()}`)
+    const stagingPrefix = transaction.stagingPrefix
     await mkdir(stagingPrefix, { mode: 0o700 })
     await chmod(stagingPrefix, 0o700)
+    await transaction.markStaging()
     const stagingRealpath = await realpath(stagingPrefix)
     const stagingIdentity = await lstat(stagingPrefix)
     const target = join(layout.versions, options.version)
@@ -183,6 +187,7 @@ export async function installRuntimeWithOperations(
       })
       await chmod(manifestPath, 0o600)
       await fsyncTree(stagingPrefix)
+      await transaction.markPreparedClosure(manifest.installationDigest)
 
       createdTarget = await placeVersionDirectory(stagingPrefix, target)
       if (createdTarget) await operations.fsyncVersions(layout.versions)
@@ -190,6 +195,7 @@ export async function installRuntimeWithOperations(
       if (verified.manifest.installationDigest !== manifest.installationDigest) {
         runtimeError('E2E_RUNTIME_VERSION_CONFLICT', '相同版本已存在但 installation digest 不同')
       }
+      await transaction.markPublished()
       await activateRuntimeFiles(layout, verified, operations)
       activated = true
       return {
@@ -207,8 +213,9 @@ export async function installRuntimeWithOperations(
       throw error
     } finally {
       await rm(stagingPrefix, { recursive: true, force: true })
+      await transaction.release()
     }
-  })
+  })()
 }
 
 export const runtimeInstallerOperations: RuntimeInstallerOperations = Object.freeze({

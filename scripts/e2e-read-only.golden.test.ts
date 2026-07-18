@@ -148,6 +148,21 @@ describe('PRD-driven read-only golden path', () => {
       approvalIdentities: [{ subject: 'os-user:golden', roles: ['e2e-approver'] }],
       authenticateApproverSession: (sessionRef, expected) => sessionRef === 'golden-session'
         ? createGoldenApprovalReceipt('os-user:golden', 'RUN-READ-1', expected) : undefined,
+      authenticateManualApproverSession: (sessionRef, expected) => {
+        const subject = sessionRef.startsWith('GOLDEN-MANUAL-EXECUTOR-')
+          ? 'os-user:manual-executor'
+          : sessionRef.startsWith('GOLDEN-MANUAL-REVIEWER-')
+            ? 'os-user:manual-reviewer'
+            : undefined
+        if (subject === undefined) return undefined
+        return {
+          subject, ...expected,
+          origin: subject.endsWith('executor') ? 'http://localhost:31001' : 'http://localhost:31002',
+          issuedAt: subject.endsWith('executor')
+            ? '2026-07-11T09:59:10.000Z' : '2026-07-11T09:59:20.000Z',
+          expiresAt: '2026-07-11T10:04:00.000Z',
+        }
+      },
       manualIdentities: [
         { subject: 'os-user:privacy-golden', roles: ['privacy-approver'] },
         { subject: 'os-user:scope-golden', roles: ['scope-approver'] },
@@ -190,9 +205,12 @@ describe('PRD-driven read-only golden path', () => {
       })),
     } : baseUniverse
     const manualResultDraft = mixedDispositions ? {
-      schemaVersion: '1.0.0', manualResultId: 'MANUAL-RESULT-ORDER-A11Y', assetId: 'PRODUCT-PRD-1',
+      schemaVersion: '1.0.0', manualResultId: 'MANUAL-RESULT-ORDER-A11Y', runId: 'RUN-READ-1',
+      assetId: 'PRODUCT-PRD-1',
       prdRevision: modelDigest, generationId: 'GENERATION-1',
+      runtimeInstallationDigest: digestText('golden-fact/v1', 'golden-runtime-installation'),
       manualProcedureId: 'MANUAL-PROCEDURE-ORDER-A11Y', obligationIds: [manualObligationId],
+      caseIds: ['CASE-READ-1'],
       executor: { subject: 'os-user:manual-executor', roles: ['e2e-manual-executor'] },
       reviewer: { subject: 'os-user:manual-reviewer', roles: ['e2e-manual-reviewer'] },
       startedAt: '2026-07-11T09:58:00.000Z', finishedAt: '2026-07-11T09:59:00.000Z', outcome: 'passed',

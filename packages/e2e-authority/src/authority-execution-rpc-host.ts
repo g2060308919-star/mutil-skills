@@ -8,12 +8,16 @@ import {
   ApprovalGrantSubjectSchema,
   DecisionReceiptSchema,
   DecisionSubjectSchema,
+  ManualResultDraftSchema,
+  ManualResultSchema,
   SignedGrantSchema,
   type ApproverIdentity,
   type ApprovalFinalizationAcknowledgement,
   type ApprovalGrantSubject,
   type DecisionReceipt,
   type DecisionSubject,
+  type ManualResult,
+  type ManualResultDraft,
   type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
 import {
@@ -108,7 +112,35 @@ export interface AuthorityExecutionRpcProcessHandle extends AuthenticatedRpcHttp
     grant: SignedGrant
     approvalBinding: ApprovalExecutionBinding
   }): Promise<void>
+  activateRecoveryGrant(input: {
+    grant: SignedGrant
+    approvalBinding: ApprovalExecutionBinding
+  }): Promise<void>
   acknowledgeFinalization(input: ApprovalFinalizationAcknowledgement): Promise<void>
+  prepareManualResult(input: { draft: ManualResultDraft; finalizationId: string; requestDigest: string }): Promise<{
+    manualResultId: string
+    draftDigest: string
+    nextRole: 'executor'
+  }>
+  finalizeManualResultRole(input: {
+    manualResultId: string
+    draftDigest: string
+    role: 'executor' | 'reviewer'
+    approvalSessionRef: string
+    finalizationId: string
+    requestDigest: string
+  }): Promise<{
+    status: 'awaiting-reviewer'
+    manualResultId: string
+    draftDigest: string
+    nextRole: 'reviewer'
+  } | { status: 'issued'; result: ManualResult }>
+  recoverManualResultRole(input: {
+    manualResultId: string; draftDigest: string; role: 'executor' | 'reviewer'
+    finalizationId: string; requestDigest: string
+  }): Promise<{
+    status: 'awaiting-reviewer'; manualResultId: string; draftDigest: string; nextRole: 'reviewer'
+  } | { status: 'issued'; result: ManualResult } | undefined>
 }
 
 export async function startAuthorityExecutionRpcHostProcess(
@@ -313,10 +345,33 @@ export async function startAuthorityExecutionRpcHostProcess(
         if (terminalError !== undefined) throw terminalError
         await callActivateControl(child, input, terminalSignal)
       },
+      async activateRecoveryGrant(input) {
+        if (closed) throw hostError('E2E_RPC_HOST_CLOSED')
+        if (terminalError !== undefined) throw terminalError
+        await callActivateRecoveryControl(child, input, terminalSignal)
+      },
       async acknowledgeFinalization(input) {
         if (closed) throw hostError('E2E_RPC_HOST_CLOSED')
         if (terminalError !== undefined) throw terminalError
         await callAcknowledgeControl(child, input, terminalSignal)
+      },
+      async prepareManualResult(input) {
+        if (closed) throw hostError('E2E_RPC_HOST_CLOSED')
+        if (terminalError !== undefined) throw terminalError
+        return await callPrepareManualResultControl(child, input, terminalSignal)
+      },
+      async finalizeManualResultRole(input) {
+        if (closed) throw hostError('E2E_RPC_HOST_CLOSED')
+        if (terminalError !== undefined) throw terminalError
+        const result = await callFinalizeManualResultRoleControl(child, input, terminalSignal)
+        approvalSessions.delete(input.approvalSessionRef)
+        completedApprovalSessions.delete(input.approvalSessionRef)
+        return result
+      },
+      async recoverManualResultRole(input) {
+        if (closed) throw hostError('E2E_RPC_HOST_CLOSED')
+        if (terminalError !== undefined) throw terminalError
+        return await callRecoverManualResultRoleControl(child, input, terminalSignal)
       },
       async waitForSession(sessionId) {
         if (terminalError !== undefined) throw terminalError
@@ -700,6 +755,116 @@ function callDecisionControl(
   })
 }
 
+function callPrepareManualResultControl(
+  child: ChildProcess,
+  input: { draft: ManualResultDraft; finalizationId: string; requestDigest: string },
+  terminalSignal: Promise<never>,
+): Promise<{ manualResultId: string; draftDigest: string; nextRole: 'executor' }> {
+  const draft = ManualResultDraftSchema.parse(input.draft)
+  if (!SAFE_ID.test(input.finalizationId) || !/^sha256:[a-f0-9]{64}$/.test(input.requestDigest)) {
+    throw hostError('E2E_MANUAL_RESULT_PREPARE_INPUT_INVALID')
+  }
+  return callChildControl(child, 'prepare-manual-result', { draft,
+    finalizationId: input.finalizationId, requestDigest: input.requestDigest },
+    'manual-result-prepared', terminalSignal, (message) => {
+      if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
+        || !isObject(message.result)
+        || Object.keys(message.result).sort().join('\0')
+          !== ['draftDigest', 'manualResultId', 'nextRole'].join('\0')
+        || typeof message.result.manualResultId !== 'string' || !SAFE_ID.test(message.result.manualResultId)
+        || typeof message.result.draftDigest !== 'string'
+        || !/^sha256:[a-f0-9]{64}$/.test(message.result.draftDigest)
+        || message.result.nextRole !== 'executor') {
+        throw hostError('E2E_MANUAL_RESULT_PREPARE_RESULT_INVALID')
+      }
+      return structuredClone(message.result) as {
+        manualResultId: string; draftDigest: string; nextRole: 'executor'
+      }
+    })
+}
+
+function callFinalizeManualResultRoleControl(
+  child: ChildProcess,
+  input: {
+    manualResultId: string
+    draftDigest: string
+    role: 'executor' | 'reviewer'
+    approvalSessionRef: string
+    finalizationId: string
+    requestDigest: string
+  },
+  terminalSignal: Promise<never>,
+): Promise<{
+  status: 'awaiting-reviewer'
+  manualResultId: string
+  draftDigest: string
+  nextRole: 'reviewer'
+} | { status: 'issued'; result: ManualResult }> {
+  if (!SAFE_ID.test(input.manualResultId) || !SAFE_ID.test(input.approvalSessionRef)
+    || !SAFE_ID.test(input.finalizationId) || !/^sha256:[a-f0-9]{64}$/.test(input.requestDigest)
+    || !/^sha256:[a-f0-9]{64}$/.test(input.draftDigest)
+    || (input.role !== 'executor' && input.role !== 'reviewer')) {
+    throw hostError('E2E_MANUAL_RESULT_FINALIZATION_INVALID')
+  }
+  return callChildControl(child, 'finalize-manual-result-role', input,
+    'manual-result-role-finalized', terminalSignal, (message) => {
+      if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
+        || !isObject(message.result)) throw hostError('E2E_MANUAL_RESULT_FINALIZATION_RESULT_INVALID')
+      if (message.result.status === 'issued') {
+        if (Object.keys(message.result).sort().join('\0') !== ['result', 'status'].join('\0')) {
+          throw hostError('E2E_MANUAL_RESULT_FINALIZATION_RESULT_INVALID')
+        }
+        const result = ManualResultSchema.safeParse(message.result.result)
+        if (!result.success) throw hostError('E2E_MANUAL_RESULT_FINALIZATION_RESULT_INVALID')
+        return { status: 'issued' as const, result: result.data }
+      }
+      if (Object.keys(message.result).sort().join('\0')
+          !== ['draftDigest', 'manualResultId', 'nextRole', 'status'].join('\0')
+        || message.result.status !== 'awaiting-reviewer' || message.result.nextRole !== 'reviewer'
+        || typeof message.result.manualResultId !== 'string' || !SAFE_ID.test(message.result.manualResultId)
+        || typeof message.result.draftDigest !== 'string'
+        || !/^sha256:[a-f0-9]{64}$/.test(message.result.draftDigest)) {
+        throw hostError('E2E_MANUAL_RESULT_FINALIZATION_RESULT_INVALID')
+      }
+      return structuredClone(message.result) as {
+        status: 'awaiting-reviewer'; manualResultId: string; draftDigest: string; nextRole: 'reviewer'
+      }
+    })
+}
+
+function callRecoverManualResultRoleControl(
+  child: ChildProcess,
+  input: { manualResultId: string; draftDigest: string; role: 'executor' | 'reviewer';
+    finalizationId: string; requestDigest: string },
+  terminalSignal: Promise<never>,
+) {
+  if (!SAFE_ID.test(input.manualResultId) || !SAFE_ID.test(input.finalizationId)
+    || !/^sha256:[a-f0-9]{64}$/.test(input.draftDigest)
+    || !/^sha256:[a-f0-9]{64}$/.test(input.requestDigest)
+    || (input.role !== 'executor' && input.role !== 'reviewer')) {
+    throw hostError('E2E_MANUAL_RESULT_FINALIZATION_INVALID')
+  }
+  return callChildControl(child, 'recover-manual-result-role', input,
+    'manual-result-role-recovered', terminalSignal, (message) => {
+      if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')) {
+        throw hostError('E2E_MANUAL_RESULT_FINALIZATION_RESULT_INVALID')
+      }
+      if (message.result === null) return undefined
+      if (!isObject(message.result)) throw hostError('E2E_MANUAL_RESULT_FINALIZATION_RESULT_INVALID')
+      if (message.result.status === 'issued') {
+        const result = ManualResultSchema.safeParse(message.result.result)
+        if (!result.success) throw hostError('E2E_MANUAL_RESULT_FINALIZATION_RESULT_INVALID')
+        return { status: 'issued' as const, result: result.data }
+      }
+      if (message.result.status !== 'awaiting-reviewer' || message.result.nextRole !== 'reviewer'
+        || typeof message.result.manualResultId !== 'string' || typeof message.result.draftDigest !== 'string') {
+        throw hostError('E2E_MANUAL_RESULT_FINALIZATION_RESULT_INVALID')
+      }
+      return structuredClone(message.result) as { status: 'awaiting-reviewer'; manualResultId: string;
+        draftDigest: string; nextRole: 'reviewer' }
+    })
+}
+
 function callRecoverControl(
   child: ChildProcess,
   input: {
@@ -757,6 +922,24 @@ function callActivateControl(
     grant: parsedGrant.data,
     approvalBinding: parseApprovalExecutionBinding(input.approvalBinding),
   }, 'grant-activated', terminalSignal, (message) => {
+    if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
+      || !isObject(message.result)
+      || Object.keys(message.result).join('\0') !== 'activated'
+      || message.result.activated !== true) throw hostError('E2E_APPROVAL_ACTIVATE_RESULT_INVALID')
+  })
+}
+
+function callActivateRecoveryControl(
+  child: ChildProcess,
+  input: { grant: SignedGrant; approvalBinding: ApprovalExecutionBinding },
+  terminalSignal: Promise<never>,
+): Promise<void> {
+  const parsedGrant = SignedGrantSchema.safeParse(input.grant)
+  if (!parsedGrant.success) throw hostError('E2E_APPROVAL_GRANT_INVALID')
+  return callChildControl(child, 'activate-recovery-grant', {
+    grant: parsedGrant.data,
+    approvalBinding: parseApprovalExecutionBinding(input.approvalBinding),
+  }, 'recovery-grant-activated', terminalSignal, (message) => {
     if (Object.keys(message).sort().join('\0') !== ['requestId', 'result', 'type'].join('\0')
       || !isObject(message.result)
       || Object.keys(message.result).join('\0') !== 'activated'

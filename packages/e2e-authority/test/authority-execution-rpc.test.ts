@@ -36,6 +36,7 @@ test('maintenance RPC 严格绑定 reservation/lease 并返回认证响应覆盖
   const otherCredential = rpc.registerClient('other-runner', Buffer.alloc(32, 8), { approvalContext })
   const cleanupDigest = digestText('cleanup/v1', 'verified')
   const receiptDigest = digestText('receipt/v1', 'released')
+  let leaseReads = 0
   registerAuthorityExecutionRpcOperations(rpc, {
     writeAuthority: { async verifyForSubject() { return { allowed: true } } },
     reservationAuthority: { getGrantApprovalContext() { return approvalContext }, findReservation(query) { return {
@@ -47,7 +48,7 @@ test('maintenance RPC 严格绑定 reservation/lease 并返回认证响应覆盖
     async markUnknown() { return digestText('receipt/v1', 'unknown') } },
     leaseAuthority: {
       async verifyTarget() { return true },
-      async getLeaseForTarget(leaseId, fencingToken, targetFingerprint) { return {
+      async getLeaseForTarget(leaseId, fencingToken, targetFingerprint) { leaseReads += 1; return {
         leaseId, runId: leaseId === 'LEASE-OTHER-RUN' ? 'RUN-2' : 'RUN-1',
         resourceKey: 'order:100', resourceFingerprint: targetFingerprint,
         exclusive: true, status: 'released', fencingToken, acquiredAt: NOW.toISOString(),
@@ -90,6 +91,37 @@ test('maintenance RPC 严格绑定 reservation/lease 并返回认证响应覆盖
   await expect(otherClient.queryReservation({ reservationId: 'RESERVATION-1', grantId: 'GRANT-1',
     capabilityId: 'CAP-1', actionId: 'ACTION-1' }))
     .rejects.toMatchObject({ code: 'E2E_RPC_RESERVATION_CONTEXT_MISMATCH' })
+
+  rpc.updateClientRegistration('runner-process', { approvalContext, recoveryOnly: true })
+  await expect(client.queryReservation({ reservationId: 'RESERVATION-1', grantId: 'GRANT-1',
+    capabilityId: 'CAP-1', actionId: 'ACTION-1' })).resolves.toMatchObject({ status: 'completed' })
+  await expect(client.completeReservation({ reservationId: 'RESERVATION-1', grantId: 'GRANT-1',
+    capabilityId: 'CAP-1', actionId: 'ACTION-1' }, digest))
+    .rejects.toMatchObject({ code: 'E2E_RPC_RECOVERY_OPERATION_DENIED' })
+  await expect(client.releaseLease({ leaseId: 'LEASE-1', fencingToken: 1,
+    targetFingerprint: digest, cleanupDigest }))
+    .rejects.toMatchObject({ code: 'E2E_RPC_RECOVERY_OPERATION_DENIED' })
+  const execution = createAuthorityExecutionRpcClients({ credential, verifierMaterial,
+    approvalBinding: { runId: 'RUN-1', installationDigest: digest,
+      approvalType: 'execution', subjectDigest: digest },
+    expectedPublicKeyDigest: verifierMaterial.publicKeyDigest,
+    transport: (request) => rpc.handle(request), now: () => clock })
+  const { grant, subject } = writeGrant()
+  await expect(execution.writeApproval.verifyForSubject(grant, subject)).resolves.toMatchObject({
+    allowed: false, code: 'E2E_APPROVAL_CONTEXT_MISMATCH',
+  })
+  const readsBeforeUnauthorizedVerify = leaseReads
+  await expect(execution.lease.verifyTarget('LEASE-1', 1, digest))
+    .rejects.toMatchObject({ code: 'E2E_APPROVAL_CONTEXT_MISMATCH' })
+  expect(leaseReads).toBe(readsBeforeUnauthorizedVerify)
+  const wrongBinding = createAuthorityMaintenanceRpcClient({ credential, verifierMaterial,
+    approvalBinding: { runId: 'RUN-WRONG', installationDigest: digest,
+      approvalType: 'execution', subjectDigest: digest },
+    expectedPublicKeyDigest: verifierMaterial.publicKeyDigest,
+    transport: (request) => rpc.handle(request), now: () => clock })
+  await expect(wrongBinding.queryReservation({ reservationId: 'RESERVATION-1', grantId: 'GRANT-1',
+    capabilityId: 'CAP-1', actionId: 'ACTION-1' }))
+    .rejects.toMatchObject({ code: 'E2E_RPC_RECOVERY_BINDING_MISMATCH' })
 })
 
 test('WebSocket Authority RPC 严格绑定协议 schema、clientId 与审批上下文，并允许同终态幂等重试', async () => {

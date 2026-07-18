@@ -21,6 +21,7 @@ const SUPPORTED_ALGORITHMS = [-7, -257] as const
 const AUTHORITY_CONSTRUCTION_KEY = Object.freeze({})
 
 export type WebAuthnApprovalType = 'scope' | 'lineage' | 'discovery' | 'execution' | 'privacy'
+  | 'manual-executor' | 'manual-reviewer'
 
 export interface StoredWebAuthnCredential {
   id: string

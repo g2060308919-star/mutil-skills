@@ -282,37 +282,39 @@ export function auditFinalReportFactBinding(
     ...arrayAt(gateway, 'requestEvents').map((item) => stringAt(item, 'actionId')),
     ...arrayAt(gateway, 'capabilityReservations').map((item) => stringAt(item, 'actionId')),
   ])
-  const counters = objectAt(gateway, 'signedCounters')
+  const reportGateway = independentlyProjectReportGatewayAudit(gateway)
   const expectedGateway = {
     status: scheduledActions.every((actionId) => gatewayActions.has(actionId))
       && (stringAt(content('approval-grants'), 'runBundleDigest') === ''
         || gatewayExecutionClosureComplete(content('browser-action-map'), runBundle,
           content('browser-results'), gateway)) ? 'valid' : 'incomplete',
-    digest: stringAt(counters, 'digest'),
-    forwarded: finiteNumberAt(counters, 'forwarded'), blocked: finiteNumberAt(counters, 'blocked'),
-    injected: finiteNumberAt(counters, 'injected'), findings: [],
+    digest: reportGateway.digest,
+    forwarded: reportGateway.forwarded, blocked: reportGateway.blocked,
+    injected: reportGateway.injected, findings: [],
   }
   if (!safeCanonicalEquals(report.gatewayAudit, expectedGateway)) {
     findings.push({ code: 'E2E_GENERATION_REPORT_GATEWAY_MISMATCH', ref: 'gatewayAudit' })
   }
   const caseResults = arrayAt(content('browser-results'), 'caseResults')
   const expectedRealResults = caseResults.filter((item) => stringAt(item, 'mode') === 'real-environment')
-    .map((item) => ({ id: stringAt(item, 'caseId'), digest: stringAt(item, 'eventChainDigest') }))
+    .map((item) => ({ id: stringAt(item, 'resultId'), digest: stringAt(item, 'eventChainDigest') }))
   const expectedInjectionResults = caseResults.filter((item) => stringAt(item, 'mode') === 'gateway-injection')
-    .map((item) => ({ id: stringAt(item, 'caseId'), digest: stringAt(item, 'eventChainDigest') }))
+    .map((item) => ({ id: stringAt(item, 'resultId'), digest: stringAt(item, 'eventChainDigest') }))
   if (!safeCanonicalArrayEquals(arrayAt(report, 'realResults'), expectedRealResults, 'id')) {
     findings.push({ code: 'E2E_GENERATION_REPORT_REAL_RESULTS_MISMATCH', ref: 'realResults' })
   }
   if (!safeCanonicalArrayEquals(arrayAt(report, 'injectionResults'), expectedInjectionResults, 'id')) {
     findings.push({ code: 'E2E_GENERATION_REPORT_INJECTION_RESULTS_MISMATCH', ref: 'injectionResults' })
   }
-  const attemptCases = new Map(arrayAt(content('workflow-events'), 'attemptCases')
-    .map((item) => [stringAt(item, 'caseId'), item]))
+  const attemptCases = arrayAt(content('workflow-events'), 'attemptCases')
   const diagnosisByCase = new Map(arrayAt(content('diagnosis'), 'caseDiagnoses')
     .map((item) => [stringAt(item, 'caseId'), item]))
-  const expectedDiagnostics = [...attemptCases.values()].sort((left, right) =>
-    stringAt(left, 'caseId').localeCompare(stringAt(right, 'caseId'))).map((attemptCase) => {
+  const expectedDiagnostics = [...attemptCases].sort((left, right) =>
+    attemptDomainKey(left).localeCompare(attemptDomainKey(right))).map((attemptCase) => {
     const caseId = stringAt(attemptCase, 'caseId')
+    const mode = stringAt(arrayAt(attemptCase, 'events').find((event) => stringAt(event, 'kind') === 'started') ?? {}, 'mode')
+    const resultId = stringAt(caseResults.find((result) =>
+      stringAt(result, 'caseId') === caseId && stringAt(result, 'mode') === mode) ?? {}, 'resultId')
     const diagnosis = diagnosisByCase.get(caseId)
     let chain = stringAt(attemptCase, 'initialChainDigest')
     const attempts: Array<Record<string, unknown>> = []
@@ -326,14 +328,16 @@ export function auditFinalReportFactBinding(
         changeDigest: null, sideEffectState: stringAt(terminal, 'effectObservation') })
     }
     const selection = objectAt(attemptCase, 'selection')
-    return { caseId, category: diagnosis ? stringAt(diagnosis, 'category') : 'not-required',
+    return { resultId, caseId, category: diagnosis ? stringAt(diagnosis, 'category') : 'not-required',
       selectedAttemptId: stringAt(selection, 'attemptId') || null,
       rationale: diagnosis ? stringAt(diagnosis, 'digest') : stringAt(selection, 'eventChainDigest'), attempts }
   })
   if (!safeCanonicalEquals(report.diagnostics, expectedDiagnostics)) {
     findings.push({ code: 'E2E_GENERATION_REPORT_ATTEMPTS_MISMATCH', ref: 'diagnostics' })
   }
-  const resultByCase = new Map(caseResults.map((item) => [stringAt(item, 'caseId'), item]))
+  const resultByCase = new Map(caseResults
+    .filter((item) => stringAt(item, 'mode') === 'real-environment')
+    .map((item) => [stringAt(item, 'caseId'), item]))
   const cleanupByLease = new Map(arrayAt(content('cleanup-results'), 'leaseResults')
     .map((item) => [stringAt(item, 'leaseId'), stringAt(item, 'status')]))
   const expectedSideEffects = arrayAt(content('browser-action-map'), 'actions').map((action) => {
@@ -376,6 +380,7 @@ export function auditFinalReportFactBinding(
   const executionCaseResults = new Map(arrayAt(trustedCompilerExecution, 'caseResults')
     .map((item) => [stringAt(item, 'caseId'), stringAt(item, 'status')]))
   const browserCaseResults = arrayAt(content('browser-results'), 'caseResults')
+    .filter((result) => stringAt(result, 'mode') === 'real-environment')
   const browserTerminalCaseResults = new Map(browserCaseResults
     .filter((result) => ['passed', 'failed'].includes(stringAt(result, 'status')))
     .map((result) => [stringAt(result, 'caseId'), stringAt(result, 'status')]))
@@ -413,8 +418,42 @@ export function auditFinalReportFactBinding(
   return { valid: findings.length === 0, findings }
 }
 
+function independentlyProjectReportGatewayAudit(gateway: Record<string, unknown>): {
+  digest: string; forwarded: number; blocked: number; injected: number
+} {
+  const sessions = arrayAt(gateway, 'sessions')
+  if (sessions.length === 0) {
+    const counters = objectAt(gateway, 'signedCounters')
+    return {
+      digest: stringAt(counters, 'digest'),
+      forwarded: finiteNumberAt(counters, 'forwarded'),
+      blocked: finiteNumberAt(counters, 'blocked'),
+      injected: finiteNumberAt(counters, 'injected'),
+    }
+  }
+  const projection = sessions.map((session) => {
+    const counters = objectAt(objectAt(session, 'audit'), 'signedCounters')
+    return {
+      resultId: stringAt(session, 'resultId'), domain: stringAt(session, 'domain'),
+      digest: stringAt(counters, 'digest'), forwarded: finiteNumberAt(counters, 'forwarded'),
+      blocked: finiteNumberAt(counters, 'blocked'), injected: finiteNumberAt(counters, 'injected'),
+    }
+  }).sort((left, right) => left.resultId.localeCompare(right.resultId))
+  return {
+    digest: digestText('gateway-audit-sessions/v1', canonicalizeJson(projection)),
+    forwarded: projection.reduce((sum, item) => sum + item.forwarded, 0),
+    blocked: projection.reduce((sum, item) => sum + item.blocked, 0),
+    injected: projection.reduce((sum, item) => sum + item.injected, 0),
+  }
+}
+
 function safeDecisionSubjectDigest(scope: Record<string, unknown>): string {
   try { return digestDecisionSubject(projectScopeDecisionSubject(scope)) } catch { return '' }
+}
+
+function attemptDomainKey(attemptCase: Record<string, unknown>): string {
+  const started = arrayAt(attemptCase, 'events').find((event) => stringAt(event, 'kind') === 'started')
+  return `${stringAt(attemptCase, 'caseId')}\0${stringAt(started ?? {}, 'mode')}`
 }
 
 function safeLineageDecisionSubjectDigest(diff: Record<string, unknown>): string {
@@ -431,6 +470,7 @@ function independentlyProjectReportTraceability(
     .filter((item) => stringAt(item, 'status') === 'active')
     .map((item) => [stringAt(item, 'caseId'), item]))
   const results = new Map(arrayAt(content('browser-results'), 'caseResults')
+    .filter((item) => stringAt(item, 'mode') === 'real-environment')
     .map((item) => [stringAt(item, 'caseId'), item]))
   const evidence = new Map(arrayAt(content('browser-evidence'), 'artifacts')
     .map((item) => [stringAt(item, 'evidenceId'), item]))
@@ -1326,6 +1366,59 @@ export function auditArtifactSemantics(
       add('E2E_GENERATION_GATEWAY_AUDIT_VERIFIER_ERROR', 'gateway-audit', 'signedCounters')
     }
   }
+  const gatewaySessions = arrayAt(gateway, 'sessions')
+  if (gatewaySessions.length > 0) {
+    const resultsById = new Map(arrayAt(browserResults, 'caseResults')
+      .map((item) => [stringAt(item, 'resultId'), item]))
+    const sessionResultIds = gatewaySessions.map((session) => stringAt(session, 'resultId')).sort()
+    const expectedResultIds = [...resultsById.keys()].sort()
+    if (canonicalizeJson(sessionResultIds) !== canonicalizeJson(expectedResultIds)) {
+      add('E2E_GENERATION_GATEWAY_SESSION_RESULT_SET_MISMATCH', 'gateway-audit', 'sessions')
+    }
+    for (const session of gatewaySessions) {
+      const resultId = stringAt(session, 'resultId')
+      const domain = stringAt(session, 'domain')
+      const audit = objectAt(session, 'audit')
+      const verifierMaterial = objectAt(session, 'verifierMaterial')
+      const result = resultsById.get(resultId)
+      const signature = objectAt(objectAt(audit, 'signedCounters'), 'signature')
+      if (result === undefined || stringAt(result, 'mode') !== domain
+        || canonicalizeJson(objectAt(verifierMaterial, 'gatewayInstance'))
+          !== canonicalizeJson(objectAt(audit, 'gatewayInstance'))
+        || !gatewayPublicationAuditInternallyValid(audit)) {
+        add('E2E_GENERATION_GATEWAY_SESSION_BINDING_INVALID', 'gateway-audit', resultId)
+        continue
+      }
+      if (!dependencies?.verifyGatewayAuditSignature) {
+        add('E2E_GENERATION_GATEWAY_AUDIT_SIGNATURE_INVALID', 'gateway-audit', resultId)
+      } else try {
+        if (!dependencies.verifyGatewayAuditSignature(signature as ArtifactDocument['signatures'][number])) {
+          add('E2E_GENERATION_GATEWAY_AUDIT_SIGNATURE_INVALID', 'gateway-audit', resultId)
+        }
+      } catch {
+        add('E2E_GENERATION_GATEWAY_AUDIT_VERIFIER_ERROR', 'gateway-audit', resultId)
+      }
+      if (domain === 'gateway-injection') {
+        const grant = objectAt(session, 'grant')
+        const capabilities = arrayAt(grant, 'capabilities')
+        const reservations = arrayAt(audit, 'capabilityReservations')
+        const events = arrayAt(audit, 'requestEvents')
+        if (numberAt(objectAt(audit, 'signedCounters'), 'forwarded') !== 0
+          || numberAt(objectAt(audit, 'signedCounters'), 'blocked') !== 0
+          || numberAt(objectAt(audit, 'signedCounters'), 'injected') < 1
+          || events.some((event) => stringAt(event, 'decision') !== 'injected')
+          || reservations.length === 0
+          || reservations.some((reservation) => stringAt(reservation, 'grantId') !== stringAt(grant, 'grantId')
+            || stringAt(reservation, 'attemptId') !== stringAt(result, 'attemptId')
+            || !capabilities.some((capability) =>
+              stringAt(capability, 'capabilityId') === stringAt(reservation, 'capabilityId')
+              && stringAt(capability, 'actionId') === stringAt(reservation, 'actionId')
+              && stringAt(capability, 'transport') === 'gateway-injection'))) {
+          add('E2E_GENERATION_INJECTION_SESSION_SAFETY_INVALID', 'gateway-audit', resultId)
+        }
+      }
+    }
+  }
   auditExecutionOutcomeReceipts({ browserResults, actionMap, gateway, leases, cleanup, cases, runBundle,
     context: { assetId: artifacts[0]?.assetId ?? '', generationId: artifacts[0]?.generationId ?? '',
       prdRevision: artifacts[0]?.prdRevision ?? '', runId: stringAt(runBundle, 'runId') } },
@@ -1335,10 +1428,13 @@ export function auditArtifactSemantics(
       add('E2E_GENERATION_GATEWAY_COVERAGE_INCOMPLETE', 'gateway-audit', actionId)
     }
   }
-  const executedActionIds = new Set(arrayAt(browserResults, 'caseResults').flatMap((caseResult) =>
+  const realBrowserResults = arrayAt(browserResults, 'caseResults')
+    .filter((caseResult) => stringAt(caseResult, 'mode') === 'real-environment')
+  const realAttemptIds = new Set(realBrowserResults.map((caseResult) => stringAt(caseResult, 'attemptId')))
+  const executedActionIds = new Set(realBrowserResults.flatMap((caseResult) =>
     arrayAt(caseResult, 'stepResults').filter((step) => ['passed', 'failed'].includes(stringAt(step, 'status')))
       .map((step) => stringAt(step, 'actionId'))))
-  const executionByActionId = new Map(arrayAt(browserResults, 'caseResults').flatMap((caseResult) =>
+  const executionByActionId = new Map(realBrowserResults.flatMap((caseResult) =>
     arrayAt(caseResult, 'stepResults').map((step) => [stringAt(step, 'actionId'), caseResult] as const)))
   const signedCapabilityIds = new Set(signedCapabilities.map((item) => stringAt(item, 'capabilityId')))
   for (const reservation of v2ApprovalFacts ? gatewayReservations : []) {
@@ -1352,7 +1448,9 @@ export function auditArtifactSemantics(
     const actionId = stringAt(mapping, 'actionId')
     for (const capability of arrayAt(mapping, 'capabilities')) {
       const capabilityId = stringAt(capability, 'capabilityId')
-      const matches = gatewayReservations.filter((reservation) => stringAt(reservation, 'capabilityId') === capabilityId)
+      const matches = gatewayReservations.filter((reservation) =>
+        stringAt(reservation, 'capabilityId') === capabilityId
+        && realAttemptIds.has(stringAt(reservation, 'attemptId')))
       if (matches.length !== 1 || stringAt(matches[0] ?? {}, 'actionId') !== actionId
         || matches[0]?.consumed !== true) {
         add('E2E_GENERATION_GATEWAY_CAPABILITY_CONSUMPTION_INVALID', 'gateway-audit', `${actionId}:${capabilityId}`)
@@ -1497,13 +1595,18 @@ function gatewayExecutionClosureComplete(
     .map((item) => stringAt(item, 'capabilityId')))
   const reservations = arrayAt(gateway, 'capabilityReservations')
   if (reservations.some((item) => !signedCapabilityIds.has(stringAt(item, 'capabilityId')))) return false
-  const executedActionIds = new Set(arrayAt(browserResults, 'caseResults').flatMap((caseResult) =>
+  const realResults = arrayAt(browserResults, 'caseResults')
+    .filter((caseResult) => stringAt(caseResult, 'mode') === 'real-environment')
+  const realAttemptIds = new Set(realResults.map((caseResult) => stringAt(caseResult, 'attemptId')))
+  const executedActionIds = new Set(realResults.flatMap((caseResult) =>
     arrayAt(caseResult, 'stepResults').filter((step) => ['passed', 'failed'].includes(stringAt(step, 'status')))
       .map((step) => stringAt(step, 'actionId'))))
   for (const mapping of arrayAt(actionMap, 'actions').filter((item) => executedActionIds.has(stringAt(item, 'actionId')))) {
     const actionId = stringAt(mapping, 'actionId')
     for (const capability of arrayAt(mapping, 'capabilities')) {
-      const matches = reservations.filter((item) => stringAt(item, 'capabilityId') === stringAt(capability, 'capabilityId'))
+      const matches = reservations.filter((item) =>
+        stringAt(item, 'capabilityId') === stringAt(capability, 'capabilityId')
+        && realAttemptIds.has(stringAt(item, 'attemptId')))
       if (matches.length !== 1 || stringAt(matches[0]!, 'actionId') !== actionId || matches[0]!.consumed !== true) return false
     }
   }
@@ -1656,6 +1759,42 @@ function auditExecutionOutcomeReceipts(
 function objectAt(value: Record<string, unknown>, key: string): Record<string, unknown> {
   const nested = value[key]
   return isPlainObject(nested) ? nested : {}
+}
+
+function gatewayPublicationAuditInternallyValid(audit: Record<string, unknown>): boolean {
+  const events = arrayAt(audit, 'requestEvents')
+  const reservations = arrayAt(audit, 'capabilityReservations')
+  const counters = objectAt(audit, 'signedCounters')
+  const invalidReservationDigest = reservations.some((item) => {
+    const reservation = {
+      reservationId: stringAt(item, 'reservationId'), grantId: stringAt(item, 'grantId'),
+      capabilityId: stringAt(item, 'capabilityId'), actionId: stringAt(item, 'actionId'),
+      attemptId: stringAt(item, 'attemptId'),
+      ...(isPlainObject(item.attemptContext) ? { attemptContext: item.attemptContext } : {}),
+      status: stringAt(item, 'status'),
+      ...(typeof item.outcomeDigest === 'string' ? { outcomeDigest: item.outcomeDigest } : {}),
+      ...(typeof item.observation === 'string' ? { observation: item.observation } : {}),
+      reservedAt: stringAt(item, 'reservedAt'),
+    }
+    return stringAt(item, 'digest') !== digestText('gateway-capability-reservation/v1', canonicalizeJson({
+      reservation, consumed: item.consumed === true,
+    }))
+  })
+  const expectedDigest = digestText('gateway-audit-counters/v1', canonicalizeJson({
+    gatewayInstance: objectAt(audit, 'gatewayInstance'), policyDigest: stringAt(audit, 'policyDigest'),
+    forwarded: events.filter((item) => stringAt(item, 'decision') === 'forwarded').length,
+    blocked: events.filter((item) => stringAt(item, 'decision') === 'blocked').length,
+    injected: events.filter((item) => stringAt(item, 'decision') === 'injected').length,
+    requestEvents: events, capabilityReservations: reservations,
+  }))
+  return !events.some((item, index) => numberAt(item, 'sequence') !== index)
+    && new Set(reservations.map((item) => stringAt(item, 'digest'))).size === reservations.length
+    && !invalidReservationDigest
+    && numberAt(counters, 'forwarded') === events.filter((item) => stringAt(item, 'decision') === 'forwarded').length
+    && numberAt(counters, 'blocked') === events.filter((item) => stringAt(item, 'decision') === 'blocked').length
+    && numberAt(counters, 'injected') === events.filter((item) => stringAt(item, 'decision') === 'injected').length
+    && stringAt(counters, 'digest') === expectedDigest
+    && stringAt(objectAt(counters, 'signature'), 'signedDigest') === expectedDigest
 }
 
 function arrayAt(value: Record<string, unknown>, key: string): Array<Record<string, unknown>> {
@@ -1999,24 +2138,28 @@ export function auditVerdictFactBinding(
   const browserResults = content('browser-results')
   const runId = stringAt(browserResults, 'runId')
   const executionFacts = arrayAt(browserResults, 'caseResults').map((caseResult) => ({
+    resultId: stringAt(caseResult, 'resultId'),
     caseId: stringAt(caseResult, 'caseId'),
     runId,
     obligationIds: stringsAt(testCases.get(stringAt(caseResult, 'caseId')) ?? {}, 'obligationIds'),
     status: stringAt(caseResult, 'status'),
     executionMode: stringAt(caseResult, 'mode'),
+    baselineResultId: stringAt(caseResult, 'baselineResultId'),
     attemptId: stringAt(caseResult, 'attemptId'),
     eventChainDigest: stringAt(caseResult, 'eventChainDigest'),
   }))
   const verdictFacts = verdictInput.caseResults.map((caseResult) => ({
+    resultId: caseResult.resultId,
     caseId: caseResult.caseId,
     runId: caseResult.runId,
     obligationIds: caseResult.obligationIds,
     status: caseResult.status,
     executionMode: caseResult.executionMode,
+    baselineResultId: caseResult.baselineResultId ?? '',
     attemptId: caseResult.attemptSelection.status === 'valid' ? caseResult.attemptSelection.attemptId : '',
     eventChainDigest: caseResult.attemptSelection.status === 'valid' ? caseResult.attemptSelection.eventChainDigest : '',
   }))
-  if (!canonicalArrayEquals(executionFacts, verdictFacts, 'caseId')) {
+  if (!canonicalArrayEquals(executionFacts, verdictFacts, 'resultId')) {
     add('E2E_GENERATION_VERDICT_CASE_RESULTS_MISMATCH', 'browser-results')
   }
   const requirements = arrayAt(content('requirement-model'), 'requirements')
@@ -2271,12 +2414,17 @@ export function deriveVerdictInputFromArtifacts(input: {
     .map((testCase) => [stringAt(testCase, 'caseId'), testCase]))
   const browserResults = content('browser-results')
   const runId = stringAt(browserResults, 'runId')
-  const caseResults = arrayAt(browserResults, 'caseResults').map((caseResult) => ({
+  const caseResults = [...arrayAt(browserResults, 'caseResults')]
+    .sort((left, right) => stringAt(left, 'resultId').localeCompare(stringAt(right, 'resultId')))
+    .map((caseResult) => ({
+    resultId: stringAt(caseResult, 'resultId'),
     caseId: stringAt(caseResult, 'caseId'),
     runId,
     obligationIds: stringsAt(testCases.get(stringAt(caseResult, 'caseId')) ?? {}, 'obligationIds'),
     status: stringAt(caseResult, 'status'),
     executionMode: stringAt(caseResult, 'mode'),
+    ...(stringAt(caseResult, 'baselineResultId')
+      ? { baselineResultId: stringAt(caseResult, 'baselineResultId') } : {}),
     attemptSelection: {
       status: 'valid' as const,
       attemptId: stringAt(caseResult, 'attemptId'),
@@ -2330,7 +2478,7 @@ export function deriveVerdictInputFromArtifacts(input: {
   )
 
   return VerdictInputSchema.parse({
-    schemaVersion: '2.0.0', assetId: input.assetId, generationId: input.generationId,
+    schemaVersion: '2.1.0', assetId: input.assetId, generationId: input.generationId,
     verdictRuleVersion: '2.0.0',
     policyDigest: byType.get('project-policy')?.contentDigest,
     universeDigest: stringAt(content('coverage-universe'), 'universeDigest'),

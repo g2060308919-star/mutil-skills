@@ -7,6 +7,7 @@ import {
   digestText,
   E2EError,
   RuntimeResponseEnvelopeSchema,
+  type ManualResult,
   type ArtifactDocument,
   type WorkflowState,
 } from '@mutil-skills/e2e-contracts'
@@ -27,6 +28,7 @@ import {
   type UnsealedRuntimeWriteAttemptRecord,
 } from './write-attempt.js'
 import type { RuntimeInjectionExecutionOutput, RuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
+import { bindManualResultToRuntimeSnapshot, MAX_TRUSTED_MANUAL_RESULTS } from './runtime-manual-results.js'
 
 const EMPTY_DIGEST = `sha256:${'0'.repeat(64)}`
 const LEASE_MILLISECONDS = 30_000
@@ -425,6 +427,42 @@ export class RuntimeRunStore {
     return record === undefined ? undefined : structuredClone(record)
   }
 
+  /** 生产写恢复的只读门禁：完整复验 store/journal 后，拒绝仍有活跃 owner 的 attempt。 */
+  async verifyWriteRecoveryReady(
+    projectIdentityDigest: string,
+    runId: string,
+    attemptId: string,
+  ): Promise<{ ok: boolean; summaryDigest: string; reasonCode?: string }> {
+    return await this.#read((store) => {
+      const key = runKey(projectIdentityDigest, runId)
+      const current = store.runs[key]
+      const attempt = current?.writeAttempts?.[attemptId]
+      const execution = current?.executionAttempt
+      const owner = store.leases[executionOwnerKey(key)]
+      const ownerActive = owner !== undefined && Date.parse(owner.expiresAt) > this.#now().getTime()
+      const bindingValid = current !== undefined && attempt !== undefined && execution !== undefined
+        && current.workflow.current === 'running-real'
+        && execution.attemptId === attemptId
+        && execution.requestId === attempt.requestId
+        && execution.fencingToken === attempt.executionFencingToken
+      const reasonCode = ownerActive ? 'E2E_RUNTIME_EXECUTION_OWNER_ACTIVE'
+        : !bindingValid ? 'E2E_RUNTIME_WRITE_RECOVERY_BINDING_INVALID' : undefined
+      return {
+        ok: reasonCode === undefined,
+        summaryDigest: digestText('runtime-write-recovery-state/v1', canonicalizeJson({
+          projectIdentityDigest, runId, attemptId,
+          runRevision: current?.runRevision ?? null,
+          writeRecordDigest: attempt?.recordDigest ?? null,
+          executionAttempt: execution ?? null,
+          owner: owner === undefined ? null : {
+            fencingToken: owner.fencingToken, expiresAt: owner.expiresAt, active: ownerActive,
+          },
+        })),
+        ...(reasonCode === undefined ? {} : { reasonCode }),
+      }
+    })
+  }
+
   async prepareWriteAttempt(input: {
     projectIdentityDigest: string
     runId: string
@@ -525,6 +563,36 @@ export class RuntimeRunStore {
     })
   }
 
+  /** verified cleanup 的 durable intent；必须先于 Authority Lease release 落盘。 */
+  async prepareWriteCleanup(input: {
+    projectIdentityDigest: string
+    runId: string
+    attemptId: string
+    cleanupDigest: string
+    preparedAt: string
+    lock: RuntimeRunLock
+  }): Promise<RuntimeWriteAttemptRecord> {
+    return await this.#transitionWriteAttempt({
+      ...input, expected: ['prepared', 'reservation-observed', 'outcome-prepared'],
+      next: (current) => {
+        if (current.cleanupPrepared !== undefined) {
+          if (current.cleanupPrepared.cleanupDigest === input.cleanupDigest) return current
+          throw runtimeStoreError(
+            'E2E_RUNTIME_WRITE_CLEANUP_CHECKPOINT_MISMATCH',
+            'Cleanup checkpoint 已绑定其他摘要',
+          )
+        }
+        return sealRuntimeWriteAttemptRecord({
+          ...withoutRecordDigest(current),
+          cleanupPrepared: { cleanupDigest: input.cleanupDigest, preparedAt: input.preparedAt },
+          recordRevision: current.recordRevision + 1,
+        } as UnsealedRuntimeWriteAttemptRecord)
+      },
+      eventKind: 'write-cleanup-prepared', timestamp: input.preparedAt,
+      allowExactNoop: true,
+    })
+  }
+
   async commitWriteOutcome(input: {
     projectIdentityDigest: string
     runId: string
@@ -609,7 +677,7 @@ export class RuntimeRunStore {
 
   async prepareWriteRecovery(input: {
     projectIdentityDigest: string; runId: string; attemptId: string
-    markUnknownOperationId?: string; quarantineOperationId: string
+    markUnknownOperationId?: string; quarantineOperationId?: string; leaseTerminalOperationId?: string
     expectedRecordDigest: string; preparedAt: string; lock: RuntimeRunLock
   }): Promise<RuntimeWriteAttemptRecord> {
     return await this.#transitionWriteAttempt({
@@ -620,10 +688,16 @@ export class RuntimeRunStore {
           ...(input.markUnknownOperationId === undefined ? {} : {
             markUnknown: { operationId: input.markUnknownOperationId },
           }),
-          quarantine: { operationId: input.quarantineOperationId },
+          ...(input.quarantineOperationId === undefined ? {} : {
+            quarantine: { operationId: input.quarantineOperationId },
+          }),
+          ...(input.leaseTerminalOperationId === undefined ? {} : {
+            leaseTerminal: { operationId: input.leaseTerminalOperationId },
+          }),
         }
         if (current.recovery !== undefined) {
-          if (current.recovery.quarantine.operationId === input.quarantineOperationId
+          if (current.recovery.quarantine?.operationId === input.quarantineOperationId
+            && current.recovery.leaseTerminal?.operationId === input.leaseTerminalOperationId
             && current.recovery.markUnknown?.operationId === input.markUnknownOperationId) return current
           throw runtimeStoreError('E2E_RUNTIME_RECOVERY_OPERATION_MISMATCH', 'Recovery operationId 绑定已改变')
         }
@@ -637,7 +711,7 @@ export class RuntimeRunStore {
 
   async recordWriteRecoveryReceipt(input: {
     projectIdentityDigest: string; runId: string; attemptId: string
-    operation: 'markUnknown' | 'quarantine'; operationId: string; receiptDigest: string
+    operation: 'markUnknown' | 'quarantine' | 'leaseTerminal'; operationId: string; receiptDigest: string
     expectedRecordDigest: string; recordedAt: string; lock: RuntimeRunLock
   }): Promise<RuntimeWriteAttemptRecord> {
     return await this.#transitionWriteAttempt({
@@ -696,7 +770,11 @@ export class RuntimeRunStore {
           terminalState: input.terminalState, message: 'Runtime recovery 已持久阻断该写尝试',
           retryable: false, resumeState: input.terminalState },
       }
-      const { pendingDecision: _pendingDecision, ...withoutPendingDecision } = current
+      const {
+        pendingDecision: _pendingDecision,
+        executionAttempt: _executionAttempt,
+        ...withoutPendingDecision
+      } = current
       const blocked = migrateRuntimeRunSnapshot({ ...withoutPendingDecision,
         runRevision: (current.runRevision ?? 0) + 1,
         workflow: recoveryTerminalWorkflow(current.workflow, input.terminalState, input.reasonCode, input.blockedAt),
@@ -706,6 +784,7 @@ export class RuntimeRunStore {
         updatedAt: input.blockedAt,
       })
       store.runs[key] = blocked
+      delete store.leases[executionOwnerKey(key)]
       const outcome = appendRunSnapshotJournal(store, key, 'runtime-recovery-blocked', attempt.requestId)
       completeGlobalLedger(store.globalLedger, attempt.requestId, attempt.requestDigest, response, outcome)
       return structuredClone(blocked)
@@ -899,8 +978,13 @@ export class RuntimeRunStore {
       const existing = store.runs[key]
       if (existing === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
       const current = migrateRuntimeRunSnapshot(existing)
+      const durableWrite = current.writeAttempts?.[input.attempt.attemptId]
+      const writeAdvanced = durableWrite?.state === 'outcome-committed'
+        && durableWrite.requestId === input.requestId
+        && durableWrite.requestDigest === input.requestDigest
+        && durableWrite.executionFencingToken === input.attempt.fencingToken
       if (canonicalizeJson(current.executionAttempt) !== canonicalizeJson(input.attempt)
-        || (current.runRevision ?? 0) !== input.attempt.revision
+        || ((current.runRevision ?? 0) !== input.attempt.revision && !writeAdvanced)
         || current.workflow.current !== 'running-real') throw runtimeStoreError(
         'E2E_RUNTIME_EXECUTION_ATTEMPT_FENCED', 'execution attempt/revision 已改变，拒绝陈旧结果',
       )
@@ -986,6 +1070,59 @@ export class RuntimeRunStore {
           response: input.response }
         },
         'trusted-execution-fact-recorded', record.lock,
+      )
+    } catch (error) {
+      record.used = false
+      throw error
+    }
+  }
+
+  async appendTrustedManualResultOutcome(input: {
+    capability: RuntimeTrustedFactCapability
+    requestId: string
+    requestDigest: string
+    result: ManualResult
+    response: unknown
+  }): Promise<unknown> {
+    const record = trustedFactCapabilities.get(input.capability)
+    if (!record || record.store !== this || record.used) throw runtimeStoreError(
+      'E2E_RUNTIME_TRUSTED_FACT_CAPABILITY_INVALID', '可信事实 capability 伪造、跨 Store 或已消费',
+    )
+    record.used = true
+    try {
+      return await this.updateRunOutcome(
+        record.projectIdentityDigest, record.runId, input.requestId, input.requestDigest,
+        (snapshot) => {
+          if ((snapshot.runRevision ?? 0) !== record.runRevision
+            || runtimeRunSnapshotDigest(snapshot) !== record.snapshotDigest) throw runtimeStoreError(
+            'E2E_RUNTIME_TRUSTED_FACT_CAPABILITY_STALE',
+            '可信事实 capability 的 Run revision/snapshot 已改变',
+          )
+          const result = bindManualResultToRuntimeSnapshot(snapshot, input.result, this.#now())
+          const raw = snapshot.trustedExecutionFacts['manual-results-by-id']
+          const existing = raw === undefined ? {} : structuredClone(raw) as Record<string, ManualResult>
+          if (Object.prototype.hasOwnProperty.call(existing, result.manualResultId)) {
+            throw runtimeStoreError(
+              'E2E_RUNTIME_MANUAL_RESULT_DUPLICATE',
+              'ManualResultId 已进入不可变可信集合；禁止覆盖或以新 request 重放',
+            )
+          }
+          if (Object.keys(existing).length >= MAX_TRUSTED_MANUAL_RESULTS) throw runtimeStoreError(
+            'E2E_RUNTIME_MANUAL_RESULT_CAPACITY_EXCEEDED', '可信 ManualResult 集合超过容量上限',
+          )
+          return {
+            snapshot: {
+              ...snapshot,
+              runRevision: (snapshot.runRevision ?? 0) + 1,
+              trustedExecutionFacts: {
+                ...snapshot.trustedExecutionFacts,
+                'manual-results-by-id': { ...existing, [result.manualResultId]: result },
+              },
+            },
+            response: input.response,
+          }
+        },
+        'trusted-manual-result-recorded', record.lock,
       )
     } catch (error) {
       record.used = false

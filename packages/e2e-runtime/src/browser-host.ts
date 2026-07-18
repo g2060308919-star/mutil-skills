@@ -1,12 +1,21 @@
 import { canonicalizeJson, digestText, E2EError } from '@mutil-skills/e2e-contracts'
 import { chromium, type BrowserContext, type Page } from 'playwright'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, rename, rm } from 'node:fs/promises'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { ChromiumInstallation } from './browser-installer.js'
 import type { GatewayBrowserBinding, RuntimeGatewayProxyHost } from './gateway-proxy-host.js'
+import type { RuntimeOwnedResourceRecord } from './runtime-owned-resource-registry.js'
+import type { RuntimeWriteOwnedResourceLifecycle } from './runtime-write-production.js'
+import {
+  NodeBrowserProfileSupervisor,
+  type BrowserProfileSupervisor,
+  type BrowserProfileSupervisorHandle,
+} from './browser-profile-supervisor.js'
+import { currentProcessStartIdentity } from './runtime-install-recovery.js'
+export type { BrowserProfileSupervisor } from './browser-profile-supervisor.js'
 
 const HOST_RESOLVER_POLICY = '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'
 const REQUIRED_FLAGS = [
@@ -174,7 +183,10 @@ function resolveActionRequest(
 export class ControlledBrowserHost {
   constructor(
     private readonly driver: BrowserHostDriver = new PlaywrightBrowserHostDriver(),
-    private readonly options: { closeTimeoutMs?: number } = {},
+    private readonly options: {
+      closeTimeoutMs?: number
+      profileSupervisor?: BrowserProfileSupervisor
+    } = {},
   ) {}
 
   async open(input: {
@@ -182,6 +194,7 @@ export class ControlledBrowserHost {
     runId: string
     installation: ChromiumInstallation
     gateway: Pick<RuntimeGatewayProxyHost, 'handle' | 'browserBinding'>
+    ownedResourceLifecycle?: RuntimeWriteOwnedResourceLifecycle
   }): Promise<ControlledBrowserSession> {
     if (!isAbsolute(input.homeDir)
       || !/^[A-Za-z0-9._:-]{1,256}$/.test(input.runId)
@@ -195,14 +208,50 @@ export class ControlledBrowserHost {
       '.mutil-skills', 'e2e', 'state', input.runId, 'browser',
     ])
     const profileParentReal = await realpath(profileParent)
+    const profileParentIdentity = await lstat(profileParentReal)
     const profileCandidate = join(profileParentReal, `profile-${randomUUID()}`)
+    const descriptor = Object.freeze({
+      schemaVersion: '1.0.0' as const,
+      profileDir: profileCandidate,
+      markerPath: join(profileCandidate, '.owner.json'),
+      profileParent: Object.freeze({ canonicalPath: profileParentReal,
+        device: String(profileParentIdentity.dev), inode: String(profileParentIdentity.ino) }),
+    })
+    const ownedResource = input.ownedResourceLifecycle === undefined ? undefined
+      : await input.ownedResourceLifecycle.register('browser-profile-lock', descriptor)
     await mkdir(profileCandidate, { mode: 0o700 })
     await assertPrivateDirectory(profileCandidate)
     const profileDir = await realpath(profileCandidate)
     assertWithin(profileParentReal, profileDir, 'E2E_BROWSER_PROFILE_DIRECTORY_UNSAFE')
-    await writeOwnerMarker(profileDir, input.runId)
     const tempDir = join(profileDir, 'tmp')
-    await mkdir(tempDir, { mode: 0o700 })
+    let profileMarker: Awaited<ReturnType<typeof writeOwnerMarker>> | undefined
+    let supervisor: BrowserProfileSupervisorHandle | undefined
+    try {
+      profileMarker = await writeOwnerMarker(
+        profileDir, input.runId, ownedResource, descriptor.profileParent,
+      )
+      await mkdir(tempDir, { mode: 0o700 })
+    } catch (error) {
+      let cleanupError: unknown
+      try {
+        await rm(profileDir, { recursive: true, force: true })
+        if (ownedResource !== undefined && input.ownedResourceLifecycle !== undefined) {
+          await input.ownedResourceLifecycle.complete(
+            ownedResource,
+            digestText('runtime-browser-profile-prelaunch-cleanup/v1', canonicalizeJson({
+              resourceId: ownedResource.resourceId,
+              descriptorDigest: ownedResource.descriptorDigest,
+              profileDir,
+            })),
+          )
+        }
+      } catch (closeError) { cleanupError = closeError }
+      if (cleanupError !== undefined) throw browserHostError(
+        'E2E_BROWSER_OPEN_CLEANUP_FAILED', 'Browser profile 准备失败且未能闭合 owned resource',
+        new AggregateError([error, cleanupError]),
+      )
+      throw error
+    }
     const options = chromiumLaunchOptions({
       executablePath: input.installation.executablePath,
       proxyEndpoint: input.gateway.handle.endpoint,
@@ -214,8 +263,17 @@ export class ControlledBrowserHost {
     let currentResolver: ActionRequestResolver | undefined
     let launchStarted = false
     try {
+      if (ownedResource !== undefined && profileMarker !== undefined) {
+        supervisor = await (this.options.profileSupervisor ?? new NodeBrowserProfileSupervisor()).start(profileDir)
+        profileMarker = await replaceOwnerMarker(profileDir, profileMarker, {
+          ...profileMarker, phase: 'supervising', ownerProcess: supervisor.ownerProcess,
+        })
+      }
       launchStarted = true
       await this.driver.launch(profileDir, options)
+      if (ownedResource !== undefined && profileMarker !== undefined && supervisor !== undefined) {
+        profileMarker = await replaceOwnerMarker(profileDir, profileMarker, { ...profileMarker, phase: 'launched' })
+      }
       await this.driver.installRequestInterceptor(async (request) => {
         const correlation = currentResolver === undefined
           ? currentCorrelation
@@ -294,7 +352,9 @@ export class ControlledBrowserHost {
           if (closePromise !== undefined) return await closePromise
           closed = true
           controlledSessions.delete(session)
-          closePromise = this.closeAndCleanup(profileDir)
+          closePromise = this.closeAndCleanup(
+            profileDir, ownedResource, input.ownedResourceLifecycle, supervisor,
+          )
           return await closePromise
         },
       })
@@ -323,10 +383,25 @@ export class ControlledBrowserHost {
     } catch (error) {
       let cleanupError: unknown
       if (launchStarted) {
-        try { await this.closeAndCleanup(profileDir) }
+        try {
+          await this.closeAndCleanup(profileDir, ownedResource, input.ownedResourceLifecycle, supervisor)
+        }
         catch (closeError) { cleanupError = closeError }
       } else if (this.driver.isClosed()) {
-        await rm(profileDir, { recursive: true, force: true }).catch(() => undefined)
+        try {
+          await supervisor?.stop()
+          await rm(profileDir, { recursive: true, force: true })
+          if (ownedResource !== undefined && input.ownedResourceLifecycle !== undefined) {
+            await input.ownedResourceLifecycle.complete(
+              ownedResource,
+              digestText('runtime-browser-profile-prelaunch-cleanup/v1', canonicalizeJson({
+                resourceId: ownedResource.resourceId,
+                descriptorDigest: ownedResource.descriptorDigest,
+                profileDir,
+              })),
+            )
+          }
+        } catch (closeError) { cleanupError = closeError }
       }
       if (cleanupError !== undefined) throw browserHostError(
         'E2E_BROWSER_OPEN_CLEANUP_FAILED',
@@ -337,7 +412,12 @@ export class ControlledBrowserHost {
     }
   }
 
-  private async closeAndCleanup(profileDir: string): Promise<void> {
+  private async closeAndCleanup(
+    profileDir: string,
+    ownedResource?: RuntimeOwnedResourceRecord,
+    lifecycle?: RuntimeWriteOwnedResourceLifecycle,
+    supervisor?: BrowserProfileSupervisorHandle,
+  ): Promise<void> {
     const timeoutMs = this.options.closeTimeoutMs ?? 10_000
     let timer: ReturnType<typeof setTimeout> | undefined
     const closeOutcome = this.driver.close().then(
@@ -359,7 +439,17 @@ export class ControlledBrowserHost {
       'E2E_BROWSER_CLOSE_UNCONFIRMED', 'Browser close 未确认进程关闭；profile 保留',
       outcome.ok ? undefined : outcome.error,
     )
+    await supervisor?.stop()
+    if (ownedResource !== undefined) await assertOwnedProfileForCleanup(profileDir, ownedResource)
     await rm(profileDir, { recursive: true, force: true })
+    if (ownedResource !== undefined && lifecycle !== undefined) await lifecycle.complete(
+      ownedResource,
+      digestText('runtime-browser-profile-cleanup/v1', canonicalizeJson({
+        resourceId: ownedResource.resourceId,
+        descriptorDigest: ownedResource.descriptorDigest,
+        profileDir,
+      })),
+    )
     if (!outcome.ok) throw browserHostError(
       'E2E_BROWSER_CLOSE_FAILED', 'Browser 已确认关闭，但 close 返回失败', outcome.error,
     )
@@ -496,14 +586,111 @@ async function assertPrivateDirectory(path: string, requirePrivateMode = true): 
   }
 }
 
-async function writeOwnerMarker(profileDir: string, runId: string): Promise<void> {
+async function writeOwnerMarker(
+  profileDir: string,
+  runId: string,
+  ownedResource?: RuntimeOwnedResourceRecord,
+  profileParent?: { canonicalPath: string; device: string; inode: string },
+): Promise<OwnedBrowserProfileMarker | undefined> {
+  const profileIdentity = await lstat(profileDir)
+  const marker: OwnedBrowserProfileMarker | undefined = ownedResource === undefined ? undefined : {
+    schemaVersion: '1.0.0', kind: 'browser-profile-lock', ownerMarker: ownedResource.ownerMarker,
+    descriptorDigest: ownedResource.descriptorDigest, phase: 'prepared',
+    profileParent: profileParent!,
+    profile: { device: String(profileIdentity.dev), inode: String(profileIdentity.ino) },
+    ownerProcess: { role: 'host', pid: process.pid, startIdentity: await currentProcessStartIdentity() },
+  }
   const handle = await open(join(profileDir, '.owner.json'),
     constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
   try {
-    await handle.writeFile(`${canonicalizeJson({ schemaVersion: '1.0.0', runId })}\n`)
+    await handle.writeFile(`${canonicalizeJson(ownedResource === undefined
+      ? { schemaVersion: '1.0.0', runId }
+      : marker)}\n`)
     await handle.chmod(0o600)
     await handle.sync()
   } finally { await handle.close() }
+  return marker
+}
+
+interface OwnedBrowserProfileMarker {
+  schemaVersion: '1.0.0'
+  kind: 'browser-profile-lock'
+  ownerMarker: RuntimeOwnedResourceRecord['ownerMarker']
+  descriptorDigest: string
+  phase: 'prepared' | 'supervising' | 'launched'
+  profileParent: { canonicalPath: string; device: string; inode: string }
+  profile: { device: string; inode: string }
+  ownerProcess: { role: 'host' | 'supervisor'; pid: number; startIdentity: string }
+}
+
+async function replaceOwnerMarker(
+  profileDir: string,
+  expected: OwnedBrowserProfileMarker,
+  next: OwnedBrowserProfileMarker,
+): Promise<OwnedBrowserProfileMarker> {
+  const path = join(profileDir, '.owner.json')
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    if ((await handle.readFile('utf8')).trim() !== canonicalizeJson(expected)) {
+      throw browserHostError('E2E_BROWSER_PROFILE_CLEANUP_FENCED', 'owner marker phase CAS 不匹配')
+    }
+  } finally { await handle.close() }
+  const temporary = join(profileDir, `.owner-${randomUUID()}.tmp`)
+  const replacement = await open(temporary,
+    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
+  try {
+    await replacement.writeFile(`${canonicalizeJson(next)}\n`)
+    await replacement.chmod(0o600)
+    await replacement.sync()
+  } finally { await replacement.close() }
+  await rename(temporary, path)
+  return next
+}
+
+async function assertOwnedProfileForCleanup(
+  profileDir: string,
+  record: RuntimeOwnedResourceRecord,
+): Promise<void> {
+  await assertPrivateDirectory(profileDir)
+  try {
+    await lstat(join(profileDir, 'SingletonLock'))
+    throw browserHostError('E2E_BROWSER_PROFILE_CLEANUP_FENCED', 'Chromium SingletonLock 仍存在')
+  } catch (error) {
+    if (!isNodeError(error, 'ENOENT')) throw error
+  }
+  const markerPath = join(profileDir, '.owner.json')
+  let handle: Awaited<ReturnType<typeof open>>
+  try { handle = await open(markerPath, constants.O_RDONLY | constants.O_NOFOLLOW) }
+  catch (error) {
+    throw browserHostError('E2E_BROWSER_PROFILE_CLEANUP_FENCED', 'owner marker 不可安全读取', error)
+  }
+  try {
+    const metadata = await handle.stat()
+    const profileMetadata = await lstat(profileDir)
+    let marker: unknown
+    try { marker = JSON.parse((await handle.readFile('utf8')).trim()) } catch { marker = undefined }
+    if (!metadata.isFile() || metadata.nlink !== 1 || (metadata.mode & 0o777) !== 0o600
+      || (typeof process.getuid === 'function' && metadata.uid !== process.getuid())
+      || !isOwnedBrowserProfileMarker(marker, record, profileMetadata)) throw browserHostError(
+      'E2E_BROWSER_PROFILE_CLEANUP_FENCED', 'owner marker 与 registry record 不一致',
+    )
+  } finally { await handle.close() }
+}
+
+function isOwnedBrowserProfileMarker(
+  value: unknown,
+  record: RuntimeOwnedResourceRecord,
+  profile: Awaited<ReturnType<Awaited<ReturnType<typeof open>>['stat']>>,
+): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const marker = value as Partial<OwnedBrowserProfileMarker>
+  return marker.schemaVersion === '1.0.0' && marker.kind === 'browser-profile-lock'
+    && marker.descriptorDigest === record.descriptorDigest
+    && canonicalizeJson(marker.ownerMarker) === canonicalizeJson(record.ownerMarker)
+    && ['prepared', 'supervising', 'launched'].includes(String(marker.phase))
+    && marker.profile?.device === String(profile.dev) && marker.profile?.inode === String(profile.ino)
+    && typeof marker.ownerProcess?.pid === 'number'
+    && typeof marker.ownerProcess.startIdentity === 'string'
 }
 
 function isNodeError(error: unknown, code: string): boolean {

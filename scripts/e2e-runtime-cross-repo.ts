@@ -27,6 +27,7 @@ export async function runCrossRepoRuntimeGolden(input: {
   const root = dirname(input.packs)
   const publicationSource = join(root, 'publication-source')
   const unavailableSource = join(root, 'publication-source.unavailable')
+  const harnessRoot = join(root, 'harness')
   const npmCache = join(root, 'npm-cache')
   const externalGoldenHome = process.env.E2E_RUNTIME_REAL_GOLDEN_HOME
   if (externalGoldenHome === undefined || !isAbsolute(externalGoldenHome)) {
@@ -37,12 +38,19 @@ export async function runCrossRepoRuntimeGolden(input: {
     mkdir(input.home, { recursive: true, mode: 0o700 }),
     mkdir(input.project, { recursive: true, mode: 0o700 }),
     mkdir(input.packs, { recursive: true, mode: 0o700 }),
+    mkdir(harnessRoot, { recursive: true, mode: 0o700 }),
     mkdir(npmCache, { recursive: true, mode: 0o700 }),
   ])
 
   await exec('npm', ['run', 'build'], SOURCE_ROOT, buildEnvironment(npmCache), 180_000)
   await copyPublicationSource(publicationSource)
   try {
+    await Promise.all([
+      cp(join(publicationSource, 'scripts', 'e2e-runtime-cross-repo-child.mjs'),
+        join(harnessRoot, 'runner.mjs')),
+      cp(join(publicationSource, 'dist', 'scripts', 'e2e-runtime-read-only.fixture.js'),
+        join(harnessRoot, 'fixture.js')),
+    ])
     await exec('npm', ['pack', '--workspaces', '--pack-destination', input.packs],
       publicationSource, buildEnvironment(npmCache), 180_000)
   } finally {
@@ -69,21 +77,23 @@ export async function runCrossRepoRuntimeGolden(input: {
     runtimePackageRoot,
     externalGoldenHome,
   })
+  const installedRuntimePackageRoot = join(
+    input.home, '.mutil-skills', 'runtime', 'e2e', 'versions', PACKAGE_VERSION,
+    'node_modules', '@mutil-skills', 'e2e-runtime',
+  )
 
-  const harnessRoot = join(input.project, '.cross-repo-harness')
-  await mkdir(harnessRoot, { recursive: true, mode: 0o700 })
+  // 用户项目中的 node_modules 只用于构造安装闭包；真实 child 启动前必须移除，
+  // 证明 Runtime 与 harness 均不从 cwd 或用户项目解析可执行依赖。
   await Promise.all([
-    cp(join(unavailableSource, 'scripts', 'e2e-runtime-cross-repo-child.mjs'),
-      join(harnessRoot, 'runner.mjs')),
-    cp(join(unavailableSource, 'dist', 'scripts', 'e2e-runtime-read-only.fixture.js'),
-      join(harnessRoot, 'fixture.js')),
+    rm(join(input.project, 'node_modules'), { recursive: true, force: true }),
+    rm(join(input.project, 'package.json'), { force: true }),
+    rm(join(input.project, 'package-lock.json'), { force: true }),
   ])
   const harness = join(harnessRoot, 'runner.mjs')
   const { stdout, stderr } = await exec(process.execPath, [harness], input.project,
-    runtimeEnvironment({
+    childRuntimeEnvironment({
       home: input.home,
-      runtimePackageRoot,
-      externalGoldenHome,
+      runtimePackageRoot: installedRuntimePackageRoot,
       project: input.project,
     }), 180_000)
   const lines = stdout.trim().split('\n')
@@ -209,9 +219,23 @@ function runtimeEnvironment(input: {
   }
 }
 
+function childRuntimeEnvironment(input: {
+  home: string
+  project: string
+  runtimePackageRoot: string
+}): NodeJS.ProcessEnv {
+  return {
+    HOME: input.home,
+    PATH: '/usr/bin:/bin',
+    TMPDIR: process.env.TMPDIR,
+    E2E_PACKED_PROJECT: input.project,
+    E2E_PACKED_RUNTIME_PACKAGE_ROOT: input.runtimePackageRoot,
+  }
+}
+
 function assertAbsoluteDistinct(input: { home: string; project: string; packs: string }): void {
   const paths = [input.home, input.project, input.packs]
-  if (paths.some((path) => !isAbsolute(path)) || new Set(paths.map(resolve)).size !== paths.length) {
+  if (paths.some((path) => !isAbsolute(path)) || new Set(paths.map((path) => resolve(path))).size !== paths.length) {
     throw new Error('home/project/packs 必须是三个不同的绝对路径')
   }
 }

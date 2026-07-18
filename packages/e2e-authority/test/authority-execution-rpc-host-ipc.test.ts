@@ -2,6 +2,7 @@ import { expect, test, vi } from 'vitest'
 import {
   parseAuthorityExecutionHostConfig,
   parseAuthorityExecutionIncomingEnvelope,
+  parseManualResultRoleFinalizationInput,
 } from '../src/authority-execution-rpc-host-ipc.js'
 
 const key = Buffer.alloc(32, 7).toString('base64url')
@@ -69,6 +70,22 @@ test('Authority child accepts only exact incoming IPC envelopes', () => {
   expect(parseAuthorityExecutionIncomingEnvelope({
     type: 'unknown-control', requestId, input: {},
   })).toBeUndefined()
+})
+
+test('manual role finalization rejects malformed, extra, or rebound control fields', () => {
+  const valid = {
+    manualResultId: 'MANUAL-1', draftDigest: `sha256:${'a'.repeat(64)}`,
+    role: 'executor', approvalSessionRef: 'SESSION-1',
+    finalizationId: 'FINALIZE-MANUAL-1-EXECUTOR',
+    requestDigest: `sha256:${'b'.repeat(64)}`,
+  }
+  expect(parseManualResultRoleFinalizationInput(valid)).toEqual(valid)
+  expect(parseManualResultRoleFinalizationInput({ ...valid, approved: true })).toBeUndefined()
+  expect(parseManualResultRoleFinalizationInput({ ...valid, role: 'approver' })).toBeUndefined()
+  expect(parseManualResultRoleFinalizationInput({ ...valid, draftDigest: `sha256:${'c'.repeat(63)}` }))
+    .toBeUndefined()
+  expect(parseManualResultRoleFinalizationInput({ ...valid, approvalSessionRef: '../session' }))
+    .toBeUndefined()
 })
 
 test('Authority child config parser zeroizes every temporary secret-key Buffer', () => {

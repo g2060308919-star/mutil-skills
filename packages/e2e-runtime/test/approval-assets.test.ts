@@ -6,6 +6,7 @@ import { expect, test } from 'vitest'
 import { copyApprovalAssets } from '../scripts/copy-approval-assets.mjs'
 
 const expectedBundleDigest = 'cf4469953efcb5617a870ae3f022b3ad48aee8c06012ccdafcabc73058f123a0'
+const expectedLicenseDigest = 'bd9e3f45696472076c7160c7f66e54b2d62d38bc2646c812d19be83ee4400c63'
 
 test('copies only the pinned SimpleWebAuthn browser bundle and verifies its digest', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'e2e-approval-assets-'))
@@ -15,11 +16,15 @@ test('copies only the pinned SimpleWebAuthn browser bundle and verifies its dige
     await mkdir(join(source, 'dist/bundle'), { recursive: true })
     await writeFile(join(source, 'package.json'), JSON.stringify({ name: '@simplewebauthn/browser', version: '13.3.0' }))
     const realBundle = await readFile('node_modules/@simplewebauthn/browser/dist/bundle/index.umd.min.js')
+    const realLicense = await readFile('node_modules/@simplewebauthn/browser/LICENSE.md')
     await writeFile(join(source, 'dist/bundle/index.umd.min.js'), realBundle)
+    await writeFile(join(source, 'LICENSE.md'), realLicense)
     await expect(copyApprovalAssets({ sourcePackageRoot: source, targetRoot: target })).resolves.toEqual({
       version: '13.3.0', sourceDigest: expectedBundleDigest, targetDigest: expectedBundleDigest,
+      licenseDigest: expectedLicenseDigest,
     })
     expect(await readFile(join(target, 'simplewebauthn-browser.js'))).toEqual(realBundle)
+    expect(await readFile(join(target, 'simplewebauthn-LICENSE.md'))).toEqual(realLicense)
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
 
@@ -31,6 +36,7 @@ test('fails closed for manifest, source digest, symlink, and existing target dri
     await mkdir(join(source, 'dist/bundle'), { recursive: true })
     await writeFile(join(source, 'package.json'), JSON.stringify({ name: '@simplewebauthn/browser', version: '13.3.1' }))
     await writeFile(join(source, 'dist/bundle/index.umd.min.js'), 'drift')
+    await writeFile(join(source, 'LICENSE.md'), await readFile('node_modules/@simplewebauthn/browser/LICENSE.md'))
     await expect(copyApprovalAssets({ sourcePackageRoot: source, targetRoot: target }))
       .rejects.toThrow(/E2E_APPROVAL_ASSET_VERSION_MISMATCH/)
     await writeFile(join(source, 'package.json'), JSON.stringify({ name: '@simplewebauthn/browser', version: '13.3.0' }))

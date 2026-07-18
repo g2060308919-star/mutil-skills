@@ -504,10 +504,17 @@ describe('WebAuthn user presence authority', () => {
       authorityNow = new Date(fixedNow.getTime() + 120_000)
       await expect(third.activatePersistedGrant({ grant, approvalBinding }))
         .rejects.toMatchObject({ code: 'E2E_APPROVAL_EXPIRED' })
+      await expect(third.activatePersistedGrantForRecovery({ grant, approvalBinding }))
+        .resolves.toEqual(grant.approvalContext)
+      await expect(third.activatePersistedGrantForRecovery({
+        grant, approvalBinding: { ...approvalBinding, runId: 'RUN-REBOUND' },
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' })
       authorityNow = fixedNow
       await third.revoke(grant.grantId, 'test-revocation')
       await expect(third.activatePersistedGrant({ grant, approvalBinding }))
         .rejects.toMatchObject({ code: 'E2E_APPROVAL_REVOKED' })
+      await expect(third.activatePersistedGrantForRecovery({ grant, approvalBinding }))
+        .resolves.toEqual(grant.approvalContext)
       expect(grant.approvalContext).toMatchObject({
         subject: approver.subject, runId: 'RUN-PERSISTED', approvalType: 'discovery',
         subjectDigest: grantSubjectDigest, installationDigest, origin: 'http://localhost:43210',

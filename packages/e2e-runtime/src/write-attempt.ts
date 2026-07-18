@@ -33,8 +33,13 @@ const RecoveryOperationSchema = z.object({
 const RecoveryProgressSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
   markUnknown: RecoveryOperationSchema.optional(),
-  quarantine: RecoveryOperationSchema,
-}).strict()
+  quarantine: RecoveryOperationSchema.optional(),
+  leaseTerminal: RecoveryOperationSchema.optional(),
+}).strict().superRefine((progress, context) => {
+  if ((progress.quarantine === undefined) === (progress.leaseTerminal === undefined)) {
+    context.addIssue({ code: 'custom', message: 'Recovery 必须且只能绑定一个 Lease 终态分支' })
+  }
+})
 
 const WriteAttemptBaseSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
@@ -50,6 +55,10 @@ const WriteAttemptBaseSchema = z.object({
   executionFencingToken: z.number().int().positive(),
   ownerMarker: RuntimeOwnedResourceMarkerSchema,
   preparedAt: TimestampSchema,
+  cleanupPrepared: z.object({
+    cleanupDigest: DigestSchema,
+    preparedAt: TimestampSchema,
+  }).strict().optional(),
   recordRevision: z.number().int().positive(),
   recordDigest: DigestSchema,
   recovery: RecoveryProgressSchema.optional(),

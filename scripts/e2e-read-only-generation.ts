@@ -660,11 +660,34 @@ export async function createReadOnlyGoldenGenerationInput(input: {
     diagnosis: draft('run/diagnosis.json', { caseDiagnoses: [], healingAttempts: [], selectedAttemptExplanations: [] }),
     'cleanup-results': draft('run/cleanup-results.json', { leaseResults: [] }),
   }
-  const manualResults = await Promise.all((input.manualResultDrafts ?? []).map((manualDraft) =>
-    input.authority.issueManualResult({ draft: {
+  const manualResults: ManualResult[] = []
+  for (const manualDraft of input.manualResultDrafts ?? []) {
+    const candidate = {
       ...manualDraft,
       requirementModelDigest: predictedContentDigest(context, 'requirement-model', drafts['requirement-model']),
-    } })))
+    }
+    const prepareFinalizationId = `PREPARE-${candidate.manualResultId}`
+    const prepared = await input.authority.prepareManualResult({
+      draft: candidate,
+      finalizationId: prepareFinalizationId,
+      requestDigest: digestText('manual-result-request/v1', prepareFinalizationId),
+    })
+    for (const role of ['executor', 'reviewer'] as const) {
+      const finalizationId = `FINALIZE-${candidate.manualResultId}-${role}`
+      const finalized = await input.authority.finalizeManualResultRole({
+        manualResultId: candidate.manualResultId,
+        draftDigest: prepared.draftDigest,
+        role,
+        approvalSessionRef: `GOLDEN-MANUAL-${role.toUpperCase()}-${candidate.manualResultId}`,
+        finalizationId,
+        requestDigest: digestText('manual-result-request/v1', finalizationId),
+      })
+      if (role === 'reviewer') {
+        if (finalized.status !== 'issued') throw new Error('Golden ManualResult reviewer 未签发终态结果')
+        manualResults.push(finalized.result)
+      }
+    }
+  }
   drafts['manual-results'].content.results = manualResults
   if (!input.write) {
     const projected = readOnlyApprovalContents({

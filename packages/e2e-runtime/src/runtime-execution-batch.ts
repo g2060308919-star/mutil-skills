@@ -1,4 +1,4 @@
-import { canonicalizeJson, digestText, E2EError } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, deriveExecutionResultId, digestText, E2EError } from '@mutil-skills/e2e-contracts'
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 const DIGEST = /^sha256:[a-f0-9]{64}$/
@@ -20,10 +20,13 @@ export interface RuntimeWriteExecutionOutput {
     resultDigest: string
     leaseReceiptDigest: string
   }
+  /** 仅允许在执行器到 Host 的短生命周期边界存在；Host 必须先写 Quarantine 并在持久化前剥离。 */
+  evidence?: { screenshot: Uint8Array; dom: Uint8Array }
   finalizationFacts?: RuntimeExecutionFinalizationFacts
 }
 
 export interface RuntimeExecutionFinalizationFacts {
+  executionGrant?: Record<string, unknown>
   gatewayAudit: Record<string, unknown>
   cleanup: Record<string, unknown>
   executionOutcomeReceipt: Record<string, unknown>
@@ -34,6 +37,9 @@ export interface RuntimeExecutionFinalizationFacts {
 }
 
 export interface RuntimeInjectionExecutionOutput {
+  resultId: string
+  baselineResultId: string
+  attemptId: string
   caseId: string
   actionId: string
   status: 'passed' | 'failed' | 'environment-blocked' | 'safety-blocked'
@@ -49,6 +55,17 @@ export interface RuntimeInjectionExecutionOutput {
     injectionTargetForwarded: number
     byIntent: Record<string, number>
   }
+  /** 仅允许在 executor→Host 边界存在；Host 必须先写 Quarantine 并清零。 */
+  evidence?: { screenshot: Uint8Array; dom: Uint8Array }
+  finalizationFacts?: RuntimeInjectionFinalizationFacts
+}
+
+export interface RuntimeInjectionFinalizationFacts {
+  executionGrant: Record<string, unknown>
+  gatewayAudit: Record<string, unknown>
+  gatewayAuditVerifierMaterial: Record<string, unknown>
+  browserMeasurements: Record<string, unknown>
+  isolationMeasurements: Record<string, unknown>
 }
 
 /**
@@ -136,7 +153,8 @@ export class RuntimeExecutionBatch {
 
 export function parseRuntimeWriteExecutionOutput(value: unknown): RuntimeWriteExecutionOutput {
   const finalizationKeys = plain(value) && Object.hasOwn(value, 'finalizationFacts') ? ['finalizationFacts'] : []
-  if (!plain(value) || !exact(value, ['actionId', 'caseId', 'cleanup', 'effectObservation', 'gatewayCommit', 'resultDigest', 'status', ...finalizationKeys])
+  const evidenceKeys = plain(value) && Object.hasOwn(value, 'evidence') ? ['evidence'] : []
+  if (!plain(value) || !exact(value, ['actionId', 'caseId', 'cleanup', 'effectObservation', 'gatewayCommit', 'resultDigest', 'status', ...evidenceKeys, ...finalizationKeys])
     || !safeId(value.caseId) || !safeId(value.actionId)
     || !['passed', 'failed', 'environment-blocked', 'safety-blocked'].includes(String(value.status))
     || !['proven-not-applied', 'applied', 'unknown'].includes(String(value.effectObservation))
@@ -149,19 +167,27 @@ export function parseRuntimeWriteExecutionOutput(value: unknown): RuntimeWriteEx
     || !digest(value.cleanup.resultDigest) || !digest(value.cleanup.leaseReceiptDigest)
     || value.effectObservation === 'applied' && value.status === 'passed' && value.cleanup.status !== 'verified-clean'
     || value.effectObservation === 'unknown' && value.cleanup.status === 'verified-clean'
+    || value.evidence !== undefined && !parseEphemeralEvidence(value.evidence)
     || value.finalizationFacts !== undefined && !parseFinalizationFacts(value.finalizationFacts)) {
     throw batchError('E2E_RUNTIME_WRITE_EXECUTOR_OUTPUT_INVALID')
   }
   return structuredClone(value) as unknown as RuntimeWriteExecutionOutput
 }
 
+function parseEphemeralEvidence(value: unknown): value is NonNullable<RuntimeWriteExecutionOutput['evidence']> {
+  return plain(value) && exact(value, ['dom', 'screenshot'])
+    && value.screenshot instanceof Uint8Array && value.screenshot.byteLength <= 16 * 1024 * 1024
+    && value.dom instanceof Uint8Array && value.dom.byteLength <= 4 * 1024 * 1024
+}
+
 function parseFinalizationFacts(value: unknown): value is RuntimeExecutionFinalizationFacts {
+  const grantKeys = plain(value) && Object.hasOwn(value, 'executionGrant') ? ['executionGrant'] : []
   if (!plain(value) || !exact(value, [
     'browserMeasurements', 'cleanup', 'executionOutcomeReceipt', 'executionOutcomeVerifierMaterial',
-    'gatewayAudit', 'gatewayAuditVerifierMaterial', 'isolationMeasurements',
+    'gatewayAudit', 'gatewayAuditVerifierMaterial', 'isolationMeasurements', ...grantKeys,
   ])) return false
   return ['browserMeasurements', 'cleanup', 'executionOutcomeReceipt', 'executionOutcomeVerifierMaterial',
-    'gatewayAudit', 'gatewayAuditVerifierMaterial', 'isolationMeasurements']
+    'gatewayAudit', 'gatewayAuditVerifierMaterial', 'isolationMeasurements', ...grantKeys]
     .every((key) => plain(value[key]) && jsonSafe(value[key], 0))
 }
 
@@ -176,8 +202,13 @@ function jsonSafe(value: unknown, depth: number): boolean {
 
 export function parseRuntimeInjectionExecutionOutput(value: unknown): RuntimeInjectionExecutionOutput {
   const audit = plain(value) && plain(value.gatewayAudit) ? value.gatewayAudit : undefined
-  if (!plain(value) || !exact(value, ['actionId', 'caseId', 'completedReservationIds', 'gatewayAudit', 'resultDigest', 'status'])
-    || !safeId(value.caseId) || !safeId(value.actionId)
+  const evidenceKeys = plain(value) && Object.hasOwn(value, 'evidence') ? ['evidence'] : []
+  const finalizationKeys = plain(value) && Object.hasOwn(value, 'finalizationFacts') ? ['finalizationFacts'] : []
+  if (!plain(value) || !exact(value, ['actionId', 'attemptId', 'baselineResultId', 'caseId', 'completedReservationIds',
+    'gatewayAudit', 'resultDigest', 'resultId', 'status', ...evidenceKeys, ...finalizationKeys])
+    || !safeId(value.caseId) || !safeId(value.actionId) || !safeId(value.attemptId)
+    || value.resultId !== deriveExecutionResultId(value.caseId, 'gateway-injection')
+    || value.baselineResultId !== deriveExecutionResultId(value.caseId, 'real-environment')
     || !['passed', 'failed', 'environment-blocked', 'safety-blocked'].includes(String(value.status))
     || !digest(value.resultDigest) || !Array.isArray(value.completedReservationIds)
     || value.completedReservationIds.length === 0 || value.completedReservationIds.some((id) => !safeId(id))
@@ -193,10 +224,20 @@ export function parseRuntimeInjectionExecutionOutput(value: unknown): RuntimeInj
     || (audit.received as number) !== (audit.matched as number)
       + (audit.forwarded as number) + (audit.blocked as number)
     || audit.injectionTargetForwarded !== 0
-    || (audit.bootstrapForwarded as number) > (audit.forwarded as number)) {
+    || (audit.bootstrapForwarded as number) > (audit.forwarded as number)
+    || value.evidence !== undefined && !parseEphemeralEvidence(value.evidence)
+    || value.finalizationFacts !== undefined && !parseInjectionFinalizationFacts(value.finalizationFacts)) {
     throw batchError('E2E_RUNTIME_INJECTION_EXECUTOR_OUTPUT_INVALID')
   }
   return structuredClone(value) as unknown as RuntimeInjectionExecutionOutput
+}
+
+function parseInjectionFinalizationFacts(value: unknown): value is RuntimeInjectionFinalizationFacts {
+  if (!plain(value) || !exact(value, [
+    'browserMeasurements', 'executionGrant', 'gatewayAudit', 'gatewayAuditVerifierMaterial', 'isolationMeasurements',
+  ])) return false
+  return ['browserMeasurements', 'executionGrant', 'gatewayAudit', 'gatewayAuditVerifierMaterial', 'isolationMeasurements']
+    .every((key) => plain(value[key]) && jsonSafe(value[key], 0))
 }
 
 function counts(value: Record<string, unknown>, keys: string[]): boolean {

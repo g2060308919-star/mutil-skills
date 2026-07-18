@@ -67,6 +67,10 @@ import { RegressionPublisher } from './regression-publisher.js'
 import { GenerationAssembler } from './generation-assembler.js'
 import { runtimeLayout } from './runtime-layout.js'
 import {
+  openRuntimeWriteProduction,
+  type OpenRuntimeWriteProductionResult,
+} from './runtime-write-production-wiring.js'
+import {
   MAX_SECRET_BYTES,
   SECRET_REF_PATTERN,
   SECRET_RUN_ID_PATTERN,
@@ -135,6 +139,8 @@ export interface RuntimeCliDependencies {
    * 普通 CLI 始终使用 openRuntimeArtifactStoreAuthority 的生产默认实现。
    */
   openArtifactStoreAuthority?: typeof openRuntimeArtifactStoreAuthority
+  /** 仅用于测试替换生产恢复装配；默认始终打开持久 Run/Authority/owned-resource adapters。 */
+  openWriteProduction?: typeof openRuntimeWriteProduction
 }
 
 export async function runCli(
@@ -305,6 +311,7 @@ export async function runCli(
     let executionSecretBroker: RuntimeSecretBroker | undefined
     let quarantineSecretProvider: RuntimeQuarantineSecretProvider | undefined
     let quarantine: EncryptedQuarantine | undefined
+    let writeProduction: OpenRuntimeWriteProductionResult | undefined
     let response: Awaited<ReturnType<E2ERuntimeHost['handle']>> | undefined
     let processingError: unknown
     try {
@@ -321,10 +328,36 @@ export async function runCli(
       const browserCapabilities = !needsBrowserExecution ? undefined : createProductionBrowserCapabilities({
         homeDir: dependencies.homeDir, installation, authorityHost: getAuthorityHost,
       })
+      // 生产执行资源只能在 Host 的最外层 workflow 前置条件可能通过时装配。
+      // 这里仅做只读短路；最终判定仍由持锁的 E2ERuntimeHost 完成，避免无效请求
+      // 提前创建后端、密钥代理或隔离区并把输入错误污染成 cleanup/internal 错误。
+      let executeRunMayReachExecutor = true
+      if (request.command === 'execute-run') {
+        const executionIdentity = await resolveProjectIdentity(request.projectRoot)
+        const snapshot = await runStore.getRun(executionIdentity.digest, request.payload.runId)
+        executeRunMayReachExecutor = snapshot?.workflow.current === 'compiled'
+      }
       let writeExecutor
       let injectionExecutor
       let evidenceQuarantine
-      if (request.command === 'execute-run' || request.command === 'finalize-run') {
+      if (((request.command === 'execute-run' && executeRunMayReachExecutor)
+          || request.command === 'resume-run')
+        && projectRoot !== undefined) {
+        writeProduction = await (dependencies.openWriteProduction ?? openRuntimeWriteProduction)({
+          homeDir: dependencies.homeDir,
+          projectRoot,
+          installation,
+          runStore,
+          ...(dependencies.startAuthorityHost === undefined ? {} : {
+            startAuthorityHost: dependencies.startAuthorityHost,
+          }),
+          ...(dependencies.openArtifactStoreAuthority === undefined ? {} : {
+            openArtifactAuthority: dependencies.openArtifactStoreAuthority,
+          }),
+        })
+      }
+      if ((request.command === 'execute-run' && executeRunMayReachExecutor)
+        || request.command === 'finalize-run') {
         const executionIdentity = await resolveProjectIdentity(request.projectRoot)
         if (request.command === 'execute-run') executionSecretBroker = await RuntimeSecretBroker.open({
           homeDir: dependencies.homeDir, projectRoot: executionIdentity.realRoot,
@@ -344,6 +377,7 @@ export async function runCli(
           installation,
           authorityHost: getAuthorityHost,
           secretBroker: executionSecretBroker!,
+          writeProduction: writeProduction!.capability,
         })
         if (request.command === 'execute-run') injectionExecutor = createProductionInjectionBrowserCapability({
           homeDir: dependencies.homeDir,
@@ -448,7 +482,9 @@ export async function runCli(
         ...(evidenceQuarantine === undefined ? {} : { evidenceQuarantine }),
         ...(generationFinalizer === undefined ? {} : { generationFinalizer }),
         ...(finalizationMaterialSealer === undefined ? {} : { finalizationMaterialSealer }),
-        ...(request.command !== 'open-approval' ? {} : {
+        ...(writeProduction === undefined ? {} : { writeProduction: writeProduction.capability }),
+        ...(!['open-approval', 'prepare-manual-result', 'finalize-manual-result-role']
+          .includes(request.command) ? {} : {
           authorityHostFactory: async () => {
             return await getAuthorityHost()
           },
@@ -474,6 +510,9 @@ export async function runCli(
     }
     if (artifactAuthority !== undefined) {
       try { await artifactAuthority.close() } catch (error) { cleanupErrors.push(error) }
+    }
+    if (writeProduction !== undefined) {
+      try { await writeProduction.close() } catch (error) { cleanupErrors.push(error) }
     }
     try { await runStore.close() } catch (error) { cleanupErrors.push(error) }
     if (cleanupErrors.length > 0) {

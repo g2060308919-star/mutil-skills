@@ -8,12 +8,54 @@ import {
   auditRuntimeProvenanceBinding, createCompletePublicationAuditor, PatternPrivacyScanner,
   type BuildCompleteGenerationInput,
 } from '../src/index.js'
-import { bindFixtureExecutionOutcomeReceipt, completeGenerationFixture, rebindFixtureApprovalInputsOuterOnly,
+import { addFixtureInjectionResult, bindFixtureExecutionOutcomeReceipt, completeGenerationFixture, rebindFixtureApprovalInputsOuterOnly,
   rebindFixtureApprovalOuterOnly, refreshFixtureApproval,
   refreshFixtureAttemptFacts, resignFixtureGatewayAudit,
   setFixtureRegressionProfile } from './complete-generation.fixture.js'
 
 describe('完整 generation builder', () => {
+  test('同一 Case 的 real 与 injection 结果独立进入报告，且输入顺序不影响裁决与分区', () => {
+    const forwardInput = completeGenerationFixture()
+    addFixtureInjectionResult(forwardInput)
+    const forward = buildCompleteGeneration(forwardInput)
+
+    const reverseInput = completeGenerationFixture()
+    addFixtureInjectionResult(reverseInput)
+    ;(reverseInput.drafts['browser-results'].content as any).caseResults.reverse()
+    const reversed = buildCompleteGeneration(reverseInput)
+
+    expect(forward.terminalVerdict).toBe('accepted')
+    expect(forward.verdictInput).toEqual(reversed.verdictInput)
+    const report = forward.artifacts.find((item) => item.artifactType === 'final-report')!.content as any
+    expect(report.caseDetails).toHaveLength(2)
+    expect(report.realResults).toHaveLength(1)
+    expect(report.injectionResults).toHaveLength(1)
+    expect(report.realResults[0].id).not.toBe(report.injectionResults[0].id)
+    expect(report.advisoryFailures).toEqual([report.injectionResults[0].id])
+  })
+
+  test('injection attempt 不得指向 real Gateway session', () => {
+    const input = completeGenerationFixture()
+    addFixtureInjectionResult(input)
+    const sessions = (input.drafts['gateway-audit'].content as any).sessions
+    const realResultId = sessions[0].resultId
+    sessions[0].resultId = sessions[1].resultId
+    sessions[1].resultId = realResultId
+
+    expect(() => buildCompleteGeneration(input))
+      .toThrow(/E2E_ATTEMPT_GATEWAY_SESSION_BINDING_INVALID/)
+  })
+
+  test('injection session 交换为 real reservation 时 fail closed', () => {
+    const input = completeGenerationFixture()
+    addFixtureInjectionResult(input)
+    const sessions = (input.drafts['gateway-audit'].content as any).sessions
+    sessions[1].audit.capabilityReservations = structuredClone(sessions[0].audit.capabilityReservations)
+
+    expect(() => buildCompleteGeneration(input))
+      .toThrow(/E2E_ATTEMPT_GATEWAY_RESERVATION_BINDING_INVALID/)
+  })
+
   test('公共输入类型不允许调用方提供任何裁决事实', () => {
     type Forbidden = Extract<keyof BuildCompleteGenerationInput,
       'verdictInput' | 'terminalVerdict' | 'verdict' | 'metrics' | 'finalReport'>

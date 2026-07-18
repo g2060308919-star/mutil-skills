@@ -1,21 +1,27 @@
 import { describe, expect, test, vi } from 'vitest'
-import { completeGenerationFixture } from '../../e2e-engine/test/complete-generation.fixture.js'
+import { addFixtureInjectionResult, completeGenerationFixture } from '../../e2e-engine/test/complete-generation.fixture.js'
 import { buildCompleteGeneration } from '@mutil-skills/e2e-engine'
 import { digestBytes } from '@mutil-skills/e2e-contracts'
+import { LocalGatewayAuditSigner } from '@mutil-skills/e2e-gateway'
 import {
   ProductionFinalizationMaterialProvider,
   createPersistedRuntimeFinalizationMaterial,
 } from '../src/production-finalization-material-provider.js'
 import type { RuntimeRunSnapshot } from '../src/run-store.js'
+import { injectionOutput } from './runtime-write-fixtures.js'
 
 describe('ProductionFinalizationMaterialProvider', () => {
   test('只从持久 trusted material 与 Quarantine 重建，不接受空事实或 caller drafts', async () => {
     const fixture = completeGenerationFixture()
+    addFixtureInjectionResult(fixture)
     const built = buildCompleteGeneration(fixture)
     const factArtifacts = built.artifacts.filter((artifact) =>
       !['final-report', 'generation-manifest'].includes(artifact.artifactType))
     const evidence = fixture.drafts['browser-evidence'].files![0]!
     const evidenceBytes = Buffer.from(evidence.base64, 'base64')
+    const executionOutcomeSigner = LocalGatewayAuditSigner.create({
+      issuer: 'gateway-test', keyId: 'gateway-test-key', instanceId: 'gateway-test-instance', version: '0.1.0',
+    })
     const material = createPersistedRuntimeFinalizationMaterial({
       runId: fixture.context.generationId,
       attemptId: 'ATTEMPT-1',
@@ -24,7 +30,23 @@ describe('ProductionFinalizationMaterialProvider', () => {
         relativePath: fixture.drafts[artifact.artifactType as keyof typeof fixture.drafts].relativePath,
       })),
       execution: { runId: fixture.context.generationId, attemptId: 'ATTEMPT-1',
-        realEnvironmentResults: [], injectionResults: [] },
+        realEnvironmentResults: [{
+          caseId: 'CASE-1', actionId: 'ACTION-1', status: 'passed', effectObservation: 'applied',
+          resultDigest: digestBytes('test/write-result/v1', Buffer.from('result')),
+          gatewayCommit: {
+            reservationId: 'RESERVATION-1',
+            reservationReceiptDigest: digestBytes('test/reservation/v1', Buffer.from('reservation')),
+            outcomeReceiptDigest: digestBytes('test/outcome/v1', Buffer.from('outcome')),
+            committed: true,
+          },
+          cleanup: {
+            status: 'verified-clean',
+            resultDigest: digestBytes('test/cleanup/v1', Buffer.from('cleanup')),
+            leaseReceiptDigest: digestBytes('test/lease/v1', Buffer.from('lease')),
+          },
+        }], injectionResults: [injectionOutput({
+          actionId: 'ACTION-1', attemptId: 'ATTEMPT-INJECTION-1', status: 'failed',
+        })] },
       gatewayAudit: fixture.drafts['gateway-audit'].content,
       evidence: [{ evidenceId: 'EVIDENCE-1', relativePath: evidence.relativePath,
         quarantinePath: 'sanitized/EVIDENCE-1.bin', byteLength: evidenceBytes.byteLength,
@@ -37,6 +59,7 @@ describe('ProductionFinalizationMaterialProvider', () => {
         decision: { kind: 'runtime-authority' }, gatewayAudit: { kind: 'persisted-test' },
         sanitizer: { kind: 'persisted-test' }, privacyReview: { kind: 'runtime-authority' },
         attemptEvent: { kind: 'runtime-authority' }, regressionDiscovery: { kind: 'finalizer-owned' },
+        executionOutcome: executionOutcomeSigner.exportExecutionOutcomeVerifierMaterial(),
       },
     })
     const snapshot = finalizingSnapshot(material, fixture.provenance)
@@ -61,6 +84,12 @@ describe('ProductionFinalizationMaterialProvider', () => {
     expect(Object.keys(bound.semanticDrafts)).toHaveLength(25)
     expect(bound.evidence[0]?.bytes).toEqual(evidenceBytes)
     expect(bound.context).toMatchObject({ generationId: 'GEN-1', fencingToken: 11 })
+    expect((bound.semanticDrafts['regression-manifest']!.content as any).discoveryVerifierMaterial)
+      .toEqual(regressionVerifierMaterial())
+    expect((bound.semanticDrafts['browser-results']!.content as any).trustedCompilerExecution.caseResults)
+      .toEqual([{ caseId: 'CASE-1', status: 'passed' }])
+    expect(bound.verifiers?.executionOutcomeVerifier).toBeTypeOf('function')
+    expect(bound.verifiers?.executionOutcomeVerifier?.({} as never)).toBe(false)
     await prepared.release()
     expect(bound.evidence[0]?.bytes).toEqual(Buffer.alloc(evidenceBytes.byteLength))
   })
@@ -106,5 +135,15 @@ function regressionResult(fixture: ReturnType<typeof completeGenerationFixture>)
     files: draft.files!.map((file) => ({ relativePath: file.relativePath,
       bytes: Buffer.from(file.base64, 'base64') })),
     isolationProof: { backend: 'linux-bwrap' as const, proofDigest: `sha256:${'d'.repeat(64)}` },
+    verifierMaterial: regressionVerifierMaterial(),
+  }
+}
+
+function regressionVerifierMaterial() {
+  return {
+    schemaVersion: '1.0.0' as const,
+    issuer: 'DISCOVERY', keyId: 'DISCOVERY-1', purpose: 'regression-discovery-attestation/v2' as const,
+    algorithm: 'Ed25519' as const, publicKeySpkiBase64: 'cHVibGljLWtleQ==',
+    publicKeyDigest: `sha256:${'e'.repeat(64)}`,
   }
 }

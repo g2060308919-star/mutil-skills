@@ -13,7 +13,7 @@ const DIGEST = /^sha256:[a-f0-9]{64}$/
 
 export interface RuntimeOwnedResourceRecord {
   resourceId: string
-  kind: 'loopback-endpoint' | 'browser-profile-lock' | 'install-staging'
+  kind: 'loopback-endpoint' | 'browser-profile-lock'
   ownerMarker: RuntimeOwnedResourceMarker
   descriptor: unknown
   descriptorDigest: string
@@ -77,6 +77,44 @@ export class RuntimeOwnedResourceRegistry {
       )
       snapshot.records[record.resourceId] = record
       return structuredClone(record)
+    })
+  }
+
+  /**
+   * 正常关闭路径在已经确认外部资源消失后写入 tombstone。调用方必须同时给出
+   * owner marker 与观察到的 revision，避免把已被重新绑定的资源误记为 cleaned。
+   */
+  async complete(input: {
+    resourceId: string
+    ownerMarkerDigest: string
+    expectedRevision: number
+    cleanupReceiptDigest: string
+  }): Promise<RuntimeOwnedResourceRecord> {
+    if (!SAFE_ID.test(input.resourceId) || !DIGEST.test(input.ownerMarkerDigest)
+      || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1
+      || !DIGEST.test(input.cleanupReceiptDigest)) throw registryError(
+      'E2E_RUNTIME_OWNED_RESOURCE_COMPLETION_INVALID', 'Owned resource completion 输入非法',
+    )
+    return await this.mutate((snapshot) => {
+      const current = snapshot.records[input.resourceId]
+      if (current === undefined) throw registryError(
+        'E2E_RUNTIME_OWNED_RESOURCE_NOT_FOUND', 'Owned resource record 不存在',
+      )
+      if (current.status === 'cleaned') {
+        if (current.ownerMarker.markerDigest === input.ownerMarkerDigest
+          && current.cleanupReceiptDigest === input.cleanupReceiptDigest) return structuredClone(current)
+        throw registryError('E2E_RUNTIME_OWNED_RESOURCE_CAS_FAILED', 'Cleaned tombstone 与 completion 不一致')
+      }
+      if (current.revision !== input.expectedRevision
+        || current.ownerMarker.markerDigest !== input.ownerMarkerDigest) throw registryError(
+        'E2E_RUNTIME_OWNED_RESOURCE_CAS_FAILED', 'Owned resource completion 观察已陈旧',
+      )
+      const completed = parseRecord({
+        ...current, revision: current.revision + 1, status: 'cleaned',
+        cleanupReceiptDigest: input.cleanupReceiptDigest,
+      })
+      snapshot.records[input.resourceId] = completed
+      return structuredClone(completed)
     })
   }
 
@@ -187,7 +225,7 @@ function parseRecord(value: unknown): RuntimeOwnedResourceRecord {
   if (!exactKeys(value, ['descriptor', 'descriptorDigest', 'kind', 'ownerMarker', 'registeredAt',
     'resourceId', 'revision', 'status', ...(hasReceipt ? ['cleanupReceiptDigest'] : [])])
     || typeof value.resourceId !== 'string' || !SAFE_ID.test(value.resourceId)
-    || !['loopback-endpoint', 'browser-profile-lock', 'install-staging'].includes(value.kind as string)
+    || !['loopback-endpoint', 'browser-profile-lock'].includes(value.kind as string)
     || typeof value.descriptorDigest !== 'string' || !DIGEST.test(value.descriptorDigest)
     || value.descriptorDigest !== digestText('runtime-owned-resource-descriptor/v1', canonicalizeJson(value.descriptor))
     || typeof value.revision !== 'number' || !Number.isSafeInteger(value.revision) || value.revision < 1

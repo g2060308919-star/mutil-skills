@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
-import { canonicalizeJson, digestBytes, digestText, type VerdictInput } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, deriveExecutionResultId, digestBytes, digestText,
+  type VerdictInput } from '@mutil-skills/e2e-contracts'
 import {
   auditArtifactGraph, auditArtifactSemantics, auditFinalVerdict, auditGenerationFiles,
   auditVerdictFactBinding, computeVerdict,
@@ -139,11 +140,12 @@ describe('代际文件登记审计', () => {
 
 describe('最终结论独立复算', () => {
   const verdictInput: VerdictInput = {
-    schemaVersion: '2.0.0', assetId: 'ASSET-1', generationId: 'GEN-1', verdictRuleVersion: '2.0.0',
+    schemaVersion: '2.1.0', assetId: 'ASSET-1', generationId: 'GEN-1', verdictRuleVersion: '2.0.0',
     policyDigest: digest('1'), universeDigest: digest('2'), prdRevision: digest('a'),
     requirementModelDigest: digest('3'),
     obligations: [{ obligationId: 'COV-1', necessity: 'required', disposition: 'automated', caseIds: ['CASE-1'] }],
     caseResults: [{
+      resultId: deriveExecutionResultId('CASE-1', 'real-environment'),
       caseId: 'CASE-1', runId: 'RUN-1', obligationIds: ['COV-1'], status: 'passed',
       executionMode: 'real-environment',
       attemptSelection: { status: 'valid', attemptId: 'ATTEMPT-1', eventChainDigest: digest('4') },
@@ -323,6 +325,7 @@ describe('业务资产闭包审计', () => {
     } },
     { artifactId: 'GRANTS', artifactType: 'approval-grants', content: { approvalSubjectDigest: bundleDigest } },
     { artifactId: 'RESULTS', artifactType: 'browser-results', content: { runId: 'RUN-1', executedBrowserIds: ['CHROMIUM'], caseResults: [{
+      resultId: deriveExecutionResultId('CASE-1', 'real-environment'),
       caseId: 'CASE-1', attemptId: 'ATTEMPT-1', eventChainDigest: digest('4'),
       mode: 'real-environment', status: 'passed', stepResults: [{ stepId: 'STEP-1', actionId: 'ACTION-1', status: 'passed',
         actualDigest: digest('9'), oracleResult: 'passed', evidenceIds: ['EVIDENCE-1'] }],
@@ -642,6 +645,7 @@ describe('业务资产闭包审计', () => {
         obligationId: 'COV-1', necessity: 'required', disposition: 'automated', caseIds: ['CASE-1'],
       }],
       caseResults: [{
+        resultId: deriveExecutionResultId('CASE-1', 'real-environment'),
         caseId: 'CASE-1', runId: 'RUN-1', obligationIds: ['COV-1'], status: 'passed',
         executionMode: 'real-environment',
         attemptSelection: { status: 'valid', attemptId: 'ATTEMPT-1', eventChainDigest: digest('4') },

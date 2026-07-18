@@ -34,7 +34,7 @@ import { authorizeRuntimeWriteProduction } from '../src/runtime-write-production
 import type { RuntimeAuthorityHost } from '../src/authority-host.js'
 import type { ProjectPublisher } from '../src/project-publisher.js'
 import { projectionFixture } from './trusted-action-runner.test.js'
-import { injectionOutput, realWriteOutput } from './runtime-write-fixtures.js'
+import { injectionOutput, realWriteOutput, runtimeWriteDigest } from './runtime-write-fixtures.js'
 import { authorizeRuntimeGenerationFinalizer } from '../src/runtime-generation-finalizer.js'
 import { authorizeRuntimeEvidenceQuarantine } from '../src/runtime-evidence-quarantine.js'
 
@@ -465,6 +465,17 @@ describe('E2ERuntimeHost', () => {
     }
     const fixture = await hostFixture({
       authorityHostFactory: async () => authorityAdapter,
+      quarantineEvidence: async (input) => ({
+        schemaVersion: '1.0.0', runId: input.runId, attemptId: input.attemptId,
+        records: [
+          { evidenceType: 'screenshot', quarantinePath: `raw/${input.attemptId}/screenshot.bin`,
+            plaintextDigest: digestBytes('quarantine-plaintext/v1', input.evidence.screenshot),
+            byteLength: input.evidence.screenshot.byteLength },
+          { evidenceType: 'dom', quarantinePath: `raw/${input.attemptId}/dom.bin`,
+            plaintextDigest: digestBytes('quarantine-plaintext/v1', input.evidence.dom),
+            byteLength: input.evidence.dom.byteLength },
+        ],
+      }),
       preflight: async () => {
         if (formalPreflightDigest === undefined) throw new Error('formal preflight not completed')
         return {
@@ -811,12 +822,20 @@ describe('E2ERuntimeHost', () => {
         executeWriteRun: async ({ snapshot, attemptId, actionId }) => {
           expect(snapshot?.workflow.current).toBe('running-real')
           expect(attemptId).toMatch(/^ATTEMPT-/)
+          expect(snapshot?.writeAttempts?.[attemptId]).toMatchObject({
+            state: 'prepared', actionId, executionFencingToken: snapshot?.executionAttempt?.fencingToken,
+          })
           return realWriteOutput({ actionId }) as never
         },
       } : {
         executeInjectionRun: async ({ snapshot, actionId }) => {
           expect(snapshot?.workflow.current).toBe('running-real')
-          return injectionOutput({ actionId }) as never
+          return injectionOutput({ actionId, finalizationFacts: {
+            executionGrant: executionGrantForMode('injection', snapshot!.runId),
+            gatewayAudit: { signed: true }, gatewayAuditVerifierMaterial: { keyId: 'INJECTION-KEY' },
+            browserMeasurements: { browserMeasurementDigest: digest('1') },
+            isolationMeasurements: { gatewaySessionMeasurementDigest: digest('2') },
+          } }) as never
         },
       })
       const created = successResult(await handleRequest(fixture.host,
@@ -863,9 +882,79 @@ describe('E2ERuntimeHost', () => {
       const persisted = await fixture.store.getRun(created.projectIdentityDigest as string, created.runId as string)
       expect(persisted).toMatchObject({ workflow: { current: 'diagnosing' } })
       expect(persisted?.executionAttempt).toBeUndefined()
+      if (mode === 'write') expect(Object.values(persisted?.writeAttempts ?? {})).toMatchObject([
+        { state: 'outcome-committed', actionId: 'ACTION-1',
+          reservation: { reservationId: 'RESERVATION-WRITE-1' },
+          outcome: { outcomeDigest: runtimeWriteDigest('outcome-receipt'),
+            receiptDigest: runtimeWriteDigest('reservation-receipt') } },
+      ])
+      if (mode === 'injection') {
+        const facts = persisted?.trustedExecutionFacts['finalization-execution-facts'] as any
+        expect(facts).toMatchObject({ schemaVersion: '2.0.0', gatewayInjection: {
+          [injectionOutput().resultId]: { gatewayAudit: { signed: true } },
+        } })
+        expect(persisted?.executionResults?.gatewayInjection['ACTION-1']).not.toHaveProperty('evidence')
+      }
       await fixture.store.close()
     },
   )
+
+  test('write 原始证据必须先进入 Quarantine，Run Store 只持久化去除 bytes 的结果', async () => {
+    const quarantineEvidence = vi.fn(async (input: {
+      runId: string; attemptId: string; evidence: { screenshot: Uint8Array; dom: Uint8Array }
+    }) => ({
+      schemaVersion: '1.0.0' as const, runId: input.runId, attemptId: input.attemptId,
+      records: [
+        { evidenceType: 'screenshot' as const, quarantinePath: `raw/${input.attemptId}/screenshot.bin`,
+          plaintextDigest: digestBytes('quarantine-plaintext/v1', input.evidence.screenshot),
+          byteLength: input.evidence.screenshot.byteLength },
+        { evidenceType: 'dom' as const, quarantinePath: `raw/${input.attemptId}/dom.bin`,
+          plaintextDigest: digestBytes('quarantine-plaintext/v1', input.evidence.dom),
+          byteLength: input.evidence.dom.byteLength },
+      ],
+    }))
+    const fixture = await hostFixture({
+      quarantineEvidence,
+      executeWriteRun: async ({ actionId }) => realWriteOutput({
+        actionId,
+        evidence: { screenshot: Uint8Array.from([1, 2]), dom: Uint8Array.from([3, 4]) },
+      }) as never,
+    })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-WRITE-EVIDENCE', fixture.roots.project)))
+    const projected = projectionFixture()
+    const frozenArtifacts = structuredClone(projected.frozenArtifacts)
+    const action = ((frozenArtifacts['browser-action-map'].content as Record<string, unknown>)
+      .actions as Array<Record<string, unknown>>)[0]!
+    action.effect = 'reversible-write'
+    const facts = executionFactsFor(projected, {
+      runId: created.runId as string, runtimeInstallationDigest: installation.installationDigest,
+    })
+    facts['signed-execution-grant'] = executionGrantForMode('write', created.runId as string)
+    await fixture.store.beginRequest('SEED-WRITE-EVIDENCE', digest('7'))
+    const lock = await fixture.store.acquireRunLock(created.projectIdentityDigest as string, created.runId as string)
+    await fixture.store.updateRunOutcome(created.projectIdentityDigest as string, created.runId as string,
+      'SEED-WRITE-EVIDENCE', digest('7'), (snapshot) => ({ snapshot: {
+        ...snapshot, frozenArtifacts,
+        artifactDigests: { ...snapshot.artifactDigests, ...Object.fromEntries(
+          Object.entries(frozenArtifacts).map(([key, artifact]) => [key, artifact.contentDigest])) },
+        trustedExecutionFacts: facts,
+        workflow: { current: 'compiled', sequence: 9, eventChainDigest: digest('8') },
+      }, response: { seeded: true } }), 'seed-write-evidence', lock)
+    await lock.close()
+
+    await expect(handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-EXECUTE-WRITE-EVIDENCE'), command: 'execute-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    }))).resolves.toMatchObject({ ok: true })
+    expect(quarantineEvidence).toHaveBeenCalledOnce()
+    const persisted = await fixture.store.getRun(created.projectIdentityDigest as string, created.runId as string)
+    expect(persisted?.trustedExecutionFacts['quarantined-evidence']).toMatchObject({
+      runId: created.runId, records: [{ evidenceType: 'screenshot' }, { evidenceType: 'dom' }],
+    })
+    expect(persisted?.executionResults?.realEnvironment['ACTION-1']).not.toHaveProperty('evidence')
+    await fixture.store.close()
+  })
 
   test('run-preflight 只接受 branded 内部执行器并持久化完整 provenance fact', async () => {
     const fixture = await hostFixture({ preflight: async ({ snapshot }) => ({
@@ -1401,7 +1490,8 @@ async function hostFixture(options: {
     ...(options.writeRecovery === undefined ? {} : {
       writeProduction: authorizeRuntimeWriteProduction({
         recovery: options.writeRecovery,
-        ownedResources: { register: vi.fn() },
+        ownedResources: { register: vi.fn(), complete: vi.fn() },
+        prepareCleanup: vi.fn(),
       }),
     }),
     ...(options.projectPublisherFactory === undefined ? {} : {

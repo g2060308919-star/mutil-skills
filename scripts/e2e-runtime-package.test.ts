@@ -27,6 +27,7 @@ const requiredFiles = [
   'assets/approval/index.html',
   'assets/approval/approval.js',
   'assets/approval/simplewebauthn-browser.js',
+  'assets/approval/simplewebauthn-LICENSE.md',
   'scripts/authority-child-fchdir.py',
   'scripts/authority-state-openat.py',
   'scripts/gateway-ca-openat.py',
@@ -37,6 +38,19 @@ afterEach(async () => {
 })
 
 describe('E2E Runtime npm tarball', () => {
+  test('跨仓 child 只从已安装 Runtime 闭包加载 E2E 包，并在启动前清空项目依赖', async () => {
+    const [child, driver] = await Promise.all([
+      readFile(new URL('./e2e-runtime-cross-repo-child.mjs', import.meta.url), 'utf8'),
+      readFile(new URL('./e2e-runtime-cross-repo.ts', import.meta.url), 'utf8'),
+    ])
+    expect(child).not.toMatch(/from ['"]@mutil-skills\//)
+    expect(child).toContain("installedPackage('e2e-authority')")
+    expect(child).toContain("installedPackage('e2e-contracts')")
+    expect(driver).toContain("rm(join(input.project, 'node_modules')")
+    expect(driver).toContain("rm(join(input.project, 'package.json')")
+    expect(driver).toContain('const harnessRoot = join(root, \'harness\')')
+  })
+
   test('跨仓 fixture 的全部外部资产都符合当前严格 schema', () => {
     const fixture = runtimeReadOnlyFixture({
       runId: 'RUN-CROSS-REPO', assetId: 'ASSET-CROSS-REPO',
@@ -89,6 +103,7 @@ describe('E2E Runtime npm tarball', () => {
     expect(files.some((file) => /(?:^|\/)\.env$/.test(file))).toBe(false)
     expect(files.some((file) => /\.(?:pem|key|crt)$/.test(file))).toBe(false)
     expect(files).not.toContain('package/scripts/copy-approval-assets.mjs')
+    expect(files).toContain('assets/approval/simplewebauthn-LICENSE.md')
   })
 
   test('仓库中的 Runtime 生产资产与 helper 均真实存在', async () => {

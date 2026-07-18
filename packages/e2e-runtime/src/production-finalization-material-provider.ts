@@ -16,7 +16,11 @@ import type {
 } from '@mutil-skills/e2e-engine'
 import { createAttemptEventProofVerifier } from '@mutil-skills/e2e-authority'
 import { createSanitizerAttestationVerifier } from '@mutil-skills/e2e-engine'
-import { LocalGatewayAuditVerifier, type GatewayPublicationAudit } from '@mutil-skills/e2e-gateway'
+import {
+  LocalExecutionOutcomeVerifier,
+  LocalGatewayAuditVerifier,
+  type GatewayPublicationAudit,
+} from '@mutil-skills/e2e-gateway'
 import { createRegressionDiscoveryVerifier, type TrustedCompilerInput } from '@mutil-skills/e2e-playwright-runtime'
 import { RuntimeExecutionBatch, type RuntimeInjectionExecutionOutput,
   type RuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
@@ -115,6 +119,7 @@ interface MaterialProviderDependencies {
   privacyReviewVerifier?: NonNullable<ReturnType<PreparedRuntimeGenerationMaterial['bind']>['verifiers']>['privacyReviewVerifier']
   regressionDiscoveryVerifier?: NonNullable<ReturnType<PreparedRuntimeGenerationMaterial['bind']>['verifiers']>['regressionDiscoveryVerifier']
   attemptProofVerifier?: NonNullable<ReturnType<PreparedRuntimeGenerationMaterial['bind']>['verifiers']>['attemptProofVerifier']
+  executionOutcomeVerifier?: NonNullable<ReturnType<PreparedRuntimeGenerationMaterial['bind']>['verifiers']>['executionOutcomeVerifier']
 }
 
 /**
@@ -204,18 +209,24 @@ function productionVerifiers(
   regression: RegressionPublicationResult,
   dependencies: MaterialProviderDependencies,
 ): NonNullable<ReturnType<PreparedRuntimeGenerationMaterial['bind']>['verifiers']> {
-  const gatewayMaterial = material.verifierMaterials.gatewayAudit as never
-  const sanitizerMaterial = material.verifierMaterials.sanitizer as never
+  const gatewayMaterials = materialList(material.verifierMaterials.gatewayAudit)
+  const sanitizerMaterials = materialList(material.verifierMaterials.sanitizer)
   const attemptMaterial = material.verifierMaterials.attemptEvent as never
-  const gateway = dependencies.gatewayVerifier === undefined
-    ? LocalGatewayAuditVerifier.create(gatewayMaterial) : undefined
-  const sanitizer = dependencies.sanitizerVerifier === undefined
-    ? createSanitizerAttestationVerifier(
-      sanitizerMaterial, (sanitizerMaterial as { publicKeyDigest: string }).publicKeyDigest,
-    ) : undefined
+  const executionOutcomeMaterial = material.verifierMaterials.executionOutcome as never
+  const gateways = dependencies.gatewayVerifier === undefined
+    ? gatewayMaterials.map((candidate) => LocalGatewayAuditVerifier.create(candidate as never)) : []
+  const sanitizers = dependencies.sanitizerVerifier === undefined
+    ? sanitizerMaterials.map((candidate) => createSanitizerAttestationVerifier(
+      candidate as never, (candidate as { publicKeyDigest: string }).publicKeyDigest,
+    )) : []
+  const requiresExecutionOutcome = material.execution.realEnvironmentResults.length > 0
+  const executionOutcome = dependencies.executionOutcomeVerifier === undefined && requiresExecutionOutcome
+    ? LocalExecutionOutcomeVerifier.create(executionOutcomeMaterial) : undefined
   return {
-    gatewayVerifier: dependencies.gatewayVerifier ?? ((signature) => gateway!.verifySignature(signature)),
-    sanitizerVerifier: dependencies.sanitizerVerifier ?? sanitizer!,
+    gatewayVerifier: dependencies.gatewayVerifier
+      ?? ((signature) => gateways.some((gateway) => gateway.verifySignature(signature))),
+    sanitizerVerifier: dependencies.sanitizerVerifier
+      ?? ((attestation, binding) => sanitizers.some((verify) => verify(attestation, binding))),
     privacyReviewVerifier: dependencies.privacyReviewVerifier ?? (() => false),
     regressionDiscoveryVerifier: dependencies.regressionDiscoveryVerifier
       ?? (regression.verifierMaterial === undefined ? () => false : createRegressionDiscoveryVerifier(
@@ -223,7 +234,15 @@ function productionVerifiers(
       )),
     attemptProofVerifier: dependencies.attemptProofVerifier
       ?? createAttemptEventProofVerifier(attemptMaterial),
+    ...(!requiresExecutionOutcome && dependencies.executionOutcomeVerifier === undefined ? {} : {
+      executionOutcomeVerifier: dependencies.executionOutcomeVerifier
+        ?? ((receipt) => executionOutcome!.verifyReceipt(receipt)),
+    }),
   }
+}
+
+function materialList(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [value]
 }
 
 function parseUnsignedMaterial(candidate: unknown): Omit<PersistedRuntimeFinalizationMaterial, 'materialDigest'> {
@@ -374,6 +393,9 @@ function bindRegression(
 ): Record<string, CompleteArtifactDraft> {
   const draft = drafts['regression-manifest']
   if (!draft || !plain(draft.content)) throw materialError('E2E_RUNTIME_FINALIZATION_REGRESSION_DRAFT_MISSING')
+  if (regression.verifierMaterial === undefined) {
+    throw materialError('E2E_RUNTIME_FINALIZATION_REGRESSION_VERIFIER_MISSING')
+  }
   const content = structuredClone(draft.content) as Record<string, unknown>
   content.sourceFiles = structuredClone(regression.discoveryAttestation.sourceFiles)
   content.caseMappings = structuredClone(regression.discoveryAttestation.caseMappings)
@@ -381,6 +403,7 @@ function bindRegression(
   content.executionProfile = regression.discoveryAttestation.executionProfile
   content.templateDigest = regression.discoveryAttestation.templateDigest
   content.toolchain = structuredClone(regression.discoveryAttestation.toolchain)
+  content.discoveryVerifierMaterial = structuredClone(regression.verifierMaterial)
   content.listResult = {
     caseIds: [...regression.caseIds],
     digest: digestText('playwright-list-result/v1', canonicalizeJson(regression.caseIds)),
@@ -410,10 +433,12 @@ function bindRegression(
   if (caseResults.length === 0 || executableCheck === undefined || gatewayCheck === undefined) {
     throw materialError('E2E_RUNTIME_FINALIZATION_TRUSTED_EXECUTION_BINDING_MISSING')
   }
-  const executionCaseResults = caseResults.map((item) => ({
-    caseId: item.caseId,
-    status: item.status === 'passed' ? 'passed' : 'failed',
-  })).sort((left, right) => String(left.caseId).localeCompare(String(right.caseId)))
+  const executionCaseResults = caseResults
+    .filter((item) => item.mode === 'real-environment')
+    .map((item) => ({
+      caseId: item.caseId,
+      status: item.status === 'passed' ? 'passed' : 'failed',
+    })).sort((left, right) => String(left.caseId).localeCompare(String(right.caseId)))
   const allPassed = executionCaseResults.every((item) => item.status === 'passed')
   drafts['browser-results'] = {
     ...browserResults,

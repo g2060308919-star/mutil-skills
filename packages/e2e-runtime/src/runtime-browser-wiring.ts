@@ -10,6 +10,7 @@ import {
 import { PlaywrightPageAdapter, runBrowserPreflight } from '@mutil-skills/e2e-playwright-runtime'
 import {
   canonicalizeJson,
+  deriveExecutionResultId,
   digestCleanupPlanDefinition,
   digestRuntimeHttpResponseBody,
   digestText,
@@ -19,7 +20,8 @@ import {
   type RuntimeHttpReadProbe,
   type SignedInjectionGrant,
 } from '@mutil-skills/e2e-contracts'
-import { InjectionGateway, ReversibleWriteGateway, digestBinaryHttpPayload } from '@mutil-skills/e2e-gateway'
+import { InjectionGateway, LocalGatewayAuditSigner, ReversibleWriteGateway,
+  digestBinaryHttpPayload } from '@mutil-skills/e2e-gateway'
 import { ControlledBrowserHost, getControlledBrowserSessionBinding } from './browser-host.js'
 import { inspectChromiumInstallation, type ChromiumInstallation } from './browser-installer.js'
 import { startGatewayProxyHostForRuntime } from './gateway-proxy-host.js'
@@ -41,6 +43,12 @@ import {
 import { projectRuntimeWriteSnapshot } from './runtime-write-projector.js'
 import { executeSecretTemplateAtBridge, type SecretTemplateBroker } from './secret-template.js'
 import { GatewayCleanupTransport, authorizeGatewayCleanupTransport } from './gateway-cleanup-transport.js'
+import {
+  createRuntimeWriteOwnedResourceLifecycle,
+  prepareRuntimeWriteCleanup,
+  type RuntimeWriteProductionCapability,
+} from './runtime-write-production.js'
+import { join } from 'node:path'
 
 export function createProductionBrowserCapabilities(input: {
   homeDir: string
@@ -331,6 +339,7 @@ export function createProductionWriteBrowserCapability(input: {
   installation: RuntimeInstallation
   authorityHost(): Promise<RuntimeAuthorityHost>
   secretBroker: SecretTemplateBroker
+  writeProduction: RuntimeWriteProductionCapability
 }): RuntimeWriteExecutorCapability {
   const browserInstallation = async () => await inspectChromiumInstallation({
     homeDir: input.browserHomeDir ?? input.homeDir, runtimeVersion: input.installation.version,
@@ -339,6 +348,13 @@ export function createProductionWriteBrowserCapability(input: {
   return authorizeRuntimeWriteExecutor(async ({ snapshot, attemptId, caseId, actionId }) => {
     if (snapshot === undefined) throw writeWiringError('E2E_RUNTIME_WRITE_SNAPSHOT_REQUIRED')
     const runtimeSnapshot = snapshot
+    const writeAttempt = runtimeSnapshot.writeAttempts?.[attemptId]
+    if (writeAttempt === undefined || writeAttempt.state !== 'prepared') {
+      throw writeWiringError('E2E_RUNTIME_WRITE_ATTEMPT_NOT_PREPARED')
+    }
+    const ownedResourceLifecycle = createRuntimeWriteOwnedResourceLifecycle(
+      input.writeProduction, writeAttempt.ownerMarker,
+    )
     const projection = projectRuntimeWriteSnapshot(runtimeSnapshot)
     if (projection.caseId !== caseId || projection.actionId !== actionId) {
       throw writeWiringError('E2E_RUNTIME_WRITE_PROJECTED_ACTION_MISMATCH')
@@ -397,6 +413,15 @@ export function createProductionWriteBrowserCapability(input: {
         gateway = await startGatewayProxyHostForRuntime({
           runId: runtimeSnapshot.runId, mode: 'real-environment', authorityRoot: runtimeLayout(input.homeDir).authority,
           approvedRequests,
+          ownedResource: {
+            markerPath: join(
+              runtimeLayout(input.homeDir).state,
+              runtimeSnapshot.runId,
+              'gateway',
+              `session-${writeAttempt.ownerMarker.markerDigest.slice(7, 31)}.owner.json`,
+            ),
+            lifecycle: ownedResourceLifecycle,
+          },
           policyObjects: { factory: ({ signer, recorder }) => {
             gatewayAuditVerifierMaterial = signer.exportVerifierMaterial() as unknown as Record<string, unknown>
             executionOutcomeVerifierMaterial = signer.exportExecutionOutcomeVerifierMaterial() as unknown as Record<string, unknown>
@@ -419,6 +444,7 @@ export function createProductionWriteBrowserCapability(input: {
         browser = await new ControlledBrowserHost().open({
           homeDir: input.homeDir, runId: runtimeSnapshot.runId,
           installation: await browserInstallation(), gateway,
+          ownedResourceLifecycle,
         })
         const rules = projectGatewayRules({ runId: runtimeSnapshot.runId, approvedRequests }).rules
         const correlations = rules.map((rule) => ({
@@ -450,6 +476,11 @@ export function createProductionWriteBrowserCapability(input: {
           cleanupPlanId: projection.cleanupPlan.cleanupPlanId,
           cleanupRequest: observations[2], verificationProbe: observations[3], status: cleanupStatus,
         }))
+        if (cleanupStatus === 'verified-clean') await prepareRuntimeWriteCleanup(input.writeProduction, {
+          projectIdentityDigest: writeAttempt.ownerMarker.projectIdentityDigest,
+          runId: runtimeSnapshot.runId, attemptId, cleanupDigest: cleanupResultDigest,
+          preparedAt: new Date().toISOString(),
+        })
         const cleanup = await new GatewayCleanupTransport({
           gateway: authorizeGatewayCleanupTransport(async () => ({
             status: cleanupStatus, resultDigest: cleanupResultDigest,
@@ -463,22 +494,33 @@ export function createProductionWriteBrowserCapability(input: {
         })
         const status = matches.every(Boolean) && cleanup.status === 'verified-clean'
           ? 'passed' as const : 'failed' as const
+        const writeEvidence = createRuntimeFixedHttpWriteEvidence({
+          actionId, observations, matches, cleanupStatus: cleanup.status,
+          screenshot: await new PlaywrightPageAdapter(browser!.page).screenshot(),
+        })
         const outcome = await gateway!.writeLifecycle.finalizeWriteOutcome(
           projection.capability.capabilityId,
           {
             status, effectObservation, runnerResultDigest: resultDigest,
             cleanupPlanId: projection.cleanupPlan.cleanupPlanId,
-            cleanup, evidenceIds: [], completedAt: new Date().toISOString(),
+            cleanup, evidenceIds: [writeEvidence.evidenceId], completedAt: new Date().toISOString(),
           },
         )
         const gatewayAudit = await gateway!.handle.finalize()
         if (!gatewayAuditVerifierMaterial || !executionOutcomeVerifierMaterial) {
           throw writeWiringError('E2E_RUNTIME_WRITE_VERIFIER_MATERIAL_MISSING')
         }
-        const reservationReceiptDigest = digestText('runtime-write-reservation-receipt/v1', canonicalizeJson({
-          reservationId: outcome.reservationId, grantId: outcome.grantId,
-          capabilityId: outcome.capabilityId, signedDigest: outcome.signedDigest,
-        }))
+        const reservationReceiptDigest = digestText(
+          'authority-reservation-terminal-receipt/v1', canonicalizeJson({
+            reservationId: outcome.reservationId,
+            grantId: projection.grant.grantId,
+            capabilityId: projection.capability.capabilityId,
+            actionId,
+            attemptId,
+            terminalStatus: 'completed',
+            outcomeDigest: outcome.signedDigest,
+          }),
+        )
         return {
           caseId, actionId, status, effectObservation, resultDigest,
           gatewayCommit: {
@@ -486,7 +528,9 @@ export function createProductionWriteBrowserCapability(input: {
             outcomeReceiptDigest: outcome.signedDigest, committed: true as const,
           },
           cleanup,
+          evidence: writeEvidence.evidence,
           finalizationFacts: {
+            executionGrant: projection.grant as unknown as Record<string, unknown>,
             gatewayAudit: gatewayAudit as unknown as Record<string, unknown>,
             cleanup: cleanup as unknown as Record<string, unknown>,
             executionOutcomeReceipt: outcome as unknown as Record<string, unknown>,
@@ -600,12 +644,16 @@ export function createProductionInjectionBrowserCapability(input: {
     let browser: Awaited<ReturnType<ControlledBrowserHost['open']>> | undefined
     let operationError: unknown
     try {
+      const auditSigner = LocalGatewayAuditSigner.create({
+        issuer: 'e2e-runtime-injection-gateway', keyId: `injection-${actionId}`,
+        instanceId: `${snapshot.runId}:injection:${actionId}`, version: input.installation.version,
+      })
       gateway = await startGatewayProxyHostForRuntime({
         runId: snapshot.runId,
         mode: 'injection',
         authorityRoot: runtimeLayout(input.homeDir).authority,
         approvedRequests,
-        policyObjects: { injectionGateway: injection },
+        policyObjects: { injectionGateway: injection, auditSigner },
       })
       browser = await new ControlledBrowserHost().open({
         homeDir: input.homeDir, runId: snapshot.runId,
@@ -631,6 +679,14 @@ export function createProductionInjectionBrowserCapability(input: {
         await browser!.page.goto(target.href, { waitUntil: 'domcontentloaded' })
       })
       const publication = await gateway.handle.finalize()
+      const pageContentDigest = digestText('runtime-injection-page-content/v1', await browser.page.content())
+      const evidence = {
+        screenshot: Uint8Array.from(await new PlaywrightPageAdapter(browser.page).screenshot()),
+        dom: Uint8Array.from(Buffer.from(canonicalizeJson({
+          format: 'dom-tree/1', roots: [{ tag: 'main', text: `gateway-injection:${pageContentDigest}`,
+            assertionRelevant: true }],
+        }))),
+      }
       const audit = injection.getAuditSummary()
       if (audit.source !== 'egress-gateway') {
         throw writeWiringError('E2E_RUNTIME_INJECTION_AUDIT_SOURCE_INVALID')
@@ -649,7 +705,9 @@ export function createProductionInjectionBrowserCapability(input: {
       const passed = gatewayAudit.matched === 1 && gatewayAudit.injectionTargetForwarded === 0
         && gatewayAudit.forwarded === 0 && reservations.length === 1
       return {
-        caseId, actionId,
+        resultId: deriveExecutionResultId(caseId, 'gateway-injection'),
+        baselineResultId: deriveExecutionResultId(caseId, 'real-environment'),
+        attemptId, caseId, actionId,
         status: passed ? 'passed' : 'safety-blocked',
         resultDigest: digestText('runtime-injection-result/v1', canonicalizeJson({
           caseId, actionId, gatewayAudit, reservations,
@@ -657,6 +715,20 @@ export function createProductionInjectionBrowserCapability(input: {
         })),
         completedReservationIds: reservations.map((item) => item.reservationId),
         gatewayAudit,
+        evidence,
+        finalizationFacts: {
+          executionGrant: grant as unknown as Record<string, unknown>,
+          gatewayAudit: publication as unknown as Record<string, unknown>,
+          gatewayAuditVerifierMaterial: auditSigner.exportVerifierMaterial() as unknown as Record<string, unknown>,
+          browserMeasurements: browser.measurement as unknown as Record<string, unknown>,
+          isolationMeasurements: {
+            browserMeasurementDigest: browser.measurement.browserMeasurementDigest,
+            sandboxProfileDigest: browser.measurement.sandboxProfileDigest,
+            canaryProofDigest: browser.measurement.canaryProofDigest,
+            browserClosureDigest: browser.measurement.browserClosureDigest,
+            gatewaySessionMeasurementDigest: gateway.handle.measurement.gatewaySessionMeasurementDigest,
+          },
+        },
       }
     } catch (error) {
       operationError = error
@@ -686,6 +758,38 @@ function injectionBehavior(
 interface FixedHttpObservation {
   status: number
   bodyDigest: string
+}
+
+export function createRuntimeFixedHttpWriteEvidence(input: {
+  actionId: string
+  observations: FixedHttpObservation[]
+  matches: boolean[]
+  cleanupStatus: 'verified-clean' | 'failed' | 'unknown'
+  screenshot: Uint8Array
+}): { evidenceId: string; evidence: { screenshot: Uint8Array; dom: Uint8Array } } {
+  if (!/^[A-Za-z0-9._:-]{1,256}$/.test(input.actionId)
+    || input.observations.length !== 4 || input.matches.length !== input.observations.length
+    || input.observations.some((item) => !Number.isSafeInteger(item.status) || item.status < 100 || item.status > 599
+      || !/^sha256:[a-f0-9]{64}$/.test(item.bodyDigest))
+    || input.matches.some((item) => typeof item !== 'boolean')
+    || !['verified-clean', 'failed', 'unknown'].includes(input.cleanupStatus)
+    || !(input.screenshot instanceof Uint8Array) || input.screenshot.byteLength > 16 * 1024 * 1024) {
+    throw writeWiringError('E2E_RUNTIME_WRITE_EVIDENCE_INPUT_INVALID')
+  }
+  const dom = Buffer.from(canonicalizeJson({
+    format: 'dom-tree/1',
+    roots: [{
+      tag: 'main', assertionRelevant: true,
+      text: canonicalizeJson({
+        protocol: 'runtime-fixed-http/v1', actionId: input.actionId,
+        observations: input.observations, matches: input.matches, cleanupStatus: input.cleanupStatus,
+      }),
+    }],
+  }), 'utf8')
+  return {
+    evidenceId: `EVIDENCE-${input.actionId}`,
+    evidence: { screenshot: Uint8Array.from(input.screenshot), dom },
+  }
 }
 
 async function executeFixedBrowserHttp(

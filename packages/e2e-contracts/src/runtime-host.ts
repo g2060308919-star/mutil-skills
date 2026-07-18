@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { ArtifactTypeSchema } from './artifacts.js'
 import { WorkflowNodeSchema } from './workflow.js'
 import { ApprovalGrantSubjectSchema, canonicalGrantApprovalType } from './approval-subject.js'
+import { ManualResultDraftSchema } from './manual-result.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -87,6 +88,26 @@ const commandSchemas = [
     command: z.literal('run-preflight'),
     projectRoot: z.string().min(1),
     payload: RunIdPayloadSchema,
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('prepare-manual-result'),
+    projectRoot: z.string().min(1),
+    payload: z.object({
+      runId: SafeIdSchema,
+      draft: ManualResultDraftSchema,
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('finalize-manual-result-role'),
+    projectRoot: z.string().min(1),
+    payload: z.object({
+      runId: SafeIdSchema,
+      manualResultId: SafeIdSchema,
+      draftDigest: DigestSchema,
+      role: z.enum(['executor', 'reviewer']),
+    }).strict(),
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,

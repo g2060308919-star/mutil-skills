@@ -1,4 +1,4 @@
-import { digestText } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, digestText } from '@mutil-skills/e2e-contracts'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
@@ -10,6 +10,28 @@ import { createRuntimeTestRoots } from './fixtures.js'
 const digest = (value: string) => digestText('owned-resource-registry-test/v1', value)
 
 describe('RuntimeOwnedResourceRegistry', () => {
+  test('write owned-resource registry 拒绝 installer 独占的 install staging 类型', async () => {
+    const fixture = await registryFixture()
+    const operation = {
+      inspect: async () => ({ status: 'absent' as const, summaryDigest: digest('absent') }),
+      cleanup: async () => ({ receiptDigest: digest('cleanup') }),
+    }
+    const registry = await fixture.open(operation)
+    const descriptor = { schemaVersion: '1.0.0', stagingPath: '/installer-owned/.staging-unowned' }
+
+    const candidate = {
+      resourceId: 'INSTALL-STAGING-1',
+      kind: 'install-staging',
+      ownerMarker: fixture.marker,
+      descriptor,
+      descriptorDigest: digestText('runtime-owned-resource-descriptor/v1', canonicalizeJson(descriptor)),
+      registeredAt: '2026-07-18T00:00:00.000Z',
+    } as unknown as Parameters<typeof registry.register>[0]
+    await expect(registry.register(candidate))
+      .rejects.toMatchObject({ code: 'E2E_RUNTIME_OWNED_RESOURCE_STATE_CORRUPT' })
+    registry.close()
+  })
+
   test('持久化 owner/descriptor，外部 inspect/cleanup 后以短事务 CAS 写 cleaned tombstone', async () => {
     const fixture = await registryFixture()
     const cleanup = vi.fn(async () => ({ receiptDigest: digest('cleanup-receipt') }))
@@ -38,6 +60,26 @@ describe('RuntimeOwnedResourceRegistry', () => {
     expect(cleanup).not.toHaveBeenCalled()
     registry.close()
   })
+
+  test('正常关闭通过精确 record revision 写 cleaned tombstone，恢复不再重复清理', async () => {
+    const fixture = await registryFixture()
+    const cleanup = vi.fn(async () => ({ receiptDigest: digest('must-not-clean') }))
+    const registry = await fixture.open({
+      inspect: async () => ({ status: 'owned', summaryDigest: digest('owned') }), cleanup,
+    })
+    const active = await registry.register(recordInput(
+      fixture.marker, 'PROFILE-NORMAL-CLOSE', 'browser-profile-lock',
+    ))
+    await expect(registry.complete({
+      resourceId: active.resourceId,
+      ownerMarkerDigest: active.ownerMarker.markerDigest,
+      expectedRevision: active.revision,
+      cleanupReceiptDigest: digest('normal-close'),
+    })).resolves.toMatchObject({ status: 'cleaned', revision: 2 })
+    await expect(registry.cleanupOwned(fixture.marker)).resolves.toMatchObject({ status: 'absent' })
+    expect(cleanup).not.toHaveBeenCalled()
+    registry.close()
+  })
 })
 
 async function registryFixture() {
@@ -50,11 +92,11 @@ async function registryFixture() {
   return { marker, open: async (operation: {
     inspect: (record: any) => Promise<any>; cleanup: (record: any) => Promise<any>
   }) => await RuntimeOwnedResourceRegistry.open({ statePath, testWorkspaceRoots: [roots.project],
-    operations: { 'loopback-endpoint': operation, 'browser-profile-lock': operation, 'install-staging': operation } }) }
+    operations: { 'loopback-endpoint': operation, 'browser-profile-lock': operation } }) }
 }
 
 function recordInput(marker: ReturnType<typeof createRuntimeOwnedResourceMarker>, resourceId: string,
-  kind: 'loopback-endpoint' | 'browser-profile-lock' | 'install-staging') {
+  kind: 'loopback-endpoint' | 'browser-profile-lock') {
   const descriptor = { path: `/managed/${resourceId}` }
   return { resourceId, kind, ownerMarker: marker, descriptor,
     descriptorDigest: digestText('runtime-owned-resource-descriptor/v1', JSON.stringify(descriptor)),

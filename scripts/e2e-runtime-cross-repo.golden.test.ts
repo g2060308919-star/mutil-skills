@@ -5,14 +5,18 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { runCrossRepoRuntimeGolden } from './e2e-runtime-cross-repo.js'
 
 const roots: string[] = []
-const runRealGolden = process.env.E2E_RUNTIME_RUN_CROSS_REPO === '1'
-  && process.env.E2E_RUNTIME_REAL_GOLDEN_HOME !== undefined
+const crossRepoRequested = process.env.E2E_RUNTIME_RUN_CROSS_REPO === '1'
+const runRealGolden = crossRepoRequested && process.env.E2E_RUNTIME_REAL_GOLDEN_HOME !== undefined
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })))
 })
 
 describe('portable E2E runtime', () => {
+  test.runIf(crossRepoRequested && !runRealGolden)(
+    '发行门禁要求显式配置受信 Real Golden Home',
+    () => { throw new Error('E2E_RUNTIME_REAL_GOLDEN_HOME_REQUIRED') },
+  )
   test.skipIf(!runRealGolden)(
     'runs from packed artifacts in a blank project without source paths',
     async () => {

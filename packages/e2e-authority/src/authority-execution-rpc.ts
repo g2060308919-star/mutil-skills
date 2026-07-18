@@ -199,13 +199,14 @@ export function registerAuthorityExecutionRpcOperations(
   })
   rpc.registerOperation(LEASE_VERIFY_OPERATION, async (payload, rpcContext) => {
     const input = parseLeaseVerifyInput(payload)
+    const runId = registeredApprovalContext(rpcContext, 'execution').runId
     if (!dependencies.leaseAuthority.getLeaseForTarget) {
       throw executionRpcError('E2E_RPC_LEASE_OWNER_BINDING_UNAVAILABLE')
     }
     const lease = parseDataLease(await dependencies.leaseAuthority.getLeaseForTarget(
       input.leaseId, input.fencingToken, input.targetFingerprint,
     ), input)
-    requireLeaseRunBinding(lease, registeredApprovalContext(rpcContext, 'execution').runId)
+    requireLeaseRunBinding(lease, runId)
     const verified = await dependencies.leaseAuthority.verifyTarget(
       input.leaseId, input.fencingToken, input.targetFingerprint,
     )
@@ -214,14 +215,21 @@ export function registerAuthorityExecutionRpcOperations(
   })
   if (dependencies.reservationAuthority) {
     rpc.registerOperation(RESERVATION_QUERY_OPERATION, async (payload, rpcContext) => {
-      const query = parseReservationQuery(payload)
+      const { query, recoveryBinding } = parseRpcReservationQueryInput(payload)
+      requireRecoveryBinding(rpcContext, recoveryBinding)
+      requireMaintenanceGrantContext(dependencies.reservationAuthority!, query.grantId,
+        rpcContext, undefined)
       const reservation = dependencies.reservationAuthority!.findReservation(query)
       requireMaintenanceGrantContext(dependencies.reservationAuthority!, query.grantId,
         rpcContext, reservation)
       return { reservation: reservation === undefined ? null : parseQueriedReservation(reservation, query) }
     })
     rpc.registerOperation(RESERVATION_COMPLETE_OPERATION, async (payload, rpcContext) => {
-      const input = parseReservationCompleteInput(payload)
+      const input = parseRpcReservationCompleteInput(payload)
+      requireRecoveryBinding(rpcContext, input.recoveryBinding)
+      rejectRecoveryOnlyOperation(rpcContext)
+      requireMaintenanceGrantContext(dependencies.reservationAuthority!, input.query.grantId,
+        rpcContext, undefined)
       const reservation = requireReservationBinding(dependencies.reservationAuthority!, input.query)
       requireMaintenanceGrantContext(dependencies.reservationAuthority!, input.query.grantId,
         rpcContext, reservation)
@@ -231,7 +239,10 @@ export function registerAuthorityExecutionRpcOperations(
       ) }
     })
     rpc.registerOperation(RESERVATION_UNKNOWN_OPERATION, async (payload, rpcContext) => {
-      const input = parseReservationUnknownInput(payload)
+      const input = parseRpcReservationUnknownInput(payload)
+      requireRecoveryBinding(rpcContext, input.recoveryBinding)
+      requireMaintenanceGrantContext(dependencies.reservationAuthority!, input.query.grantId,
+        rpcContext, undefined)
       const reservation = requireReservationBinding(dependencies.reservationAuthority!, input.query)
       requireMaintenanceGrantContext(dependencies.reservationAuthority!, input.query.grantId,
         rpcContext, reservation)
@@ -244,7 +255,9 @@ export function registerAuthorityExecutionRpcOperations(
   if (dependencies.leaseAuthority.getLeaseForTarget && dependencies.leaseAuthority.releaseForTarget
     && dependencies.leaseAuthority.quarantineForTarget) {
     rpc.registerOperation(LEASE_QUERY_OPERATION, async (payload, rpcContext) => {
-      const input = parseLeaseBindingInput(payload)
+      const parsed = parseRpcLeaseBindingInput(payload)
+      requireRecoveryBinding(rpcContext, parsed.recoveryBinding)
+      const input = parsed.input
       const lease = parseDataLease(await dependencies.leaseAuthority.getLeaseForTarget!(
         input.leaseId, input.fencingToken, input.targetFingerprint,
       ), input)
@@ -252,7 +265,10 @@ export function registerAuthorityExecutionRpcOperations(
       return { lease }
     })
     rpc.registerOperation(LEASE_RELEASE_OPERATION, async (payload, rpcContext) => {
-      const input = parseLeaseReleaseInput(payload)
+      const parsed = parseRpcLeaseReleaseInput(payload)
+      requireRecoveryBinding(rpcContext, parsed.recoveryBinding)
+      rejectRecoveryOnlyOperation(rpcContext)
+      const input = parsed.input
       requireLeaseRunBinding(parseDataLease(await dependencies.leaseAuthority.getLeaseForTarget!(
         input.leaseId, input.fencingToken, input.targetFingerprint,
       ), input), registeredRecoveryApprovalContext(rpcContext).runId)
@@ -260,7 +276,9 @@ export function registerAuthorityExecutionRpcOperations(
       return { receiptDigest: parseReceiptDigest(receiptDigest, 'E2E_RPC_LEASE_RELEASE_RESULT_INVALID') }
     })
     rpc.registerOperation(LEASE_QUARANTINE_OPERATION, async (payload, rpcContext) => {
-      const input = parseLeaseQuarantineInput(payload)
+      const parsed = parseRpcLeaseQuarantineInput(payload)
+      requireRecoveryBinding(rpcContext, parsed.recoveryBinding)
+      const input = parsed.input
       requireLeaseRunBinding(parseDataLease(await dependencies.leaseAuthority.getLeaseForTarget!(
         input.leaseId, input.fencingToken, input.targetFingerprint,
       ), input), registeredRecoveryApprovalContext(rpcContext).runId)
@@ -430,14 +448,16 @@ function registeredApprovalContext(
   allowExpired = false,
 ) {
   const registration = rpcContext.registration
-  const candidate = isPlainObject(registration) && hasExactKeys(registration, ['approvalContext'])
+  const recoveryOnly = isPlainObject(registration) && registration.recoveryOnly === true
+  const candidate = isPlainObject(registration)
+    && hasExactKeys(registration, ['approvalContext', ...(recoveryOnly ? ['recoveryOnly'] : [])])
     ? CanonicalApprovalContextSchema.safeParse(registration.approvalContext)
     : undefined
   const current = candidate?.success ? candidate.data : undefined
   const now = Date.parse(rpcContext.now)
   if (!current || current.approvalType !== approvalType
     || !Number.isFinite(now) || Date.parse(current.issuedAt) > now
-    || (!allowExpired && Date.parse(current.expiresAt) <= now)) {
+    || (!allowExpired && (recoveryOnly || Date.parse(current.expiresAt) <= now))) {
     throw executionRpcError('E2E_APPROVAL_CONTEXT_MISMATCH')
   }
   return current
@@ -445,6 +465,21 @@ function registeredApprovalContext(
 
 function registeredRecoveryApprovalContext(rpcContext: AuthenticatedRpcOperationContext) {
   return registeredApprovalContext(rpcContext, 'execution', true)
+}
+
+function requireRecoveryBinding(
+  rpcContext: AuthenticatedRpcOperationContext,
+  recoveryBinding: ApprovalExecutionBinding,
+): void {
+  if (!sameRecoveryBinding(registeredRecoveryApprovalContext(rpcContext), recoveryBinding)) {
+    throw executionRpcError('E2E_RPC_RECOVERY_BINDING_MISMATCH')
+  }
+}
+
+function rejectRecoveryOnlyOperation(rpcContext: AuthenticatedRpcOperationContext): void {
+  if (isPlainObject(rpcContext.registration) && rpcContext.registration.recoveryOnly === true) {
+    throw executionRpcError('E2E_RPC_RECOVERY_OPERATION_DENIED')
+  }
 }
 
 function rpcReservationOwner(
@@ -488,6 +523,9 @@ function requireReservationOwner(
   reservationId: string,
   rpcContext: AuthenticatedRpcOperationContext,
 ): void {
+  if (isPlainObject(rpcContext.registration) && rpcContext.registration.recoveryOnly === true) {
+    throw executionRpcError('E2E_APPROVAL_CONTEXT_MISMATCH')
+  }
   const registered = registeredRecoveryApprovalContext(rpcContext)
   const persisted = authority.getReservationRpcBinding?.(reservationId)
   if (persisted !== undefined) {
@@ -647,12 +685,12 @@ export function createAuthorityDiscoveryRpcClient(
 export function createAuthorityMaintenanceRpcClient(
   options: AuthorityExecutionRpcClientOptions,
 ): AuthorityMaintenanceRpcClient & { destroy(): void } {
-  parseRpcApprovalBinding(options.approvalBinding, 'execution')
+  const recoveryBinding = parseRpcApprovalBinding(options.approvalBinding, 'execution')
   const rpc = AuthenticatedRpcClient.create(options)
   return Object.freeze({
     async queryReservation(query: ReservationMaintenanceQuery) {
       const parsed = parseReservationQuery(query)
-      const result = await rpc.call(RESERVATION_QUERY_OPERATION, parsed)
+      const result = await rpc.call(RESERVATION_QUERY_OPERATION, { ...parsed, recoveryBinding })
       if (!isPlainObject(result) || !hasExactKeys(result, ['reservation'])) {
         throw executionRpcError('E2E_RPC_RESERVATION_QUERY_RESULT_INVALID')
       }
@@ -662,18 +700,18 @@ export function createAuthorityMaintenanceRpcClient(
     async completeReservation(query: ReservationMaintenanceQuery, outcomeDigest: string) {
       const parsed = parseReservationCompleteInput({ ...query, outcomeDigest })
       return parseReceiptResult(await rpc.call(RESERVATION_COMPLETE_OPERATION,
-        { ...parsed.query, outcomeDigest: parsed.outcomeDigest }),
+        { ...parsed.query, outcomeDigest: parsed.outcomeDigest, recoveryBinding }),
       'E2E_RPC_RESERVATION_COMPLETE_RESULT_INVALID')
     },
     async markReservationUnknown(query: ReservationMaintenanceQuery, observation: string) {
       const parsed = parseReservationUnknownInput({ ...query, observation })
       return parseReceiptResult(await rpc.call(RESERVATION_UNKNOWN_OPERATION,
-        { ...parsed.query, observation: parsed.observation }),
+        { ...parsed.query, observation: parsed.observation, recoveryBinding }),
       'E2E_RPC_RESERVATION_UNKNOWN_RESULT_INVALID')
     },
     async queryLease(leaseId: string, fencingToken: number, targetFingerprint: string) {
       const input = parseLeaseBindingInput({ leaseId, fencingToken, targetFingerprint })
-      const result = await rpc.call(LEASE_QUERY_OPERATION, input)
+      const result = await rpc.call(LEASE_QUERY_OPERATION, { ...input, recoveryBinding })
       if (!isPlainObject(result) || !hasExactKeys(result, ['lease'])) {
         throw executionRpcError('E2E_RPC_LEASE_QUERY_RESULT_INVALID')
       }
@@ -681,12 +719,12 @@ export function createAuthorityMaintenanceRpcClient(
     },
     async releaseLease(input: LeaseReleaseInput) {
       return parseReceiptResult(await rpc.call(LEASE_RELEASE_OPERATION,
-        parseLeaseReleaseInput(input)),
+        { ...parseLeaseReleaseInput(input), recoveryBinding }),
         'E2E_RPC_LEASE_RELEASE_RESULT_INVALID')
     },
     async quarantineLease(input: LeaseQuarantineInput) {
       return parseReceiptResult(await rpc.call(LEASE_QUARANTINE_OPERATION,
-        parseLeaseQuarantineInput(input)),
+        { ...parseLeaseQuarantineInput(input), recoveryBinding }),
         'E2E_RPC_LEASE_QUARANTINE_RESULT_INVALID')
     },
     destroy: () => rpc.destroy(),

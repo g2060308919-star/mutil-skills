@@ -1,5 +1,6 @@
 import {
   canonicalizeJson,
+  deriveExecutionResultId,
   digestText,
   WorkflowEventsV2ContentSchema,
   type AttemptEventAuthorityProof,
@@ -22,7 +23,7 @@ interface AttemptArtifact {
 
 export interface PersistedAttemptFinding { code: string; ref: string }
 export interface PersistedAttemptProjection {
-  caseId: string; attemptId: string; slot: number; eventChainDigest: string
+  resultId: string; caseId: string; attemptId: string; slot: number; eventChainDigest: string
   status: string; mode: ExecutionMode; effect: ExecutionEffect; effectObservation: EffectObservation
   attempts: Array<{ attemptId: string; slot: number; status: string; mode: ExecutionMode; effect: ExecutionEffect;
     effectObservation: EffectObservation; reservationSafeToVoid: boolean; eventChainDigest: string }>
@@ -71,20 +72,26 @@ export function auditPersistedAttemptFacts(
   if (new Set(planIds).size !== planIds.length) add('E2E_ATTEMPT_PLAN_DUPLICATE', 'attemptPlans')
   const plans = new Map(planItems.map((item) => [string(object(item).caseId), object(item)]))
   const cases = new Map(testCases.map((item) => [string(object(item).caseId), object(item)]))
-  const resultMap = new Map(array(results.caseResults).map((item) => [string(object(item).caseId), object(item)]))
-  const gatewayReservations = gatewayArtifact
-    ? array(object(gatewayArtifact.content).capabilityReservations).map(object)
-    : []
-  const ids = attemptCases.map((item) => item.caseId)
+  const resultMap = new Map(array(results.caseResults).map((item) => {
+    const result = object(item)
+    return [domainKey(string(result.caseId), string(result.mode)), result]
+  }))
+  const gatewayContent = gatewayArtifact ? object(gatewayArtifact.content) : {}
+  const gatewaySessions = array(gatewayContent.sessions).map(object)
+  const legacyGatewayReservations = array(gatewayContent.capabilityReservations).map(object)
+  const ids = attemptCases.map((item) => domainKey(item.caseId, attemptMode(item)))
   if (new Set(ids).size !== ids.length) add('E2E_ATTEMPT_CASE_DUPLICATE', 'attemptCases')
   const expectedIds = [...resultMap.keys()].sort()
   if (canonicalizeJson([...ids].sort()) !== canonicalizeJson(expectedIds)) add('E2E_ATTEMPT_CASE_COVERAGE_INVALID', 'attemptCases')
   const scheduledIds = array(bundle.schedule).map((item) => string(object(item).caseId))
   if (new Set(scheduledIds).size !== scheduledIds.length) add('E2E_ATTEMPT_SCHEDULE_DUPLICATE', 'schedule')
   scheduledIds.sort()
-  if (canonicalizeJson([...plans.keys()].sort()) !== canonicalizeJson(expectedIds)
-    || canonicalizeJson(scheduledIds) !== canonicalizeJson(expectedIds)
-    || expectedIds.some((caseId) => !cases.has(caseId))) {
+  const expectedBusinessCaseIds = [...new Set(array(results.caseResults)
+    .filter((item) => string(object(item).mode) === 'real-environment')
+    .map((item) => string(object(item).caseId)))].sort()
+  if (canonicalizeJson([...plans.keys()].sort()) !== canonicalizeJson(expectedBusinessCaseIds)
+    || canonicalizeJson(scheduledIds) !== canonicalizeJson(expectedBusinessCaseIds)
+    || expectedBusinessCaseIds.some((caseId) => !cases.has(caseId))) {
     add('E2E_ATTEMPT_CASE_COVERAGE_INVALID', 'test-cases/run-bundle/browser-results')
   }
 
@@ -92,8 +99,7 @@ export function auditPersistedAttemptFacts(
     const caseId = attemptCase.caseId
     const testCase = cases.get(caseId)
     const plan = plans.get(caseId)
-    const result = resultMap.get(caseId)
-    if (!testCase || !plan || !result) { add('E2E_ATTEMPT_CASE_BINDING_MISSING', caseId); continue }
+    if (!testCase || !plan) { add('E2E_ATTEMPT_CASE_BINDING_MISSING', caseId); continue }
     if (attemptCase.retryPolicy !== testCase.retryPolicy) add('E2E_ATTEMPT_RETRY_POLICY_MISMATCH', caseId)
     const expectedInitial = digestText('attempt-chain-initial/v2', canonicalizeJson({ ...expectedInitialContext, caseId }))
     if (attemptCase.initialChainDigest !== expectedInitial) add('E2E_ATTEMPT_INITIAL_CHAIN_CONTEXT_MISMATCH', caseId)
@@ -103,16 +109,37 @@ export function auditPersistedAttemptFacts(
       initialChainDigest: attemptCase.initialChainDigest, events: attemptCase.events,
       verifyAuthorityProof: verifyProof ?? (() => false) })
     if (reselected.status !== 'selected') { add('E2E_ATTEMPT_SELECTION_BLOCKED', `${caseId}:${reselected.reasonCodes.join(',')}`); continue }
+    const result = resultMap.get(domainKey(caseId, reselected.result.mode))
+    if (!result) { add('E2E_ATTEMPT_CASE_BINDING_MISSING', `${caseId}:${reselected.result.mode}`); continue }
     if (attemptCase.selection.status !== 'selected' || attemptCase.selection.attemptId !== reselected.attemptId
       || attemptCase.selection.slot !== reselected.slot
       || attemptCase.selection.eventChainDigest !== reselected.eventChainDigest) add('E2E_ATTEMPT_PERSISTED_SELECTION_MISMATCH', caseId)
     const effect = string(testCase.effect) === 'irreversible' ? 'irreversible-write' : string(testCase.effect)
-    if (string(testCase.mode) !== reselected.result.mode) add('E2E_ATTEMPT_CASE_MODE_MISMATCH', caseId)
+    if (reselected.result.mode === 'real-environment' && string(testCase.mode) !== reselected.result.mode) {
+      add('E2E_ATTEMPT_CASE_MODE_MISMATCH', caseId)
+    }
     if (string(result.attemptId) !== reselected.attemptId || string(result.eventChainDigest) !== reselected.eventChainDigest
       || string(result.status) !== reselected.result.status || string(result.mode) !== reselected.result.mode
       || string(result.effect) !== reselected.result.effect || effect !== reselected.result.effect
       || string(result.effectObservation) !== reselected.result.effectObservation) add('E2E_ATTEMPT_BROWSER_RESULT_MISMATCH', caseId)
     const terminals = attemptCase.events.filter((event) => event.kind === 'terminal')
+    const expectedResultId = deriveExecutionResultId(caseId, reselected.result.mode)
+    const persistedResultId = string(result.resultId)
+    const resultId = persistedResultId || expectedResultId
+    if (persistedResultId && persistedResultId !== expectedResultId) {
+      add('E2E_ATTEMPT_RESULT_IDENTITY_INVALID', `${caseId}:${reselected.result.mode}`)
+    }
+    const matchingSessions = gatewaySessions.filter((session) => string(session.resultId) === resultId
+      && string(session.domain) === reselected.result.mode)
+    const gatewayReservations = gatewaySessions.length === 0
+      ? (resultMap.size === 1 ? legacyGatewayReservations : [])
+      : matchingSessions.length === 1
+        ? array(object(matchingSessions[0]!.audit).capabilityReservations).map(object)
+        : []
+    if ((gatewaySessions.length > 0 && matchingSessions.length !== 1)
+      || (gatewaySessions.length === 0 && resultMap.size > 1)) {
+      add('E2E_ATTEMPT_GATEWAY_SESSION_BINDING_INVALID', `${resultId}:${reselected.result.mode}`)
+    }
     for (const event of terminals) {
       if (!['passed', 'failed'].includes(event.result.status)) continue
       const bound = gatewayReservations.some((reservation) =>
@@ -122,7 +149,7 @@ export function auditPersistedAttemptFacts(
         && string(reservation.outcomeDigest) === event.result.outcomeDigest)
       if (!bound) add('E2E_ATTEMPT_GATEWAY_RESERVATION_BINDING_INVALID', `${caseId}:${event.attemptId}`)
     }
-    selected.push({ caseId, attemptId: reselected.attemptId, slot: reselected.slot,
+    selected.push({ resultId, caseId, attemptId: reselected.attemptId, slot: reselected.slot,
       eventChainDigest: reselected.eventChainDigest, status: reselected.result.status,
       mode: reselected.result.mode, effect: reselected.result.effect,
       effectObservation: reselected.result.effectObservation,
@@ -133,7 +160,7 @@ export function auditPersistedAttemptFacts(
         eventChainDigest: chainAt(attemptCase.initialChainDigest, attemptCase.events, event.sequence) })) })
   }
   findings.sort((a, b) => a.code.localeCompare(b.code) || a.ref.localeCompare(b.ref))
-  selected.sort((a, b) => a.caseId.localeCompare(b.caseId))
+  selected.sort((a, b) => a.resultId.localeCompare(b.resultId))
   return { valid: findings.length === 0, findings, selected }
 
   function add(code: string, ref: string): void { findings.push({ code, ref }) }
@@ -142,17 +169,23 @@ export function auditPersistedAttemptFacts(
 export function createPersistedAttemptVerdictDependencies(
   audit: ReturnType<typeof auditPersistedAttemptFacts>, manual?: VerdictDependencies['verifyManualResult'],
 ): VerdictDependencies {
-  const selected = new Map(audit.selected.map((item) => [item.caseId, item]))
+  const selected = new Map(audit.selected.map((item) => [item.resultId, item]))
   return {
     ...(manual ? { verifyManualResult: manual } : {}),
     verifyAttemptSelection: ({ caseResult }) => {
-      const expected = selected.get(caseResult.caseId)
+      const expected = selected.get(caseResult.resultId)
       return audit.valid && expected !== undefined && caseResult.attemptSelection.status === 'valid'
         && caseResult.attemptSelection.attemptId === expected.attemptId
         && caseResult.attemptSelection.eventChainDigest === expected.eventChainDigest
     },
   }
 }
+
+function attemptMode(attemptCase: PersistedAttemptCase): ExecutionMode | '' {
+  const started = attemptCase.events.find((event) => event.kind === 'started')
+  return started?.mode ?? ''
+}
+function domainKey(caseId: string, mode: string): string { return `${caseId}\0${mode}` }
 
 function chainAt(initial: string, events: PersistedAttemptCase['events'], sequence: number): string {
   let digest = initial

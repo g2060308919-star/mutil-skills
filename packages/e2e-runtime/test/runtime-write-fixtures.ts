@@ -1,4 +1,4 @@
-import { digestText } from '@mutil-skills/e2e-contracts'
+import { deriveExecutionResultId, digestText } from '@mutil-skills/e2e-contracts'
 
 export const runtimeWriteDigest = (label: string): string =>
   digestText('runtime-write-flow-test/v1', label)
@@ -27,6 +27,9 @@ export function realWriteOutput(overrides: Record<string, unknown> = {}) {
 
 export function injectionOutput(overrides: Record<string, unknown> = {}) {
   return {
+    resultId: deriveExecutionResultId('CASE-1', 'gateway-injection'),
+    baselineResultId: deriveExecutionResultId('CASE-1', 'real-environment'),
+    attemptId: 'ATTEMPT-INJECTION-1',
     caseId: 'CASE-1',
     actionId: 'ACTION-INJECT-1',
     status: 'passed' as const,

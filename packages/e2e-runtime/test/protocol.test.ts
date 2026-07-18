@@ -1,4 +1,6 @@
 import { Readable, Writable } from 'node:stream'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import {
   E2EError,
   RuntimeResponseEnvelopeSchema,
@@ -7,6 +9,8 @@ import {
 } from '@mutil-skills/e2e-contracts'
 import { describe, expect, test, vi } from 'vitest'
 import { runCli } from '../src/cli.js'
+import { authorizeRuntimeWriteProduction } from '../src/runtime-write-production.js'
+import { createRuntimeTestRoots } from './fixtures.js'
 import {
   exitCodeForResponse,
   parseRuntimeRequest,
@@ -92,6 +96,60 @@ describe('Runtime protocol', () => {
 })
 
 describe('repo-e2e CLI protocol slice', () => {
+  test('installed CLI 为 resume-run 打开并关闭 production write recovery', async () => {
+    const roots = await createRuntimeTestRoots()
+    await mkdir(join(roots.project, '.biztest'), { recursive: true })
+    await writeFile(join(roots.project, '.biztest', 'project.json'), JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-CLI-WRITE-RECOVERY',
+    }))
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    const close = vi.fn(async () => undefined)
+    const recover = vi.fn(async () => ({ status: 'blocked' as const,
+      reasonCode: 'E2E_RUNTIME_WRITE_EFFECT_UNCERTAIN', browserCalls: 0 as const }))
+    const openWriteProduction = vi.fn(async () => ({
+      capability: authorizeRuntimeWriteProduction({
+        recovery: { recover }, ownedResources: { register: vi.fn(), complete: vi.fn() },
+        prepareCleanup: vi.fn(),
+      }),
+      close,
+    }))
+    const request = {
+      schemaVersion: '1.0.0', requestId: 'REQUEST-CLI-WRITE-RECOVERY',
+      client: { name: 'e2e-skill', version: '0.1.0' },
+      command: 'resume-run', projectRoot: roots.project,
+      payload: { runId: 'RUN-WRITE-RECOVERY',
+        decision: { kind: 'recover-write-attempt', expectedAttemptId: 'ATTEMPT-WRITE-1' } },
+    }
+    const dependencies = {
+        homeDir: roots.home,
+        installRuntime: async () => ({ version: '0.1.0', installationDigest: digest,
+          launcher: '/unused' }),
+        uninstallRuntime: async () => ({ version: '0.1.0' }),
+        inspectRuntimeInstallation: async () => ({
+          version: '0.1.0', protocolMajor: 1 as const, versionRoot: roots.root,
+          entrypoint: '/unused', installationDigest: digest, sourceRepositoryIndependent: true as const,
+        }),
+        openWriteProduction,
+      }
+    const exitCode = await runCli(['rpc'], Readable.from([JSON.stringify(request)]),
+      stdout.stream, stderr.stream, dependencies)
+    const replayStdout = captureWritable()
+    expect(await runCli(['rpc'], Readable.from([JSON.stringify(request)]),
+      replayStdout.stream, captureWritable().stream, dependencies)).toBe(0)
+
+    expect(exitCode).toBe(0)
+    expect(openWriteProduction).toHaveBeenCalledWith(expect.objectContaining({
+      homeDir: roots.home, projectRoot: roots.project,
+    }))
+    expect(recover).toHaveBeenCalledOnce()
+    expect(close).toHaveBeenCalledTimes(2)
+    expect(JSON.parse(stdout.text())).toMatchObject({ ok: true, result: {
+      status: 'blocked', reasonCode: 'E2E_RUNTIME_WRITE_EFFECT_UNCERTAIN', browserCalls: 0,
+    } })
+    expect(JSON.parse(replayStdout.text())).toEqual(JSON.parse(stdout.text()))
+  })
+
   test('human report command maps to the same render-report Runtime Host protocol', async () => {
     const stdout = captureWritable()
     const stderr = captureWritable()

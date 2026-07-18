@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest'
+import { deriveExecutionResultId } from '@mutil-skills/e2e-contracts'
 import * as reportModule from '../src/index.js'
 import { finalReportFixture as finalReport } from './final-report.fixture.js'
 
@@ -118,11 +119,23 @@ describe('renderCompleteReport', () => {
     expect(() => render(brokenUniverse)).toThrowError(expect.objectContaining({ code: 'E2E_REPORT_INPUT_INVALID' }))
   })
 
+  test('拒绝没有同 Case 已通过真实基线的注入结果', () => {
+    const render = (reportModule as unknown as { renderCompleteReport(input: unknown): unknown }).renderCompleteReport
+    const missingBaseline = structuredClone(finalReport)
+    delete missingBaseline.content.caseDetails[1]!.baselineResultId
+    expect(() => render(missingBaseline)).toThrowError(expect.objectContaining({ code: 'E2E_REPORT_INPUT_INVALID' }))
+
+    const wrongCase = structuredClone(finalReport)
+    wrongCase.content.caseDetails[1]!.caseId = 'CASE-OTHER'
+    expect(() => render(wrongCase)).toThrowError(expect.objectContaining({ code: 'E2E_REPORT_INPUT_INVALID' }))
+  })
+
   test('手工 Case 可进入报告，但不得被冒充为可独立执行的自动化回归 Case', () => {
     const render = (reportModule as unknown as { renderCompleteReport(input: unknown): { markdown: string } }).renderCompleteReport
     const withManualCase = structuredClone(finalReport)
     withManualCase.content.caseDetails.push({
-      caseId: 'CASE-MANUAL-1', title: '人工视觉复核', executionMode: 'manual', necessity: 'required', status: 'passed',
+      resultId: 'MANUAL-1', caseId: 'CASE-MANUAL-1', title: '人工视觉复核', executionMode: 'manual',
+      necessity: 'required', status: 'passed',
       preconditions: ['复核人员已授权'], steps: [],
     })
 
@@ -139,6 +152,7 @@ describe('renderCompleteReport', () => {
     const cases = Array.from({ length: 1_000 }, (_, index) => {
       const ordinal = index + 1
       return {
+        resultId: deriveExecutionResultId(`CASE-LOAD-${ordinal}`, 'real-environment'),
         caseId: `CASE-LOAD-${ordinal}`, title: `性能基线 ${ordinal}`, executionMode: 'real-environment',
         necessity: 'required', status: 'passed', preconditions: ['基线前置'],
         steps: [{
@@ -148,7 +162,7 @@ describe('renderCompleteReport', () => {
       }
     })
     largeReport.content.caseDetails = cases
-    largeReport.content.realResults = cases.map((item) => ({ id: item.caseId, digest: digest('e') }))
+    largeReport.content.realResults = cases.map((item) => ({ id: item.resultId, digest: digest('e') }))
     largeReport.content.injectionResults = []
     largeReport.content.regressionDetails.caseIds = cases.map((item) => item.caseId)
     largeReport.content.coverageUniverse.obligations = cases.map((item, index) => ({

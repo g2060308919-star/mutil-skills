@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { chromium } from 'playwright'
 import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 import {
-  canonicalizeJson, digestDecisionSubject, digestText,
+  canonicalizeJson, deriveExecutionResultId, digestDecisionSubject, digestText,
   projectLineageDecisionSubject, projectScopeDecisionSubject,
   type EntityLineageMapping, type WorkflowState,
 } from '@mutil-skills/e2e-contracts'
@@ -497,11 +497,12 @@ async function publishResult(input: {
     })
     : undefined
   const verdict = computeVerdict({
-    schemaVersion: '2.0.0', assetId: 'PRODUCT-PRD-FLOW', generationId: input.generationId,
+    schemaVersion: '2.1.0', assetId: 'PRODUCT-PRD-FLOW', generationId: input.generationId,
     verdictRuleVersion: '2.0.0', policyDigest: input.revision, universeDigest: input.revision,
     prdRevision: input.revision, requirementModelDigest: input.revision,
     obligations: [{ obligationId: `COV-${input.result.caseId}`, necessity: 'required', disposition: 'automated', caseIds: [input.result.caseId] }],
     caseResults: [{
+      resultId: deriveExecutionResultId(input.result.caseId, 'real-environment'),
       caseId: input.result.caseId, runId: `RUN-${input.generationId}`, obligationIds: [`COV-${input.result.caseId}`],
       status: input.result.status, executionMode: 'real-environment',
       attemptSelection: attempt?.attemptSelection ?? { status: 'not-started' },

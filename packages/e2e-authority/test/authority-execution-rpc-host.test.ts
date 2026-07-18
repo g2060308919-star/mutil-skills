@@ -7,6 +7,7 @@ import {
   canonicalGrantApprovalSubjectDigest,
   canonicalizeJson,
   digestText,
+  type ManualResultDraft,
   type WriteApprovalSubjectV2,
 } from '@mutil-skills/e2e-contracts'
 import { isoCBOR } from '@simplewebauthn/server/helpers'
@@ -15,6 +16,7 @@ import {
   LocalLeaseAuthority,
   createAuthenticatedRpcHttpTransport,
   createAuthorityExecutionRpcClients,
+  createAuthorityMaintenanceRpcClient,
   startAuthorityExecutionRpcHostProcess,
 } from '../src/index.js'
 
@@ -27,6 +29,10 @@ const approvalBinding = {
   runId: approvalContext.runId, installationDigest: approvalContext.installationDigest,
   approvalType: approvalContext.approvalType, subjectDigest: approvalContext.subjectDigest,
 }
+const manualIdentities = [
+  { subject: 'manual:executor', roles: ['e2e-manual-executor'] },
+  { subject: 'manual:reviewer', roles: ['e2e-manual-reviewer'] },
+]
 
 test('Authority/Lease Host 在独立 OS 进程打开持久状态并提供认证 RPC', async ({ skip }) => {
   const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-rpc-host-'))
@@ -38,7 +44,8 @@ test('Authority/Lease Host 在独立 OS 进程打开持久状态并提供认证 
   let host: Awaited<ReturnType<typeof startAuthorityExecutionRpcHostProcess>> | undefined
   try {
     const approval = await LocalApprovalAuthority.open({ issuer: 'authority', keyId: 'key-1', now,
-      statePath: approvalPath, stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()] })
+      statePath: approvalPath, stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()],
+      manualIdentities })
     approval.close()
     const lease = await LocalLeaseAuthority.open({ now, statePath: leasePath, testWorkspaceRoots: [process.cwd()] })
     const fingerprint = digestText('rpc-host-test/v1', 'resource')
@@ -51,7 +58,7 @@ test('Authority/Lease Host 在独立 OS 进程打开持久状态并提供认证 
       host = await startAuthorityExecutionRpcHostProcess({
         rpc: { issuer: 'authority-host', keyId: 'rpc-key-1', clientId: 'runner-1' },
         approval: { issuer: 'authority', keyId: 'key-1', statePath: approvalPath,
-          stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()] },
+          stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()], manualIdentities },
         lease: { statePath: leasePath, testWorkspaceRoots: [process.cwd()] },
         clock: { kind: 'fixed-test-only', now: fixedNow },
       })
@@ -65,8 +72,18 @@ test('Authority/Lease Host 在独立 OS 进程打开持久状态并提供认证 
       verifierMaterial: host.verifierMaterial,
       expectedPublicKeyDigest: host.verifierMaterial.publicKeyDigest,
       transport: createAuthenticatedRpcHttpTransport(host.endpoint), now })
-    await expect(clients.lease.verifyTarget(active.leaseId, active.fencingToken, fingerprint)).resolves.toBe(true)
-    await expect(clients.lease.verifyTarget(active.leaseId, active.fencingToken + 1, fingerprint)).resolves.toBe(false)
+    // 仅启动 Host 不得隐式激活 execution context；即使 Lease 本身真实存在也必须先有持久 Grant。
+    await expect(clients.lease.verifyTarget(active.leaseId, active.fencingToken, fingerprint))
+      .rejects.toMatchObject({ code: 'E2E_APPROVAL_CONTEXT_MISMATCH' })
+    await expect(clients.lease.verifyTarget(active.leaseId, active.fencingToken + 1, fingerprint))
+      .rejects.toMatchObject({ code: 'E2E_APPROVAL_CONTEXT_MISMATCH' })
+    const manual = await host.prepareManualResult({
+      draft: manualDraft(), finalizationId: 'PREPARE-MANUAL-HOST-1',
+      requestDigest: digestText('authority-host-manual-request/v1', 'PREPARE-MANUAL-HOST-1'),
+    })
+    expect(manual).toMatchObject({
+      manualResultId: 'MANUAL-HOST-1', nextRole: 'executor', draftDigest: expect.stringMatching(/^sha256:/),
+    })
     const closedHost = host
     await closedHost.close()
     expect(closedHost.credential.sessionKeyBase64Url).toBe('')
@@ -77,6 +94,20 @@ test('Authority/Lease Host 在独立 OS 进程打开持久状态并提供认证 
     await rm(directory, { recursive: true, force: true })
   }
 })
+
+function manualDraft(): ManualResultDraft {
+  const digest = (value: string) => digestText('authority-host-manual/v1', value)
+  return {
+    schemaVersion: '1.0.0', manualResultId: 'MANUAL-HOST-1', runId: 'RUN-1', assetId: 'ASSET-1',
+    prdRevision: digest('prd'), generationId: 'GEN-1', runtimeInstallationDigest: digest('runtime'),
+    manualProcedureId: 'MANUAL-PROCEDURE-1', caseIds: ['CASE-MANUAL-1'], obligationIds: ['COV-MANUAL-1'],
+    requirementModelDigest: digest('requirement'), executor: manualIdentities[0]!, reviewer: manualIdentities[1]!,
+    startedAt: '2026-07-14T09:50:00.000Z', finishedAt: '2026-07-14T09:55:00.000Z', outcome: 'passed',
+    steps: [{ stepId: 'MANUAL-STEP-1', instructionDigest: digest('instruction'), outcome: 'passed',
+      observation: '人工验证通过', evidenceDigests: [digest('evidence')] }],
+    evidenceDigests: [digest('evidence')], expiresAt: '2026-07-15T09:55:00.000Z',
+  }
+}
 
 test('Authority child opens WebAuthn sessions while the parent receives only URL references', async ({ skip }) => {
   const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-presence-host-'))
@@ -235,6 +266,10 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
     }
     seed.close()
     const lease = await LocalLeaseAuthority.open({ now, statePath: leasePath, testWorkspaceRoots: [process.cwd()] })
+    const normalLeaseFingerprint = digest('normal-active-lease')
+    const normalTentativeLease = await lease.acquire({ runId: 'RUN-1', resourceKey: 'normal:1',
+      resourceFingerprint: normalLeaseFingerprint, exclusive: true, ttlMs: 300_000 })
+    const normalActiveLease = await lease.activate(normalTentativeLease.leaseId)
     lease.close()
 
     const hostOptions: Parameters<typeof startAuthorityExecutionRpcHostProcess>[0] = {
@@ -323,9 +358,12 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
       transport: createAuthenticatedRpcHttpTransport(host.endpoint), now,
     })
     try {
+      await expect(clients.lease.verifyTarget(
+        normalActiveLease.leaseId, normalActiveLease.fencingToken, normalLeaseFingerprint,
+      )).resolves.toBe(true)
       await expect(clients.gatewayAuthority.verifyForSubject(finalized.grant as never, writeSubject))
         .resolves.toEqual({ allowed: true })
-      await expect(clients.gatewayAuthority.reserveForSubject({
+      const writeReservation = await clients.gatewayAuthority.reserveForSubject({
         grant: finalized.grant as never, currentSubject: writeSubject,
         capabilityId: finalized.grant.capabilities[0]!.capabilityId,
         actionId: writeSubject.actions[0]!.actionId, attemptId: 'ATTEMPT-WRITE-1',
@@ -333,8 +371,75 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
           assetId: 'ASSET-1', generationId: 'GEN-1', prdRevision: writeSubject.prdRevision,
           runId: 'RUN-1', caseId: 'CASE-1',
         },
-      })).resolves.toMatchObject({ status: 'reserved', attemptId: 'ATTEMPT-WRITE-1' })
+      })
+      expect(writeReservation).toMatchObject({ status: 'reserved', attemptId: 'ATTEMPT-WRITE-1' })
     } finally { clients.destroy() }
+
+    // 模拟 Grant 过期且撤销后才重启恢复：只开放 maintenance allowlist。
+    await host.close()
+    host = undefined
+    const revoked = await LocalApprovalAuthority.open({
+      issuer: 'authority', keyId: 'key-1', now, statePath: approvalPath,
+      stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()], approvalIdentities: [approver],
+    })
+    await revoked.revoke(finalized.grant.grantId, 'late-recovery-test')
+    revoked.close()
+    const leaseAuthority = await LocalLeaseAuthority.open({
+      now, statePath: leasePath, testWorkspaceRoots: [process.cwd()],
+    })
+    const recoveryFingerprint = digest('recovery-target')
+    const tentative = await leaseAuthority.acquire({ runId: 'RUN-1', resourceKey: 'recovery:1',
+      resourceFingerprint: recoveryFingerprint, exclusive: true, ttlMs: 300_000 })
+    const recoveryLease = await leaseAuthority.activate(tentative.leaseId)
+    leaseAuthority.close()
+
+    const expiredNow = '2026-07-17T04:10:00.000Z'
+    host = await startAuthorityExecutionRpcHostProcess({
+      ...hostOptions, clock: { kind: 'fixed-test-only', now: expiredNow },
+    })
+    await expect(host.activateGrant({ grant: finalized.grant, approvalBinding: finalized.approvalBinding }))
+      .rejects.toMatchObject({ code: 'E2E_APPROVAL_REVOKED' })
+    await expect(host.activateRecoveryGrant({
+      grant: finalized.grant, approvalBinding: finalized.approvalBinding,
+    })).resolves.toBeUndefined()
+    const maintenance = createAuthorityMaintenanceRpcClient({
+      credential: host.credential, approvalBinding: finalized.approvalBinding,
+      verifierMaterial: host.verifierMaterial,
+      expectedPublicKeyDigest: host.verifierMaterial.publicKeyDigest,
+      transport: createAuthenticatedRpcHttpTransport(host.endpoint), now: () => new Date(expiredNow),
+    })
+    const recoveryExecution = createAuthorityExecutionRpcClients({
+      credential: host.credential, approvalBinding: finalized.approvalBinding,
+      verifierMaterial: host.verifierMaterial,
+      expectedPublicKeyDigest: host.verifierMaterial.publicKeyDigest,
+      transport: createAuthenticatedRpcHttpTransport(host.endpoint), now: () => new Date(expiredNow),
+    })
+    try {
+      const query = { attemptId: 'ATTEMPT-WRITE-1', grantId: finalized.grant.grantId,
+        capabilityId: finalized.grant.capabilities[0]!.capabilityId,
+        actionId: writeSubject.actions[0]!.actionId }
+      await expect(maintenance.queryReservation(query)).resolves.toMatchObject({ status: 'reserved' })
+      await expect(maintenance.markReservationUnknown(query, 'late recovery'))
+        .resolves.toMatch(/^sha256:/)
+      await expect(maintenance.queryLease(recoveryLease.leaseId, recoveryLease.fencingToken, recoveryFingerprint))
+        .resolves.toMatchObject({ status: 'active' })
+      await expect(maintenance.quarantineLease({ leaseId: recoveryLease.leaseId,
+        fencingToken: recoveryLease.fencingToken, targetFingerprint: recoveryFingerprint,
+        reason: 'late recovery effect unknown' })).resolves.toMatch(/^sha256:/)
+      await expect(maintenance.completeReservation(query, digest('must-not-complete')))
+        .rejects.toMatchObject({ code: 'E2E_RPC_RECOVERY_OPERATION_DENIED' })
+      await expect(maintenance.releaseLease({ leaseId: recoveryLease.leaseId,
+        fencingToken: recoveryLease.fencingToken, targetFingerprint: recoveryFingerprint,
+        cleanupDigest: digest('must-not-release') }))
+        .rejects.toMatchObject({ code: 'E2E_RPC_RECOVERY_OPERATION_DENIED' })
+      await expect(recoveryExecution.gatewayAuthority.verifyForSubject(finalized.grant as never, writeSubject))
+        .resolves.toMatchObject({ allowed: false, code: 'E2E_APPROVAL_CONTEXT_MISMATCH' })
+      await expect(recoveryExecution.gatewayAuthority.reserveForSubject({
+        grant: finalized.grant as never, currentSubject: writeSubject,
+        capabilityId: finalized.grant.capabilities[0]!.capabilityId,
+        actionId: writeSubject.actions[0]!.actionId, attemptId: 'ATTEMPT-FORBIDDEN',
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_CONTEXT_MISMATCH' })
+    } finally { maintenance.destroy(); recoveryExecution.destroy() }
   } finally {
     await host?.close()
     encryptionKey.fill(0)

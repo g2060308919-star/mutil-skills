@@ -91,10 +91,11 @@ async function replaceLocalAuthorityAnchor(
   })
 }
 
-function stripSnapshotStateProof(snapshot: Record<string, unknown>): void {
+function stripSnapshotFieldsIntroducedAfter27(snapshot: Record<string, unknown>): void {
   delete snapshot.stateRevision
   delete snapshot.stateDigest
   delete snapshot.stateMac
+  delete snapshot.pendingManualResults
 }
 
 function convertToRealLegacySnapshot(snapshot: Record<string, any>, encryptionKey: Buffer): void {
@@ -237,7 +238,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const database = new DatabaseSync(statePath)
     const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
     const snapshot = JSON.parse(row.snapshot) as Record<string, any>
-    expect(snapshot.schemaVersion).toBe('2.7.0')
+    expect(snapshot.schemaVersion).toBe('2.8.0')
     snapshot.grantFinalizations = Array.from({ length: 512 }, (_, index) => [`FINALIZE-${index}`, {}])
     snapshot.acknowledgedFinalizations = Array.from(
       { length: 513 }, (_, index) => [`ACKNOWLEDGED-${index}`, {}],
@@ -410,7 +411,7 @@ describe('SQLite 持久 Authority 状态', () => {
   })
 
   test.each(['2.0.0', '2.1.0'] as const)(
-    '将真实 %s snapshot 幂等迁移到 2.7.0，并对未知版本 fail closed', async (legacyVersion) => {
+    '将真实 %s snapshot 幂等迁移到 2.8.0，并对未知版本 fail closed', async (legacyVersion) => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-migration-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')
     const options = {
@@ -434,7 +435,7 @@ describe('SQLite 持久 Authority 状态', () => {
     delete legacy.grantFinalizations
     delete legacy.acknowledgedFinalizations
     delete legacy.reservationRpcBindings
-    stripSnapshotStateProof(legacy)
+    stripSnapshotFieldsIntroducedAfter27(legacy)
     convertToRealLegacySnapshot(legacy, stateEncryptionKey)
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
     database.close()
@@ -450,7 +451,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const migratedDatabase = new DatabaseSync(statePath)
     const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
     const persisted = JSON.parse(migratedRow.snapshot) as Record<string, unknown>
-    expect(persisted.schemaVersion).toBe('2.7.0')
+    expect(persisted.schemaVersion).toBe('2.8.0')
     expect(persisted.webAuthnCredentials).toMatchObject({ algorithm: 'aes-256-gcm' })
     expect(persisted).toMatchObject({ grants: [], uses: [], reservations: [], reservationRpcBindings: [],
       completedPreflights: [], attemptLogs: [] })
@@ -484,7 +485,7 @@ describe('SQLite 持久 Authority 状态', () => {
     delete old.grantFinalizations
     delete old.acknowledgedFinalizations
     delete old.reservationRpcBindings
-    stripSnapshotStateProof(old)
+    stripSnapshotFieldsIntroducedAfter27(old)
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
     database.close()
     await removeAuthorityAnchors(directory)
@@ -495,7 +496,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const migratedDatabase = new DatabaseSync(statePath)
     const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
     expect(JSON.parse(migratedRow.snapshot)).toMatchObject({
-      schemaVersion: '2.7.0', grantFinalizations: [], acknowledgedFinalizations: [], reservationRpcBindings: [],
+      schemaVersion: '2.8.0', grantFinalizations: [], acknowledgedFinalizations: [], reservationRpcBindings: [],
     })
     migratedDatabase.close()
   })
@@ -524,7 +525,7 @@ describe('SQLite 持久 Authority 状态', () => {
     delete old.grantFinalizations
     delete old.acknowledgedFinalizations
     delete old.reservationRpcBindings
-    stripSnapshotStateProof(old)
+    stripSnapshotFieldsIntroducedAfter27(old)
     const legacyGrant = convertWriteGrantToRealLegacy(old, stateEncryptionKey, grant.grantId, 'post')
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
     database.close()
@@ -539,7 +540,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
     const persisted = JSON.parse(migratedRow.snapshot) as Record<string, any>
     expect(persisted).toMatchObject({
-      schemaVersion: '2.7.0',
+      schemaVersion: '2.8.0',
       grantFinalizations: [],
       acknowledgedFinalizations: [],
       reservationRpcBindings: [],
@@ -576,7 +577,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const legacy = JSON.parse(row.snapshot) as Record<string, any>
     legacy.schemaVersion = '2.4.0'
     delete legacy.reservationRpcBindings
-    stripSnapshotStateProof(legacy)
+    stripSnapshotFieldsIntroducedAfter27(legacy)
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
     database.close()
     await removeAuthorityAnchors(directory)
@@ -616,7 +617,7 @@ describe('SQLite 持久 Authority 状态', () => {
     old.schemaVersion = '2.3.0'
     delete old.acknowledgedFinalizations
     delete old.reservationRpcBindings
-    stripSnapshotStateProof(old)
+    stripSnapshotFieldsIntroducedAfter27(old)
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
     database.close()
     await removeAuthorityAnchors(directory)
@@ -629,7 +630,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const migratedDatabase = new DatabaseSync(statePath)
     const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
     expect(JSON.parse(migratedRow.snapshot)).toMatchObject({
-      schemaVersion: '2.7.0', acknowledgedFinalizations: [], reservationRpcBindings: [],
+      schemaVersion: '2.8.0', acknowledgedFinalizations: [], reservationRpcBindings: [],
     })
     migratedDatabase.close()
   })
@@ -661,7 +662,7 @@ describe('SQLite 持久 Authority 状态', () => {
     old.schemaVersion = legacyVersion
     delete old.acknowledgedFinalizations
     delete old.reservationRpcBindings
-    stripSnapshotStateProof(old)
+    stripSnapshotFieldsIntroducedAfter27(old)
     const legacy = convertWriteFinalizationToRealV23(
       old, stateEncryptionKey, 'FINALIZE-WRITE-SIGNATURE-23', 'post',
     )
@@ -701,7 +702,7 @@ describe('SQLite 持久 Authority 状态', () => {
     old.schemaVersion = '2.3.0'
     delete old.acknowledgedFinalizations
     delete old.reservationRpcBindings
-    stripSnapshotStateProof(old)
+    stripSnapshotFieldsIntroducedAfter27(old)
     old.grantFinalizations = Array.from({ length: 1_025 }, (_, index) => [`FINALIZE-23-${index}`, {}])
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
     database.close()
@@ -742,7 +743,7 @@ describe('SQLite 持久 Authority 状态', () => {
     old.schemaVersion = '2.3.0'
     delete old.acknowledgedFinalizations
     delete old.reservationRpcBindings
-    stripSnapshotStateProof(old)
+    stripSnapshotFieldsIntroducedAfter27(old)
     const legacy = convertWriteFinalizationToRealV23(
       old, stateEncryptionKey, 'FINALIZE-WRITE-MIGRATION-23', 'post',
     )
@@ -764,7 +765,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
     const persisted = JSON.parse(migratedRow.snapshot) as Record<string, any>
     expect(persisted).toMatchObject({
-      schemaVersion: '2.7.0', grantFinalizations: [], acknowledgedFinalizations: [], reservationRpcBindings: [],
+      schemaVersion: '2.8.0', grantFinalizations: [], acknowledgedFinalizations: [], reservationRpcBindings: [],
     })
     expect(persisted.grants.some(([grantId]: [string]) => grantId === legacy.grantId)).toBe(false)
     expect(persisted.uses.some(([key]: [string]) => key.startsWith(`${legacy.grantId}:`))).toBe(false)
@@ -795,7 +796,7 @@ describe('SQLite 持久 Authority 状态', () => {
     delete legacy.grantFinalizations
     delete legacy.acknowledgedFinalizations
     delete legacy.reservationRpcBindings
-    stripSnapshotStateProof(legacy)
+    stripSnapshotFieldsIntroducedAfter27(legacy)
     const legacyBytes = JSON.stringify(legacy)
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(legacyBytes)
     const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
@@ -816,7 +817,7 @@ describe('SQLite 持久 Authority 状态', () => {
       revision: number; snapshot: string
     }
     expect(migratedRow.revision).toBe(row.revision + 1)
-    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({ schemaVersion: '2.7.0' })
+    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({ schemaVersion: '2.8.0' })
     migratedDatabase.close()
   })
 
@@ -852,7 +853,7 @@ describe('SQLite 持久 Authority 状态', () => {
       delete legacy.grantFinalizations
       delete legacy.acknowledgedFinalizations
       delete legacy.reservationRpcBindings
-      stripSnapshotStateProof(legacy)
+      stripSnapshotFieldsIntroducedAfter27(legacy)
       corrupt(legacy)
       database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
       const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
@@ -905,7 +906,7 @@ describe('SQLite 持久 Authority 状态', () => {
       delete legacy.grantFinalizations
       delete legacy.acknowledgedFinalizations
       delete legacy.reservationRpcBindings
-      stripSnapshotStateProof(legacy)
+      stripSnapshotFieldsIntroducedAfter27(legacy)
       const events = legacy.attemptLogs[0][1].events as unknown[]
       if (mutation === 'delete') events.splice(0, 1)
       else events.reverse()

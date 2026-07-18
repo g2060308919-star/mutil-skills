@@ -1,7 +1,15 @@
 import { createServer } from 'node:http'
-import { readFile, stat } from 'node:fs/promises'
-import { afterEach, describe, expect, test } from 'vitest'
-import { canBindLoopback, listenOnLoopback, startGatewayProxyHostForTest } from './fixtures.js'
+import { access, mkdir, readFile, realpath, stat } from 'node:fs/promises'
+import { join } from 'node:path'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+import { canBindLoopback, createRuntimeTestRoots, listenOnLoopback, startGatewayProxyHostForTest } from './fixtures.js'
+import {
+  authorizeRuntimeWriteProduction,
+  createRuntimeWriteOwnedResourceLifecycle,
+} from '../src/runtime-write-production.js'
+import { createRuntimeOwnedResourceMarker } from '../src/write-attempt.js'
+import { digestText } from '@mutil-skills/e2e-contracts'
+import { startGatewayProxyHostWithTestControl } from '../src/gateway-proxy-host.js'
 
 const handles: Array<{ close(): Promise<void> }> = []
 
@@ -60,6 +68,53 @@ test('Gateway 在独立子进程运行，CA 只写入受限 Authority root', asy
   expect(gateway.caSpkiFingerprint).toMatch(/^[A-Za-z0-9+/]{43}=$/)
   expect((await stat(gateway.caCertPath)).mode & 0o777).toBe(0o600)
   expect(await readFile(gateway.caCertPath, 'utf8')).toContain('BEGIN CERTIFICATE')
+})
+
+test('生产 Gateway 在 spawn 前登记 marker descriptor，正常关闭后才完成 tombstone', async () => {
+  const roots = await createRuntimeTestRoots()
+  const marker = createRuntimeOwnedResourceMarker({
+    runtimeInstallationDigest: digestText('gateway-owned-test/v1', 'runtime'),
+    projectIdentityDigest: digestText('gateway-owned-test/v1', 'project'),
+    runId: 'RUN-GATEWAY-OWNED', attemptId: 'ATTEMPT-1', ownerNonce: 'OWNER-1',
+  })
+  const gatewayOwnerRoot = join(roots.home, '.mutil-skills', 'e2e', 'state', marker.runId, 'gateway')
+  await mkdir(gatewayOwnerRoot, { recursive: true, mode: 0o700 })
+  const canonicalMarkerPath = join(await realpath(gatewayOwnerRoot),
+    `session-${marker.markerDigest.slice(7, 31)}.owner.json`)
+  let activeRecord: any
+  const complete = vi.fn(async (input: any) => ({
+    ...activeRecord, revision: 2, status: 'cleaned' as const,
+    cleanupReceiptDigest: input.cleanupReceiptDigest,
+  }))
+  const register = vi.fn(async (record: any) => {
+    expect(record.descriptor.markerPath).toBe(canonicalMarkerPath)
+    await expect(access(canonicalMarkerPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    activeRecord = { ...record, revision: 1, status: 'active' as const }
+    return activeRecord
+  })
+  const lifecycle = createRuntimeWriteOwnedResourceLifecycle(authorizeRuntimeWriteProduction({
+    recovery: { recover: vi.fn() }, ownedResources: { register, complete }, prepareCleanup: vi.fn(),
+  }), marker)
+  const authorityRoot = join(roots.home, '.mutil-skills', 'e2e', 'authority')
+  await mkdir(authorityRoot, { recursive: true, mode: 0o700 })
+  const started = await startGatewayProxyHostWithTestControl({
+    runId: marker.runId, mode: 'real-environment', approvedRequests: [],
+    authorityRoot,
+    ownedResource: { markerPath: canonicalMarkerPath, lifecycle },
+  })
+  const gateway = started.handle
+  expect(register).toHaveBeenCalledOnce()
+  const active = JSON.parse(await readFile(canonicalMarkerPath, 'utf8'))
+  expect(active).toMatchObject({
+    phase: 'listening', pid: gateway.pid, endpoint: gateway.endpoint,
+    ownerMarker: marker, descriptorDigest: expect.stringMatching(/^sha256:/),
+  })
+  await gateway.close()
+  await expect(access(canonicalMarkerPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  expect(complete).toHaveBeenCalledWith(expect.objectContaining({
+    expectedRevision: 1, ownerMarkerDigest: marker.markerDigest,
+    cleanupReceiptDigest: expect.stringMatching(/^sha256:/),
+  }))
 })
   },
 )

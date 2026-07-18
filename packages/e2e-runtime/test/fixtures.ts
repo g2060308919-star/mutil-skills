@@ -99,7 +99,8 @@ export async function startGatewayProxyHostForTest(
   const authorityRoot = options.authorityRoot ?? join(roots!.home, '.mutil-skills', 'e2e', 'authority')
   await mkdir(authorityRoot, { recursive: true, mode: 0o700 })
   const started = await startGatewayProxyHostWithTestControl({ ...options, authorityRoot })
-  return Object.assign(started.handle, {
+  return Object.freeze({
+    ...started.handle,
     requestThroughProxy: started.requestThroughProxy,
     openWebSocketThroughProxy: started.openWebSocketThroughProxy,
     requestWithTokenHeaders: started.requestWithTokenHeaders,

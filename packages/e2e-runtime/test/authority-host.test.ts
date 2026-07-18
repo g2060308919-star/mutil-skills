@@ -1,7 +1,7 @@
 import { link, lstat, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { Readable, Writable } from 'node:stream'
 import { expect, test, vi } from 'vitest'
-import { RuntimeRequestEnvelopeSchema } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, digestText, RuntimeRequestEnvelopeSchema } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority } from '@mutil-skills/e2e-authority'
 import {
   RuntimeAuthorityHost,
@@ -119,6 +119,71 @@ test('Runtime Authority adapter sends only the four provable fields and rejects 
   })
   await expect(session.finalize!(subject)).rejects.toMatchObject({
     code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH',
+  })
+  await host.close()
+})
+
+test('Runtime Authority adapter keeps manual session references internal and binds both roles to one draft', async () => {
+  const draft = manualDraft()
+  const draftDigest = digestText('manual-result-draft/v1', canonicalizeJson(draft))
+  const prepareFinalizationId = 'PREPARE-MANUAL-1'
+  const prepareRequestDigest = digestText('manual-result-request/v1', prepareFinalizationId)
+  const executorFinalizationId = 'FINALIZE-MANUAL-1-EXECUTOR'
+  const executorRequestDigest = digestText('manual-result-request/v1', executorFinalizationId)
+  const reviewerFinalizationId = 'FINALIZE-MANUAL-1-REVIEWER'
+  const reviewerRequestDigest = digestText('manual-result-request/v1', reviewerFinalizationId)
+  const prepareManualResult = vi.fn(async () => ({
+    manualResultId: draft.manualResultId, draftDigest, nextRole: 'executor' as const,
+  }))
+  const openApprovalSession = vi.fn()
+    .mockResolvedValueOnce({ url: `http://localhost:41011/#${'e'.repeat(43)}`, sessionId: 'SESSION-EXECUTOR' })
+    .mockResolvedValueOnce({ url: `http://localhost:41012/#${'f'.repeat(43)}`, sessionId: 'SESSION-REVIEWER' })
+  const finalizeManualResultRole = vi.fn()
+    .mockResolvedValueOnce({ status: 'awaiting-reviewer', manualResultId: draft.manualResultId,
+      draftDigest, nextRole: 'reviewer' })
+    .mockResolvedValueOnce({ status: 'issued', result: { ...draft, authorityProof: manualProof(draft, draftDigest) } })
+  const host = new RuntimeAuthorityHost({ installationDigest, processHandle: {
+    enrollIdentity: vi.fn(), openApprovalSession, waitForSession: vi.fn(async () => undefined),
+    prepareManualResult, finalizeManualResultRole, close: vi.fn(async () => undefined),
+  } })
+
+  await expect(host.prepareManualResult({ draft, finalizationId: prepareFinalizationId,
+    requestDigest: prepareRequestDigest })).resolves.toEqual({
+    manualResultId: draft.manualResultId, draftDigest, nextRole: 'executor',
+  })
+  const executor = await host.requestManualResultRole({
+    runId: draft.runId, manualResultId: draft.manualResultId, draftDigest,
+    role: 'executor', installationDigest, finalizationId: executorFinalizationId,
+    requestDigest: executorRequestDigest,
+  })
+  await executor.wait()
+  await expect(executor.finalizeManualResultRole!()).resolves.toMatchObject({
+    status: 'awaiting-reviewer', nextRole: 'reviewer',
+  })
+  const reviewer = await host.requestManualResultRole({
+    runId: draft.runId, manualResultId: draft.manualResultId, draftDigest,
+    role: 'reviewer', installationDigest, finalizationId: reviewerFinalizationId,
+    requestDigest: reviewerRequestDigest,
+  })
+  await reviewer.wait()
+  await expect(reviewer.finalizeManualResultRole!()).resolves.toMatchObject({
+    status: 'issued', result: { manualResultId: draft.manualResultId },
+  })
+  expect(openApprovalSession).toHaveBeenNthCalledWith(1, {
+    runId: draft.runId, approvalType: 'manual-executor', subjectDigest: draftDigest, installationDigest,
+  })
+  expect(openApprovalSession).toHaveBeenNthCalledWith(2, {
+    runId: draft.runId, approvalType: 'manual-reviewer', subjectDigest: draftDigest, installationDigest,
+  })
+  expect(finalizeManualResultRole).toHaveBeenNthCalledWith(1, {
+    manualResultId: draft.manualResultId, draftDigest, role: 'executor',
+    approvalSessionRef: 'SESSION-EXECUTOR',
+    finalizationId: executorFinalizationId, requestDigest: executorRequestDigest,
+  })
+  expect(finalizeManualResultRole).toHaveBeenNthCalledWith(2, {
+    manualResultId: draft.manualResultId, draftDigest, role: 'reviewer',
+    approvalSessionRef: 'SESSION-REVIEWER',
+    finalizationId: reviewerFinalizationId, requestDigest: reviewerRequestDigest,
   })
   await host.close()
 })
@@ -1124,6 +1189,40 @@ function runSnapshot(): RuntimeRunSnapshot {
     artifactDigests: { 'prd-source': `sha256:${'3'.repeat(64)}`, scope: `sha256:${'4'.repeat(64)}` },
     frozenArtifacts: {}, trustedExecutionFacts: {},
     requestResponses: {}, createdAt: '2026-07-16T00:00:00.000Z', updatedAt: '2026-07-16T00:00:00.000Z',
+  }
+}
+
+function manualDraft() {
+  return {
+    schemaVersion: '1.0.0' as const, manualResultId: 'MANUAL-RESULT-ADAPTER-1',
+    runId: 'RUN-1', assetId: 'ASSET-1', prdRevision: `sha256:${'1'.repeat(64)}`,
+    generationId: 'RUN-1', runtimeInstallationDigest: installationDigest,
+    manualProcedureId: 'MANUAL-1', caseIds: ['CASE-MANUAL-1'], obligationIds: ['COV-MANUAL-1'],
+    requirementModelDigest: `sha256:${'2'.repeat(64)}`,
+    executor: { subject: 'os-user:executor', roles: ['e2e-manual-executor'] },
+    reviewer: { subject: 'os-user:reviewer', roles: ['e2e-manual-reviewer'] },
+    startedAt: '2026-07-18T00:00:00.000Z', finishedAt: '2026-07-18T00:01:00.000Z',
+    outcome: 'passed' as const,
+    steps: [{ stepId: 'STEP-MANUAL-1', instructionDigest: `sha256:${'3'.repeat(64)}`,
+      outcome: 'passed' as const, observation: '符合预期', evidenceDigests: [`sha256:${'4'.repeat(64)}`] }],
+    evidenceDigests: [`sha256:${'4'.repeat(64)}`], expiresAt: '2026-07-18T01:00:00.000Z',
+  }
+}
+
+function manualProof(draft: ReturnType<typeof manualDraft>, draftDigest: string) {
+  return {
+    issuer: 'fixture-authority', keyId: 'fixture-key', proofScope: 'local-os-user' as const,
+    algorithm: 'Ed25519' as const, signedDigest: `sha256:${'5'.repeat(64)}`, signature: 'signature',
+    executorPresence: { role: 'executor' as const, approvalType: 'manual-executor' as const,
+      requiredRole: 'e2e-manual-executor' as const, subject: draft.executor.subject,
+      sessionId: 'SESSION-EXECUTOR', runId: draft.runId, installationDigest,
+      draftDigest, origin: 'http://localhost:41011', issuedAt: '2026-07-18T00:01:00.000Z',
+      expiresAt: draft.expiresAt },
+    reviewerPresence: { role: 'reviewer' as const, approvalType: 'manual-reviewer' as const,
+      requiredRole: 'e2e-manual-reviewer' as const, subject: draft.reviewer.subject,
+      sessionId: 'SESSION-REVIEWER', runId: draft.runId, installationDigest,
+      draftDigest, origin: 'http://localhost:41012', issuedAt: '2026-07-18T00:02:00.000Z',
+      expiresAt: draft.expiresAt },
   }
 }
 

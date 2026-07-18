@@ -20,7 +20,7 @@ import type { RuntimeRunSnapshot } from '../src/run-store.js'
 const d = (value: string) => digestText('runtime-write-projector-test/v1', value)
 const response = digestRuntimeHttpResponseBody(Buffer.from('{"ok":true}'))
 
-function fixture(): RuntimeRunSnapshot {
+export function runtimeWriteProjectionFixture(): RuntimeRunSnapshot {
   const bodyTemplate = {
     kind: 'segments' as const, contentType: 'application/json',
     segments: [
@@ -168,13 +168,13 @@ function artifact(type: string, schemaVersion: string, content: unknown): Artifa
 
 describe('Runtime write strict projector', () => {
   test('冻结合同、ActionMap、RunBundle、Signed Grant、Lease 与 cleanup 全部闭合后才投影', () => {
-    const projected = projectRuntimeWriteSnapshot(fixture())
+    const projected = projectRuntimeWriteSnapshot(runtimeWriteProjectionFixture())
     expect(projected).toMatchObject({ caseId: 'CASE-1', actionId: 'ACTION-1', secretRefs: ['SECRET.API'] })
     expect(projected.capability.requests).toHaveLength(4)
   })
 
   test('拒绝写 locator 与 RunBundle 未批准 secretRef', () => {
-    const locator = fixture()
+    const locator = runtimeWriteProjectionFixture()
     ;((locator.frozenArtifacts['browser-action-map']!.content as any).actions[0].locatorCandidates)
       .push({ strategy: 'role', value: 'button', confidence: 1 })
     const locatorGrant = locator.trustedExecutionFacts['signed-execution-grant'] as SignedWriteGrant
@@ -184,7 +184,7 @@ describe('Runtime write strict projector', () => {
     rebindSubject(locatorGrant)
     expect(() => projectRuntimeWriteSnapshot(locator)).toThrow(/WRITE_ACTION_DSL_INVALID/)
 
-    const secret = fixture()
+    const secret = runtimeWriteProjectionFixture()
     ;(secret.frozenArtifacts['run-bundle']!.content as any).secretRefs = []
     const grant = secret.trustedExecutionFacts['signed-execution-grant'] as SignedWriteGrant
     grant.subject.runBundleProjectionDigest = digestApprovalProjection(

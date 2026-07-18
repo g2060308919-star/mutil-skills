@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { canonicalizeJson, digestText } from './common.js'
+import { WriteHttpIntentSchema } from './approval-freshness.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -7,22 +8,8 @@ const AttemptContextSchema = z.object({
   assetId: SafeIdSchema, generationId: SafeIdSchema, prdRevision: DigestSchema,
   runId: SafeIdSchema, caseId: SafeIdSchema,
 }).strict()
-const HttpIntentSchema = z.object({
-  intentId: SafeIdSchema,
-  method: z.string().min(1).max(32).regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/),
-  canonicalOrigin: z.string().url(),
-  exactPath: z.string().min(1).max(4096).regex(/^\//),
-  query: z.array(z.tuple([z.string().max(4096), z.string().max(4096)])).max(10_000),
-  payload: z.discriminatedUnion('kind', [
-    z.object({ kind: z.literal('no-body') }).strict(),
-    z.object({ kind: z.literal('json'), digest: DigestSchema }).strict(),
-    z.object({ kind: z.literal('binary'), digest: DigestSchema }).strict(),
-    z.object({ kind: z.literal('template'), templateDigest: DigestSchema }).strict(),
-  ]),
-  targetFingerprint: DigestSchema,
-  maxRequests: z.number().int().positive(),
-  expectedOrder: z.number().int().positive(),
-}).strict()
+// ExecutionOutcome 必须冻结与 SignedWriteGrant 完全相同的 intent；禁止复制一份易漂移的近似 schema。
+const HttpIntentSchema = WriteHttpIntentSchema
 const ReversibleWriteCapabilitySnapshotSchema = z.object({
   capabilityId: SafeIdSchema,
   nonce: z.string().min(1).max(4096),

@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url'
 
 const PINNED_VERSION = '13.3.0'
 const PINNED_SOURCE_DIGEST = 'cf4469953efcb5617a870ae3f022b3ad48aee8c06012ccdafcabc73058f123a0'
+const PINNED_LICENSE_DIGEST = 'bd9e3f45696472076c7160c7f66e54b2d62d38bc2646c812d19be83ee4400c63'
 const BUNDLE_PATH = 'dist/bundle/index.umd.min.js'
+const LICENSE_PATH = 'LICENSE.md'
 
 export async function copyApprovalAssets(options = {}) {
   const sourcePackageRoot = options.sourcePackageRoot ?? await resolveInstalledPackageRoot()
@@ -18,22 +20,35 @@ export async function copyApprovalAssets(options = {}) {
     throw assetError('E2E_APPROVAL_ASSET_VERSION_MISMATCH')
   }
 
-  const sourcePath = join(packageRoot, BUNDLE_PATH)
+  const sourceBytes = await readPinnedSource(packageRoot, BUNDLE_PATH, PINNED_SOURCE_DIGEST)
+  const licenseBytes = await readPinnedSource(packageRoot, LICENSE_PATH, PINNED_LICENSE_DIGEST)
+
+  await mkdir(targetRoot, { recursive: true, mode: 0o755 })
+  const targetDirectory = await realpath(targetRoot)
+  const targetDigest = await copyOrVerifyTarget(
+    targetDirectory, 'simplewebauthn-browser.js', sourceBytes, PINNED_SOURCE_DIGEST,
+  )
+  const licenseDigest = await copyOrVerifyTarget(
+    targetDirectory, 'simplewebauthn-LICENSE.md', licenseBytes, PINNED_LICENSE_DIGEST,
+  )
+  return { version: PINNED_VERSION, sourceDigest: PINNED_SOURCE_DIGEST, targetDigest, licenseDigest }
+}
+
+async function readPinnedSource(packageRoot, relativePath, expectedDigest) {
+  const sourcePath = join(packageRoot, relativePath)
   const sourceStat = await lstat(sourcePath)
   const sourceRealpath = await realpath(sourcePath)
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceRealpath !== sourcePath
     || !isWithin(packageRoot, sourceRealpath)) {
     throw assetError('E2E_APPROVAL_ASSET_SOURCE_REALPATH_INVALID')
   }
-  const sourceBytes = await readFile(sourceRealpath)
-  const sourceDigest = digest(sourceBytes)
-  if (sourceDigest !== PINNED_SOURCE_DIGEST) {
-    throw assetError('E2E_APPROVAL_ASSET_SOURCE_DIGEST_MISMATCH')
-  }
+  const bytes = await readFile(sourceRealpath)
+  if (digest(bytes) !== expectedDigest) throw assetError('E2E_APPROVAL_ASSET_SOURCE_DIGEST_MISMATCH')
+  return bytes
+}
 
-  await mkdir(targetRoot, { recursive: true, mode: 0o755 })
-  const targetDirectory = await realpath(targetRoot)
-  const targetPath = join(targetDirectory, 'simplewebauthn-browser.js')
+async function copyOrVerifyTarget(targetDirectory, name, sourceBytes, sourceDigest) {
+  const targetPath = join(targetDirectory, name)
   try {
     const targetStat = await lstat(targetPath)
     const targetRealpath = await realpath(targetPath)
@@ -46,7 +61,7 @@ export async function copyApprovalAssets(options = {}) {
     }
   } catch (error) {
     if (!isMissing(error)) throw error
-    const staging = join(targetDirectory, `.simplewebauthn-browser.${process.pid}.tmp`)
+    const staging = join(targetDirectory, `.${name}.${process.pid}.tmp`)
     try {
       await writeFile(staging, sourceBytes, { flag: 'wx', mode: 0o644 })
       await chmod(staging, 0o644)
@@ -64,7 +79,7 @@ export async function copyApprovalAssets(options = {}) {
   }
   const targetDigest = digest(await readFile(targetRealpath))
   if (targetDigest !== sourceDigest) throw assetError('E2E_APPROVAL_ASSET_TARGET_DIGEST_MISMATCH')
-  return { version: PINNED_VERSION, sourceDigest, targetDigest }
+  return targetDigest
 }
 
 async function resolveInstalledPackageRoot() {
