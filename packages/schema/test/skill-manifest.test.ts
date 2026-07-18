@@ -59,4 +59,46 @@ describe('skill manifest schema', () => {
 
     expect(manifest.requires[0]).toMatchObject({ capability: 'e2e.gateway' })
   })
+
+  test('parses the single installable E2E Runtime Host capability gate', () => {
+    const manifest = parseSkillManifest({
+      ...validManifest,
+      requires: [{
+        capability: 'e2e.runtime-host',
+        satisfiedBy: [
+          '~/.mutil-skills/bin/repo-e2e doctor --json',
+          'verified installation manifest + protocol major + safety probes',
+        ],
+        whenMissing: {
+          action: 'prompt-install',
+          package: '@mutil-skills/e2e-runtime',
+          version: '0.1.0',
+          terminalState: 'environment-blocked',
+          reasonCode: 'E2E_RUNTIME_HOST_UNAVAILABLE',
+        },
+      }],
+    })
+
+    expect(manifest.requires).toEqual([expect.objectContaining({ capability: 'e2e.runtime-host' })])
+  })
+
+  test('rejects widened or inexact E2E Runtime Host installation contracts', () => {
+    const runtimeHost = {
+      capability: 'e2e.runtime-host',
+      satisfiedBy: ['~/.mutil-skills/bin/repo-e2e doctor --json'],
+      whenMissing: {
+        action: 'prompt-install',
+        package: '@mutil-skills/e2e-runtime',
+        version: 'latest',
+        terminalState: 'environment-blocked',
+        reasonCode: 'E2E_RUNTIME_HOST_UNAVAILABLE',
+      },
+    }
+
+    expect(validateSkillManifest({ ...validManifest, requires: [runtimeHost] }).success).toBe(false)
+    expect(validateSkillManifest({
+      ...validManifest,
+      requires: [{ ...runtimeHost, whenMissing: { ...runtimeHost.whenMissing, version: '0.1.0', extra: true } }],
+    }).success).toBe(false)
+  })
 })

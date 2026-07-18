@@ -17,6 +17,7 @@ export const aliases = {
   '@mutil-skills/e2e-gateway': `${root}packages/e2e-gateway/src/index.ts`,
   '@mutil-skills/e2e-playwright-runtime': `${root}packages/e2e-playwright-runtime/src/index.ts`,
   '@mutil-skills/e2e-report': `${root}packages/e2e-report/src/index.ts`,
+  '@mutil-skills/e2e-runtime': `${root}packages/e2e-runtime/src/index.ts`,
 }
 
 export default defineConfig({

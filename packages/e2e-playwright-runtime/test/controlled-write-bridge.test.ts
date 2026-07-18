@@ -39,6 +39,12 @@ const approvedRequests = [{ intentId: 'INTENT-WRITE', method: 'POST',
   canonicalOrigin: 'https://test.example.com', exactPath: '/api/write', query: [] as Array<[string, string]>,
   payload: { kind: 'json' as const, digest: digestText('bridge-test/v1', 'payload') },
   targetFingerprint: digestText('bridge-test/v1', 'target'), maxRequests: 1, expectedOrder: 1 }]
+const approvalContext = {
+  schemaVersion: '1.0.0' as const, subject: 'local:user', runId: 'RUN-1', approvalType: 'execution' as const,
+  subjectDigest: digestText('bridge-test/v1', 'subject'), installationDigest: digestText('bridge-test/v1', 'install'),
+  origin: 'http://127.0.0.1:43210', issuedAt: '2026-07-14T10:00:00.000Z',
+  expiresAt: '2026-07-14T10:01:00.000Z',
+}
 
 const evidenceIds = ['EVIDENCE-1']
 const receiptBinding = {
@@ -110,9 +116,12 @@ describe('受控可恢复写桥', () => {
   test('生产 launcher 只接受签名隔离会话与同公钥 Authority RPC 客户端', () => {
     const now = () => new Date('2026-07-14T10:00:00.000Z')
     const rpc = AuthenticatedRpcServer.create({ issuer: 'authority-host', keyId: 'rpc-key-1', now })
-    const credential = rpc.registerClient('isolated-runner', Buffer.alloc(32, 13))
+    const credential = rpc.registerClient('isolated-runner', Buffer.alloc(32, 13), { approvalContext })
     const rpcMaterial = rpc.verifierMaterial
     const clients = createAuthorityExecutionRpcClients({ credential, verifierMaterial: rpcMaterial,
+      approvalBinding: { runId: approvalContext.runId,
+        installationDigest: approvalContext.installationDigest,
+        approvalType: approvalContext.approvalType, subjectDigest: approvalContext.subjectDigest },
       expectedPublicKeyDigest: rpcMaterial.publicKeyDigest, transport: (request) => rpc.handle(request), now })
     const isolation = LocalRuntimeIsolationAuthority.create({
       issuer: 'isolation-authority', keyId: 'isolation-key-1', now,

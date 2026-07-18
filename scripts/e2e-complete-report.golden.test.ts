@@ -30,7 +30,7 @@ describe('完整 E2E 报告真实浏览器交互', () => {
     expect(await page.getByLabel('搜索 CASE-ID、标题或状态').isVisible()).toBe(true)
     expect(await page.locator('[data-case]').count()).toBe(2)
 
-    await page.getByLabel('搜索 CASE-ID、标题或状态').fill('CASE-REAL-1')
+    await page.getByLabel('搜索 CASE-ID、标题或状态').fill('真实列表')
     expect(await page.locator('#case-filter-status').textContent()).toBe('显示 1 / 2 个 Case')
     expect(await page.locator('[data-case]:visible').count()).toBe(1)
     expect(await page.locator('[data-case]:visible').getAttribute('data-case-status')).toBe('passed')

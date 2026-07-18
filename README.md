@@ -23,3 +23,45 @@ npm run lint:architecture
 Telemetry hook 使用 `install-hooks --runtime all` 显式安装，使用 `uninstall-hooks --runtime all` 卸载；安装后 runtime 位于用户目录，不依赖当前 checkout。第一期默认不保存或上传事件，详细口径见 [统计说明](./docs/telemetry-hook-statistics-guide.md)。
 
 本实现统一使用的包 scope 是 `@mutil-skills/*`。
+
+## PRD 驱动 E2E 验收
+
+E2E Skill 负责从 PRD 编排需求、审批、受控浏览器执行、证据和报告；`@mutil-skills/e2e-runtime` 提供确定性状态机与安全执行边界。Skill 与 Runtime 分开安装，安装 Skill 不会隐式下载或启动 Runtime。
+
+首次使用按以下顺序准备：
+
+1. 使用你的 Agent Skill 安装器安装 `packages/skills/skills/testing/e2e` 中的 E2E Skill。
+2. 用户显式安装精确版本 Runtime：
+
+   ```bash
+   npm exec --yes --package=@mutil-skills/e2e-runtime@0.1.0 -- repo-e2e install-runtime --version 0.1.0
+   ```
+
+3. 使用安装后的固定 launcher 安装受控 Chromium：
+
+   ```bash
+   ~/.mutil-skills/bin/repo-e2e install-browser
+   ```
+
+4. 在本机浏览器中完成 WebAuthn 身份登记：
+
+   ```bash
+   ~/.mutil-skills/bin/repo-e2e identity enroll
+   ```
+
+5. 运行环境诊断；只有 `ready: true` 才能开始受信验收：
+
+   ```bash
+   ~/.mutil-skills/bin/repo-e2e doctor --json
+   ```
+
+6. 进入用户项目，让 Agent 调用 E2E Skill 并提供 PRD 路径。所有状态转换都通过固定 launcher 的 JSON stdin/stdout RPC 完成，不从用户项目解析 Runtime package。
+7. 验收完成后，在该项目的 `.biztest` 目录查看可追踪测试资产、脱敏证据与最终报告；Git 外原始证据不会作为报告资产发布。
+
+### 运行边界
+
+- Runtime Host、Approval Authority 和 Safety Gateway 都是按需启动的本地临时进程，不是需要部署或维护的远程后端。
+- 首个版本只支持 macOS/Linux 与受控 Chromium；未执行 Firefox/WebKit 时，报告不能宣称跨浏览器通过。
+- 首个版本只对显式审批闭包内的 HTTP/HTTPS、逐跳 Redirect 和 Beacon 提供生产执行。WebSocket 与 SSE 在缺少转发前逐帧/流终态桥时固定 `safety-blocked`，不会连接上游，也不能被报告为已覆盖。
+- Runtime、Chromium、身份登记和产生副作用的审批都必须由用户显式触发。Doctor 不会代替用户安装或修复环境。
+- Skill 缺少 Runtime 时仍可读取文档和梳理 PRD，但不得执行 Case、生成审批或发布验收资产。

@@ -22,6 +22,10 @@ function websocketGrant(): SignedWebSocketReadGrant {
       }],
     },
     subjectDigest: digest, issuedAt: '2026-07-11T10:00:00.000Z', expiresAt: '2026-07-11T10:10:00.000Z',
+    approvalContext: { schemaVersion: '1.0.0', subject: 'os-user:qa', runId: 'RUN-1',
+      approvalType: 'execution', subjectDigest: digest, installationDigest: digest,
+      origin: 'http://127.0.0.1:43210', issuedAt: '2026-07-11T10:00:00.000Z',
+      expiresAt: '2026-07-11T10:10:00.000Z' },
     capabilities: [{
       capabilityId: 'CAP-WS-1', nonce: 'nonce', transport: 'websocket', effect: 'read',
       actionId: 'ACTION-WS-READ', origin: 'wss://stream.example.com', path: '/events/orders',
@@ -41,6 +45,10 @@ function sseGrant(): SignedSseReadGrant {
       environment: 'test', baseOrigin: 'https://test.example.com', actions: [],
     },
     subjectDigest: digest, issuedAt: '2026-07-11T10:00:00.000Z', expiresAt: '2026-07-11T10:10:00.000Z',
+    approvalContext: { schemaVersion: '1.0.0', subject: 'os-user:qa', runId: 'RUN-1',
+      approvalType: 'execution', subjectDigest: digest, installationDigest: digest,
+      origin: 'http://127.0.0.1:43210', issuedAt: '2026-07-11T10:00:00.000Z',
+      expiresAt: '2026-07-11T10:10:00.000Z' },
     capabilities: [{
       capabilityId: 'INTENT-SSE', nonce: 'nonce', transport: 'sse', effect: 'read',
       actionId: 'ACTION-SSE', origin: 'https://stream.example.com', exactPath: '/events',

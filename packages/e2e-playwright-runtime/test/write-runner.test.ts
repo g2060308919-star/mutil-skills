@@ -42,6 +42,7 @@ const now = () => new Date('2026-07-11T10:00:00.000Z')
 async function trustedContext(input: { authorizationAllowed: boolean; leaseAllowed: boolean }): Promise<{
   authorization: RunReversibleWriteCaseInput['authorization']
   lease: RunReversibleWriteCaseInput['lease']
+  rpcHostAuthorities: { approval: LocalApprovalAuthority; lease: LocalLeaseAuthority }
 }> {
   const leaseAuthority = new LocalLeaseAuthority({ now })
   const acquired = await leaseAuthority.acquire({
@@ -52,16 +53,24 @@ async function trustedContext(input: { authorizationAllowed: boolean; leaseAllow
   const authority = LocalApprovalAuthority.create({
     issuer: 'AUTHORITY', keyId: 'KEY-1', now,
     approvalIdentities: [{ subject: 'os-user:test', roles: ['e2e-approver'] }],
-    authenticateApproverSession: (sessionRef) => sessionRef === 'test-session' ? 'os-user:test' : undefined,
+    authenticateApproverSession: (sessionRef, expected) => sessionRef === 'test-session' ? {
+      subject: 'os-user:test', runId: 'RUN-1', approvalType: expected.approvalType,
+      subjectDigest: expected.subjectDigest, installationDigest: `sha256:${'a'.repeat(64)}`,
+      origin: 'http://127.0.0.1:43210', issuedAt: '2026-01-01T00:00:00.000Z',
+      expiresAt: '2099-01-01T00:00:00.000Z',
+    } : undefined,
   })
   const prdRevision = digestText('write-runner-test/v1', 'prd')
   const scopeDigest = digestText('write-runner-test/v1', 'scope')
   const discoverySubject = {
-    schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision, scopeDigest,
+    schemaVersion: '1.1.0' as const, assetId: 'ASSET-1', prdRevision, scopeDigest,
     environment: 'test' as const, baseOrigin: 'https://test.example.com', actor: 'operator',
     expectedPageIdentity: { url: 'https://test.example.com/orders/100', title: '订单审批', heading: '订单 100', ariaSignals: ['main'] },
     bootstrapIntentsDigest: digestText('write-runner-test/v1', 'bootstrap'),
-    actions: [{ actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{
+      actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
+    }],
   }
   const discovery = await authority.issueDiscoveryGrant({ subject: discoverySubject,
     approver: { subject: 'os-user:test', roles: ['e2e-approver'] }, approvalSessionRef: 'test-session', ttlMs: 60_000 })
@@ -93,9 +102,11 @@ async function trustedContext(input: { authorizationAllowed: boolean; leaseAllow
   })
   if (!input.authorizationAllowed) await authority.revoke(grant.grantId, 'test revocation')
   if (!input.leaseAllowed) await leaseAuthority.quarantine(active.leaseId, 'test quarantine')
-  return { authorization: { grant, currentSubject: grant.subject, authority: authority.createWriteExecutionClient() },
+  return { authorization: { grant, currentSubject: grant.subject,
+      authority: authority.createWriteExecutionClient(grant.approvalContext) },
     lease: { leaseId: active.leaseId, fencingToken: active.fencingToken, targetFingerprint,
-      authority: leaseAuthority.createExecutionClient() } }
+      authority: leaseAuthority.createExecutionClient() },
+    rpcHostAuthorities: { approval: authority, lease: leaseAuthority } }
 }
 
 async function rpcTrustedContext(): Promise<Awaited<ReturnType<typeof trustedContext>> & {
@@ -103,17 +114,26 @@ async function rpcTrustedContext(): Promise<Awaited<ReturnType<typeof trustedCon
 }> {
   const trusted = await trustedContext({ authorizationAllowed: true, leaseAllowed: true })
   const rpc = AuthenticatedRpcServer.create({ issuer: 'authority-host', keyId: 'rpc-key-1', now })
-  const credential = rpc.registerClient('runner-process', Buffer.alloc(32, 11))
+  const credential = rpc.registerClient('runner-process', Buffer.alloc(32, 11), {
+    approvalContext: trusted.authorization.grant.approvalContext,
+  })
   registerAuthorityExecutionRpcOperations(rpc, {
-    writeAuthority: trusted.authorization.authority,
-    leaseAuthority: trusted.lease.authority,
+    writeAuthority: trusted.rpcHostAuthorities.approval,
+    leaseAuthority: trusted.rpcHostAuthorities.lease,
   })
   const material = rpc.verifierMaterial
   const clients = createAuthorityExecutionRpcClients({ credential, verifierMaterial: material,
+    approvalBinding: {
+      runId: trusted.authorization.grant.approvalContext.runId,
+      installationDigest: trusted.authorization.grant.approvalContext.installationDigest,
+      approvalType: trusted.authorization.grant.approvalContext.approvalType,
+      subjectDigest: trusted.authorization.grant.approvalContext.subjectDigest,
+    },
     expectedPublicKeyDigest: material.publicKeyDigest, transport: (request) => rpc.handle(request), now })
   return {
     authorization: { ...trusted.authorization, authority: clients.writeApproval },
     lease: { ...trusted.lease, authority: clients.lease },
+    rpcHostAuthorities: trusted.rpcHostAuthorities,
     expectedAuthorityRpcPublicKeyDigest: material.publicKeyDigest,
   }
 }

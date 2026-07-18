@@ -2,7 +2,8 @@ import { describe, expect, test } from 'vitest'
 import {
   runBrowserPreflight, runReadOnlyCase, type BrowserPageAdapter, type DiscoveryAuthorityClient,
 } from '../src/index.js'
-import { canonicalizeJson, digestBytes, digestText, E2EError } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, digestBytes, digestCanonicalGrantApprovalSubject, digestText,
+  E2EError } from '@mutil-skills/e2e-contracts'
 import type {
   DiscoveryApprovalSubject, ReadApprovalSubject, SignedDiscoveryGrant, SignedReadGrant,
 } from '@mutil-skills/e2e-contracts'
@@ -112,6 +113,108 @@ describe('runReadOnlyCase', () => {
     expect(page.navigations).toEqual([])
   })
 
+  test('后续 capability 保留失败时补偿完成此前 reservation，且不开始浏览器动作', async () => {
+    const page = fakePage()
+    const authorized = readAuthorizationInput()
+    let reserveCalls = 0
+    const completed: Array<{ reservationId: string; outcomeDigest: string }> = []
+    authorized.authorization.authority = {
+      async reserveForSubject(input) {
+        reserveCalls += 1
+        if (reserveCalls === 2) throw new E2EError({
+          code: 'E2E_APPROVAL_CAPABILITY_EXHAUSTED', category: 'decision',
+          message: 'capability exhausted', retryable: false,
+        })
+        return {
+          reservationId: `RES-${input.capabilityId}`, grantId: authorized.authorization.grant.grantId,
+          capabilityId: input.capabilityId, actionId: input.actionId, attemptId: input.attemptId,
+          status: 'reserved' as const, reservedAt: '2026-07-12T00:00:00.000Z',
+        }
+      },
+      async complete(reservationId, outcomeDigest) { completed.push({ reservationId, outcomeDigest }) },
+      async markUnknown() {},
+    }
+    const result = await runReadOnlyCase({
+      caseId: 'CASE-READ-1', actionId: 'ACTION-READ-1', url: 'https://test.example.com/orders',
+      expectedIdentity: { title: '订单', heading: '订单列表' }, expectedText: '待审核',
+      runtime: { sandboxHealthy: true, gatewayConnected: true }, ...authorized,
+      gatewayAudit: { received: 0, forwarded: 0, blocked: 0, byIntent: {} }, page,
+    })
+
+    expect(result).toMatchObject({
+      status: 'safety-blocked', reasonCode: 'E2E_APPROVAL_CAPABILITY_EXHAUSTED',
+    })
+    expect(completed).toEqual([{
+      reservationId: 'RES-CAP-READ-1', outcomeDigest: expect.stringMatching(/^sha256:/),
+    }])
+    expect(page.navigations).toEqual([])
+  })
+
+  test('部分 reservation 补偿失败时升级为专用安全阻塞', async () => {
+    const page = fakePage()
+    const authorized = readAuthorizationInput()
+    let reserveCalls = 0
+    authorized.authorization.authority = {
+      async reserveForSubject(input) {
+        reserveCalls += 1
+        if (reserveCalls === 2) throw new Error('reserve failed')
+        return {
+          reservationId: `RES-${input.capabilityId}`, grantId: authorized.authorization.grant.grantId,
+          capabilityId: input.capabilityId, actionId: input.actionId, attemptId: input.attemptId,
+          status: 'reserved' as const, reservedAt: '2026-07-12T00:00:00.000Z',
+        }
+      },
+      async complete() { throw new Error('compensation failed') },
+      async markUnknown() {},
+    }
+    const result = await runReadOnlyCase({
+      caseId: 'CASE-READ-1', actionId: 'ACTION-READ-1', url: 'https://test.example.com/orders',
+      expectedIdentity: { title: '订单', heading: '订单列表' }, expectedText: '待审核',
+      runtime: { sandboxHealthy: true, gatewayConnected: true }, ...authorized,
+      gatewayAudit: { received: 0, forwarded: 0, blocked: 0, byIntent: {} }, page,
+    })
+
+    expect(result).toMatchObject({
+      status: 'safety-blocked', reasonCode: 'E2E_RUNTIME_READ_RESERVATION_COMPENSATION_FAILED',
+      reservationIds: ['RES-CAP-READ-1'], outcomeDigest: expect.stringMatching(/^sha256:/),
+    })
+    expect(page.navigations).toEqual([])
+  })
+
+  test('complete 中途失败时把失败项及剩余项全部标为 unknown，并保留完整 reservationIds', async () => {
+    const page = fakePage()
+    const authorized = readAuthorizationInput()
+    let completeCalls = 0
+    const unknown: string[] = []
+    authorized.authorization.authority = {
+      async reserveForSubject(input) {
+        return {
+          reservationId: `RES-${input.capabilityId}`, grantId: authorized.authorization.grant.grantId,
+          capabilityId: input.capabilityId, actionId: input.actionId, attemptId: input.attemptId,
+          status: 'reserved' as const, reservedAt: '2026-07-12T00:00:00.000Z',
+        }
+      },
+      async complete() {
+        completeCalls += 1
+        if (completeCalls === 2) throw new Error('complete failed')
+      },
+      async markUnknown(reservationId) { unknown.push(reservationId) },
+    }
+    const result = await runReadOnlyCase({
+      caseId: 'CASE-READ-1', actionId: 'ACTION-READ-1', url: 'https://test.example.com/orders',
+      expectedIdentity: { title: '订单', heading: '订单列表' }, expectedText: '待审核',
+      runtime: { sandboxHealthy: true, gatewayConnected: true }, ...authorized,
+      gatewayAudit: { received: 1, forwarded: 1, blocked: 0, byIntent: {} }, page,
+    })
+
+    expect(result).toMatchObject({
+      status: 'safety-blocked', reasonCode: 'E2E_RUNTIME_READ_RESERVATION_FINALIZE_FAILED',
+      reservationIds: ['RES-CAP-READ-1', 'RES-CAP-READ-2', 'RES-CAP-READ-3'],
+      outcomeDigest: expect.stringMatching(/^sha256:/),
+    })
+    expect(unknown).toEqual(['RES-CAP-READ-2', 'RES-CAP-READ-3'])
+  })
+
   test('records page identity, actual result, and minimum evidence for a passing case', async () => {
     const page = fakePage()
     const result = await runReadOnlyCase({
@@ -212,33 +315,42 @@ function readAuthorizationInput(actionId = 'ACTION-READ-1'): {
         attemptId: string; status: 'reserved'; reservedAt: string
       }>
       complete(reservationId: string, outcomeDigest: string): Promise<void>
+      markUnknown(reservationId: string, observation: string): Promise<void>
     }
   }
   attemptId: string
 } {
   const digest = digestText('test/v1', 'read-authorization')
   const currentSubject: ReadApprovalSubject = {
-    schemaVersion: '2.0.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
+    schemaVersion: '2.1.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
     requirementModelDigest: digest, coveragePolicyDigest: digest, universeDigest: digest,
     caseDigest: digest, actionMapDigest: digest, policyDigest: digest,
     executionContractDigest: digest, runBundleProjectionDigest: digest,
     environment: 'test', baseOrigin: 'https://test.example.com', actor: 'auditor',
     discoveryGrantId: 'GRANT-DISCOVERY-READY', preflightDigest: digest,
+    requests: [],
     actions: [
-      { actionId, operation: 'local-navigation', maxUses: 1 },
-      { actionId, operation: 'dom-read', maxUses: 1 },
-      { actionId, operation: 'screenshot', maxUses: 1 },
+      { actionId, operation: 'local-navigation', maxUses: 1, requestIds: [] },
+      { actionId, operation: 'dom-read', maxUses: 1, requestIds: [] },
+      { actionId, operation: 'screenshot', maxUses: 1, requestIds: [] },
     ],
   }
   const grant: SignedReadGrant = {
     grantId: 'GRANT-READ-1', issuer: 'test-authority', keyId: 'test-key', proofScope: 'local-os-user',
     approver: { subject: 'os-user:test', roles: ['e2e-approver'] }, subject: currentSubject,
-    subjectDigest: digestText('approval-subject/v1', canonicalizeJson(currentSubject)),
+    subjectDigest: digestCanonicalGrantApprovalSubject('execution', currentSubject),
+    approvalContext: { schemaVersion: '1.0.0', subject: 'os-user:test', runId: 'RUN-1',
+      approvalType: 'execution', subjectDigest: digestCanonicalGrantApprovalSubject('execution', currentSubject),
+      installationDigest: digest, origin: 'http://127.0.0.1:43210',
+      issuedAt: '2026-07-12T00:00:00.000Z', expiresAt: '2026-07-12T01:00:00.000Z' },
     issuedAt: '2026-07-12T00:00:00.000Z', expiresAt: '2026-07-12T01:00:00.000Z',
-    capabilities: currentSubject.actions.map((action, index) => ({
-      capabilityId: `CAP-READ-${index + 1}`, nonce: `${index}`.repeat(64), transport: 'browser-local',
-      effect: 'read', ...action,
-    })),
+    capabilities: currentSubject.actions.map((action, index) => {
+      if (action.operation === 'http-request') throw new Error('测试夹具只构造 browser-local capability')
+      return {
+        capabilityId: `CAP-READ-${index + 1}`, nonce: `${index}`.repeat(64), transport: 'browser-local' as const,
+        effect: 'read' as const, actionId: action.actionId, operation: action.operation, maxUses: action.maxUses,
+      }
+    }),
     revocationSequence: 0, signature: 'signature',
   }
   return {
@@ -253,6 +365,7 @@ function readAuthorizationInput(actionId = 'ACTION-READ-1'): {
           }
         },
         async complete() {},
+        async markUnknown() {},
       },
     },
     attemptId: 'ATTEMPT-READ-1',
@@ -267,19 +380,24 @@ function discoveryAuthorization(): {
 } {
   const digest = `sha256:${'a'.repeat(64)}`
   const currentSubject: DiscoveryApprovalSubject = {
-    schemaVersion: '1.0.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
+    schemaVersion: '1.1.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
     environment: 'test', baseOrigin: 'https://test.example.com', actor: 'auditor',
     expectedPageIdentity: {
       url: 'https://test.example.com/orders', title: '订单', heading: '订单列表',
       ariaSignals: ['main:订单列表'],
     },
     bootstrapIntentsDigest: digest,
-    actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation', maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation', maxUses: 1, requestIds: [] }],
   }
   const grant: SignedDiscoveryGrant = {
     grantId: 'GRANT-DISCOVERY-1', issuer: 'test-authority', keyId: 'test-key', proofScope: 'local-os-user',
     approver: { subject: 'os-user:test', roles: ['e2e-approver'] }, subject: currentSubject,
     subjectDigest: digest, issuedAt: '2026-07-12T00:00:00.000Z', expiresAt: '2026-07-12T01:00:00.000Z',
+    approvalContext: { schemaVersion: '1.0.0', subject: 'os-user:test', runId: 'RUN-1',
+      approvalType: 'discovery', subjectDigest: digest, installationDigest: digest,
+      origin: 'http://127.0.0.1:43210', issuedAt: '2026-07-12T00:00:00.000Z',
+      expiresAt: '2026-07-12T01:00:00.000Z' },
     capabilities: [{
       capabilityId: 'CAPABILITY-PREFLIGHT-1', nonce: '0'.repeat(64), transport: 'browser-local', effect: 'read',
       actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation',

@@ -6,7 +6,7 @@ const digest = digestText('test/v1', 'value')
 
 function subject(preflight: { discoveryGrantId: string; preflightDigest: string }): ReadApprovalSubject {
   return {
-    schemaVersion: '2.0.0',
+    schemaVersion: '2.1.0',
     assetId: 'PRODUCT/PRD-1',
     prdRevision: digest,
     scopeDigest: digest,
@@ -22,7 +22,8 @@ function subject(preflight: { discoveryGrantId: string; preflightDigest: string 
     baseOrigin: 'https://test.example.com',
     actor: 'auditor',
     ...preflight,
-    actions: [{ actionId: 'ACTION-READ-1', operation: 'dom-read', maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-READ-1', operation: 'dom-read', maxUses: 1, requestIds: [] }],
   }
 }
 
@@ -30,13 +31,16 @@ async function readyPreflight(authority: LocalApprovalAuthority): Promise<{
   discoveryGrantId: string; preflightDigest: string
 }> {
   const discoverySubject = {
-    schemaVersion: '1.0.0' as const, assetId: 'PRODUCT/PRD-1', prdRevision: digest, scopeDigest: digest,
+    schemaVersion: '1.1.0' as const, assetId: 'PRODUCT/PRD-1', prdRevision: digest, scopeDigest: digest,
     environment: 'test' as const, baseOrigin: 'https://test.example.com', actor: 'auditor',
     expectedPageIdentity: {
       url: 'https://test.example.com/orders', title: '订单', heading: '订单列表', ariaSignals: ['main:订单列表'],
     },
     bootstrapIntentsDigest: digest,
-    actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{
+      actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
+    }],
   }
   const grant = await authority.issueDiscoveryGrant({
     subject: discoverySubject, approver: { subject: 'os-user:zhangxudong', roles: ['e2e-approver'] }, ttlMs: 60_000,

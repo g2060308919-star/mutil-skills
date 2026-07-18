@@ -14,7 +14,9 @@ business/input/environment/safety/automation/pending 分类候选，以及仅限
 
 ## 调用的确定性 API
 
-调用 Engine `classify()`、持久化 attempt 审计、attempt slot 验链/选择和 retry policy；执行器只向 Attempt Authority 的 `appendAttemptEvent()` 提交完整上下文和事件，由 Authority 自行验证状态转换、计算链摘要并签名；使用独立 verifier 验证每个 event proof。需要修订时重新计算 ApprovalSubject 并由 Authority 撤销旧 grant。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态；崩溃或 pending attempt 只能发送真实的 `"command":"resume-run"`，不得自动重放 Browser action。
+
+Runtime 内部必须调用 Engine `classify()`、持久化 attempt 审计、attempt slot 验链/选择和 retry policy；执行器只向 Attempt Authority 的 `appendAttemptEvent()` 提交完整上下文和事件，由 Authority 自行验证状态转换、计算链摘要并签名；使用独立 verifier 验证每个 event proof。需要修订时重新计算 ApprovalSubject 并由 Authority 撤销旧 grant。
 
 ## 执行步骤
 

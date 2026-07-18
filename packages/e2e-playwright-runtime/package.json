@@ -1,6 +1,6 @@
 {
   "name": "@mutil-skills/e2e-playwright-runtime",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "files": ["dist/src"],
   "exports": {
@@ -13,10 +13,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@playwright/test": "^1.61.1",
-    "@mutil-skills/e2e-authority": "0.0.0",
-    "@mutil-skills/e2e-contracts": "0.0.0",
-    "@mutil-skills/e2e-engine": "0.0.0",
-    "playwright": "^1.61.1"
+    "@playwright/test": "1.61.1",
+    "@mutil-skills/e2e-authority": "0.1.0",
+    "@mutil-skills/e2e-contracts": "0.1.0",
+    "@mutil-skills/e2e-engine": "0.1.0",
+    "playwright": "1.61.1"
   }
 }

@@ -238,6 +238,8 @@ type RuntimeError = {
 | `get-status` | 返回状态、已验证摘要、下一条合法边和最小阻塞项 | 不产生新领域事实 |
 | `render-report` | 从冻结 FinalizationSnapshot 复算并渲染报告 | 不覆盖 Engine verdict |
 
+> **Spec Errata（2026-07-17，Task 5 外审）**：审批命令必须显式携带审批类型，Runtime 只校验该类型是否适用于当前 workflow，不得从 workflow 猜测类型。下列命令表已按此外审结论更正。
+
 人类命令固定为：
 
 ```text
@@ -248,7 +250,8 @@ repo-e2e project rebind --project <path>
 repo-e2e doctor [--json]
 repo-e2e start --request <path>
 repo-e2e status --run-id <id> [--json]
-repo-e2e approve --run-id <id>
+repo-e2e approve --run-id <id> --type <scope|lineage|privacy>
+repo-e2e approve --run-id <id> --type <discovery|execution> --subject-file <project-relative-json>
 repo-e2e secret provide --run-id <id> --ref <secret-ref>
 repo-e2e resume --run-id <id> --input <path>
 repo-e2e report --run-id <id>
@@ -364,6 +367,28 @@ npm exec --yes --package=@mutil-skills/e2e-runtime@<exact-version> -- repo-e2e i
 
 这些构造器和 Host facade 不得通过 `@mutil-skills/e2e-runtime` 公共导出。公共入口只导出协议类型、Schema 和版本信息；程序化调用方也必须启动稳定 launcher 并走同一进程边界。测试专用 factory 只能通过未导出的 test entry 使用，且不能进入 npm `exports`。
 
+> **Spec Errata（2026-07-17，Task 5 二次外审）**：Authority `2.0.0 → 2.1.0` 迁移必须在同一 SQLite transaction 内先严格解析全部嵌套状态、解密并验证全部私钥及既有签名，再提交新 snapshot；错误密钥或任一损坏必须原样回滚。Grant 签发接口不得接收调用方提供的 receipt binding，而要先验证真实 canonical subject，再由 Authority 内部派生 `{ subject, approvalType, subjectDigest }` 并一次性消费私有 receipt。RPC 与人类审批 callback 必须共用完整项目身份比较。global request replay 必须早于 Authority factory，重放不得启动 Authority；单请求 cleanup 独立关闭全部已打开资源，cleanup 失败时只输出一个 cleanup error。若业务 success 已持久化但 cleanup 失败，本次返回 cleanup error，后续同 requestId 重放仍返回已持久化 success，这是持久幂等优先于本次传输结果的明确语义。stdout 一旦开始写入，不得再追加第二份 JSON。Authority 状态目录和 `state.key` 必须由 Runtime 自带的 `openat`/`mkdirat` helper 通过 dirfd 与 `O_NOFOLLOW` 创建/读取；父进程只读固定最终目录 fd，Authority 子进程继承该 fd、`fchdir` 后 `exec`，SQLite 只使用相对 basename 并在打开前后核对 realpath/dev/inode。Runtime npm 根入口仅导出协议 Schema、类型和版本。
+
+> **Spec Errata（2026-07-17，Task 5 三次外审，覆盖冲突旧结论）**：二次外审中的“三字段 `{ subject, approvalType, subjectDigest }` 即足够绑定”结论撤销。Discovery/Execution 的 Runtime `open-approval` 与六类 Grant 签发必须共同使用唯一的 `e2e-canonical-approval-subject/v1` 域和严格、拒绝额外字段的 Grant subject union。人类命令必须通过项目内 no-follow 读取的 `--subject-file` 提交该 subject；Runtime 在打开会话前及 callback 后校验 Asset、PRD revision、Run 绑定并重算同一 digest。WebAuthn 完成后持久化完整 `{ subject, runId, approvalType, subjectDigest, installationDigest, origin, issuedAt, expiresAt }` 回执；回执与 credential counter 在同一 Authority transaction 中提交，以独立 AES-256-GCM AAD 加密进入 `2.2.0` snapshot。签发只接收 session ID，Authority 从实际严格 Grant subject 派生 type/digest，原子 take 回执、精确匹配并把完整上下文写入 Grant 签名；消费与 Grant 提交共用 transaction，失败回滚、重启后仍仅可消费一次。Attempt 日志迁移必须重放 context、sequence、previous chain、时间单调性、started/terminal 状态机、最终 chain digest 和已完成 reservation attestation，删除、重排或跨上下文一律原样回滚。
+
+> **Spec Errata（2026-07-17，Task 5 四次外审，覆盖旧授权迁移结论）**：Grant 的 `approvalContext` 不只在签发时校验，执行时还必须与 Authority/RPC Host 注册的当前可信上下文逐字段匹配；至少覆盖 runId、installationDigest、approvalType、subjectDigest、origin、issuedAt 和 expiresAt。RPC payload 不得自报该上下文，Host 必须从已认证客户端注册记录读取；生产绑定在 Authority 实际 take WebAuthn receipt 时更新，receipt 的 runId 来自 Runtime 对 Run Store 快照的审批请求，installationDigest 来自已固定安装，origin 与时间来自 WebAuthn Authority。Parent/client 只携带其可证明且不含秘密的 `{ runId, installationDigest, approvalType, subjectDigest }`，不得要求 parent 猜测 child 生成的 origin/issuedAt/expiresAt；最终放行仍由 Server 的完整 receipt exact match 决定。Runner 与 Gateway 还要与可信 Runtime/Attempt 的 runId 交叉验证。Authority `2.0.0/2.1.0` snapshot 中没有完整 `approvalContext` 的旧 Grant 不得猜测补值继续使用：迁移先严格解析、解密并验证旧签名域和 Attempt 链，再保留可独立验证的密钥、身份、credential 和人工结果状态，同时清空 grants/uses/reservations/completedPreflights/attemptLogs，并为全部旧 grantId 写入迁移撤销 tombstone，强制重新审批。任何旧 Grant 在迁移后都必须返回 revoked/denied。
+
+> **Spec Errata（2026-07-17，Task 5 五次外审，补齐生产最终化链）**：Runtime/CLI 打开审批会话时只能把自身可证明的 `{ runId, approvalType, subjectDigest, installationDigest }` 交给 child；不得预传 Grant subject、approver 或完整 approvalContext，也不得保留任何可向生产 Host 注入审批上下文的 test-only 选项。WebAuthn 完成后，parent 必须以严格 Grant subject 显式调用一次性 `finalize-approval`；child 对打开时的四字段重新绑定，并在同一 Authority SQLite transaction 内完成 receipt take、Grant 签发以及 RPC Server 完整 approvalContext 注册。注册或提交任一步失败，receipt、Grant 和注册状态必须共同回滚；完成前、错误 subject 和重放均拒绝。child 返回的 SignedGrant 与四字段 binding 必须从 Authority 生成的 `approvalContext` 派生，Runtime 再与 Run/安装/subject 精确复验，并将人类审批结果持久化进 Run Store，重放不得再次消费会话。真实 `2.0.0/2.1.0` Grant 的旧 subject digest 使用 `approval-subject/v1` 域校验，迁移验证旧签名后仍按四次外审规则撤销，不得以当前 canonical 域伪造 legacy fixture。Authority child 清理必须在 listener 尚未建立、部分启动或多个 close 失败时仍独立尝试 WebAuthn revoke、所有审批 server、HTTP、RPC destroy、Approval Authority 与 Lease Authority，并聚合错误而不覆盖原始 startup failure。Task 5 Golden 必须通过真实 WebAuthn assertion 串起 receipt→finalize→SignedGrant→RPC verify/reserve；若宿主安全策略禁止 loopback/Chromium，应把该环境阻塞与产品失败明确分开，不得把 sandbox skip 记为通过。
+
+> **Spec Errata（2026-07-17，Task 5 六次外审，覆盖五次外审的注册回滚结论）**：Authority snapshot 提升为 `2.3.0`，receipt take、SignedGrant 与 `{ finalizationId, requestDigest, subject, approvalBinding, grantId, approvalSessionRef }` finalization outbox 必须在同一持久 transaction 内提交；RPC client 的 ephemeral approvalContext 注册只能发生在 transaction 提交之后，注册失败不得回滚或重复消费 receipt，而应保留 outbox，并由相同 finalization identity 在重启后的 Host 恢复同一 Grant 再重试注册。child 必须用单一互斥序列化 finalize/recover/activate 与 ephemeral 注册，parent 不得再向 Local Authority 传注册 callback。Runtime machine requestId 与直接 CLI 的稳定 finalization identity 必须在 WebAuthn 前写入全局 reservation；Authority 已提交而 Run Store outcome 未提交时，请求保持 pending，重试先 recover，不重复创建 session 或展示 URL；成功写入后，Run snapshot 的已记录 request 集合必须使后续人工审批推导出新 identity。恢复或最终化后必须重新取得 Run lock，复验 Run、安装、审批类型、subject digest 和项目身份后才写 outcome。
+>
+> 新 Host 只可激活当前持久状态中逐字节一致、完整严格 Schema、签名有效、未撤销、未过期且四字段 binding 精确匹配的 SignedGrant；错误 Run/安装/type/digest、缺失存储态、畸形、多余字段、撤销和过期均拒绝。HostConfig、ready/control/shutdown IPC 必须使用精确字段 Schema；state/session key 解析产生的临时 Buffer 必须全路径清零。显式 shutdown、startup cleanup 与 SIGTERM cleanup 必须有界报告稳定的 `E2E_*` cause code 并在 `finally` 断连/退出，不能吞掉 cleanup failure 或用 EPIPE 覆盖已报告的 startup cause。可逆写 Golden 必须由 Host1 finalize/persist/close，再由全新 Host2 激活同一持久 Grant 后创建新 RPC client 执行 verify/reserve。
+
+> **Spec Errata（2026-07-17，Task 5 七次外审）**：Authority transaction 已提交但 ephemeral RPC 注册失败必须返回专用 `E2E_APPROVAL_FINALIZATION_RECOVERY_REQUIRED`；Runtime machine 与直接 CLI 都不得把该请求记为终态，且 recover/注册/Run outcome 必须位于同一 Run lock 临界区。Run outcome 成功后 parent 以严格 finalization identity、grantId 和四字段 binding 确认 outbox；确认失败不得推翻已持久化成功。outbox 必须在 Grant 过期时裁剪，最多 1024 项，超限签发整事务回滚，oversized snapshot 拒绝加载。child 的全部 incoming envelope 和嵌套 payload 都必须 exact；透传错误码只接受 `^E2E_[A-Z0-9_]+$`。SignedGrant 及其 subject 的字符串、数组与数值均有生产上界，注入响应还必须限制 status、delay、header allowlist/body bytes 并复算 body digest。parent 序列化 state key 的临时副本也必须显式清零。终止面必须严格解析 `terminal-cleanup-error`，保留 Aggregate cause；disconnect 要等待 exit code，非零 exit 映射稳定 cleanup failure，不得先用 generic disconnect 覆盖。四字段 binding 结构解析必须单源复用；该 parser 只验证结构，不授予 trusted client 身份。
+
+> **Spec Errata（2026-07-17，Task 5 八次外审）**：finalization ack 的幂等性必须由持久 tombstone 证明，不能把“不存在”当作成功。Authority `2.4.0` 在同一事务内将精确匹配的 outbox 移到 `{ requestDigest, grantId, approvalBinding, expiresAt }` tombstone；重复精确 ack 成功，任何 mismatch 失败。outbox+tombstone 总容量固定 1024，两个集合共同校验、共同 expiry prune，`2.3.0 → 2.4.0` 保留 outbox 并增加空 tombstone。child 解码 session key 后必须用 `try/finally` 包围 RPC client registration。parent 启动状态机不得在 disconnect 时抢先返回 generic 错误，而要等待 startup-error、exit code 或 timeout；child 报告启动清理失败时 exitCode 必须非零。Write HTTP intent 由唯一导出的 schema 定义并同时用于 subject、签发、IPC/recover 与 SignedGrant，接受 1–32 字符的大写 HTTP token，拒绝 lowercase/33；Injection 使用独立 schema。四字段值不是 trusted object，公共类型/parser 使用中性名称，唯一 parser 自己负责 exact keys；Trusted 仅指 WeakMap 登记后的客户端 wrapper。Run outcome 的“persist→best-effort ack→pending on persist failure”由 machine/CLI 共用协调器实现。必须保留 fake 故障单测，同时增加不 mock `child_process` 的 Runtime 真实恢复测试：真实 P-256 assertion 后让 Run Store outcome 失败，关闭 Host1，以新 key 启动 Host2，recover/activate 同一 Grant，不再次调用 WebAuthn，并通过认证 RPC verify/reserve。
+
+> **Spec Errata（2026-07-17，Task 5 九次外审，修正历史 Write 契约）**：Authority snapshot version 是验证能力选择器。`2.2.0/2.3.0` 的 Write subject/capability method 按当时合法的任意 1–32 字符 schema 与相同 canonical subject digest/signature payload 验证；只有验证全部成功后才执行 `2.4.0` 迁移。满足当前 uppercase HTTP token 契约的旧 Grant 与 outbox 保留；其余旧 Write Grant 必须定向撤销，清除 Grant、outbox、use、reservation、preflight 与引用该 reservation 的 attempt log，留下可在 Grant 缺失时持久化的 `legacy-write-method-migration` tombstone，恢复返回未命中并要求新审批。无效签名、超 1024 outbox 和损坏关联不能被迁移清理掩盖，必须在 mutation 前判为 corrupt。每个 snapshot 版本的 credentials/receipts/context/outbox/ack/write-contract 能力集中在单一 policy switch。ACK 的 `{ finalizationId, requestDigest, grantId, approvalBinding }` 与四字段 binding 是共享 contracts strict schema/type；共享只消除 data clump，不替代 Runtime、Host parent、Host child 与 Authority 各边界的独立 runtime parse，optional transport 不得绕过解析。任何 session-key decode 临时字节在无效输入抛错前清零。
+>
+> Authority/Artifact FS 的 Python helper 不得硬编码单一路径或信任 `PATH`：Runtime 只枚举固定绝对候选，验证 root owner、不可被 group/world 写、普通文件内容摘要和所需 `dir_fd/O_NOFOLLOW/fchdir/pread/pwrite/fsync` 能力，并在每次 spawn 前复验；Doctor 记录该证明 digest。helper 创建目录或 key 后必须 fsync 文件与包含目录。Authority child 的关闭顺序固定为 shutdown→TERM→KILL 并等待退出；启动失败、父 fd 关闭失败和人类审批任一资源失败都必须独立回收全部已打开资源。WebAuthn body/chunk、helper stdout、state/session key Buffer 必须在最早可行的 `finally` 中清零。
+>
+> SQLite basename 使用 `O_NOFOLLOW` 预开、regular/nlink=1/UID/mode/fd-path identity 校验、fd `chmod(0600)` 和打开后复验。**残余边界**：Node `DatabaseSync` 只能按 pathname 打开，不能把已验证 fd 交给 native VFS；因此在 current-UID 0700 目录内，同 UID 恶意进程仍可能在“预检 fd—native open”窗口主动替换 leaf。实现必须检测替换后 fail closed、不得继续初始化/写入替换文件，但在获得可靠 fd-backed VFS 前不得宣称消除了该竞态；此同 UID 主动对手属于明确记录的宿主账户信任残余。
+
 ### 8.2 子进程模型
 
 每个执行 Run 使用一个 Host 父进程，按需启动 Authority、Gateway 和 Controlled Browser 子进程。Host 必须：
@@ -383,6 +408,12 @@ npm exec --yes --package=@mutil-skills/e2e-runtime@<exact-version> -- repo-e2e i
 同一 `projectId + runId` 同时只允许一个写 Host。请求 envelope 的 `requestId` 在 Run journal 内去重：相同 requestId 和相同请求摘要返回原结果；相同 requestId 不同摘要返回 `E2E_RUNTIME_REQUEST_REPLAY_MISMATCH`。读命令可以并发，但必须读取同一 committed snapshot。
 
 ## 9. Gateway Proxy Host
+
+> **Spec Errata（2026-07-17，Task 7 实施与外审收口）**：强制代理证明的允许/拒绝 canary 必须使用专用内部一次性规则、独立计数与独立 policy digest，并把真实 Browser measurement 和本次 Gateway session measurement 绑定到 proof；不得复用或消耗业务规则。代理收到 HTTP response 仅记录 transport observed，cleanup 与 effect observation 完整后才允许 Runtime 提交 signed execution outcome；abort、断连及未最终化关闭必须 mark unknown。CA generation 目录由逐级 `openat`/`O_NOFOLLOW` helper 以 `0700/0600` 原子创建并固定 dirfd，子进程 `fchdir` 后只使用相对 key/cert basename；WebSocket 的 opaque correlation 通过 hop-by-hop `Proxy-Authorization` 传递且不得到达上游。Mockttp 无转发前 frame hook，Task 7 因而对全部 WebSocket behavior 固定 501；Task 9 必须以受控逐帧 bridge 取代。Injection session 禁止任何 pass-through，projected rule 必须在 reserve 前与签名 capability 的 request、response、顺序和次数逐项一致，完成 reservation 必须进入 signed Gateway audit。Browser correlation 绑定 `ruleId + stepOrdinal + bodyDigest`；请求体最多 1 MiB，拒绝 chunked、无长度非空 body 和超限 `Content-Length`。Gateway child 的 session key 由父进程随机创建并只经继承匿名 pipe 交付；因为该 OS IPC 无网络重连和独立服务端身份，双向 HMAC、strict monotonic sequence（等价 nonce/重放窗）、requestId、direction 与 exact result schema 构成 §8.2 网络 RPC 的等价边界，不再重复增加 wall-clock window 或第二层服务端签名。Task 7 提供 Authority-backed policy object 的装配 seam，但 Injection/WebSocket/SSE 生产 RPC、逐帧 WebSocket bridge与写 outcome crash recovery 属于 Task 9，在完成前不得宣称生产授权闭环。
+
+> **Task 7 最终安全审查 Errata（2026-07-17，覆盖上段 WebSocket 透传表述）**：Mockttp 的 WebSocket 消息事件只能事后观察，无法证明 client/inbound frame 在转发前经过 `ProtocolGuard`；因此 Task 7 对正确 token/capability 的 WebSocket 也 fail closed，返回 `E2E_GATEWAY_WEBSOCKET_BRIDGE_UNAVAILABLE`，不连接上游且不创建 reservation。支持 WebSocket 必须等待受控逐帧 bridge 能在转发前拒绝 client frame、执行 inbound 消息/字节上限并在 close 时 complete。Gateway audit finalize 必须先冻结接入、drain in-flight 并等待 child terminal/write settlement；write complete/unknown/close/child-exit 在首个 await 前原子 claim 单一终态，多步 request sequence 未全部 transport observed 与 policy-complete 时不得 finalize。
+
+> **Task 9 协议支持边界 Errata（2026-07-17，覆盖“首发支持 WebSocket/SSE”的旧表述）**：Task 9 复核确认，在 Mockttp `4.4.2` 上无法以事后 message event 实现转发前逐帧策略；现有 SSE policy 也没有把 reservation 终态绑定到真实 stream close/abort。首发生产能力因此限定为 HTTP/HTTPS、显式逐跳 Redirect 与 Beacon；WebSocket/SSE 必须在上游连接或转发前以稳定 reason code 阻塞，不消费授权，并进入报告 `cannotClaim`。独立 bridge 完成 client-frame pre-forward deny、inbound pre-forward limits、close→complete、abort→unknown 以及真实浏览器/上游矩阵之前，不得恢复支持声明。
 
 ### 9.1 职责
 
@@ -415,6 +446,8 @@ Gateway 使用每安装独立、本地保存的 CA material，为每 Run 生成�
 
 本设计防御 PRD、页面、生成候选、项目依赖和受控测试进程；不声称防御已完全控制当前 OS 用户账号或 root 的攻击者。同一 OS 用户证明的报告范围仍是“本地个人 Authority”，不得描述为组织级不可抵赖。
 
+> **Spec Errata（2026-07-18，Task 9 Authority 状态复审）**：Authority snapshot 的 HMAC 与 SQLite revision 只能认证内容并检测 DB 单独回滚；默认本地 anchor 使用单一有界高水位，只提供 `local-crash-integrity`，anchor 缺失、序列断裂、DB/anchor 不精确相等均失败关闭，不再用数据库自动补齐。它与 DB 和状态密钥属于同一 UID 信任域，符合本节“不防御已完全控制当前 OS 用户”的边界，不能被报告为同 UID 反回滚或组织级不可抵赖。实现必须提供同步、线性化的 `TrustedMonotonicAuthorityStateAnchor` seam；只有部署方显式注入权限和介质独立、声明 `trusted-monotonic` 的 provider，才可提升该项证明等级。reservation 与 RPC 终态幂等记录不得通过淘汰改变历史语义，必须持久有界或在容量耗尽时失败关闭。
+
 ## 10. Browser、Compiler 与宿主资源隔离
 
 ### 10.1 权威验收不执行生成源码
@@ -438,6 +471,12 @@ Browser/Runner 工作目录位于用户级 Run staging，不是项目根。子�
 
 ### 10.3 环境变量与秘密
 
+> **Spec Errata（2026-07-17，Task 6 实施）**：本节“Runtime 内部一次性 handle 可进入子进程 env”的示例不适用于首发实现。子进程 env 保持固定 `HOME/LANG/PATH/TMPDIR`，handle/value 均只经过 RuntimeHost 构造注入的 Broker 和受控 Bridge API。交互秘密跨 CLI 进程持久到用户级 strict `1.0.0` SQLite snapshot：独立 `0600` master key 包装每 Run data key，secret AAD 精确绑定 run/ref/provider，wrapped key 同时认证项目身份。provide 以原子 version 替换；consume 在事务内先删除 ciphertext、提交 consumed tombstone，再返回需立即清零的 Buffer。真实 OS 子进程并发消费最多一个成功。系统 provider 以持久 reservation 保证单次读取，环境变量/`.env` 永不回退。state、key、provider command、TTY、容量、损坏与跨项目边界全部 fail closed；首发未知 Secret schema 不迁移。
+
+> **Spec Errata（2026-07-17，Task 6 二次外审，覆盖上段 key、身份与 Bridge 表述）**：Secret 不再创建独立 master-key 文件，而是复用 Task 5 Authority `openat` helper 安全取得 `authority/state.key`，用固定 HKDF 域分别派生 wrapping/MAC key，并在全部成功与异常路径清零原始 key 与派生 Buffer。SQLite 行保存 strict `{ schemaVersion, revision, payload, mac }` envelope；HMAC-SHA256 覆盖 capacity、全部 project/run/ref/version/status/reservation/tombstone/expiry/ciphertext，envelope revision 必须等于同一事务读出的 SQLite revision。因此单独删除 tombstone、篡改 reservation 或重放旧 snapshot 均 fail closed；攻击者若能把完整 SQLite 文件连同 revision 一起回滚，在没有外部单调计数器的本地单用户模型下仍不可检测，这是明确 residual。Run 主键为 `projectIdentityDigest + NUL + runId`，不同项目可安全共存同名 Run；调用方不得提交 digest，Broker 在 open 及每次 provide/resolve/consume/retire 前都从 no-follow 项目声明重建并比较物理根、device/inode、逻辑 ID 与 digest。系统读取的 resolving 记录包含 attempt/created/expiry，崩溃后过期只转为 authenticated abandoned tombstone，绝不再次读取 provider；容量只由持有效终态 Run lease、Run snapshot 与 Store revision 的不可伪造一次性退役 capability 释放。Provider 所有失败路径统一 SIGKILL 并有界等待真实 close；Linux 只信任 UID 派生且前后 identity 一致的 `/run/user/<uid>/bus`，不继承 host env。TTY 使用固定 64KiB Buffer、恢复精确原 `isRaw`，支持退格清零与 Ctrl-D。Task 6 只建立 secret 存储/handle/provider/CLI 边界，尚未把 secret 注入页面；实际受控 Bridge 消费属于 Task 8/9，故 RuntimeHost 不保留未使用的 `secretBroker` 依赖。
+
+> **Spec Errata（2026-07-17，Task 6 三次外审）**：Secret Run 退役必须写 HMAC 认证的 Run 级 `retired` marker，不得把缺失 Run 当作可重新 provide/resolve 的空状态。marker 移除 wrapped key/ciphertext，拒绝 provide/resolve/consume，且系统 provider 调用计数不得增加；它不计 1024 secret-entry 额度，但仍计入 4MiB envelope，达到总上限后 fail closed，回收需要未来与 Run 终态归档/销毁共同证明的协议。所有组合操作固定 RunStore→SecretStore 锁序：短 provide/consume 在 RunStore `BEGIN IMMEDIATE` active 校验 callback 内提交 SecretStore；system provider reservation 提交后释放 RunStore，再执行外部读取，返回后重新 active 校验并密封，终态竞争只允许 abandoned。退役 capability 在 RunStore transaction 内复验并执行 SecretStore 幂等 callback，失败回 available 可重试、成功才 used；两个 SQLite 库没有单一原子事务。Broker 默认按 darwin/linux 装配 Keychain/Secret Service，未知平台保持 provider 缺失，不实现 env fallback；Linux 环境只增加经固定 UID 路径验证的 `XDG_RUNTIME_DIR` 和 `DBUS_SESSION_BUS_ADDRESS`。provider child 已 fulfilled 但 post-spawn 复验失败时必须清零 fulfilled Buffer。CLI 在 TTY 前完成 Broker open，provide 后立即清零再 close/output；真实 PTY 由可信 Python discovery 在 macOS/Linux 运行。反回滚 residual 扩大为同一 namespace 行 `{ revision, snapshot }` 成对回滚，完整 SQLite 文件回滚只是其中一种。
+
 Host 启动子进程时从空对象构建 env，只允许固定的无敏感键，例如 locale、受控临时目录和 Runtime 内部一次性 handle。以下内容一律不继承：
 
 - `SSH_*`、`AWS_*`、`GITHUB_*`、`NPM_*`、云凭证、数据库 URL；
@@ -447,6 +486,10 @@ Host 启动子进程时从空对象构建 env，只允许固定的无敏感键�
 业务登录凭证只能以 `secretRef` 出现在模型和资产中。首期 Secret Broker 只支持两种来源：`repo-e2e secret provide` 的隐藏交互输入，或用户预先显式绑定的 macOS Keychain/Linux Secret Service 条目。交互值只存入以每 Run key 加密的用户级 state，系统条目按固定 ID 单次读取；两者都通过一次性 Bridge 操作注入页面。明文不进入 stdin/stdout、Run Bundle、trace、report、生成测试源码或普通 Runtime log。环境变量 provider 和项目 `.env` 首期明确不支持；缺失 provider 必须阻塞，不允许回退到“把全部 `process.env` 传给测试”。
 
 ### 10.4 Chromium 安装
+
+> **Spec Errata（2026-07-17，Task 8 实施）**：Browser closure manifest 必须闭合 Runtime installation、精确 Playwright/Chromium、CLI/executable bytes 与全部内部 file/symlink；inspect 只读且拒绝 symlink、owner/mode、digest 或 binding 篡改。Runtime 通过持久 profile、最小 env、固定 proxy/SPKI/bypass/禁 QUIC/WebRTC 非代理 UDP 参数启动 Chromium，并用 CDP 实际 command line、Gateway approved/denied canary 与 measurement digest 证明约束生效。Discovery preflight 事实必须同时绑定 Run、Grant、reservation/outcome receipt、观察身份、Browser closure/executable、Gateway policy/session/signed audit 与 canary。Doctor 不以“代码已安装”冒充能力通过，只读取成功受控会话原子写入的 installation-bound capability proof；无 proof 为 not-installed，损坏/错绑定为 blocked。首份 proof 由 `install-browser` 后的显式无业务 Run bootstrap 产生：空业务 Gateway rules 仍执行独立 approved/denied canary，Browser/Gateway finalize 与清理全部成功后才写 proof；bootstrap 或清理失败时安装命令失败且 proof 保持缺失。
+
+> **Spec Errata（2026-07-17，Task 8 崩溃恢复收口）**：只读执行除 mutation lease 外还必须持有独立、可续租的 execution-owner lease；owner 未释放时任何 reconcile 都必须失败，防止长执行被过期 mutation lease 误判为陈旧。Preflight 必须拆成 Browser `prepare`、RunStore 持久 preparation、Authority `finalize`、可信事实与 replay 原子提交四步；Authority 只允许同 reservation、同 subject、同 outcome digest 的精确幂等完成。Authority 已完成而 fact 提交失败时，相同 pending 请求只能从持久 preparation 恢复，不得再次启动 Browser 或消耗 capability。为覆盖 reserve 到 preparation 的前置窗口，Host 还必须从 `{runId, requestId, requestDigest}` 派生稳定 attemptId；Discovery Authority 仅对同 grant/capability/action/attempt/subject 精确返回原 reservation，普通 read/write reservation 不得获得此幂等特例。
 
 `repo-e2e install-browser` 使用当前已安装 Runtime 内 Playwright 的绝对 CLI，下载到版本化用户级 browser root，并记录 browser executable bytes digest、Playwright version 和平台。`doctor` 只探测，不下载。Runtime 升级后若 Playwright revision 不兼容，明确返回恢复命令。
 

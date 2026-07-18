@@ -1,8 +1,13 @@
-import type {
-  GrantDecision,
-  SignedWriteGrant,
-  WriteApprovalSubject,
+import {
+  ApprovalExecutionBindingSchema,
+  E2EError,
+  type ApprovalExecutionBinding,
+  type GrantDecision,
+  type SignedWriteGrant,
+  type WriteApprovalSubject,
 } from '@mutil-skills/e2e-contracts'
+
+export type { ApprovalExecutionBinding } from '@mutil-skills/e2e-contracts'
 
 export interface TrustedWriteApprovalClient {
   verifyForSubject(grant: SignedWriteGrant, currentSubject: WriteApprovalSubject): Promise<GrantDecision>
@@ -12,9 +17,24 @@ export interface TrustedLeaseClient {
   verifyTarget(leaseId: string, fencingToken: number, targetFingerprint: string): Promise<boolean>
 }
 
+/** Strictly parses the four-field execution binding; parsing alone does not confer client trust. */
+export function parseApprovalExecutionBinding(value: unknown): ApprovalExecutionBinding {
+  const parsed = ApprovalExecutionBindingSchema.safeParse(value)
+  if (!parsed.success) bindingInvalid()
+  return structuredClone(parsed.data)
+}
+
+function bindingInvalid(): never {
+  throw new E2EError({
+    code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH', category: 'safety',
+    message: 'Runtime approval binding 必须是严格的四字段结构', retryable: false,
+  })
+}
+
 export type TrustedExecutionClientBinding =
-  | { transport: 'in-process-test' }
-  | { transport: 'authenticated-rpc'; authorityPublicKeyDigest: string }
+  | { transport: 'in-process-test'; approvalBinding?: ApprovalExecutionBinding }
+  | { transport: 'authenticated-rpc'; authorityPublicKeyDigest: string;
+      approvalBinding?: ApprovalExecutionBinding }
 
 const trustedWriteApprovalClients = new WeakMap<object, TrustedExecutionClientBinding>()
 const trustedLeaseClients = new WeakMap<object, TrustedExecutionClientBinding>()

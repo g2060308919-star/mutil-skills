@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>E2E Runtime 本地审批</title>
+  <script defer src="/simplewebauthn-browser.js"></script>
+  <script defer src="/approval.js"></script>
+</head>
+<body>
+  <main>
+    <h1>E2E Runtime 本地审批</h1>
+    <p>请核对以下不可编辑的 Authority 摘要，然后使用本机 WebAuthn 完成用户在场验证。</p>
+    <pre id="summary" aria-label="Authority 审批摘要"></pre>
+    <button id="confirm" type="button">使用 WebAuthn 确认</button>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+</body>
+</html>

@@ -34,21 +34,30 @@ export function computeVerdict(
   if (!parsed.success) return invalidInputResult(candidate)
   const input = parsed.data
   const obligations = new Map(input.obligations.map((obligation) => [obligation.obligationId, obligation]))
-  const resultByCase = new Map(input.caseResults.map((caseResult) => [caseResult.caseId, caseResult]))
+  const realCaseResults = input.caseResults.filter((caseResult) => caseResult.executionMode === 'real-environment')
+  const injectionCaseResults = input.caseResults.filter((caseResult) => caseResult.executionMode === 'gateway-injection')
+  const resultByCase = new Map(realCaseResults.map((caseResult) => [caseResult.caseId, caseResult]))
   const requiredAutomated = input.obligations.filter((item) => item.necessity === 'required' && item.disposition === 'automated')
   const requiredManual = input.obligations.filter((item) => item.necessity === 'required' && item.disposition === 'manual')
   const requiredCaseIds = unique(requiredAutomated.flatMap((item) => item.caseIds ?? []))
   const requiredResults = requiredCaseIds.map((caseId) => resultByCase.get(caseId)).filter(isDefined)
-  const businessFailuresObserved = unique(input.caseResults.filter((item) => item.status === 'failed').map((item) => item.caseId))
-  const advisoryFailures = unique(input.caseResults
-    .filter((item) => item.status === 'failed' && item.obligationIds.every((id) => obligations.get(id)?.necessity === 'advisory'))
+  const businessFailuresObserved = unique(realCaseResults
+    .filter((item) => item.status === 'failed'
+      && item.obligationIds.some((id) => obligations.get(id)?.necessity === 'required'))
     .map((item) => item.caseId))
+  const advisoryFailures = unique([
+    ...realCaseResults
+      .filter((item) => item.status === 'failed'
+        && item.obligationIds.every((id) => obligations.get(id)?.necessity === 'advisory'))
+      .map((item) => item.resultId),
+    ...injectionCaseResults.filter((item) => item.status === 'failed').map((item) => item.resultId),
+  ])
   const referenceSafety = validateReferences(input)
   const manual = evaluateManualResults(input, dependencies)
   const attemptSafety = validateAttemptSelections(input, dependencies)
   businessFailuresObserved.push(...manual.failedResultIds)
   advisoryFailures.push(...manual.advisoryFailureIds)
-  const metrics = computeMetrics(input, requiredCaseIds, requiredManual, manual, resultByCase)
+  const metrics = computeMetrics(input, requiredCaseIds, requiredManual, manual, resultByCase, injectionCaseResults)
 
   if (input.pendingDecisionIds.length > 0 || requiredResults.some((item) => item.status === 'pending-decision')) {
     return result(input, 'pending-decision', ['VERDICT_PENDING_DECISION'], metrics, businessFailuresObserved, advisoryFailures)
@@ -203,11 +212,12 @@ function computeMetrics(
   requiredManual: VerdictInput['obligations'],
   manual: ManualEvaluation,
   resultByCase: Map<string, VerdictInput['caseResults'][number]>,
+  injectionResults: VerdictInput['caseResults'],
 ): VerdictResult['metrics'] {
   const requiredResults = requiredCaseIds.map((id) => resultByCase.get(id)).filter(isDefined)
   const executed = requiredResults.filter((item) => item.status === 'passed' || item.status === 'failed')
   const real = executed.filter((item) => item.executionMode === 'real-environment')
-  const injection = executed.filter((item) => item.executionMode === 'gateway-injection')
+  const injection = injectionResults.filter((item) => item.status === 'passed' || item.status === 'failed')
   const requiredObligations = input.obligations.filter((item) => item.necessity === 'required')
   const blockedAutomated = input.obligations.filter((obligation) =>
     obligation.necessity === 'required'
@@ -263,8 +273,8 @@ function result(
     verdict,
     reasonCodes: unique(reasonCodes),
     cannotClaim: verdict === 'accepted' ? [] : ['不能宣称本次验收范围已全部通过'],
-    businessFailuresObserved: unique(businessFailuresObserved),
-    advisoryFailures: unique(advisoryFailures),
+    businessFailuresObserved: unique(businessFailuresObserved).sort(),
+    advisoryFailures: unique(advisoryFailures).sort(),
     metrics,
   }
 }

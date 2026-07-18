@@ -189,11 +189,45 @@ export class EncryptedQuarantine {
       throw quarantineError('E2E_QUARANTINE_GENERATION_DIGEST_INVALID', '发布 generation digest 无效')
     }
     const manifest = await this.loadActiveManifest(input.runId)
+    if (manifest.status === 'committed-pending-erasure') {
+      if (manifest.generationDigest !== input.generationDigest) {
+        throw quarantineError('E2E_QUARANTINE_GENERATION_DIGEST_MISMATCH', '已提交 generation digest 不匹配')
+      }
+    } else {
+      manifest.status = 'committed-pending-erasure'
+      manifest.generationDigest = input.generationDigest
+      delete manifest.privacyUnlock
+      await this.record(
+        input.runId, input.actor, 'publication-committed', 'allowed',
+        'E2E_QUARANTINE_COMMITTED_PENDING_ERASURE', input.generationDigest,
+      )
+      await this.writeManifest(manifest)
+    }
     await this.record(
       input.runId, input.actor, 'destroy', 'allowed',
       'E2E_QUARANTINE_PUBLICATION_CRYPTO_ERASURE', input.generationDigest,
     )
     await this.cryptoErase(manifest)
+  }
+
+  /** Runtime 重启后只恢复已确认提交 generation 的 crypto-erasure，不恢复发布。 */
+  async resumePendingErasure(actor: QuarantineActor): Promise<string[]> {
+    requireRole(actor, 'e2e-publisher')
+    await this.assertSecureRoot()
+    const erased: string[] = []
+    for (const entry of await readdir(this.#root, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(entry.name)) continue
+      let manifest: QuarantineRunManifest
+      try { manifest = await this.loadManifest(entry.name) } catch { continue }
+      if (manifest.status !== 'committed-pending-erasure' || manifest.generationDigest === undefined) continue
+      await this.record(
+        manifest.runId, actor, 'destroy', 'allowed',
+        'E2E_QUARANTINE_RESUMED_CRYPTO_ERASURE', manifest.generationDigest,
+      )
+      await this.cryptoErase(manifest)
+      erased.push(manifest.runId)
+    }
+    return erased.sort()
   }
 
   async recoverRun(input:

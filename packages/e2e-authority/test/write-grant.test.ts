@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
-import { digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
-import { LocalApprovalAuthority } from './approval-authority.fixture.js'
+import { SignedGrantSchema, digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
+import { LocalApprovalAuthority, testApprovalReceipt } from './approval-authority.fixture.js'
 import { LocalApprovalAuthority as RuntimeApprovalAuthority } from '../src/index.js'
 
 const digest = digestText('test/v1', 'value')
@@ -13,11 +13,14 @@ async function subject(authority: RuntimeApprovalAuthority, input: {
 } = {}): Promise<WriteApprovalSubject> {
   const approver = input.approver ?? { subject: 'os-user:qa', roles: ['e2e-approver'] }
   const discoverySubject = {
-    schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
+    schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: digest, scopeDigest: digest,
     environment: 'test' as const, baseOrigin: 'https://test.example.com', actor: 'qa',
     expectedPageIdentity: { url: 'https://test.example.com/orders/100', title: 'Order', heading: 'Order 100', ariaSignals: ['main'] },
     bootstrapIntentsDigest: digest,
-    actions: [{ actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{
+      actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
+    }],
   }
   const discovery = await authority.issueDiscoveryGrant({ subject: discoverySubject, approver,
     ...(input.approvalSessionRef ? { approvalSessionRef: input.approvalSessionRef } : {}), ttlMs: 60_000 })
@@ -82,14 +85,16 @@ describe('LocalApprovalAuthority write grants', () => {
         { subject: 'os-user:victim', roles: ['e2e-approver'] },
         { subject: 'os-user:attacker', roles: ['e2e-approver'] },
       ],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'attacker-session' ? 'os-user:attacker' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'attacker-session'
+        ? testApprovalReceipt('os-user:attacker', expected)
+        : undefined,
     })
 
     await expect(authority.issueWriteGrant({
       subject: await subject(authority, { approver: { subject: 'os-user:attacker', roles: ['e2e-approver'] },
         approvalSessionRef: 'attacker-session' }), approver: { subject: 'os-user:victim', roles: ['e2e-approver'] },
       approvalSessionRef: 'attacker-session', ttlMs: 60_000,
-    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_APPROVER_UNTRUSTED' })
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' })
   })
 
   test('拒绝调用方自报 e2e-approver，只有可信身份登记中的角色可以签发 Grant', async () => {
@@ -116,6 +121,26 @@ describe('LocalApprovalAuthority write grants', () => {
       ...grant,
       subject: { ...grant.subject, actions: [{ ...grant.subject.actions[0]!, fencingToken: 8 }] },
     })).toMatchObject({ allowed: false, code: 'E2E_APPROVAL_SIGNATURE_INVALID' })
+  })
+
+  test('a boundary-valid issued Write Grant round-trips through the shared SignedGrant contract', async () => {
+    const authority = LocalApprovalAuthority.create({
+      issuer: 'local-authority', keyId: 'local-key-1', now: () => new Date('2026-07-11T10:00:00.000Z'),
+    })
+    const approved = await subject(authority)
+    const boundary = {
+      ...approved,
+      actions: [{
+        ...approved.actions[0]!,
+        requests: approved.actions[0]!.requests.map((request, index) =>
+          index === 0 ? { ...request, method: 'X' } : { ...request, method: 'X'.repeat(32) }),
+      }],
+    }
+    const issued = await authority.issueWriteGrant({
+      subject: boundary, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
+    })
+
+    expect(SignedGrantSchema.parse(issued)).toEqual(issued)
   })
 
   test('旧 Grant 与当前 target、payload、environment 或 Revision 任一不同时均失效', async () => {

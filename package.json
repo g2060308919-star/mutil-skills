@@ -12,12 +12,13 @@
     "build": "tsc -b",
     "generate:e2e-schemas": "npm run build && node scripts/generate-e2e-artifact-schemas.mjs",
     "lint:architecture": "node scripts/check-architecture.mjs",
-    "e2e:golden": "vitest run --config vitest.e2e.config.ts"
+    "e2e:golden": "vitest run --config vitest.e2e.config.ts",
+    "verify:e2e-release": "npm run build && npm pack --workspaces --pack-destination /private/tmp/mutil-skills-pack-qa && E2E_RUNTIME_RUN_PACKED_INSTALL=1 E2E_RUNTIME_PACKS_DIR=/private/tmp/mutil-skills-pack-qa npx vitest run scripts/e2e-runtime-package.test.ts && E2E_RUNTIME_RUN_CROSS_REPO=1 npm run e2e:golden"
   },
   "devDependencies": {
-    "@playwright/test": "^1.61.1",
+    "@playwright/test": "1.61.1",
     "@types/node": "^24.0.0",
-    "playwright": "^1.61.1",
+    "playwright": "1.61.1",
     "tsx": "^4.20.0",
     "typescript": "^5.8.0",
     "vitest": "^3.2.0",

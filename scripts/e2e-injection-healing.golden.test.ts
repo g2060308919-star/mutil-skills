@@ -5,6 +5,7 @@ import { once } from 'node:events'
 import { afterEach, describe, expect, test } from 'vitest'
 import { chromium } from 'playwright'
 import { resolveChromeExecutablePath } from './e2e-browser-runtime.js'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 import {
   canonicalizeJson,
   digestInjectionResponseBody,
@@ -87,10 +88,15 @@ describe('PRD-driven injection and healing golden path', () => {
         { subject: 'os-user:injection-golden', roles: ['e2e-approver'] },
         { subject: 'os-user:golden', roles: ['e2e-approver'] },
       ],
-      authenticateApproverSession: (sessionRef) => ({
-        'injection-session': 'os-user:injection-golden',
-        'golden-session': 'os-user:golden',
-      }[sessionRef]),
+      authenticateApproverSession: (sessionRef, expected) => {
+        const subject = {
+          'injection-session': 'os-user:injection-golden',
+          'golden-session': 'os-user:golden',
+        }[sessionRef]
+        return subject === undefined
+          ? undefined
+          : createGoldenApprovalReceipt(subject, 'RUN-INJECTION-HEALING', expected)
+      },
     })
     const realGateway = new ReadOnlyGateway({
       stage: 'bootstrap', intents: [{
@@ -104,13 +110,14 @@ describe('PRD-driven injection and healing golden path', () => {
     try {
       const page = await realBrowser.newPage()
       const discoverySubject = {
-        schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision,
+        schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision,
         scopeDigest: prdRevision, environment: 'test' as const, baseOrigin: fixtureOrigin, actor: 'auditor',
         expectedPageIdentity: {
           url: `${fixtureOrigin}/real`, title: '订单搜索', heading: '订单搜索', ariaSignals: ['main:订单搜索'],
         },
         bootstrapIntentsDigest: prdRevision,
-        actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation' as const, maxUses: 1 }],
+        requests: [],
+        actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
       }
       const discoveryGrant = await authority.issueDiscoveryGrant({
         subject: discoverySubject,
@@ -126,16 +133,17 @@ describe('PRD-driven injection and healing golden path', () => {
       if (preflight.status !== 'ready' || !preflight.preflightDigest) throw new Error('Discovery preflight 未 ready')
       const realReadGrant = await authority.issueReadGrant({
         subject: {
-          schemaVersion: '2.0.0', assetId: 'PRODUCT-PRD-1', prdRevision,
+          schemaVersion: '2.1.0', assetId: 'PRODUCT-PRD-1', prdRevision,
           scopeDigest: prdRevision, requirementModelDigest: prdRevision, coveragePolicyDigest: prdRevision,
           universeDigest: prdRevision, caseDigest: prdRevision, actionMapDigest: prdRevision,
           policyDigest: prdRevision, executionContractDigest: prdRevision,
           runBundleProjectionDigest: prdRevision, environment: 'test', baseOrigin: fixtureOrigin, actor: 'auditor',
           discoveryGrantId: discoveryGrant.grantId, preflightDigest: preflight.preflightDigest,
+          requests: [],
           actions: [
-            { actionId: 'ACTION-REAL-READ', operation: 'local-navigation', maxUses: 1 },
-            { actionId: 'ACTION-REAL-READ', operation: 'dom-read', maxUses: 1 },
-            { actionId: 'ACTION-REAL-READ', operation: 'screenshot', maxUses: 1 },
+            { actionId: 'ACTION-REAL-READ', operation: 'local-navigation', maxUses: 1, requestIds: [] },
+            { actionId: 'ACTION-REAL-READ', operation: 'dom-read', maxUses: 1, requestIds: [] },
+            { actionId: 'ACTION-REAL-READ', operation: 'screenshot', maxUses: 1, requestIds: [] },
           ],
         },
         approver: { subject: 'os-user:injection-golden', roles: ['e2e-approver'] },
@@ -462,8 +470,9 @@ describe('PRD-driven injection and healing golden path', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'local-authority', keyId: 'local-key-1', now: () => new Date('2026-07-11T10:00:00.000Z'),
       approvalIdentities: [{ subject: 'os-user:injection-golden', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'injection-session'
-        ? 'os-user:injection-golden' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'injection-session'
+        ? createGoldenApprovalReceipt('os-user:injection-golden', 'RUN-INJECT-MATCHER-MISS', expected)
+        : undefined,
     })
     const expectedPayload = { query: 'order-100' }
     const responseBody = JSON.stringify({ error: 'UPSTREAM_FAILURE' })

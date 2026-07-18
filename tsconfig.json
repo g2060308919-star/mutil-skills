@@ -13,6 +13,7 @@
     { "path": "./packages/e2e-gateway" },
     { "path": "./packages/e2e-playwright-runtime" },
     { "path": "./packages/e2e-report" },
+    { "path": "./packages/e2e-runtime" },
     { "path": "./packages/cli" }
   ]
 }

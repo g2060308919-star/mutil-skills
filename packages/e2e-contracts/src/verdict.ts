@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { AssetIdSchema } from './common.js'
 import { ManualResultSchema } from './manual-result.js'
+import { assertExecutionResultIdentities } from './execution-result-identity.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SemverSchema = z.string().regex(/^\d+\.\d+\.\d+$/)
@@ -64,11 +65,13 @@ const AttemptSelectionSchema = z.discriminatedUnion('status', [
 ])
 
 const CaseResultSchema = z.object({
+  resultId: SafeIdSchema,
   caseId: SafeIdSchema,
   runId: SafeIdSchema,
   obligationIds: z.array(SafeIdSchema).min(1).max(256),
   status: CaseVerdictStatusSchema,
   executionMode: z.enum(['real-environment', 'gateway-injection']),
+  baselineResultId: SafeIdSchema.optional(),
   attemptSelection: AttemptSelectionSchema,
 }).strict().superRefine((result, context) => {
   if (new Set(result.obligationIds).size !== result.obligationIds.length) {
@@ -117,7 +120,7 @@ const CompletionAuditSchema = z.object({
 })
 
 export const VerdictInputSchema = z.object({
-  schemaVersion: z.literal('2.0.0'),
+  schemaVersion: z.literal('2.1.0'),
   assetId: AssetIdSchema,
   generationId: SafeIdSchema,
   verdictRuleVersion: SemverSchema,
@@ -151,7 +154,14 @@ export const VerdictInputSchema = z.object({
   }),
 }).strict().superRefine((input, context) => {
   unique(input.obligations.map((item) => item.obligationId), ['obligations'], context)
-  unique(input.caseResults.map((item) => item.caseId), ['caseResults'], context)
+  try {
+    assertExecutionResultIdentities(input.caseResults.map((item) => ({
+      resultId: item.resultId, caseId: item.caseId, mode: item.executionMode,
+      status: item.status, ...(item.baselineResultId ? { baselineResultId: item.baselineResultId } : {}),
+    })))
+  } catch (error) {
+    context.addIssue({ code: 'custom', message: error instanceof Error ? error.message : '执行结果身份无效', path: ['caseResults'] })
+  }
   unique(input.manualResults.map((item) => item.manualResultId), ['manualResults'], context)
   unique(input.pendingDecisionIds, ['pendingDecisionIds'], context)
 })

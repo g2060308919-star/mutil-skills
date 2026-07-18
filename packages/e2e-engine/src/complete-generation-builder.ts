@@ -5,6 +5,8 @@ import {
   digestArtifactContent,
   digestBytes,
   digestText,
+  deriveExecutionResultId,
+  migrateLegacyBrowserResultIdentities,
   parseArtifactDocument,
   type ArtifactDocument,
   type ArtifactSignature,
@@ -26,6 +28,8 @@ import {
   type VerdictInput,
   type AttemptEventAuthorityProof,
   type ExecutionOutcomeReceipt,
+  RuntimeProvenanceSchema,
+  type RuntimeProvenance,
 } from '@mutil-skills/e2e-contracts'
 import {
   computeFinalizationSnapshotDigest,
@@ -39,6 +43,7 @@ import {
 } from './generation-audit.js'
 import { computeVerdict, type VerdictDependencies } from './verdict.js'
 import { deriveBrowserCannotClaim } from './browser-claims.js'
+import { deriveRuntimeProvenanceCannotClaim } from './runtime-provenance-claims.js'
 import { auditPersistedAttemptFacts, createPersistedAttemptVerdictDependencies,
   type PersistedAttemptProjection } from './persisted-attempt-audit.js'
 import { types as utilTypes } from 'node:util'
@@ -99,6 +104,8 @@ export interface CompleteGenerationFile {
 
 export interface BuildCompleteGenerationInput {
   context: CompleteGenerationContext
+  /** Runtime Host 在隔离边界内测量并冻结的事实，不接受项目侧推导。 */
+  provenance: RuntimeProvenance
   drafts: Record<FactArtifactType, CompleteArtifactDraft>
   reportPresentation: ReportPresentation
   authority: CompleteGenerationAuthority
@@ -133,7 +140,7 @@ const FACT_TYPES = ARTIFACT_TYPES.filter(
 export function buildCompleteGeneration(candidate: BuildCompleteGenerationInput): CompleteGenerationBuild {
   const input = snapshotCompleteGenerationInput(candidate)
   assertExactKeys(input as unknown as Record<string, unknown>, [
-    'context', 'drafts', 'reportPresentation', 'authority',
+    'context', 'provenance', 'drafts', 'reportPresentation', 'authority',
     'gatewayVerifier', 'sanitizerVerifier', 'privacyReviewVerifier', 'regressionDiscoveryVerifier', 'verdictDependencies',
     'attemptProofVerifier', 'executionOutcomeVerifier',
   ], 'E2E_COMPLETE_GENERATION_INPUT_KEYS_INVALID')
@@ -148,6 +155,9 @@ export function buildCompleteGeneration(candidate: BuildCompleteGenerationInput)
   ], 'E2E_COMPLETE_GENERATION_BROWSER_PRESENTATION_KEYS_INVALID')
   assertContext(input.context)
   assertExactDraftTypes(input.drafts)
+  input.drafts['browser-results'].content = migrateLegacyBrowserResultIdentities(
+    input.drafts['browser-results'].content as { caseResults: unknown[] },
+  )
   const artifactPaths: Record<string, string> = {}
   const artifacts: ArtifactDocument[] = []
 
@@ -175,7 +185,7 @@ export function buildCompleteGeneration(candidate: BuildCompleteGenerationInput)
     attemptAudit, input.verdictDependencies?.verifyManualResult,
   )
   const terminal = computeVerdict(verdictInput, verdictDependencies)
-  const finalReport = createFinalReport(input, artifacts, verdictInput, terminal, attemptAudit.selected)
+  const finalReport = renderFinalReport(input, artifacts, verdictInput, terminal, attemptAudit.selected)
   artifacts.push(finalReport)
   artifactPaths[finalReport.artifactId] = 'run/final-report.json'
 
@@ -208,6 +218,7 @@ export function buildCompleteGeneration(candidate: BuildCompleteGenerationInput)
   const manifestDraft: CompleteArtifactDraft = {
     relativePath: 'generation-manifest.json', dependencies: [], graph: { defines: [], references: [] },
     content: {
+      runtimeProvenance: input.provenance,
       generationId: input.context.generationId,
       fencingToken: input.context.fencingToken,
       finalizationSnapshotDigest,
@@ -229,6 +240,7 @@ export function buildCompleteGeneration(candidate: BuildCompleteGenerationInput)
     .sort((left, right) => left.path.localeCompare(right.path))
   const validationInput: CompleteGenerationBuild['validationInput'] = {
     artifactPaths,
+    runtimeProvenance: input.provenance,
     verdictInput,
     verdictInputPath,
     verdictDependencies: input.verdictDependencies?.verifyManualResult
@@ -265,7 +277,7 @@ function snapshotCompleteGenerationInput(candidate: unknown): BuildCompleteGener
   assertPlainDataTree(candidate, '$')
   const source = candidate as BuildCompleteGenerationInput
   assertExactKeys(source as unknown as Record<string, unknown>, [
-    'context', 'drafts', 'reportPresentation', 'authority',
+    'context', 'provenance', 'drafts', 'reportPresentation', 'authority',
     'gatewayVerifier', 'sanitizerVerifier', 'privacyReviewVerifier', 'regressionDiscoveryVerifier', 'verdictDependencies',
     'attemptProofVerifier', 'executionOutcomeVerifier',
   ], 'E2E_COMPLETE_GENERATION_INPUT_KEYS_INVALID')
@@ -282,12 +294,14 @@ function snapshotCompleteGenerationInput(candidate: unknown): BuildCompleteGener
   const verifyManualResult = source.verdictDependencies?.verifyManualResult?.bind(source.verdictDependencies)
   let cloned: {
     context: CompleteGenerationContext
+    provenance: RuntimeProvenance
     drafts: BuildCompleteGenerationInput['drafts']
     reportPresentation: ReportPresentation
   }
   try {
     cloned = structuredClone({
       context: source.context,
+      provenance: source.provenance,
       drafts: source.drafts,
       reportPresentation: source.reportPresentation,
     })
@@ -297,6 +311,7 @@ function snapshotCompleteGenerationInput(candidate: unknown): BuildCompleteGener
   }
   return {
     ...cloned,
+    provenance: RuntimeProvenanceSchema.parse(cloned.provenance),
     authority: { signArtifactDigest, verifyArtifactSignature, verifyApprovalFreshnessReceipt, verifyDecisionReceipt },
     gatewayVerifier,
     sanitizerVerifier,
@@ -365,8 +380,12 @@ function createArtifact(
 ): Record<string, unknown> {
   const base: Record<string, unknown> = {
     artifactId, artifactType,
-    schemaVersion: ['final-report', 'cleanup-results', 'approval-grants', 'browser-preflight',
-      'browser-action-map', 'run-bundle', 'project-policy', 'browser-evidence',
+    schemaVersion: artifactType === 'final-report' ? '3.0.0'
+      : artifactType === 'generation-manifest' ? '2.0.0'
+      : artifactType === 'execution-contract' ? '1.1.0'
+      : artifactType === 'browser-action-map' ? '2.1.0'
+      : ['cleanup-results', 'approval-grants', 'browser-preflight',
+      'run-bundle', 'project-policy', 'browser-evidence',
       'acceptance-scope', 'prd-diff', 'regression-manifest', 'workflow-events', 'browser-results'].includes(artifactType) ? '2.0.0' : '1.0.0',
     engineVersion: input.context.engineVersion, assetId: input.context.assetId,
     prdRevision: input.context.prdRevision, generationId: input.context.generationId,
@@ -386,7 +405,7 @@ function createArtifact(
   return { ...base, contentDigest, signatures }
 }
 
-function createFinalReport(
+function renderFinalReport(
   input: BuildCompleteGenerationInput,
   artifacts: ArtifactDocument[],
   verdictInput: VerdictInput,
@@ -398,13 +417,20 @@ function createFinalReport(
   const content = <T extends ArtifactType>(type: T): ArtifactOf<T>['content'] =>
     artifact(type).content as unknown as ArtifactOf<T>['content']
   const cases = content('test-cases').cases
-  const results = new Map(content('browser-results').caseResults
+  const browserResults = [...content('browser-results').caseResults]
+    .sort((left, right) => left.resultId!.localeCompare(right.resultId!))
+  const results = new Map(browserResults.map((result) => [result.resultId!, result]))
+  const realResultsByCase = new Map(browserResults
+    .filter((result) => result.mode === 'real-environment')
     .map((result) => [result.caseId, result]))
   const evidence = new Map(content('browser-evidence').artifacts
     .map((item) => [item.evidenceId, item]))
-  const reportCases = cases.filter((item) => item.status === 'active').map((testCase) => {
-    const result = results.get(testCase.caseId)
-    return {
+  const reportCases = cases.filter((item) => item.status === 'active').flatMap((testCase) => {
+    const domainResults = browserResults.filter((result) => result.caseId === testCase.caseId)
+    const projected = domainResults.length > 0 ? domainResults : [undefined]
+    return projected.map((result) => ({
+      resultId: result?.resultId ?? deriveExecutionResultId(testCase.caseId, 'real-environment'),
+      ...(result?.baselineResultId ? { baselineResultId: result.baselineResultId } : {}),
       caseId: testCase.caseId, title: testCase.title,
       executionMode: result?.mode === 'gateway-injection'
         ? 'browser-injection' as const : 'real-environment' as const,
@@ -422,19 +448,20 @@ function createFinalReport(
           evidenceLinks,
         }
       }),
-    }
+    }))
   })
   const realResults = reportCases.filter((item) => item.executionMode === 'real-environment')
-    .filter((item) => results.has(item.caseId))
-    .map((item) => ({ id: item.caseId, digest: results.get(item.caseId)!.eventChainDigest }))
+    .filter((item) => results.has(item.resultId))
+    .map((item) => ({ id: item.resultId, digest: results.get(item.resultId)!.eventChainDigest }))
   const injectionResults = reportCases.filter((item) => item.executionMode === 'browser-injection')
-    .filter((item) => results.has(item.caseId))
-    .map((item) => ({ id: item.caseId, digest: results.get(item.caseId)!.eventChainDigest }))
+    .filter((item) => results.has(item.resultId))
+    .map((item) => ({ id: item.resultId, digest: results.get(item.resultId)!.eventChainDigest }))
   const regressionDigest = byType.get('regression-manifest')!.contentDigest
   const grantContent = content('approval-grants')
   const scopeContent = content('acceptance-scope')
   const diffContent = content('prd-diff')
   const gateway = content('gateway-audit')
+  const reportGateway = projectReportGatewayAudit(gateway)
   const executionApprovalStatus = grantContent.grants.some((grant) => grant.status === 'revoked')
     ? 'revoked' as const : grantContent.grants.some((grant) => grant.status === 'expired')
       ? 'expired' as const : grantContent.grants.some((grant) => grant.status === 'denied')
@@ -459,7 +486,7 @@ function createFinalReport(
         const testCase = casesById.get(caseId)
         if (!testCase) continue
         addEdge(obligation.obligationId, caseId, 'implemented-by')
-        const result = results.get(caseId)
+        const result = realResultsByCase.get(caseId)
         for (const step of testCase.steps) {
           addEdge(caseId, step.stepId, 'executes')
           const stepResult = result?.stepResults.find((item) => item.stepId === step.stepId)
@@ -510,8 +537,13 @@ function createFinalReport(
   const trustedCompilerExecution = content('browser-results').trustedCompilerExecution
   if (!trustedCompilerExecution) throw new Error('E2E_TRUSTED_COMPILER_EXECUTION_FACT_REQUIRED')
   const report: FinalReportContent = {
+    runtimeProvenance: input.provenance,
     ...terminal,
-    cannotClaim: [...new Set([...terminal.cannotClaim, ...browserCannotClaim])].sort(),
+    cannotClaim: [...new Set([
+      ...terminal.cannotClaim,
+      ...browserCannotClaim,
+      ...deriveRuntimeProvenanceCannotClaim(input.provenance),
+    ])].sort(),
     verdictInputDigest: digestText('verdict-input/v2', canonicalizeJson(verdictInput)),
     scope: scopeContent.includedReqCandidates.map((item) => ({ id: item.reqId, digest: artifact('acceptance-scope').contentDigest })),
     traceability, realResults, injectionResults,
@@ -561,15 +593,15 @@ function createFinalReport(
     injectionBoundary: input.reportPresentation.injectionBoundary,
     gatewayAudit: {
       status: verdictInput.gatewayAudit.status,
-      digest: gateway.signedCounters.digest,
-      forwarded: gateway.signedCounters.forwarded, blocked: gateway.signedCounters.blocked,
-      injected: gateway.signedCounters.injected, findings: [],
+      digest: reportGateway.digest,
+      forwarded: reportGateway.forwarded, blocked: reportGateway.blocked,
+      injected: reportGateway.injected, findings: [],
     },
     browserHealth: content('browser-preflight').checks.filter((check) => check.status === 'failed')
       .map((check) => ({ code: check.code, severity: 'high' as const, ref: check.digest })),
     diagnostics: attemptSelections.map((selection) => {
       const diagnosis = content('diagnosis').caseDiagnoses.find((item) => item.caseId === selection.caseId)
-      return { caseId: selection.caseId, category: diagnosis?.category ?? 'not-required',
+      return { resultId: selection.resultId, caseId: selection.caseId, category: diagnosis?.category ?? 'not-required',
       selectedAttemptId: selection.attemptId,
       rationale: diagnosis?.digest ?? selection.eventChainDigest,
       attempts: selection.attempts.map((attempt) => ({
@@ -581,7 +613,7 @@ function createFinalReport(
       })),
     }}),
     sideEffects: content('browser-action-map').actions.map((action) => {
-      const caseResult = results.get(action.caseId)
+      const caseResult = realResultsByCase.get(action.caseId)
       const stepResult = caseResult?.stepResults.find((step) => step.actionId === action.actionId)
       return {
         actionId: action.actionId, effect: action.effect, status: stepResult?.status ?? 'not-executed',
@@ -596,7 +628,7 @@ function createFinalReport(
       executionProfile: content('regression-manifest').executionProfile,
       generationId: input.context.generationId, manifestDigest: regressionDigest,
       command: input.reportPresentation.regressionCommand,
-      caseIds: reportCases.map((item) => item.caseId),
+      caseIds: [...new Set(reportCases.map((item) => item.caseId))],
       trustedCompiler: {
         compilerInputDigest: regressionAttestation.compilerInputDigest,
         compilerVersion: regressionAttestation.compilerVersion,
@@ -619,6 +651,31 @@ function createFinalReport(
   return ArtifactSchemaRegistry['final-report'].parse(
     createArtifact(input, 'final-report', artifactIdFor('final-report'), draft),
   ) as ArtifactDocument
+}
+
+function projectReportGatewayAudit(gateway: Record<string, any>): {
+  digest: string; forwarded: number; blocked: number; injected: number
+} {
+  const sessions = Array.isArray(gateway.sessions) ? gateway.sessions as Array<Record<string, any>> : []
+  if (sessions.length === 0) return {
+    digest: gateway.signedCounters.digest,
+    forwarded: gateway.signedCounters.forwarded,
+    blocked: gateway.signedCounters.blocked,
+    injected: gateway.signedCounters.injected,
+  }
+  const projection = sessions.map((session) => ({
+    resultId: session.resultId, domain: session.domain,
+    digest: session.audit.signedCounters.digest,
+    forwarded: session.audit.signedCounters.forwarded,
+    blocked: session.audit.signedCounters.blocked,
+    injected: session.audit.signedCounters.injected,
+  })).sort((left, right) => left.resultId.localeCompare(right.resultId))
+  return {
+    digest: digestText('gateway-audit-sessions/v1', canonicalizeJson(projection)),
+    forwarded: projection.reduce((sum, item) => sum + item.forwarded, 0),
+    blocked: projection.reduce((sum, item) => sum + item.blocked, 0),
+    injected: projection.reduce((sum, item) => sum + item.injected, 0),
+  }
 }
 
 interface ReportDispositionSources {

@@ -1,10 +1,36 @@
 import { z } from 'zod'
-import { AssetIdSchema, canonicalizeJson, digestText } from './common.js'
+import {
+  AssetIdSchema,
+  canonicalizeJson,
+  digestCanonicalGrantApprovalSubject,
+  digestText,
+} from './common.js'
+import {
+  ReadHttpRequestSetSchema,
+  refineReadHttpActionReferences,
+  validateReadHttpActionReferences,
+  validateReadHttpRequestSet,
+  type ReadHttpRequestReferences,
+} from './read-http-request.js'
+import { RuntimeHttpHeaderSchema } from './runtime-http-action.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
+const BoundedStringSchema = (maximumBytes: number) => z.string()
+  .refine((value) => Buffer.byteLength(value, 'utf8') <= maximumBytes)
+const CanonicalOriginSchema = BoundedStringSchema(8 * 1024).refine((value) => {
+  try { return new URL(value).origin === value } catch { return false }
+})
+const ExactPathSchema = BoundedStringSchema(8 * 1024).refine((value) => value.startsWith('/'))
+const QueryPartSchema = BoundedStringSchema(8 * 1024)
 
-export const ReadApprovalSubjectSchema = z.object({
+const LegacyReadActionSchema = z.object({
+  actionId: SafeIdSchema,
+  operation: z.enum(['dom-read', 'screenshot', 'local-navigation']),
+  maxUses: z.number().int().positive().max(100_000),
+}).strict()
+
+export const LegacyReadApprovalSubjectV20Schema = z.object({
   schemaVersion: z.literal('2.0.0'),
   assetId: AssetIdSchema,
   prdRevision: DigestSchema,
@@ -18,15 +44,11 @@ export const ReadApprovalSubjectSchema = z.object({
   executionContractDigest: DigestSchema,
   runBundleProjectionDigest: DigestSchema,
   environment: z.enum(['local', 'test', 'staging', 'production']),
-  baseOrigin: z.string().url(),
+  baseOrigin: CanonicalOriginSchema,
   actor: SafeIdSchema,
   discoveryGrantId: SafeIdSchema,
   preflightDigest: DigestSchema,
-  actions: z.array(z.object({
-    actionId: SafeIdSchema,
-    operation: z.enum(['dom-read', 'screenshot', 'local-navigation']),
-    maxUses: z.number().int().positive(),
-  }).strict()).min(1).max(100_000),
+  actions: z.array(LegacyReadActionSchema).min(1).max(100_000),
 }).strict().superRefine((subject, context) => {
   const ids = subject.actions.map((action) => `${action.actionId}\0${action.operation}`)
   if (new Set(ids).size !== ids.length) {
@@ -34,39 +56,128 @@ export const ReadApprovalSubjectSchema = z.object({
   }
 })
 
+export const ReadApprovalSubjectSchema = z.object({
+  schemaVersion: z.literal('2.1.0'),
+  assetId: AssetIdSchema,
+  prdRevision: DigestSchema,
+  scopeDigest: DigestSchema,
+  requirementModelDigest: DigestSchema,
+  coveragePolicyDigest: DigestSchema,
+  universeDigest: DigestSchema,
+  caseDigest: DigestSchema,
+  actionMapDigest: DigestSchema,
+  policyDigest: DigestSchema,
+  executionContractDigest: DigestSchema,
+  runBundleProjectionDigest: DigestSchema,
+  environment: z.enum(['local', 'test', 'staging', 'production']),
+  baseOrigin: CanonicalOriginSchema,
+  actor: SafeIdSchema,
+  discoveryGrantId: SafeIdSchema,
+  preflightDigest: DigestSchema,
+  requests: ReadHttpRequestSetSchema,
+  actions: z.array(z.object({
+    actionId: SafeIdSchema,
+    operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request']),
+    maxUses: z.number().int().positive().max(100_000),
+    requestIds: z.array(SafeIdSchema).max(1_000),
+  }).strict()).min(1).max(100_000),
+}).strict().superRefine((subject, context) => {
+  refineReadHttpActionReferences(subject.actions, subject.requests, context)
+})
+
+export function migrateReadApprovalSubjectV20ToV21(
+  candidate: unknown,
+  requestCandidates: unknown,
+  references: ReadHttpRequestReferences,
+) {
+  const legacy = LegacyReadApprovalSubjectV20Schema.parse(candidate)
+  const requests = validateReadHttpRequestSet(requestCandidates)
+  const mapped = validateReadHttpActionReferences(
+    legacy.actions.map((action) => action.actionId), requests, references,
+  )
+  return ReadApprovalSubjectSchema.parse({
+    ...legacy,
+    schemaVersion: '2.1.0',
+    requests,
+    actions: legacy.actions.map((action) => {
+      const requestIds = mapped[action.actionId]!
+      return {
+        ...action,
+        operation: requestIds.length > 0 ? 'http-request' as const : action.operation,
+        requestIds,
+      }
+    }),
+  })
+}
+
 const CanonicalPayloadSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('no-body') }).strict(),
   z.object({ kind: z.literal('json'), digest: DigestSchema }).strict(),
   z.object({ kind: z.literal('binary'), digest: DigestSchema }).strict(),
+  z.object({ kind: z.literal('template'), templateDigest: DigestSchema }).strict(),
 ])
 
-const HttpIntentSchema = z.object({
-  intentId: SafeIdSchema, method: z.string().min(1).max(32), canonicalOrigin: z.string().url(),
-  exactPath: z.string().startsWith('/'), query: z.array(z.tuple([z.string(), z.string()])).max(1_000),
-  payload: CanonicalPayloadSchema, targetFingerprint: DigestSchema, maxRequests: z.number().int().positive(),
-  expectedOrder: z.number().int().positive(),
+const WriteHttpIntentTailShape = {
+  canonicalOrigin: CanonicalOriginSchema,
+  exactPath: ExactPathSchema,
+  query: z.array(z.tuple([QueryPartSchema, QueryPartSchema])).max(1_000),
+  payload: CanonicalPayloadSchema, targetFingerprint: DigestSchema,
+  headers: z.array(RuntimeHttpHeaderSchema).max(128).optional(),
+  maxRequests: z.number().int().positive().max(1_000),
+  expectedOrder: z.number().int().positive().max(100_000),
+}
+
+/** Historical Write intent accepted by Authority snapshot 2.3 and earlier. */
+export const LegacyWriteHttpIntentV23Schema = z.object({
+  intentId: SafeIdSchema,
+  method: z.string().min(1).max(32),
+  ...WriteHttpIntentTailShape,
 }).strict()
 
-export const WriteApprovalSubjectV2Schema = z.object({
+export const WriteHttpIntentSchema = z.object({
+  intentId: SafeIdSchema,
+  method: z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Z-]{1,32}$/),
+  ...WriteHttpIntentTailShape,
+}).strict()
+
+const WriteApprovalSubjectV2Shape = {
   schemaVersion: z.literal('2.0.0'), assetId: AssetIdSchema, prdRevision: DigestSchema,
   executionDigest: DigestSchema, scopeDigest: DigestSchema, requirementModelDigest: DigestSchema,
   coveragePolicyDigest: DigestSchema, universeDigest: DigestSchema, caseDigest: DigestSchema,
   actionMapDigest: DigestSchema, policyDigest: DigestSchema, executionContractDigest: DigestSchema,
   runBundleProjectionDigest: DigestSchema, environment: z.enum(['local', 'test', 'staging']),
-  baseOrigin: z.string().url(), actor: SafeIdSchema, discoveryGrantId: SafeIdSchema, preflightDigest: DigestSchema,
+  baseOrigin: CanonicalOriginSchema, actor: SafeIdSchema,
+  discoveryGrantId: SafeIdSchema, preflightDigest: DigestSchema,
+}
+
+const WriteActionShape = {
+  actionId: SafeIdSchema, effect: z.literal('reversible-write'), dataLeaseId: SafeIdSchema,
+  fencingToken: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), cleanupPlanDigest: DigestSchema,
+}
+
+/** Historical Write subject accepted by Authority snapshot 2.3 and earlier. */
+export const LegacyWriteApprovalSubjectV23Schema = z.object({
+  ...WriteApprovalSubjectV2Shape,
   actions: z.array(z.object({
-    actionId: SafeIdSchema, effect: z.literal('reversible-write'), dataLeaseId: SafeIdSchema,
-    fencingToken: z.number().int().positive(), cleanupPlanDigest: DigestSchema,
-    requests: z.array(HttpIntentSchema).min(1).max(1_000),
+    ...WriteActionShape,
+    requests: z.array(LegacyWriteHttpIntentV23Schema).min(1).max(1_000),
+  }).strict()).min(1).max(100_000),
+}).strict()
+
+export const WriteApprovalSubjectV2Schema = z.object({
+  ...WriteApprovalSubjectV2Shape,
+  actions: z.array(z.object({
+    ...WriteActionShape,
+    requests: z.array(WriteHttpIntentSchema).min(1).max(1_000),
   }).strict()).min(1).max(100_000),
 }).strict()
 
 const ReadCapabilityRecordSchema = z.object({
   capabilityId: SafeIdSchema,
   actionId: SafeIdSchema,
-  operation: z.enum(['dom-read', 'screenshot', 'local-navigation']),
+  operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request']),
   effect: z.literal('read'),
-  maxUses: z.number().int().positive(),
+  maxUses: z.number().int().positive().max(100_000),
   digest: DigestSchema,
 }).strict()
 
@@ -75,7 +186,7 @@ const WriteCapabilityRecordSchema = z.object({
   effect: z.literal('reversible-write'), maxUses: z.literal(1), digest: DigestSchema,
 }).strict()
 
-export const ApprovalCapabilityRecordSchema = z.discriminatedUnion('operation', [
+export const ApprovalCapabilityRecordSchema = z.discriminatedUnion('effect', [
   ReadCapabilityRecordSchema, WriteCapabilityRecordSchema,
 ])
 
@@ -87,9 +198,9 @@ const CommonReceiptBody = {
   browserPreflightArtifactDigest: DigestSchema,
   capabilities: z.array(ApprovalCapabilityRecordSchema).min(1).max(100_000),
   capabilitySetDigest: DigestSchema,
-  expiresAt: z.string().datetime(),
-  checkedAt: z.string().datetime(),
-  revocationSequence: z.number().int().nonnegative(),
+  expiresAt: z.string().datetime().max(64),
+  checkedAt: z.string().datetime().max(64),
+  revocationSequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   status: z.enum(['valid', 'expired', 'revoked', 'denied']),
   reasonCodes: z.array(SafeIdSchema).max(100),
 }
@@ -129,7 +240,7 @@ export const ApprovalFreshnessReceiptSchema = z.discriminatedUnion('grantType', 
     authorityProof: ApprovalFreshnessAuthorityProofSchema }).strict(),
 ]).superRefine((receipt, context) => {
   const { authorityProof, ...body } = receipt
-  const subjectDigest = digestText('approval-subject/v1', canonicalizeJson(receipt.executionSubjectSnapshot))
+  const subjectDigest = digestCanonicalGrantApprovalSubject('execution', receipt.executionSubjectSnapshot)
   const capabilitySetDigest = digestText('approval-capability-set/v1', canonicalizeJson(receipt.capabilities))
   const signedDigest = digestText('approval-freshness-receipt/v1', canonicalizeJson(body))
   if (receipt.subjectDigest !== subjectDigest) {
@@ -152,6 +263,9 @@ export const ApprovalFreshnessReceiptSchema = z.discriminatedUnion('grantType', 
 })
 
 export type ApprovalCapabilityRecord = z.infer<typeof ApprovalCapabilityRecordSchema>
+export type ReadApprovalSubjectV21 = z.infer<typeof ReadApprovalSubjectSchema>
+export type LegacyReadApprovalSubjectV20 = z.infer<typeof LegacyReadApprovalSubjectV20Schema>
+export type WriteApprovalSubjectV2 = z.infer<typeof WriteApprovalSubjectV2Schema>
 export type ApprovalFreshnessReceipt = z.infer<typeof ApprovalFreshnessReceiptSchema>
 export type ApprovalFreshnessVerifierMaterial = z.infer<typeof ApprovalFreshnessVerifierMaterialSchema>
 export type ApprovalFreshnessReceiptBody = z.infer<typeof ApprovalFreshnessReceiptBodySchema>

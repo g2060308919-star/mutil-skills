@@ -1,9 +1,12 @@
 import { canonicalizeJson, digestApprovalProjection, digestArtifactContent, digestBytes, digestText,
+  deriveExecutionResultId,
+  canonicalGrantApprovalSubjectDigest,
   digestCleanupPlanDefinition,
+  digestCanonicalGrantApprovalSubject,
   digestDecisionSubject, projectLineageDecisionSubject, projectScopeDecisionSubject,
   computeRegressionSourceSetDigest, type DecisionReceipt, type DecisionReceiptVerificationBinding,
   type RegressionDiscoveryAttestation, type RegressionDiscoverySubject,
-  type AttemptEventAuthorityProof, type ExecutionOutcomeReceipt } from '@mutil-skills/e2e-contracts'
+  type AttemptEventAuthorityProof, type ExecutionOutcomeReceipt, type RuntimeProvenance } from '@mutil-skills/e2e-contracts'
 import { createSanitizerAttestationVerifier, LocalSanitizerAuthority,
   appendAttemptEvent, type BuildCompleteGenerationInput, type CompleteGenerationAuthority } from '../src/index.js'
 import type { SanitizerPolicy } from '@mutil-skills/e2e-contracts'
@@ -13,6 +16,17 @@ const d = (value: string) => digestText('fixture/v1', value)
 const context = {
   assetId: 'ASSET-1', generationId: 'GEN-1', prdRevision: d('prd'),
   engineVersion: '1.0.0', createdAt: '2026-07-12T00:00:00.000Z', fencingToken: 7,
+}
+const provenance: RuntimeProvenance = {
+  runtimeVersion: '0.0.0', runtimeInstallationDigest: d('runtime-installation'), protocolVersion: '1.0.0',
+  contractsVersion: '0.0.0', engineVersion: context.engineVersion, playwrightVersion: '1.0.0',
+  chromiumDigest: d('browser-executable'), gatewayPolicyDigest: d('runtime-policy'),
+  authorityPublicKeyDigest: d('authority-public-key'),
+  authorityStateProtectionLevel: 'local-crash-integrity', projectIdentityDigest: d('project-identity'),
+  sourceRevisionDigest: context.prdRevision, sourceRepositoryIndependent: true,
+  isolationProofDigest: digestText('runtime-isolation-proof/v1', canonicalizeJson([
+    { id: 'TRUSTED-CHROME-EXECUTABLE', digest: d('browser-executable') },
+  ])),
 }
 const authorityKeys = generateKeyPairSync('ed25519')
 const freshnessKeys = generateKeyPairSync('ed25519')
@@ -261,7 +275,8 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       browserMatrix: [{ browserId: 'CHROMIUM', channel: 'chromium', viewportId: 'DESKTOP' }],
       identities: [{ identityId: 'IDENTITY-1', roleIds: ['USER'], secretRef: 'SECRET-REF-1' }],
       caseQueue: [{ ordinal: 0, caseId: 'CASE-1' }],
-      actionIntents: [{ actionId: 'ACTION-1', effect: 'read', intentDigest: d('intent') }],
+      actionIntents: [{ actionId: 'ACTION-1', effect: 'read', intentDigest: d('intent'), requestIds: [] }],
+      readHttpRequests: [],
       dataNeeds: [], manualProcedures: [], evidencePolicyDigest: sanitizationRecord.policyDigest,
       runtimeIsolation: null, unresolvedItems: [],
     }),
@@ -284,7 +299,8 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       actions: [{ caseId: 'CASE-1', stepId: 'STEP-1', actionId: 'ACTION-1', pageIdentityId: 'PAGE-1',
         locatorCandidates: [{ strategy: 'role', value: 'main', confidence: 1 }],
         playwrightAction: 'page.goto', waits: [], oracleIds: ['ORACLE-1'], effect: 'read',
-        capabilities: [{ operation: 'dom-read', capabilityId: 'CAPABILITY-1' }] }], unmappedSteps: [], discoveredRisks: [],
+        capabilities: [{ operation: 'dom-read', capabilityId: 'CAPABILITY-1' }], requestIds: [] }],
+      unmappedSteps: [], discoveredRisks: [],
     }),
     'regression-manifest': draft('run/regression-manifest.json', {
       testDomain: regressionSubject.testDomain, executionProfile: regressionSubject.executionProfile,
@@ -314,6 +330,7 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
         exitCode: 0, stdoutDigest: d('execution-stdout'), stderrDigest: d('execution-stderr'),
         caseResults: [{ caseId: 'CASE-1', status: 'passed' }],
       }, executedBrowserIds: ['CHROMIUM'], caseResults: [{
+        resultId: deriveExecutionResultId('CASE-1', 'real-environment'),
         caseId: 'CASE-1', attemptId, eventChainDigest, mode: 'real-environment', effect: 'read', status: 'passed',
         stepResults: [{ stepId: 'STEP-1', actionId: 'ACTION-1', status: 'passed',
           actualDigest: d('actual-home'), oracleResult: 'passed', evidenceIds: ['EVIDENCE-1'] }],
@@ -341,7 +358,7 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
   drafts['run-bundle'].content.allInputRefs = fixtureApprovalInputRefs(drafts)
   const runBundleDigest = predictedContentDigest('run-bundle', drafts['run-bundle'])
   const subject = {
-    schemaVersion: '2.0.0', assetId: context.assetId, prdRevision: context.prdRevision,
+    schemaVersion: '2.1.0', assetId: context.assetId, prdRevision: context.prdRevision,
     scopeDigest: digestApprovalProjection('acceptance-scope', drafts['acceptance-scope'].content),
     requirementModelDigest: digestApprovalProjection('requirement-model', drafts['requirement-model'].content),
     coveragePolicyDigest: d('coverage-policy'),
@@ -353,12 +370,13 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
     runBundleProjectionDigest: digestApprovalProjection('run-bundle', drafts['run-bundle'].content),
     environment: 'test', baseOrigin: 'https://example.test', actor: 'USER',
     discoveryGrantId: 'DISCOVERY-1', preflightDigest: d('authority-preflight'),
-    actions: [{ actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1, requestIds: [] }],
   }
   const capabilities = drafts['run-bundle'].content.signedCapabilities
   const receiptBody = {
     schemaVersion: '1.0.0', grantType: 'read', grantId: 'GRANT-1',
-    subjectDigest: digestText('approval-subject/v1', canonicalizeJson(subject)),
+    subjectDigest: digestCanonicalGrantApprovalSubject('execution', subject),
     runBundleDigest,
     executionSubjectSnapshot: subject,
     browserPreflightArtifactDigest: predictedContentDigest('browser-preflight', drafts['browser-preflight']),
@@ -376,7 +394,7 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
   } }] }
 
   const result: BuildCompleteGenerationInput = {
-    context: { ...context }, drafts,
+    context: { ...context }, drafts, provenance: { ...provenance },
     reportPresentation: {
       title: 'E2E 验收报告', injectionBoundary: '本代没有浏览器注入结果。', recommendations: ['执行 CASE-1。'],
       regressionCommand: 'npx playwright test', browser: { version: '1.0.0', channel: 'chromium' },
@@ -433,7 +451,7 @@ export function refreshFixtureApproval(input: BuildCompleteGenerationInput): voi
   const capabilities = drafts['run-bundle'].content.signedCapabilities
   const body = {
     ...previous, authorityProof: undefined,
-    subjectDigest: digestText('approval-subject/v1', canonicalizeJson(subject)),
+    subjectDigest: digestCanonicalGrantApprovalSubject('execution', subject),
     runBundleDigest: predictedContentDigestFor(input.context, 'run-bundle', drafts['run-bundle']),
     executionSubjectSnapshot: subject,
     browserPreflightArtifactDigest: predictedContentDigestFor(input.context, 'browser-preflight', drafts['browser-preflight']),
@@ -509,6 +527,109 @@ export function refreshFixtureAttemptFacts(input: BuildCompleteGenerationInput):
       eventChainDigest: terminal.eventChainDigest } }
   drafts['workflow-events'].content = { runId, attemptCases: [attemptCase],
     workflowDigest: digestText('workflow-events/v2', canonicalizeJson({ runId, attemptCases: [attemptCase] })) }
+}
+
+export function addFixtureInjectionResult(input: BuildCompleteGenerationInput): void {
+  const drafts = input.drafts as any
+  const gatewayKeys = gatewayKeysByInput.get(input)
+  if (!gatewayKeys) throw new Error('FIXTURE_GATEWAY_KEYS_MISSING')
+  const real = drafts['browser-results'].content.caseResults.find(
+    (item: any) => item.caseId === 'CASE-1' && item.mode === 'real-environment',
+  )
+  if (!real) throw new Error('FIXTURE_REAL_RESULT_MISSING')
+  const attemptId = 'ATTEMPT-INJECTION-1'
+  const initialChainDigest = digestText('attempt-chain-initial/v2', canonicalizeJson({
+    assetId: input.context.assetId, generationId: input.context.generationId,
+    prdRevision: input.context.prdRevision, runId: 'RUN-1', caseId: 'CASE-1',
+  }))
+  const signProof = (signedDigest: string): AttemptEventAuthorityProof => ({
+    purpose: 'attempt-event-authority-proof/v2', issuer: 'fixture-authority',
+    keyId: 'fixture-key:attempt-event', algorithm: 'Ed25519', signedDigest,
+    signature: sign(null, Buffer.from(canonicalizeJson({ purpose: 'attempt-event-authority-proof/v2',
+      issuer: 'fixture-authority', keyId: 'fixture-key:attempt-event', signedDigest })),
+    attemptKeys.privateKey).toString('base64url'),
+  })
+  const started = appendAttemptEvent({ sequence: 1, caseId: 'CASE-1', slot: 0, attemptId,
+    timestamp: drafts['browser-results'].content.startedAt, previousChainDigest: initialChainDigest,
+    kind: 'started', mode: 'gateway-injection' }, signProof)
+  const terminal = appendAttemptEvent({ sequence: 2, caseId: 'CASE-1', slot: 0, attemptId,
+    timestamp: drafts['browser-results'].content.finishedAt, previousChainDigest: started.eventChainDigest,
+    kind: 'terminal', result: { status: 'failed', mode: 'gateway-injection', effect: 'read',
+      effectObservation: 'not-applicable', reservationSafeToVoid: true,
+      reservationId: 'RESERVATION-INJECTION-1', outcomeDigest: d('injection-outcome') } }, signProof)
+  drafts['workflow-events'].content.attemptCases.push({
+    caseId: 'CASE-1', retryPolicy: 'read-automation-max-2', initialChainDigest,
+    events: [started.event, terminal.event],
+    selection: { status: 'selected', attemptId, slot: 0, eventChainDigest: terminal.eventChainDigest },
+  })
+  drafts['workflow-events'].content.workflowDigest = digestText('workflow-events/v2', canonicalizeJson({
+    runId: 'RUN-1', attemptCases: drafts['workflow-events'].content.attemptCases,
+  }))
+  drafts['browser-results'].content.caseResults.push({
+    ...structuredClone(real),
+    resultId: deriveExecutionResultId('CASE-1', 'gateway-injection'),
+    baselineResultId: real.resultId,
+    attemptId, eventChainDigest: terminal.eventChainDigest, mode: 'gateway-injection', status: 'failed',
+    stepResults: real.stepResults.map((step: any) => ({
+      ...step, status: 'failed', oracleResult: 'failed', actualDigest: d('injection-actual'),
+    })),
+  })
+  const gateway = drafts['gateway-audit'].content
+  const injectionEvent = {
+    sequence: 0, actionId: 'ACTION-1', decision: 'injected',
+    digest: digestText('gateway-canonical-request/v1', canonicalizeJson({ method: 'GET', url: 'https://example.test/' })),
+  }
+  const reservation = {
+    reservationId: 'RESERVATION-INJECTION-1', grantId: 'GRANT-INJECTION-1', capabilityId: 'CAPABILITY-INJECTION-1',
+    actionId: 'ACTION-1', attemptId, status: 'completed', outcomeDigest: d('injection-outcome'),
+    reservedAt: input.context.createdAt,
+  }
+  const injectionReservation = { ...reservation, consumed: true,
+    digest: digestText('gateway-capability-reservation/v1', canonicalizeJson({ reservation, consumed: true })) }
+  const injectionCounterDigest = digestText('gateway-audit-counters/v1', canonicalizeJson({
+    gatewayInstance: gateway.gatewayInstance, policyDigest: gateway.policyDigest,
+    forwarded: 0, blocked: 0, injected: 1, requestEvents: [injectionEvent],
+    capabilityReservations: [injectionReservation],
+  }))
+  const injectionAudit = {
+    gatewayInstance: gateway.gatewayInstance, policyDigest: gateway.policyDigest,
+    requestEvents: [injectionEvent], capabilityReservations: [injectionReservation],
+    signedCounters: { forwarded: 0, blocked: 0, injected: 1, digest: injectionCounterDigest,
+      signature: { issuer: 'fixture-gateway', keyId: 'fixture-gateway-key', algorithm: 'Ed25519',
+        signedDigest: injectionCounterDigest,
+        signature: sign(null, Buffer.from(injectionCounterDigest, 'utf8'), gatewayKeys.privateKey).toString('base64url') } },
+  }
+  const request = { intentId: 'INTENT-INJECTION-1', method: 'GET', canonicalOrigin: 'https://example.test',
+    exactPath: '/', query: [] as Array<[string, string]>, payload: { kind: 'no-body' as const },
+    targetFingerprint: 'not-applicable' as const, maxRequests: 1, expectedOrder: 1 }
+  const response = { kind: 'http-response' as const, status: 503, headers: [] as [],
+    body: { kind: 'no-body' as const }, delayMs: 0 }
+  const subject = { schemaVersion: '1.0.0' as const, assetId: input.context.assetId,
+    prdRevision: input.context.prdRevision, executionDigest: d('injection-execution'), environment: 'test' as const,
+    baseOrigin: 'https://example.test', actions: [{ actionId: 'ACTION-1', caseId: 'CASE-1', runId: 'RUN-1',
+      attemptSlot: 1, request, response, expectedMatches: 1, expectedOrder: 1,
+      upstreamForwarding: 'forbidden' as const }] }
+  const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+  const injectionGrant = { grantId: 'GRANT-INJECTION-1', issuer: 'fixture-authority', keyId: 'fixture-key',
+    proofScope: 'local-os-user' as const, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] },
+    subject, subjectDigest, approvalContext: { schemaVersion: '1.0.0' as const, subject: 'os-user:qa',
+      runId: 'RUN-1', approvalType: 'execution' as const, subjectDigest,
+      installationDigest: d('runtime-installation'), origin: 'http://127.0.0.1:43210',
+      issuedAt: '2026-07-12T00:00:00.000Z', expiresAt: '2026-07-12T00:10:00.000Z' },
+    issuedAt: '2026-07-12T00:00:00.000Z', expiresAt: '2026-07-12T00:10:00.000Z',
+    capabilities: [{ capabilityId: 'CAPABILITY-INJECTION-1', nonce: 'a'.repeat(64),
+      transport: 'gateway-injection' as const, actionId: 'ACTION-1', caseId: 'CASE-1', runId: 'RUN-1',
+      attemptSlot: 1, request, response, expectedMatches: 1, expectedOrder: 1,
+      upstreamForwarding: 'forbidden' as const, maxUses: 1 }], revocationSequence: 0, signature: 'A'.repeat(86) }
+  const verifierMaterial = { issuer: 'fixture-gateway', keyId: 'fixture-gateway-key',
+    gatewayInstance: gateway.gatewayInstance,
+    publicKeySpki: gatewayKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url') }
+  gateway.sessions = [
+    { resultId: real.resultId, domain: 'real-environment', audit: structuredClone(gateway), verifierMaterial },
+    { resultId: deriveExecutionResultId('CASE-1', 'gateway-injection'), domain: 'gateway-injection',
+      audit: injectionAudit, verifierMaterial, grant: injectionGrant },
+  ]
+  delete gateway.sessions[0].audit.sessions
 }
 
 function refreshFixtureDecisionsForDrafts(
@@ -667,8 +788,10 @@ function predictedContentDigest(artifactType: string, artifactDraft: any): strin
 }
 
 function predictedContentDigestFor(contextValue: BuildCompleteGenerationInput['context'], artifactType: string, artifactDraft: any): string {
-  const schemaVersion = ['approval-grants', 'browser-preflight', 'browser-action-map', 'run-bundle', 'project-policy']
-    .includes(artifactType) ? '2.0.0' : '1.0.0'
+  const schemaVersion = artifactType === 'browser-action-map' ? '2.1.0'
+    : artifactType === 'execution-contract' ? '1.1.0'
+      : ['approval-grants', 'browser-preflight', 'run-bundle', 'project-policy']
+          .includes(artifactType) ? '2.0.0' : '1.0.0'
   const envelope = {
     artifactId: `ARTIFACT-${artifactType.toUpperCase()}`, artifactType, schemaVersion,
     engineVersion: contextValue.engineVersion, assetId: contextValue.assetId, prdRevision: contextValue.prdRevision,

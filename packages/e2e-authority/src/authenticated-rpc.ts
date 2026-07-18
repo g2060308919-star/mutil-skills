@@ -18,6 +18,8 @@ import { createServer, type IncomingMessage, type Server } from 'node:http'
 
 const MAX_RPC_BYTES = 1024 * 1024
 const MAX_RPC_TTL_MS = 30_000
+const MAX_RPC_REPLAY_ENTRIES = 2_048
+const MAX_RPC_REPLAY_ENTRIES_PER_CLIENT = 1_024
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 
@@ -67,7 +69,17 @@ export interface AuthenticatedRpcResponse {
   signature: string
 }
 
-export type AuthenticatedRpcOperation = (payload: unknown) => Promise<unknown>
+export interface AuthenticatedRpcOperationContext {
+  clientId: string
+  now: string
+  /** 仅来自 Server.registerClient 的可信注册元数据，不来自 RPC payload。 */
+  registration: unknown
+}
+
+export type AuthenticatedRpcOperation = (
+  payload: unknown,
+  context: AuthenticatedRpcOperationContext,
+) => Promise<unknown>
 
 export class AuthenticatedRpcServer {
   readonly #issuer: string
@@ -75,9 +87,11 @@ export class AuthenticatedRpcServer {
   readonly #now: () => Date
   readonly #privateKey: KeyObject
   readonly #publicKeySpki: Buffer
-  readonly #credentials = new Map<string, Buffer>()
+  readonly #credentials = new Map<string, { key: Buffer; registration: unknown }>()
   readonly #operations = new Map<string, AuthenticatedRpcOperation>()
-  readonly #consumed = new Map<string, number>()
+  readonly #consumed = new Map<string, { clientId: string; expiresAt: number }>()
+  readonly #consumedByClient = new Map<string, number>()
+  #destroyed = false
 
   private constructor(input: { issuer: string; keyId: string; now: () => Date },
     privateKey: KeyObject, publicKey: KeyObject) {
@@ -95,22 +109,35 @@ export class AuthenticatedRpcServer {
       keys.privateKey, keys.publicKey)
   }
 
-  registerClient(clientId: string, sessionKey?: Uint8Array): AuthenticatedRpcCredential {
+  registerClient(clientId: string, sessionKey?: Uint8Array, registration: unknown = null): AuthenticatedRpcCredential {
+    this.#requireOpen()
     if (!SAFE_ID.test(clientId) || this.#credentials.has(clientId)) throw rpcError('E2E_RPC_CLIENT_DUPLICATE')
     const key = sessionKey ? Buffer.from(sessionKey) : randomBytes(32)
-    if (key.byteLength !== 32) throw rpcError('E2E_RPC_SESSION_KEY_INVALID')
-    this.#credentials.set(clientId, Buffer.from(key))
-    return { clientId, sessionKeyBase64Url: key.toString('base64url') }
+    if (key.byteLength !== 32) { key.fill(0); throw rpcError('E2E_RPC_SESSION_KEY_INVALID') }
+    try {
+      this.#credentials.set(clientId, { key: Buffer.from(key), registration: structuredClone(registration) })
+      return { clientId, sessionKeyBase64Url: key.toString('base64url') }
+    } finally { key.fill(0) }
   }
 
   registerOperation(operation: string, handler: AuthenticatedRpcOperation): void {
+    this.#requireOpen()
     if (!SAFE_ID.test(operation) || this.#operations.has(operation) || typeof handler !== 'function') {
       throw rpcError('E2E_RPC_OPERATION_INVALID')
     }
     this.#operations.set(operation, handler)
   }
 
+  /** Authority Host 在完成并消费用户在场回执后更新；调用方 RPC payload 无法触达。 */
+  updateClientRegistration(clientId: string, registration: unknown): void {
+    this.#requireOpen()
+    const credential = this.#credentials.get(clientId)
+    if (!credential) throw rpcError('E2E_RPC_CLIENT_UNKNOWN')
+    credential.registration = structuredClone(registration)
+  }
+
   get verifierMaterial(): AuthenticatedRpcVerifierMaterial {
+    this.#requireOpen()
     return {
       schemaVersion: '1.0.0', issuer: this.#issuer, keyId: this.#keyId,
       purpose: 'authority-rpc-response/v1', algorithm: 'Ed25519',
@@ -120,6 +147,7 @@ export class AuthenticatedRpcServer {
   }
 
   async handle(candidate: unknown): Promise<AuthenticatedRpcResponse> {
+    this.#requireOpen()
     const request = parseRequest(candidate)
     const now = this.#now().getTime()
     this.#pruneConsumed(now)
@@ -131,21 +159,30 @@ export class AuthenticatedRpcServer {
     }
     const replayKey = `${request.clientId}\0${request.requestId}\0${request.nonce}`
     if (this.#consumed.has(replayKey)) throw rpcError('E2E_RPC_REQUEST_REPLAYED')
-    const key = this.#credentials.get(request.clientId)
-    if (!key) throw rpcError('E2E_RPC_CLIENT_UNKNOWN')
+    const credential = this.#credentials.get(request.clientId)
+    if (!credential) throw rpcError('E2E_RPC_CLIENT_UNKNOWN')
+    if (this.#consumed.size >= MAX_RPC_REPLAY_ENTRIES
+      || (this.#consumedByClient.get(request.clientId) ?? 0) >= MAX_RPC_REPLAY_ENTRIES_PER_CLIENT) {
+      throw rpcError('E2E_RPC_REPLAY_CACHE_CAPACITY')
+    }
     const expectedPayloadDigest = digestText('authority-rpc-payload/v1', canonicalizeJson(request.payload))
     if (request.payloadDigest !== expectedPayloadDigest) throw rpcError('E2E_RPC_PAYLOAD_DIGEST_INVALID')
     const unsigned = requestWithoutAuthentication(request)
-    const expectedMac = requestMac(key, unsigned)
+    const expectedMac = requestMac(credential.key, unsigned)
     const suppliedMac = decodeCanonicalBase64Url(request.authentication.mac, 'E2E_RPC_REQUEST_MAC_INVALID')
     if (expectedMac.byteLength !== suppliedMac.byteLength || !timingSafeEqual(expectedMac, suppliedMac)) {
       throw rpcError('E2E_RPC_REQUEST_MAC_INVALID')
     }
-    this.#consumed.set(replayKey, expiresAt)
+    this.#consumed.set(replayKey, { clientId: request.clientId, expiresAt })
+    this.#consumedByClient.set(request.clientId, (this.#consumedByClient.get(request.clientId) ?? 0) + 1)
     const handler = this.#operations.get(request.operation)
     if (!handler) return this.#signResponse(request, 'error', undefined, 'E2E_RPC_OPERATION_UNKNOWN')
     try {
-      return this.#signResponse(request, 'ok', await handler(structuredClone(request.payload)))
+      return this.#signResponse(request, 'ok', await handler(structuredClone(request.payload), {
+        clientId: request.clientId,
+        now: new Date(now).toISOString(),
+        registration: structuredClone(credential.registration),
+      }))
     } catch (error) {
       return this.#signResponse(request, 'error', undefined, safeErrorCode(error))
     }
@@ -167,7 +204,28 @@ export class AuthenticatedRpcServer {
   }
 
   #pruneConsumed(now: number): void {
-    for (const [key, expiresAt] of this.#consumed) if (expiresAt <= now) this.#consumed.delete(key)
+    for (const [key, consumed] of this.#consumed) {
+      if (consumed.expiresAt > now) continue
+      this.#consumed.delete(key)
+      const remaining = (this.#consumedByClient.get(consumed.clientId) ?? 1) - 1
+      if (remaining === 0) this.#consumedByClient.delete(consumed.clientId)
+      else this.#consumedByClient.set(consumed.clientId, remaining)
+    }
+  }
+
+  destroy(): void {
+    if (this.#destroyed) return
+    this.#destroyed = true
+    for (const credential of this.#credentials.values()) credential.key.fill(0)
+    this.#credentials.clear()
+    this.#operations.clear()
+    this.#consumed.clear()
+    this.#consumedByClient.clear()
+    this.#publicKeySpki.fill(0)
+  }
+
+  #requireOpen(): void {
+    if (this.#destroyed) throw rpcError('E2E_RPC_DESTROYED')
   }
 }
 
@@ -181,6 +239,7 @@ export class AuthenticatedRpcClient {
   readonly #transport: AuthenticatedRpcTransport
   readonly #now: () => Date
   readonly #ttlMs: number
+  #destroyed = false
 
   private constructor(input: {
     credential: AuthenticatedRpcCredential
@@ -189,10 +248,9 @@ export class AuthenticatedRpcClient {
     transport: AuthenticatedRpcTransport
     now: () => Date
     ttlMs: number
-  }, publicKey: KeyObject) {
+  }, publicKey: KeyObject, sessionKey: Buffer) {
     this.#clientId = input.credential.clientId
-    this.#sessionKey = decodeCanonicalBase64Url(input.credential.sessionKeyBase64Url,
-      'E2E_RPC_SESSION_KEY_INVALID')
+    this.#sessionKey = sessionKey
     this.#material = structuredClone(input.verifierMaterial)
     this.#publicKey = publicKey
     this.#transport = input.transport
@@ -211,19 +269,21 @@ export class AuthenticatedRpcClient {
     validateMaterial(input.verifierMaterial, input.expectedPublicKeyDigest)
     if (!SAFE_ID.test(input.credential.clientId)) throw rpcError('E2E_RPC_CLIENT_ID_INVALID')
     const key = decodeCanonicalBase64Url(input.credential.sessionKeyBase64Url, 'E2E_RPC_SESSION_KEY_INVALID')
-    if (key.byteLength !== 32) throw rpcError('E2E_RPC_SESSION_KEY_INVALID')
+    if (key.byteLength !== 32) { key.fill(0); throw rpcError('E2E_RPC_SESSION_KEY_INVALID') }
     const spki = decodeCanonicalBase64Url(input.verifierMaterial.publicKeySpkiBase64Url,
       'E2E_RPC_PUBLIC_KEY_INVALID')
     let publicKey: KeyObject
     try {
       publicKey = createPublicKey({ key: spki, type: 'spki', format: 'der' })
       if (publicKey.asymmetricKeyType !== 'ed25519') throw new Error('not Ed25519')
-    } catch { throw rpcError('E2E_RPC_PUBLIC_KEY_INVALID') }
+    } catch { key.fill(0); throw rpcError('E2E_RPC_PUBLIC_KEY_INVALID') }
+    finally { spki.fill(0) }
     const ttlMs = input.ttlMs ?? 5_000
     if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > MAX_RPC_TTL_MS) {
+      key.fill(0)
       throw rpcError('E2E_RPC_TTL_INVALID')
     }
-    return new AuthenticatedRpcClient({ ...input, now: input.now ?? (() => new Date()), ttlMs }, publicKey)
+    return new AuthenticatedRpcClient({ ...input, now: input.now ?? (() => new Date()), ttlMs }, publicKey, key)
   }
 
   get authorityPublicKeyDigest(): string { return this.#material.publicKeyDigest }
@@ -232,6 +292,7 @@ export class AuthenticatedRpcClient {
   }
 
   async call(operation: string, payload: unknown): Promise<unknown> {
+    if (this.#destroyed) throw rpcError('E2E_RPC_DESTROYED')
     if (!SAFE_ID.test(operation)) throw rpcError('E2E_RPC_OPERATION_INVALID')
     const issuedAt = this.#now()
     const unsigned = {
@@ -246,6 +307,12 @@ export class AuthenticatedRpcClient {
     this.#verifyResponse(response, request)
     if (response.status === 'error') throw rpcError(response.errorCode ?? 'E2E_RPC_OPERATION_FAILED')
     return structuredClone(response.result)
+  }
+
+  destroy(): void {
+    if (this.#destroyed) return
+    this.#destroyed = true
+    this.#sessionKey.fill(0)
   }
 
   #verifyResponse(response: AuthenticatedRpcResponse, request: AuthenticatedRpcRequest): void {
@@ -295,7 +362,9 @@ export async function startAuthenticatedRpcLoopbackServer(
     await closeServer(server)
     throw rpcError('E2E_RPC_SERVER_ADDRESS_INVALID')
   }
-  return { endpoint: `http://127.0.0.1:${address.port}/v1/authority-rpc`, close: () => closeServer(server) }
+  return { endpoint: `http://127.0.0.1:${address.port}/v1/authority-rpc`, close: async () => {
+    try { await closeServer(server) } finally { rpc.destroy() }
+  } }
 }
 
 export function createAuthenticatedRpcHttpTransport(endpoint: string): AuthenticatedRpcTransport {
@@ -381,22 +450,34 @@ function validateMaterial(material: AuthenticatedRpcVerifierMaterial, expectedDi
     throw rpcError('E2E_RPC_VERIFIER_MATERIAL_INVALID')
   }
   const spki = decodeCanonicalBase64Url(material.publicKeySpkiBase64Url, 'E2E_RPC_PUBLIC_KEY_INVALID')
-  if (digestBytes('authority-rpc-public-key/v1', spki) !== material.publicKeyDigest) {
-    throw rpcError('E2E_RPC_PUBLIC_KEY_DIGEST_INVALID')
-  }
+  try {
+    if (digestBytes('authority-rpc-public-key/v1', spki) !== material.publicKeyDigest) {
+      throw rpcError('E2E_RPC_PUBLIC_KEY_DIGEST_INVALID')
+    }
+  } finally { spki.fill(0) }
 }
 
 async function readJson(request: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = []
   let size = 0
-  for await (const chunk of request) {
-    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-    size += bytes.byteLength
-    if (size > MAX_RPC_BYTES) throw httpError(413, 'E2E_RPC_REQUEST_TOO_LARGE')
-    chunks.push(bytes)
+  let body: Buffer | undefined
+  try {
+    for await (const chunk of request) {
+      const source = Buffer.isBuffer(chunk) ? chunk : undefined
+      try {
+        const bytes = Buffer.from(chunk)
+        size += bytes.byteLength
+        if (size > MAX_RPC_BYTES) { bytes.fill(0); throw httpError(413, 'E2E_RPC_REQUEST_TOO_LARGE') }
+        chunks.push(bytes)
+      } finally { source?.fill(0) }
+    }
+    body = Buffer.concat(chunks)
+    try { return JSON.parse(body.toString('utf8')) as unknown }
+    catch { throw httpError(400, 'E2E_RPC_REQUEST_INVALID') }
+  } finally {
+    body?.fill(0)
+    for (const chunk of chunks) chunk.fill(0)
   }
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown }
-  catch { throw httpError(400, 'E2E_RPC_REQUEST_INVALID') }
 }
 
 function decodeCanonicalBase64Url(value: string, code: string): Buffer {

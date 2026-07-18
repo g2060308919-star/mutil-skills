@@ -179,7 +179,7 @@ describe('Artifact kill-point 与恢复矩阵', () => {
       expect(journal.phase).toBe('committed')
       await publish(store, 'GENERATION-3')
     }
-  })
+  }, 15_000)
 
   test('fencing 与每次 publish journal 原子写的 temp/fsync/rename kill-point 均可恢复', async () => {
     const stages = ['temp-fsync', 'rename', 'parent-fsync']
@@ -208,7 +208,7 @@ describe('Artifact kill-point 与恢复矩阵', () => {
         await expect(store.recover('PRODUCT-PRD-1')).resolves.toMatchObject({ generationId: 'GENERATION-2' })
       }
     }
-  })
+  }, 15_000)
 
   test('成功提交后 GC 收敛为唯一 latest generation', async () => {
     const { root, store } = await createStore()

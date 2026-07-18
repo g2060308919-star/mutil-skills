@@ -158,6 +158,7 @@ export interface ReadAuthorityClient {
     attemptId: string
   }): Promise<CapabilityReservation>
   complete(reservationId: string, outcomeDigest: string): Promise<void>
+  markUnknown(reservationId: string, observation: string): Promise<void>
 }
 
 export interface RuntimeEvidenceSummary {
@@ -201,9 +202,34 @@ export async function runReadOnlyCase(input: RunReadOnlyCaseInput): Promise<Read
       }))
     }
   } catch (error) {
-    return baseResult(
-      input, 'safety-blocked', error instanceof E2EError ? error.code : 'E2E_RUNTIME_READ_AUTHORIZATION_DENIED',
-    )
+    const reasonCode = error instanceof E2EError ? error.code : 'E2E_RUNTIME_READ_AUTHORIZATION_DENIED'
+    if (reservations.length > 0) {
+      const compensationDigest = digestText('read-reservation-compensation/v1', canonicalizeJson({
+        caseId: input.caseId, actionId: input.actionId, attemptId: input.attemptId,
+        reasonCode, reservationIds: reservations.map((reservation) => reservation.reservationId),
+        executionStarted: false,
+      }))
+      const compensated = await Promise.allSettled(reservations.map(async (reservation) =>
+        await input.authorization.authority.complete(reservation.reservationId, compensationDigest)))
+      if (compensated.some((result) => result.status === 'rejected')) {
+        const unresolved = reservations.filter((_reservation, index) => compensated[index]?.status === 'rejected')
+        await Promise.allSettled(unresolved.map(async (reservation) =>
+          await input.authorization.authority.markUnknown(
+            reservation.reservationId, `reserve-compensation-failed:${compensationDigest}`,
+          )))
+        return {
+          ...baseResult(input, 'safety-blocked', 'E2E_RUNTIME_READ_RESERVATION_COMPENSATION_FAILED'),
+          reservationIds: reservations.map((reservation) => reservation.reservationId),
+          outcomeDigest: compensationDigest,
+        }
+      }
+    }
+    return {
+      ...baseResult(input, 'safety-blocked', reasonCode),
+      ...(reservations.length === 0 ? {} : {
+        reservationIds: reservations.map((reservation) => reservation.reservationId),
+      }),
+    }
   }
 
   let result: ReadOnlyCaseResult
@@ -228,16 +254,16 @@ export async function runReadOnlyCase(input: RunReadOnlyCaseInput): Promise<Read
         observedIdentity,
       }
     } else {
+      const matched = await input.page.containsText(input.expectedText)
+      const screenshot = await input.page.screenshot()
+      const dom = await input.page.domSnapshot()
       const gatewayAudit = typeof input.gatewayAudit === 'function' ? input.gatewayAudit() : input.gatewayAudit
       if (gatewayAudit.received <= 0 || gatewayAudit.forwarded <= 0) {
         result = {
-        ...baseResult(input, 'safety-blocked', 'E2E_RUNTIME_GATEWAY_AUDIT_INCOMPLETE'),
-        observedIdentity,
+          ...baseResult(input, 'safety-blocked', 'E2E_RUNTIME_GATEWAY_AUDIT_INCOMPLETE'),
+          observedIdentity,
         }
       } else {
-        const matched = await input.page.containsText(input.expectedText)
-        const screenshot = await input.page.screenshot()
-        const dom = await input.page.domSnapshot()
         const gatewayAuditText = canonicalizeJson(gatewayAudit)
         const evidence: RuntimeEvidenceSummary[] = [
           { kind: 'screenshot', byteLength: screenshot.byteLength,
@@ -258,17 +284,30 @@ export async function runReadOnlyCase(input: RunReadOnlyCaseInput): Promise<Read
         }
       }
     }
-  } catch {
-    result = baseResult(input, 'environment-blocked', 'E2E_RUNTIME_PAGE_UNAVAILABLE')
+  } catch (error) {
+    result = error instanceof E2EError && error.code === 'E2E_RUNTIME_EVIDENCE_SIZE_LIMIT'
+      ? baseResult(input, 'safety-blocked', error.code)
+      : baseResult(input, 'environment-blocked', 'E2E_RUNTIME_PAGE_UNAVAILABLE')
   }
 
   const outcomeDigest = digestText('read-only-case-result/v1', canonicalizeJson(result))
-  try {
-    for (const reservation of reservations) {
+  for (const [index, reservation] of reservations.entries()) {
+    try {
       await input.authorization.authority.complete(reservation.reservationId, outcomeDigest)
+    } catch {
+      const unresolved = reservations.slice(index)
+      const marked = await Promise.allSettled(unresolved.map(async (candidate) =>
+        await input.authorization.authority.markUnknown(
+          candidate.reservationId, `read-complete-failed:${outcomeDigest}`,
+        )))
+      return {
+        ...baseResult(input, 'safety-blocked', marked.some((item) => item.status === 'rejected')
+          ? 'E2E_RUNTIME_READ_RESERVATION_UNKNOWN_MARK_FAILED'
+          : 'E2E_RUNTIME_READ_RESERVATION_FINALIZE_FAILED'),
+        reservationIds: reservations.map((candidate) => candidate.reservationId),
+        outcomeDigest,
+      }
     }
-  } catch {
-    return baseResult(input, 'safety-blocked', 'E2E_RUNTIME_READ_RESERVATION_FINALIZE_FAILED')
   }
   return { ...result, reservationIds: reservations.map((reservation) => reservation.reservationId), outcomeDigest }
 }
