@@ -1,11 +1,13 @@
 {
   "name": "@mutil-skills/e2e-runtime",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "files": [
     "dist/src",
-    "assets",
-    "scripts"
+    "assets/approval",
+    "scripts/authority-child-fchdir.py",
+    "scripts/authority-state-openat.py",
+    "scripts/gateway-ca-openat.py"
   ],
   "bin": {
     "repo-e2e": "./dist/src/bin/repo-e2e.js"
@@ -22,12 +24,12 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@mutil-skills/e2e-authority": "0.0.0",
-    "@mutil-skills/e2e-contracts": "0.0.0",
-    "@mutil-skills/e2e-engine": "0.0.0",
-    "@mutil-skills/e2e-gateway": "0.0.0",
-    "@mutil-skills/e2e-playwright-runtime": "0.0.0",
-    "@mutil-skills/e2e-report": "0.0.0",
+    "@mutil-skills/e2e-authority": "0.1.0",
+    "@mutil-skills/e2e-contracts": "0.1.0",
+    "@mutil-skills/e2e-engine": "0.1.0",
+    "@mutil-skills/e2e-gateway": "0.1.0",
+    "@mutil-skills/e2e-playwright-runtime": "0.1.0",
+    "@mutil-skills/e2e-report": "0.1.0",
     "mockttp": "4.4.2",
     "playwright": "1.61.1"
   }
