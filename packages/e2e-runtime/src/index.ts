@@ -1,6 +1,21 @@
 export { RUNTIME_PACKAGE_VERSION } from './protocol.js'
 
 export {
+  ApprovalModeConfigurationSchema,
+  ApprovalModeSchema,
+  BrowserSelectionSchema,
+  BrowserSourceSchema,
+  readApprovalMode,
+  readBrowserSelection,
+  writeApprovalMode,
+  writeBrowserSelection,
+  type ApprovalMode,
+  type ApprovalModeConfiguration,
+  type BrowserSelection,
+  type BrowserSource,
+} from './runtime-user-config.js'
+
+export {
   RuntimeDoctorProbeSchema,
   RuntimeDoctorReportSchema,
   RuntimeErrorSchema,

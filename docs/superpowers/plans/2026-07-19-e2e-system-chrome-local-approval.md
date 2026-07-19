@@ -34,11 +34,11 @@
 - `ApprovalModeSchema`：`local-confirmation | webauthn`；配置缺失时默认本地模式。
 - `read/writeBrowserSelection()`、`read/writeApprovalMode()`：私有目录、no-follow、0600、临时文件 + rename 原子写。
 
-- [ ] 写失败测试：拒绝额外字段、相对路径、坏摘要、符号链接、不安全权限；默认 approval mode 为本地；写入可重读且权限正确。
-- [ ] 运行 `npx vitest run packages/e2e-runtime/test/runtime-user-config.test.ts`，确认 RED。
-- [ ] 实现最小严格状态存储并导出。
-- [ ] 运行定向测试与 `npm run typecheck`。
-- [ ] Commit：`feat(e2e): add strict browser and approval configuration`
+- [x] 写失败测试：拒绝额外字段、相对路径、坏摘要、符号链接、不安全权限；默认 approval mode 为本地；写入可重读且权限正确。
+- [x] 运行 `npx vitest run packages/e2e-runtime/test/runtime-user-config.test.ts`，确认 RED。
+- [x] 实现最小严格状态存储并导出。
+- [x] 运行定向测试与 `npm run typecheck`。
+- [x] Commit：`feat(e2e): add strict browser and approval configuration`
 
 ### Task 2：系统 Google Chrome 发现、验证和选择
 
@@ -229,4 +229,3 @@
 - [ ] 运行 `npm pack --dry-run --workspaces` 和 release closure 测试；不得 publish。
 - [ ] 使用 `code-review` 与 `superpowers:verification-before-completion` 审查并修复所有发现。
 - [ ] Commit：`test(e2e): verify local-first cross-repo acceptance`
-
