@@ -118,11 +118,11 @@
 - RPC 新增 `confirm-approval`。
 - `localApprovalDisposition(subject, policy)` 只允许已知、非生产、纯只读自动批准；写/注入/隐私/人工需确认；未知/生产/不可逆阻断。
 
-- [ ] 写失败测试：严格联合、summary 禁止敏感字段、riskTier 缺失按 production、纯只读/高风险/未知矩阵。
-- [ ] 运行定向测试，确认 RED。
-- [ ] 实现 Contracts 与纯函数。
-- [ ] 运行定向测试和 typecheck。
-- [ ] Commit：`feat(e2e): define local approval assurance and policy`
+- [x] 写失败测试：严格联合、summary 禁止敏感字段、riskTier 缺失按 production、纯只读/高风险/未知矩阵。
+- [x] 运行定向测试，确认 RED。
+- [x] 实现 Contracts 与纯函数。
+- [x] 运行定向测试和 typecheck。
+- [x] Commit：`feat(e2e): define local approval assurance and policy`
 
 ### Task 6：Runtime Host 两阶段本地确认与 Authority 签发
 

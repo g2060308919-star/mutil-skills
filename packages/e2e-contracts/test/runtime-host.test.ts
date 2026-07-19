@@ -75,6 +75,18 @@ describe('Runtime Host contracts', () => {
     }).success).toBe(false)
   })
 
+  test('accepts only subject-bound confirm-approval requests', () => {
+    expect(RuntimeRequestEnvelopeSchema.parse({
+      ...doctorRequest, command: 'confirm-approval', projectRoot: '/tmp/project',
+      payload: { runId: 'RUN-1', confirmationId: 'CONFIRM-1',
+        subjectDigest: `sha256:${'a'.repeat(64)}` },
+    })).toBeTruthy()
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...doctorRequest, command: 'confirm-approval', projectRoot: '/tmp/project',
+      payload: { runId: 'RUN-1', confirmationId: 'CONFIRM-1' },
+    }).success).toBe(false)
+  })
+
   test('manual result commands accept only a draft and a role transition, never approval booleans or session proofs', () => {
     const prepare = {
       ...doctorRequest, command: 'prepare-manual-result', projectRoot: '/tmp/project',

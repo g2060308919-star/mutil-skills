@@ -38,6 +38,16 @@ const commandSchemas = [
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
+    command: z.literal('confirm-approval'),
+    projectRoot: z.string().min(1),
+    payload: z.object({
+      runId: SafeIdSchema,
+      confirmationId: SafeIdSchema,
+      subjectDigest: DigestSchema,
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
     command: z.literal('create-run'),
     projectRoot: z.string().min(1),
     payload: z.object({
@@ -178,7 +188,7 @@ export const RuntimeDoctorReportSchema = z.object({
 
 export const RuntimeStatusNextEdgeSchema = z.object({
   command: z.enum([
-    'submit-candidate', 'open-approval', 'run-preflight', 'prepare-manual-result',
+    'submit-candidate', 'open-approval', 'confirm-approval', 'run-preflight', 'prepare-manual-result',
     'finalize-manual-result-role', 'execute-run', 'resume-run', 'finalize-run', 'render-report',
   ]),
   from: WorkflowNodeSchema,

@@ -125,7 +125,11 @@ const FindingSchema = z.object({
 
 const projectPolicyContent = z.object({
   policyVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
-  environments: z.array(z.object({ environmentId: SafeIdSchema, baseOrigin: z.string().url() }).strict()).min(1).max(256),
+  environments: z.array(z.object({
+    environmentId: SafeIdSchema,
+    baseOrigin: z.string().url(),
+    riskTier: z.enum(['local', 'test', 'staging', 'production']).optional(),
+  }).strict()).min(1).max(256),
   originPolicies: z.array(z.object({ origin: z.string().url(), allowRead: z.boolean(), allowWrite: z.boolean() }).strict()).min(1).max(256),
   browserMatrix: z.array(z.object({ browserId: SafeIdSchema, channel: SafeIdSchema, required: z.boolean() }).strict()).min(1).max(64),
   coveragePolicy: IdDigestSchema,

@@ -28,6 +28,13 @@ export {
 } from './system-chrome.js'
 
 export {
+  localApprovalDisposition,
+  projectRiskTier,
+  type LocalApprovalDisposition,
+  type LocalApprovalPolicyInput,
+} from './local-approval-policy.js'
+
+export {
   RuntimeDoctorProbeSchema,
   RuntimeDoctorReportSchema,
   RuntimeErrorSchema,

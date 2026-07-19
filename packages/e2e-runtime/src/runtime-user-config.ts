@@ -1,4 +1,9 @@
-import { canonicalizeJson, E2EError } from '@mutil-skills/e2e-contracts'
+import {
+  ApprovalModeSchema,
+  canonicalizeJson,
+  E2EError,
+  type ApprovalMode,
+} from '@mutil-skills/e2e-contracts'
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, open, rename, unlink } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
@@ -6,6 +11,9 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { runtimeLayout } from './runtime-layout.js'
 import { currentUid } from './runtime-manifest.js'
+
+export { ApprovalModeSchema }
+export type { ApprovalMode }
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const AbsolutePathSchema = z.string().min(1).max(16 * 1024).refine(isAbsolute, '浏览器路径必须是绝对路径')
@@ -26,7 +34,6 @@ export const BrowserSelectionSchema = z.object({
   configuredAt: z.string().datetime({ offset: true }),
 }).strict()
 
-export const ApprovalModeSchema = z.enum(['local-confirmation', 'webauthn'])
 export const ApprovalModeConfigurationSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
   mode: ApprovalModeSchema,
@@ -34,7 +41,6 @@ export const ApprovalModeConfigurationSchema = z.object({
 
 export type BrowserSource = z.infer<typeof BrowserSourceSchema>
 export type BrowserSelection = z.infer<typeof BrowserSelectionSchema>
-export type ApprovalMode = z.infer<typeof ApprovalModeSchema>
 export type ApprovalModeConfiguration = z.infer<typeof ApprovalModeConfigurationSchema>
 
 export async function readBrowserSelection(homeDir: string): Promise<BrowserSelection> {
