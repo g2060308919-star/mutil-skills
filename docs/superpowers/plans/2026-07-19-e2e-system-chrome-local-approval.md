@@ -53,11 +53,11 @@
 - `inspectSystemChrome()`：绝对路径 canonicalize、regular executable、owner、非 group/world writable、非项目内、digest/version。
 - `BrowserInstallation`：统一 `system-chrome` 与 `managed-chromium`，保留启动所需 closure/executable digest。
 
-- [ ] 写失败测试：allowlist 顺序、显式路径、相对/项目内/symlink swap/错误 owner/可写文件拒绝、digest 与版本绑定。
-- [ ] 运行 `npx vitest run packages/e2e-runtime/test/system-chrome.test.ts packages/e2e-runtime/test/browser-installer.test.ts`，确认 RED。
-- [ ] 实现系统 Chrome 检查与统一浏览器安装投影。
-- [ ] 运行定向测试与 typecheck。
-- [ ] Commit：`feat(e2e): support verified system Google Chrome`
+- [x] 写失败测试：allowlist 顺序、显式路径、相对/项目内/symlink swap/错误 owner/可写文件拒绝、digest 与版本绑定。
+- [x] 运行 `npx vitest run packages/e2e-runtime/test/system-chrome.test.ts packages/e2e-runtime/test/browser-installer.test.ts`，确认 RED。
+- [x] 实现系统 Chrome 检查与统一浏览器安装投影。
+- [x] 运行定向测试与 typecheck。
+- [x] Commit：`feat(e2e): support verified system Google Chrome`
 
 ### Task 3：系统 Chrome 受控启动、Profile 清理与能力证明
 

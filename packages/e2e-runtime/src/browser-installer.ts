@@ -11,6 +11,7 @@ import { z } from 'zod'
 import { runtimeLayout } from './runtime-layout.js'
 import { currentUid, verifyCurrentRuntimeInstallation, verifyRuntimeRoot } from './runtime-manifest.js'
 import type { RuntimeLayout } from './runtime-layout.js'
+import type { InspectedSystemChrome } from './system-chrome.js'
 
 export const EXPECTED_PLAYWRIGHT_VERSION = '1.61.1'
 export const BROWSER_MANIFEST_FILE = 'browser-manifest.json'
@@ -52,6 +53,12 @@ export interface ChromiumInstallation {
   executablePath: string
   manifest: BrowserManifest
 }
+
+/**
+ * Runtime 受控浏览器入口接受的完整来源联合。托管 Chromium 保留不可变闭包
+ * manifest；系统 Chrome 以每次重验的 executable identity 与用户选择记录绑定。
+ */
+export type BrowserInstallation = ChromiumInstallation | InspectedSystemChrome
 
 export interface InstallChromiumOptions {
   homeDir: string

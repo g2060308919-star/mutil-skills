@@ -1,4 +1,5 @@
 export { RUNTIME_PACKAGE_VERSION } from './protocol.js'
+export type { BrowserInstallation, ChromiumInstallation } from './browser-installer.js'
 
 export {
   ApprovalModeConfigurationSchema,
@@ -14,6 +15,16 @@ export {
   type BrowserSelection,
   type BrowserSource,
 } from './runtime-user-config.js'
+
+export {
+  SYSTEM_CHROME_PATHS,
+  discoverSystemChrome,
+  inspectSystemChrome,
+  revalidateSystemChrome,
+  type InspectedSystemChrome,
+  type SystemChromeSelection,
+  type SystemChromeIdentity,
+} from './system-chrome.js'
 
 export {
   RuntimeDoctorProbeSchema,
