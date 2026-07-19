@@ -186,11 +186,11 @@
 - 每项审批和 FinalReport 暴露 `approvalMode`、`identityVerified`、`separationOfDutiesVerified`。
 - Builder 从 Authority/Run 冻结事实投影；Auditor 独立复算；Markdown/HTML 清楚显示有限保证。
 
-- [ ] 写失败测试：本地模式固定 false/false，伪造 true 被审计阻断；WebAuthn verified 事实可为 true；两个 renderer 同值。
-- [ ] 运行定向测试，确认 RED。
-- [ ] 实现 schema、builder、auditor 与 renderer。
-- [ ] 重新生成 artifact schemas，运行定向测试和 typecheck。
-- [ ] Commit：`feat(e2e): report actual approval assurance`
+- [x] 写失败测试：本地模式固定 false/false，伪造 true 被审计阻断；WebAuthn verified 事实可为 true；两个 renderer 同值。
+- [x] 运行定向测试，确认 RED。
+- [x] 实现 schema、builder、auditor 与 renderer。
+- [x] 重新生成 artifact schemas，运行定向测试和 typecheck。
+- [x] Commit：`feat(e2e): report actual approval assurance`
 
 ### Task 9：Skill、用户文档、迁移和 0.2.0 版本闭包
 

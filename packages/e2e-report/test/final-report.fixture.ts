@@ -11,6 +11,8 @@ export const finalReportFixture = {
   createdAt: '2026-07-12T00:00:00.000Z', contentDigest: digest('b'), signatures: [], dependencies: [],
   graph: { defines: [], references: [] },
   content: {
+    approvalAssurance: { approvalMode: 'local-confirmation', identityVerified: false,
+      separationOfDutiesVerified: false },
     runtimeProvenance: {
       runtimeVersion: '0.0.0', runtimeInstallationDigest: digest('a'), protocolVersion: '1.0.0',
       contractsVersion: '0.0.0', engineVersion: '2.0.0', playwrightVersion: '1.61.1',
@@ -34,7 +36,8 @@ export const finalReportFixture = {
     traceability: [{ fromId: 'REQ-1', toId: 'RULE-1', kind: 'defines' }],
     realResults: [{ id: realResultId, digest: digest('e') }],
     injectionResults: [{ id: injectionResultId, digest: digest('f') }],
-    manualResults: [{ id: 'MANUAL-1', digest: digest('1') }],
+    manualResults: [{ id: 'MANUAL-1', digest: digest('1'), approvalMode: 'local-confirmation',
+      identityVerified: false, separationOfDutiesVerified: false }],
     risks: [{ code: 'RISK-GATEWAY', severity: 'high', ref: 'gateway-audit' }],
     regression: { manifestDigest: digest('2'), command: 'npm run e2e:regression' },
     title: '<script>alert(1)</script> 订单验收报告',
@@ -43,9 +46,12 @@ export const finalReportFixture = {
       approvalGrantDigests: [digest('5')], generationDigest: digest('6'),
     },
     approvals: [
-      { kind: 'scope', status: 'approved', subjectDigest: digest('3'), grantDigests: [digest('5')] },
-      { kind: 'lineage', status: 'approved', subjectDigest: digest('9'), grantDigests: [digest('a')] },
-      { kind: 'execution', status: 'approved', subjectDigest: digest('4'), grantDigests: [digest('5')] },
+      { kind: 'scope', status: 'approved', subjectDigest: digest('3'), grantDigests: [digest('5')],
+        approvalMode: 'local-confirmation', identityVerified: false, separationOfDutiesVerified: false },
+      { kind: 'lineage', status: 'approved', subjectDigest: digest('9'), grantDigests: [digest('a')],
+        approvalMode: 'local-confirmation', identityVerified: false, separationOfDutiesVerified: false },
+      { kind: 'execution', status: 'approved', subjectDigest: digest('4'), grantDigests: [digest('5')],
+        approvalMode: 'local-confirmation', identityVerified: false, separationOfDutiesVerified: false },
     ],
     environment: {
       environmentId: 'STAGING', origins: ['https://example.test'],

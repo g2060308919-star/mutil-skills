@@ -281,8 +281,19 @@ describe('RuntimeFinalizationMaterialSealer', () => {
       playwrightVersion: '1.61.1', now: () => new Date('2026-07-18T00:03:00.000Z'),
     }).seal(prepared.snapshot)
     const artifact = material.artifacts.find((entry) => entry.artifact.artifactType === 'manual-results')!.artifact
-    expect((artifact.content as any).results).toEqual([manual])
-    expect(verifyManualResult).toHaveBeenCalledWith(manual)
+    const sealedManual = {
+      ...manual,
+      authorityProof: {
+        ...manual.authorityProof,
+        approvalAssurance: {
+          approvalMode: 'webauthn',
+          identityVerified: true,
+          separationOfDutiesVerified: true,
+        },
+      },
+    }
+    expect((artifact.content as any).results).toEqual([sealedManual])
+    expect(verifyManualResult).toHaveBeenCalledWith(sealedManual)
 
     const invalid = writeSnapshot()
     addTrustedManualResult(invalid)

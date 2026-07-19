@@ -35,6 +35,8 @@ describe('renderCompleteReport', () => {
     expect(report.markdown).toContain('测试域：prd-e2e-trusted-compiler')
     expect(report.markdown).toContain('执行 Profile：trusted-read-only')
     expect(report.html).toContain('执行审批')
+    expect(report.markdown).toContain('本地确认（不验证身份/职责分离）')
+    expect(report.html).toContain('本地确认（不验证身份/职责分离）')
     expect(report.html).toContain('测试域：prd-e2e-trusted-compiler')
     expect(report.html).toContain('执行 Profile：trusted-read-only')
     expect(report.html).toContain('业务失败（已观测）')

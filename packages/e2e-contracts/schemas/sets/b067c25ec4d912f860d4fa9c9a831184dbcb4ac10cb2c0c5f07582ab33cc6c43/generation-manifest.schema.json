@@ -1,0 +1,919 @@
+{
+  "type": "object",
+  "properties": {
+    "artifactId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "artifactType": {
+      "type": "string",
+      "const": "generation-manifest"
+    },
+    "schemaVersion": {
+      "type": "string",
+      "const": "2.0.0"
+    },
+    "engineVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "assetId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9._:-]+(?:\\/[A-Za-z0-9._:-]+)*$"
+    },
+    "prdRevision": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "generationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "contentDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "signatures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "issuer": {
+            "type": "string",
+            "minLength": 1
+          },
+          "keyId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "algorithm": {
+            "type": "string",
+            "const": "Ed25519"
+          },
+          "signedDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "issuer",
+          "keyId",
+          "algorithm",
+          "signedDigest",
+          "signature"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifactId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "artifactType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "schemaVersion": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+          },
+          "relativePath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "pattern": "^(?!\\/)(?!.*\\\\)(?!.*:)(?!.*\\/\\/)(?!.*\\/$)(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:\\/|$))[^\\0/]+(?:\\/[^\\0/]+)*$"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "artifactId",
+          "artifactType",
+          "schemaVersion",
+          "relativePath",
+          "digest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "graph": {
+      "type": "object",
+      "properties": {
+        "defines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100000
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100000
+        }
+      },
+      "required": [
+        "defines",
+        "references"
+      ],
+      "additionalProperties": false
+    },
+    "content": {
+      "type": "object",
+      "properties": {
+        "runtimeProvenance": {
+          "type": "object",
+          "properties": {
+            "runtimeVersion": {
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+$"
+            },
+            "runtimeInstallationDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "protocolVersion": {
+              "type": "string",
+              "const": "1.0.0"
+            },
+            "contractsVersion": {
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+$"
+            },
+            "engineVersion": {
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+$"
+            },
+            "playwrightVersion": {
+              "type": "string",
+              "pattern": "^\\d+\\.\\d+\\.\\d+$"
+            },
+            "chromiumDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "gatewayPolicyDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "authorityPublicKeyDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "authorityStateProtectionLevel": {
+              "type": "string",
+              "enum": [
+                "local-crash-integrity",
+                "trusted-monotonic"
+              ]
+            },
+            "projectIdentityDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "sourceRevisionDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "sourceRepositoryIndependent": {
+              "type": "boolean",
+              "const": true
+            },
+            "isolationProofDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "runtimeVersion",
+            "runtimeInstallationDigest",
+            "protocolVersion",
+            "contractsVersion",
+            "engineVersion",
+            "playwrightVersion",
+            "chromiumDigest",
+            "gatewayPolicyDigest",
+            "authorityPublicKeyDigest",
+            "authorityStateProtectionLevel",
+            "projectIdentityDigest",
+            "sourceRevisionDigest",
+            "sourceRepositoryIndependent",
+            "isolationProofDigest"
+          ],
+          "additionalProperties": false
+        },
+        "generationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "fencingToken": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "finalizationSnapshotDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "artifactId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "artifactType": {
+                "type": "string",
+                "enum": [
+                  "project-policy",
+                  "prd-request",
+                  "prd-manifest",
+                  "prd-diff",
+                  "semantic-generation",
+                  "acceptance-scope",
+                  "requirement-model",
+                  "interaction-flow",
+                  "coverage-universe",
+                  "test-cases",
+                  "design-audit",
+                  "execution-contract",
+                  "approval-grants",
+                  "manual-results",
+                  "data-leases",
+                  "browser-preflight",
+                  "browser-action-map",
+                  "regression-manifest",
+                  "run-bundle",
+                  "workflow-events",
+                  "browser-results",
+                  "gateway-audit",
+                  "browser-evidence",
+                  "diagnosis",
+                  "cleanup-results",
+                  "final-report",
+                  "generation-manifest"
+                ]
+              },
+              "relativePath": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "pattern": "^(?!\\/)(?!.*\\\\)(?!.*:)(?!.*\\/\\/)(?!.*\\/$)(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:\\/|$))[^\\0/]+(?:\\/[^\\0/]+)*$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "artifactId",
+              "artifactType",
+              "relativePath",
+              "digest"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 26,
+          "maxItems": 26,
+          "uniqueItems": true
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "relativePath": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "pattern": "^(?!\\/)(?!.*\\\\)(?!.*:)(?!.*\\/\\/)(?!.*\\/$)(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:\\/|$))[^\\0/]+(?:\\/[^\\0/]+)*$"
+              },
+              "digest": {
+                "type": "string",
+                "pattern": "^sha256:[a-f0-9]{64}$"
+              },
+              "byteLength": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "relativePath",
+              "digest",
+              "byteLength"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 1000000,
+          "uniqueItems": true
+        },
+        "rootDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "terminalVerdict": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "rejected",
+            "incomplete",
+            "pending-decision",
+            "safety-blocked",
+            "artifact-blocked",
+            "migration-required",
+            "environment-blocked",
+            "automation-blocked"
+          ]
+        },
+        "authoritySignature": {
+          "type": "object",
+          "properties": {
+            "issuer": {
+              "type": "string",
+              "minLength": 1
+            },
+            "keyId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "algorithm": {
+              "type": "string",
+              "const": "Ed25519"
+            },
+            "signedDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "signature": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "issuer",
+            "keyId",
+            "algorithm",
+            "signedDigest",
+            "signature"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "runtimeProvenance",
+        "generationId",
+        "fencingToken",
+        "finalizationSnapshotDigest",
+        "artifacts",
+        "files",
+        "rootDigest",
+        "terminalVerdict",
+        "authoritySignature"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "project-policy"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "prd-request"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "prd-manifest"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "prd-diff"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "semantic-generation"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "acceptance-scope"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "requirement-model"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "interaction-flow"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "coverage-universe"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "test-cases"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "design-audit"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "execution-contract"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "approval-grants"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "manual-results"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "data-leases"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "browser-preflight"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "browser-action-map"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "regression-manifest"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "run-bundle"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "workflow-events"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "browser-results"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "gateway-audit"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "browser-evidence"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "diagnosis"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "cleanup-results"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "properties": {
+                  "artifactType": {
+                    "const": "final-report"
+                  }
+                },
+                "required": [
+                  "artifactType"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "required": [
+    "artifactId",
+    "artifactType",
+    "schemaVersion",
+    "engineVersion",
+    "assetId",
+    "prdRevision",
+    "generationId",
+    "createdAt",
+    "contentDigest",
+    "signatures",
+    "dependencies",
+    "graph",
+    "content"
+  ],
+  "additionalProperties": false,
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mutil-skills.local/e2e/schemas/generation-manifest.schema.json",
+  "title": "generation-manifest artifact",
+  "x-e2e-runtime-validation": {
+    "required": true,
+    "constraints": [
+      "contentDigest、Authority 签名、dependency 与 graph 必须由 validateGeneration 校验",
+      "artifactId 与 relativePath 分别唯一",
+      "authoritySignature.signedDigest 必须等于 rootDigest",
+      "rootDigest、finalizationSnapshotDigest 与 terminalVerdict 必须由本代事实复算"
+    ]
+  }
+}

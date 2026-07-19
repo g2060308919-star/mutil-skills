@@ -242,24 +242,39 @@ export function auditFinalReportFactBinding(
   const lineageDecision = objectAt(content('prd-diff'), 'lineageReview')
   const grants = content('approval-grants')
   const grantItems = arrayAt(grants, 'grants')
+  const approvalAssurance = objectAt(grants, 'approvalAssurance')
   const executionStatus = grantItems.some((grant) => stringAt(grant, 'status') === 'revoked')
     ? 'revoked' : grantItems.some((grant) => stringAt(grant, 'status') === 'expired')
       ? 'expired' : grantItems.some((grant) => stringAt(grant, 'status') === 'denied') ? 'rejected' : 'approved'
   const expectedApprovals = [
     { kind: 'scope', status: stringAt(scopeDecision, 'status'),
+      ...approvalAssurance,
       subjectDigest: safeDecisionSubjectDigest(content('acceptance-scope')),
       grantDigests: stringAt(scopeDecision, 'status') === 'pending' ? []
         : [stringAt(objectAt(scopeDecision, 'receipt'), 'signedDigest')] },
     { kind: 'lineage', status: stringAt(lineageDecision, 'status'),
+      ...approvalAssurance,
       subjectDigest: safeLineageDecisionSubjectDigest(content('prd-diff')),
       grantDigests: stringAt(lineageDecision, 'status') === 'pending' ? []
         : [stringAt(objectAt(lineageDecision, 'receipt'), 'signedDigest')] },
     { kind: 'execution', status: executionStatus,
+      ...approvalAssurance,
       subjectDigest: stringAt(grants, 'runBundleDigest'),
       grantDigests: grantItems.map((grant) => stringAt(objectAt(grant, 'authorityProof'), 'signedDigest')) },
   ]
   if (!safeCanonicalEquals(report.approvals, expectedApprovals)) {
     findings.push({ code: 'E2E_GENERATION_REPORT_APPROVALS_MISMATCH', ref: 'approvals' })
+  }
+  if (!safeCanonicalEquals(report.approvalAssurance, approvalAssurance)) {
+    findings.push({ code: 'E2E_GENERATION_REPORT_APPROVAL_ASSURANCE_MISMATCH', ref: 'approvalAssurance' })
+  }
+  const expectedManualResults = arrayAt(content('manual-results'), 'results').map((result) => ({
+    id: stringAt(result, 'manualResultId'),
+    digest: stringAt(objectAt(result, 'authorityProof'), 'signedDigest'),
+    ...objectAt(objectAt(result, 'authorityProof'), 'approvalAssurance'),
+  }))
+  if (!safeCanonicalEquals(report.manualResults, expectedManualResults)) {
+    findings.push({ code: 'E2E_GENERATION_REPORT_MANUAL_ASSURANCE_MISMATCH', ref: 'manualResults' })
   }
   const traceabilityFacts = independentlyProjectReportTraceability(content)
   if (!safeCanonicalEquals(report.traceability, traceabilityFacts.edges)) {

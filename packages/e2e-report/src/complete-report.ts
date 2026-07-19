@@ -66,10 +66,12 @@ function renderMarkdown(report: FinalReportArtifact): string {
       `- Scope digest：${content.summaries.scopeDigest}`,
       `- Execution Contract digest：${content.summaries.executionContractDigest}`,
       `- Approval grants：${content.summaries.approvalGrantDigests.join('、') || '无'}`,
+      `- 审批保证：${approvalAssuranceLabel(content.approvalAssurance)}`,
       `- Generation：${cell(report.generationId)} · ${content.summaries.generationDigest}`,
       '',
-      table(['审批类型', '状态', 'Subject digest', 'Grant digests'], content.approvals.map((item) => [
-        approvalLabel(item.kind), item.status, item.subjectDigest, item.grantDigests.join('、') || '无',
+      table(['审批类型', '状态', '保证', 'Subject digest', 'Grant digests'], content.approvals.map((item) => [
+        approvalLabel(item.kind), item.status, approvalAssuranceLabel(item),
+        item.subjectDigest, item.grantDigests.join('、') || '无',
       ])),
     ]),
     markdownSection(SECTION_TITLES[2], [
@@ -96,7 +98,9 @@ function renderMarkdown(report: FinalReportArtifact): string {
       ])),
       '',
       '手工验收结果：',
-      table(['Manual result', 'Digest'], content.manualResults.map((item) => [item.id, item.digest])),
+      table(['Manual result', '保证', 'Digest'], content.manualResults.map((item) => [
+        item.id, approvalAssuranceLabel(item), item.digest,
+      ])),
     ]),
     markdownSection(SECTION_TITLES[5], [
       table(['REQ', 'RULE', 'COV', 'CASE', 'STEP', 'EVIDENCE'], content.traceabilityMatrix.map((item) => [
@@ -221,15 +225,16 @@ function htmlSection(index: number, report: FinalReportArtifact): string {
     `Scope digest：${content.summaries.scopeDigest}`,
     `Execution Contract digest：${content.summaries.executionContractDigest}`,
     `Approval grants：${content.summaries.approvalGrantDigests.join('、') || '无'}`,
+    `审批保证：${approvalAssuranceLabel(content.approvalAssurance)}`,
     `Generation：${report.generationId} · ${content.summaries.generationDigest}`,
-  ])}${htmlTable(['审批类型', '状态', 'Subject digest', 'Grant digests'], content.approvals.map((item) => [approvalLabel(item.kind), item.status, item.subjectDigest, item.grantDigests.join('、') || '无']))}`
+  ])}${htmlTable(['审批类型', '状态', '保证', 'Subject digest', 'Grant digests'], content.approvals.map((item) => [approvalLabel(item.kind), item.status, approvalAssuranceLabel(item), item.subjectDigest, item.grantDigests.join('、') || '无']))}`
   if (index === 2) return `${htmlList([
     `环境：${content.environment.environmentId}`,
     `Origin：${content.environment.origins.join('、')}`,
     `浏览器：${content.environment.browser.name} ${content.environment.browser.version}`,
   ])}${htmlTable(['角色', '状态'], content.environment.roles.map((item) => [item.roleId, item.status]))}${htmlTable(['Lease', '状态', '资源指纹'], content.environment.dataLeases.map((item) => [item.leaseId, item.status, item.resourceFingerprint]))}`
   if (index === 3) return `<p>Universe digest：${html(content.coverageUniverse.universeDigest)}</p>${htmlTable(['COV', '标题', '必要性', '处置', 'Case'], content.coverageUniverse.obligations.map((item) => [item.obligationId, item.title, item.necessity, item.disposition, item.caseIds.join('、') || '无']))}${htmlTable(['指标', '值'], metricEntries(content.metrics).map(([label, metric]) => [label, formatMetric(metric)]))}`
-  if (index === 4) return `${htmlTable(['类别', 'ID', '标题', '状态', '理由'], content.dispositions.map((item) => [item.kind, item.id, item.title, item.status, item.reason]))}<h3>手工验收结果</h3>${htmlTable(['Manual result', 'Digest'], content.manualResults.map((item) => [item.id, item.digest]))}`
+  if (index === 4) return `${htmlTable(['类别', 'ID', '标题', '状态', '理由'], content.dispositions.map((item) => [item.kind, item.id, item.title, item.status, item.reason]))}<h3>手工验收结果</h3>${htmlTable(['Manual result', '保证', 'Digest'], content.manualResults.map((item) => [item.id, approvalAssuranceLabel(item), item.digest]))}`
   if (index === 5) return htmlTable(['REQ', 'RULE', 'COV', 'CASE', 'STEP', 'EVIDENCE'], content.traceabilityMatrix.map((item) => [item.reqId, item.ruleId, item.obligationId, item.caseId, item.stepId, htmlEvidenceLink(item.evidencePath, item.evidenceId)]))
   if (index === 6 || index === 7) {
     const mode = index === 6 ? 'real-environment' : 'browser-injection'
@@ -389,6 +394,16 @@ function formatMetric(metric: Metric): string {
 function approvalLabel(kind: 'scope' | 'lineage' | 'execution'): string {
   if (kind === 'scope') return '范围审批'
   return kind === 'lineage' ? '谱系审批' : '执行审批'
+}
+
+function approvalAssuranceLabel(value: {
+  approvalMode: 'local-confirmation' | 'webauthn'
+  identityVerified: boolean
+  separationOfDutiesVerified: boolean
+}): string {
+  return value.approvalMode === 'local-confirmation'
+    ? '本地确认（不验证身份/职责分离）'
+    : 'WebAuthn（已验证身份/职责分离）'
 }
 
 function htmlCaseSummary(cases: FinalReportArtifact['content']['caseDetails']): string {

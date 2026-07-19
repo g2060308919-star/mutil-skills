@@ -458,6 +458,7 @@ function renderFinalReport(
     .map((item) => ({ id: item.resultId, digest: results.get(item.resultId)!.eventChainDigest }))
   const regressionDigest = byType.get('regression-manifest')!.contentDigest
   const grantContent = content('approval-grants')
+  const approvalAssurance = grantContent.approvalAssurance
   const scopeContent = content('acceptance-scope')
   const diffContent = content('prd-diff')
   const gateway = content('gateway-audit')
@@ -538,6 +539,7 @@ function renderFinalReport(
   if (!trustedCompilerExecution) throw new Error('E2E_TRUSTED_COMPILER_EXECUTION_FACT_REQUIRED')
   const report: FinalReportContent = {
     runtimeProvenance: input.provenance,
+    approvalAssurance,
     ...terminal,
     cannotClaim: [...new Set([
       ...terminal.cannotClaim,
@@ -547,7 +549,10 @@ function renderFinalReport(
     verdictInputDigest: digestText('verdict-input/v2', canonicalizeJson(verdictInput)),
     scope: scopeContent.includedReqCandidates.map((item) => ({ id: item.reqId, digest: artifact('acceptance-scope').contentDigest })),
     traceability, realResults, injectionResults,
-    manualResults: content('manual-results').results.map((item) => ({ id: item.manualResultId, digest: item.authorityProof.signedDigest })),
+    manualResults: content('manual-results').results.map((item) => ({
+      id: item.manualResultId, digest: item.authorityProof.signedDigest,
+      ...item.authorityProof.approvalAssurance,
+    })),
     risks: content('design-audit').findings,
     regression: { manifestDigest: regressionDigest, command: input.reportPresentation.regressionCommand },
     title: input.reportPresentation.title,
@@ -560,14 +565,17 @@ function renderFinalReport(
     },
     approvals: [
       { kind: 'scope', status: scopeContent.scopeDecision.status,
+        ...approvalAssurance,
         subjectDigest: digestDecisionSubject(projectScopeDecisionSubject(scopeContent)),
         grantDigests: scopeContent.scopeDecision.status === 'pending'
           ? [] : [scopeContent.scopeDecision.receipt.signedDigest] },
       { kind: 'lineage', status: diffContent.lineageReview.status,
+        ...approvalAssurance,
         subjectDigest: digestDecisionSubject(projectLineageDecisionSubject(diffContent)),
         grantDigests: diffContent.lineageReview.status === 'pending'
           ? [] : [diffContent.lineageReview.receipt.signedDigest] },
       { kind: 'execution', status: executionApprovalStatus, subjectDigest: grantContent.runBundleDigest,
+        ...approvalAssurance,
         grantDigests: grantContent.grants.map((grant) => grant.authorityProof.signedDigest) },
     ],
     environment: {

@@ -12,6 +12,7 @@ import {
 } from './common.js'
 import { RequirementModelSchema } from './design.js'
 import { ManualResultSchema } from './manual-result.js'
+import { ApprovalAssuranceSchema } from './approval-assurance.js'
 import { SanitizationRecordSchema } from './privacy.js'
 import { PrivacyReviewReceiptSchema, SanitizerAttestationSchema } from './privacy-attestation.js'
 import { VerdictResultSchema } from './verdict.js'
@@ -388,6 +389,7 @@ export function migrateExecutionContractV10ToV11(
 
 const approvalGrantsContent = z.object({
   runBundleDigest: DigestSchema,
+  approvalAssurance: ApprovalAssuranceSchema,
   grants: z.array(ApprovalFreshnessReceiptSchema).min(1).max(10_000),
 }).strict()
 
@@ -743,6 +745,7 @@ export const ReportGatewayAuditSchema = z.object({
 
 export const FinalReportContentSchema = z.object({
   runtimeProvenance: RuntimeProvenanceSchema,
+  approvalAssurance: ApprovalAssuranceSchema,
   verdictRuleVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
   verdictInputDigest: DigestSchema,
   verdict: VerdictResultSchema.shape.verdict,
@@ -755,7 +758,10 @@ export const FinalReportContentSchema = z.object({
   traceability: z.array(z.object({ fromId: SafeIdSchema, toId: SafeIdSchema, kind: SafeIdSchema }).strict()).max(1_000_000),
   realResults: z.array(IdDigestSchema).max(100_000),
   injectionResults: z.array(IdDigestSchema).max(100_000),
-  manualResults: z.array(IdDigestSchema).max(100_000),
+  manualResults: z.array(IdDigestSchema.extend({
+    approvalMode: z.enum(['local-confirmation', 'webauthn']),
+    identityVerified: z.boolean(), separationOfDutiesVerified: z.boolean(),
+  }).strict()).max(100_000),
   risks: z.array(FindingSchema).max(100_000),
   regression: z.object({ manifestDigest: DigestSchema, command: NonEmptyTextSchema }).strict(),
   title: NonEmptyTextSchema,
@@ -773,6 +779,8 @@ export const FinalReportContentSchema = z.object({
     subjectDigest: DigestSchema,
     grantDigests: z.array(DigestSchema).max(100_000)
       .refine((values) => new Set(values).size === values.length, '审批 grant digest 必须唯一'),
+    approvalMode: z.enum(['local-confirmation', 'webauthn']),
+    identityVerified: z.boolean(), separationOfDutiesVerified: z.boolean(),
   }).strict()).length(3),
   environment: z.object({
     environmentId: SafeIdSchema,
@@ -884,6 +892,21 @@ export const FinalReportContentSchema = z.object({
   }).strict(),
   recommendations: z.array(NonEmptyTextSchema).max(100_000),
 }).strict().superRefine((content, context) => {
+  const assurance = content.approvalAssurance
+  const assuranceInvalid = assurance.approvalMode === 'local-confirmation'
+    && (assurance.identityVerified || assurance.separationOfDutiesVerified)
+  if (assuranceInvalid) context.addIssue({ code: 'custom', path: ['approvalAssurance'],
+    message: '本地确认报告不得声明身份验证或职责分离' })
+  for (const [collection, values] of [
+    ['approvals', content.approvals], ['manualResults', content.manualResults],
+  ] as const) values.forEach((value, index) => {
+    if (value.approvalMode !== assurance.approvalMode
+      || value.identityVerified !== assurance.identityVerified
+      || value.separationOfDutiesVerified !== assurance.separationOfDutiesVerified) {
+      context.addIssue({ code: 'custom', path: [collection, index],
+        message: '逐项审批保证必须与报告总体保证一致' })
+    }
+  })
   const casesByResultId = new Map(content.caseDetails.map((item) => [item.resultId, item]))
   const resultIds = content.caseDetails.map((item) => item.resultId)
   if (casesByResultId.size !== resultIds.length) {

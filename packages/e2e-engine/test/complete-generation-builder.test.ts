@@ -291,6 +291,9 @@ describe('完整 generation builder', () => {
     expect(report.approvals.map((approval: any) => approval.kind)).toEqual(['scope', 'lineage', 'execution'])
     expect(report.approvals[1]).toEqual({
       kind: 'lineage', status: 'approved',
+      approvalMode: 'webauthn',
+      identityVerified: true,
+      separationOfDutiesVerified: true,
       subjectDigest: diff.lineageReview.receipt.decisionSubjectDigest,
       grantDigests: [diff.lineageReview.receipt.signedDigest],
     })
@@ -911,6 +914,13 @@ describe('完整 generation builder', () => {
     ['scope approval', (report: any) => { report.approvals[0].status = 'rejected' }],
     ['lineage approval', (report: any) => { report.approvals[1].status = 'rejected' }],
     ['execution approval', (report: any) => { report.approvals[2].status = 'expired' }],
+    ['approval assurance', (report: any) => {
+      report.approvalAssurance = {
+        approvalMode: 'local-confirmation',
+        identityVerified: true,
+        separationOfDutiesVerified: true,
+      }
+    }],
     ['gateway status', (report: any) => { report.gatewayAudit.status = 'invalid' }],
     ['gateway counters', (report: any) => { report.gatewayAudit.forwarded += 1 }],
     ['noncanonical gateway counter', (report: any) => { report.gatewayAudit.forwarded = Number.NaN }],

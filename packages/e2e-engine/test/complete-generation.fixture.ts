@@ -281,7 +281,10 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       runtimeIsolation: null, unresolvedItems: [],
     }),
     'approval-grants': draft('run/approval-grants.json', {
-      runBundleDigest: d('placeholder'), grants: [],
+      runBundleDigest: d('placeholder'),
+      approvalAssurance: { approvalMode: 'webauthn', identityVerified: true,
+        separationOfDutiesVerified: true },
+      grants: [],
     }),
     'manual-results': draft('run/manual-results.json', { results: [] }),
     'data-leases': draft('run/data-leases.json', { leases: [], allocatorEpoch: 1 }),
@@ -385,7 +388,9 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
     revocationSequence: 0, status: 'valid', reasonCodes: [],
   }
   const receiptDigest = digestText('approval-freshness-receipt/v1', canonicalizeJson(receiptBody))
-  drafts['approval-grants'].content = { runBundleDigest, grants: [{ ...receiptBody, authorityProof: {
+  drafts['approval-grants'].content = { runBundleDigest,
+    approvalAssurance: { approvalMode: 'webauthn', identityVerified: true,
+      separationOfDutiesVerified: true }, grants: [{ ...receiptBody, authorityProof: {
     purpose: 'approval-freshness-receipt/v1', issuer: 'fixture-authority',
     keyId: 'fixture-key:approval-freshness', algorithm: 'Ed25519', signedDigest: receiptDigest,
     signature: sign(null, Buffer.from(canonicalizeJson({ purpose: 'approval-freshness-receipt/v1',
@@ -462,6 +467,8 @@ export function refreshFixtureApproval(input: BuildCompleteGenerationInput): voi
   const signedDigest = digestText('approval-freshness-receipt/v1', canonicalizeJson(body))
   drafts['approval-grants'].content = {
     runBundleDigest: predictedContentDigestFor(input.context, 'run-bundle', drafts['run-bundle']),
+    approvalAssurance: { approvalMode: 'webauthn', identityVerified: true,
+      separationOfDutiesVerified: true },
     grants: [{ ...body, authorityProof: { purpose: 'approval-freshness-receipt/v1', issuer: 'fixture-authority',
       keyId: 'fixture-key:approval-freshness', algorithm: 'Ed25519', signedDigest,
       signature: sign(null, Buffer.from(canonicalizeJson({ purpose: 'approval-freshness-receipt/v1',

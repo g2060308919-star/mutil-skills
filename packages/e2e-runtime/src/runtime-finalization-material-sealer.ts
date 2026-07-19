@@ -12,6 +12,7 @@ import {
   digestCleanupPlanDefinition,
   digestText,
   E2EError,
+  approvalAssuranceForMode,
   type ApprovalCapabilityRecord,
   type ArtifactDocument,
   type ArtifactType,
@@ -43,6 +44,7 @@ import { parseRuntimeInjectionExecutionOutput, parseRuntimeWriteExecutionOutput 
 import type { RuntimeInjectionExecutionOutput, RuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
 import type { RuntimeRunSnapshot } from './run-store.js'
 import { bindManualResultToRuntimeSnapshot } from './runtime-manual-results.js'
+import { approvalModeFromTrustedFacts } from './local-approval-confirmations.js'
 
 const EXTERNAL_TYPES = [
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation',
@@ -220,7 +222,11 @@ export class RuntimeFinalizationMaterialSealer {
       runBundle: { artifactDigest: runBundle.contentDigest, content: runBundle.content },
     })
     documents.set('approval-grants', createArtifact(snapshot, 'approval-grants', {
-      runBundleDigest: runBundle.contentDigest, grants: [receipt],
+      runBundleDigest: runBundle.contentDigest,
+      approvalAssurance: approvalAssuranceForMode(
+        approvalModeFromTrustedFacts(snapshot.trustedExecutionFacts),
+      ),
+      grants: [receipt],
     }, this.dependencies.authority))
     documents.set('manual-results', createArtifact(snapshot, 'manual-results', {
       results: this.requireManualResults(snapshot, external),
@@ -498,7 +504,11 @@ export class RuntimeFinalizationMaterialSealer {
       runBundle: { artifactDigest: runBundle.contentDigest, content: runBundle.content },
     })
     documents.set('approval-grants', createArtifact(snapshot, 'approval-grants', {
-      runBundleDigest: runBundle.contentDigest, grants: [freshness],
+      runBundleDigest: runBundle.contentDigest,
+      approvalAssurance: approvalAssuranceForMode(
+        approvalModeFromTrustedFacts(snapshot.trustedExecutionFacts),
+      ),
+      grants: [freshness],
     }, this.dependencies.authority))
     documents.set('manual-results', createArtifact(snapshot, 'manual-results', {
       results: this.requireManualResults(snapshot, external),
