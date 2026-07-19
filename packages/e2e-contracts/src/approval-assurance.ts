@@ -36,7 +36,7 @@ export const LocalApprovalSummarySchema = z.object({
   methods: z.array(z.enum(['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'])).max(16)
     .refine((values) => new Set(values).size === values.length, 'HTTP method 必须唯一'),
   actionCount: z.number().int().nonnegative().max(100_000),
-  effects: z.array(ApprovalEffectSchema).max(16)
+  effects: z.array(z.union([ApprovalEffectSchema, z.literal('unknown')])).max(16)
     .refine((values) => new Set(values).size === values.length, 'effect 必须唯一'),
   maxUses: z.number().int().nonnegative().max(100_000),
   secretRefs: UniqueSafeIdsSchema,

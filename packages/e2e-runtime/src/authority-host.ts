@@ -489,7 +489,87 @@ export interface RuntimeArtifactStoreAuthority extends CompleteGenerationAuthori
     event: AppendAttemptEventInput
   }): { event: AttemptEvent; eventChainDigest: string }
   verifyManualResult(result: ManualResult): ManualResultVerification
+  finalizeLocalApprovalGrant(input: {
+    subject: ApprovalGrantSubject
+    ttlMs: number
+    finalizationId: string
+    requestDigest: string
+    approvalBinding: ApprovalExecutionBinding
+  }): Promise<SignedGrant>
+  recoverFinalizedGrant(input: {
+    finalizationId: string
+    requestDigest: string
+    subject: ApprovalGrantSubject
+    approvalBinding: ApprovalExecutionBinding
+  }): Promise<{ grant: SignedGrant; approvalSessionRef: string } | undefined>
+  acknowledgeFinalizedGrant(input: ApprovalFinalizationAcknowledgement): Promise<void>
+  issueLocalDecisionReceipt(input: {
+    kind: 'scope' | 'lineage' | 'coverage-disposition'
+    decisionId: string
+    decisionStatus: 'approved' | 'rejected'
+    decisionSubject: DecisionSubject
+  }): DecisionReceipt
   close(): Promise<void>
+}
+
+/** 把持久 Authority 暴露成无需 WebAuthn child/browser 的本地确认签发适配器。 */
+export function createRuntimeLocalApprovalHost(
+  authority: RuntimeArtifactStoreAuthority,
+): Partial<Pick<RuntimeAuthorityHost, 'requestApproval' | 'recoverApproval' | 'acknowledgeFinalization'>> {
+  return {
+    async requestApproval(input) {
+      const grantsCapability = input.approvalType === 'discovery' || input.approvalType === 'execution'
+      const binding: ApprovalExecutionBinding | undefined = grantsCapability ? {
+        runId: input.runId,
+        approvalType: input.approvalType as 'discovery' | 'execution',
+        subjectDigest: input.subjectDigest,
+        installationDigest: input.installationDigest,
+      } : undefined
+      const sessionId = `LOCAL-${input.finalizationId ?? input.runId}-${input.approvalType}`
+      return Object.freeze({
+        url: 'http://localhost/#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        sessionId,
+        async wait() {},
+        ...(binding === undefined ? {} : {
+          async finalize(grantSubject: ApprovalGrantSubject) {
+            if (!input.finalizationId || !input.requestDigest) {
+              throw authorityHostError('E2E_APPROVAL_FINALIZATION_INVALID')
+            }
+            const grant = await authority.finalizeLocalApprovalGrant({
+              subject: grantSubject, ttlMs: 5 * 60_000,
+              finalizationId: input.finalizationId, requestDigest: input.requestDigest,
+              approvalBinding: binding,
+            })
+            return { grant, approvalBinding: binding }
+          },
+        }),
+        ...(!['scope', 'lineage'].includes(input.approvalType) ? {} : {
+          async finalizeDecision(decision: { decisionId: string; decisionSubject: DecisionSubject }) {
+            return authority.issueLocalDecisionReceipt({
+              kind: input.approvalType as 'scope' | 'lineage',
+              decisionId: decision.decisionId,
+              decisionStatus: 'approved',
+              decisionSubject: decision.decisionSubject,
+            })
+          },
+        }),
+      })
+    },
+    async recoverApproval(input) {
+      const recovered = await authority.recoverFinalizedGrant({
+        finalizationId: input.finalizationId, requestDigest: input.requestDigest,
+        subject: input.grantSubject, approvalBinding: input.approvalBinding,
+      })
+      return recovered === undefined ? undefined : {
+        sessionId: recovered.approvalSessionRef,
+        grant: recovered.grant,
+        approvalBinding: input.approvalBinding,
+      }
+    },
+    async acknowledgeFinalization(input) {
+      await authority.acknowledgeFinalizedGrant(input)
+    },
+  }
 }
 
 /**
@@ -585,6 +665,22 @@ export async function openRuntimeArtifactStoreAuthority(options: {
     verifyManualResult: (result) => closed
       ? { valid: false, code: 'E2E_MANUAL_RESULT_AUTHORITY_CLOSED', impact: 'safety-blocked' }
       : authority.verifyManualResult(result),
+    finalizeLocalApprovalGrant: async (input) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return await authority.finalizeLocalApprovalGrant(input)
+    },
+    recoverFinalizedGrant: async (input) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return await authority.recoverFinalizedGrant(input)
+    },
+    acknowledgeFinalizedGrant: async (input) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      await authority.acknowledgeFinalizedGrant(input)
+    },
+    issueLocalDecisionReceipt: (input) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return authority.issueLocalDecisionReceipt(input)
+    },
     async close() {
       if (closed) return
       closed = true

@@ -29,6 +29,10 @@ import {
 } from './write-attempt.js'
 import type { RuntimeInjectionExecutionOutput, RuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
 import { bindManualResultToRuntimeSnapshot, MAX_TRUSTED_MANUAL_RESULTS } from './runtime-manual-results.js'
+import {
+  PendingLocalApprovalConfirmationSchema,
+  type PendingLocalApprovalConfirmation,
+} from './local-approval-confirmations.js'
 
 const EMPTY_DIGEST = `sha256:${'0'.repeat(64)}`
 const LEASE_MILLISECONDS = 30_000
@@ -372,6 +376,49 @@ export class RuntimeRunStore {
         snapshot.globalLedger, requestId, requestDigest, outcome.response, runOutcome,
       )
       return structuredClone(outcome.response)
+    })
+  }
+
+  async claimLocalApprovalConfirmation(input: {
+    projectIdentityDigest: string
+    runId: string
+    confirmationId: string
+    requestId: string
+    requestDigest: string
+    claimedAt: string
+    lock: RuntimeRunLock
+  }): Promise<PendingLocalApprovalConfirmation> {
+    return await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      requirePendingRequest(store, input.requestId, input.requestDigest)
+      const raw = store.runs[key]
+      if (raw === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+      const current = migrateRuntimeRunSnapshot(raw)
+      const parsed = PendingLocalApprovalConfirmationSchema.safeParse(
+        current.trustedExecutionFacts['pending-local-approval'],
+      )
+      if (!parsed.success || parsed.data.confirmationId !== input.confirmationId) {
+        throw runtimeStoreError('E2E_LOCAL_CONFIRMATION_NOT_FOUND', '本地确认不存在或已消费')
+      }
+      if (parsed.data.claimRequestId !== undefined
+        && (parsed.data.claimRequestId !== input.requestId
+          || parsed.data.claimRequestDigest !== input.requestDigest)) {
+        throw runtimeStoreError('E2E_LOCAL_CONFIRMATION_ALREADY_CLAIMED', '本地确认已被其他请求占用')
+      }
+      const claimed = PendingLocalApprovalConfirmationSchema.parse({
+        ...parsed.data, claimRequestId: input.requestId, claimRequestDigest: input.requestDigest,
+      })
+      store.runs[key] = migrateRuntimeRunSnapshot({
+        ...current,
+        trustedExecutionFacts: {
+          ...current.trustedExecutionFacts, 'pending-local-approval': claimed,
+        },
+        updatedAt: input.claimedAt,
+      })
+      appendRunSnapshotJournal(store, key, 'local-approval-confirmation-claimed', input.requestId)
+      return structuredClone(claimed)
     })
   }
 

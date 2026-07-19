@@ -6,10 +6,13 @@ import { LocalApprovalAuthority } from '@mutil-skills/e2e-authority'
 import {
   RuntimeAuthorityHost,
   computeRuntimeApprovalSubjectDigest,
+  createRuntimeLocalApprovalHost,
   loadRuntimeApprovalAssets,
   openRuntimeArtifactStoreAuthority,
   startRuntimeAuthorityHost,
 } from '../src/authority-host.js'
+import { createPendingLocalApprovalConfirmation } from '../src/local-approval-confirmations.js'
+import { writeApprovalMode } from '../src/runtime-user-config.js'
 import type { RuntimeRunSnapshot } from '../src/run-store.js'
 import { RuntimeRunStore } from '../src/run-store.js'
 import { E2ERuntimeHost } from '../src/runtime-host.js'
@@ -38,6 +41,117 @@ test('production artifact authority reopens the persistent Authority identity fo
   expect(reopened.verifySignature(signature)).toBe(true)
   await reopened.close()
   await rm(roots.root, { recursive: true, force: true })
+})
+
+test('local Authority adapter signs a subject-bound grant without inventing a WebAuthn identity', async () => {
+  const roots = await createRuntimeTestRoots()
+  const installation = {
+    ...runtimeInstallation(), versionRoot: roots.source, entrypoint: `${roots.source}/runtime-host.js`,
+  }
+  const authority = await openRuntimeArtifactStoreAuthority({
+    homeDir: roots.home, installation, subject: `local:uid:${process.getuid!()}`,
+  })
+  try {
+    const snapshot = runSnapshot()
+    const subject = localExecutionGrantSubject(snapshot)
+    const subjectDigest = computeRuntimeApprovalSubjectDigest(snapshot, 'execution', subject)
+    const host = createRuntimeLocalApprovalHost(authority)
+    const session = await host.requestApproval!({
+      runId: snapshot.runId, approvalType: 'execution', subjectDigest,
+      installationDigest, finalizationId: 'LOCAL-FINALIZE-1',
+      requestDigest: `sha256:${'d'.repeat(64)}`,
+    })
+    const finalized = await session.finalize!(subject)
+    expect(finalized.grant.approver).toEqual({ kind: 'local-caller' })
+    expect(finalized.grant.approvalContext).toMatchObject({
+      subject: 'local-caller', runId: snapshot.runId, subjectDigest, installationDigest,
+    })
+    await expect(host.recoverApproval!({
+      finalizationId: 'LOCAL-FINALIZE-1', requestDigest: `sha256:${'d'.repeat(64)}`,
+      grantSubject: subject, approvalBinding: finalized.approvalBinding,
+    })).resolves.toMatchObject({ grant: { grantId: finalized.grant.grantId } })
+    await host.acknowledgeFinalization!({
+      finalizationId: 'LOCAL-FINALIZE-1', requestDigest: `sha256:${'d'.repeat(64)}`,
+      grantId: finalized.grant.grantId, approvalBinding: finalized.approvalBinding,
+    })
+  } finally {
+    await authority.close()
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
+test('Runtime Host consumes one subject-bound local confirmation and persists the signed Grant', async () => {
+  const roots = await createRuntimeTestRoots()
+  const runStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+  let authority: Awaited<ReturnType<typeof openRuntimeArtifactStoreAuthority>> | undefined
+  try {
+    await mkdir(`${roots.project}/.biztest`, { recursive: true })
+    await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-LOCAL-CONFIRM',
+    }))
+    const identity = await resolveProjectIdentity(roots.project)
+    const base = {
+      ...runSnapshot(), projectIdentityDigest: identity.digest,
+      workflow: { current: 'awaiting-execution-approval' as const, sequence: 8,
+        eventChainDigest: `sha256:${'8'.repeat(64)}` },
+    }
+    const subject = localExecutionGrantSubject(base)
+    const subjectDigest = computeRuntimeApprovalSubjectDigest(base, 'execution', subject)
+    const confirmation = createPendingLocalApprovalConfirmation({
+      approvalType: 'execution', subjectDigest, projectIdentityDigest: identity.digest,
+      runtimeInstallationDigest: installationDigest, workflowState: base.workflow.current,
+      grantSubject: subject, now: new Date('2026-07-16T00:00:00.000Z'),
+      summary: {
+        runId: base.runId, approvalType: 'execution', environmentId: 'test', riskTier: 'test',
+        origins: ['https://test.example.com'], methods: [], actionCount: 1, effects: ['read'],
+        maxUses: 1, secretRefs: [], dataLeaseRefs: [], cleanupRefs: [],
+        injectionClassifications: [], subjectDigest, expiresAt: '2026-07-16T00:10:00.000Z',
+      },
+    })
+    const snapshot = { ...base, trustedExecutionFacts: {
+      ...base.trustedExecutionFacts,
+      'approval-mode': 'local-confirmation',
+      'pending-local-approval': confirmation,
+    } }
+    const seedDigest = `sha256:${'7'.repeat(64)}`
+    await runStore.beginRequest('SEED-LOCAL-CONFIRM', seedDigest)
+    const seedLock = await runStore.acquireRunLock(identity.digest, snapshot.runId)
+    try { await runStore.createRunOutcome(snapshot, 'SEED-LOCAL-CONFIRM', seedDigest, { seeded: true }, seedLock) }
+    finally { await seedLock.close() }
+    authority = await openRuntimeArtifactStoreAuthority({
+      homeDir: roots.home,
+      installation: { ...runtimeInstallation(), versionRoot: roots.source,
+        entrypoint: `${roots.source}/runtime-host.js` },
+      subject: `local:uid:${process.getuid!()}`,
+    })
+    const host = new E2ERuntimeHost({
+      installation: runtimeInstallation(), doctor: async () => { throw new Error('not used') },
+      runStore, now: () => new Date('2026-07-16T00:01:00.000Z'),
+      localAuthorityHostFactory: async () => createRuntimeLocalApprovalHost(authority!),
+    })
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'CONFIRM-LOCAL-1',
+      client: { name: 'test', version: '1.0.0' }, command: 'confirm-approval',
+      projectRoot: roots.project,
+      payload: { runId: snapshot.runId, confirmationId: confirmation.confirmationId, subjectDigest },
+    })
+    const response = await host.handle(request, JSON.stringify(request))
+    expect(response).toMatchObject({ ok: true, result: {
+      status: 'approved', approvalMode: 'local-confirmation',
+      signedGrant: { approver: { kind: 'local-caller' } },
+    } })
+    expect(await host.handle(request, JSON.stringify(request))).toEqual(response)
+    const persisted = await runStore.getRun(identity.digest, snapshot.runId)
+    expect(persisted?.workflow.current).toBe('execution-approved')
+    expect(persisted?.trustedExecutionFacts['pending-local-approval']).toBeUndefined()
+    expect(persisted?.trustedExecutionFacts['signed-execution-grant']).toMatchObject({
+      approver: { kind: 'local-caller' },
+    })
+  } finally {
+    await authority?.close()
+    await runStore.close()
+    await rm(roots.root, { recursive: true, force: true })
+  }
 })
 
 test('Runtime Authority adapter can only open and wait for child-owned sessions', async () => {
@@ -881,6 +995,7 @@ test('direct CLI reserves a stable finalization before WebAuthn and recovers aft
 
 test('default rpc wiring lazily starts Authority only after Host validation, writes URL to stderr, and closes it', async () => {
   const roots = await createRuntimeTestRoots()
+  await writeApprovalMode(roots.home, 'webauthn')
   const store = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
   try {
     await mkdir(`${roots.project}/.biztest`, { recursive: true })
@@ -1095,6 +1210,7 @@ test('default rpc wiring lazily starts Authority only after Host validation, wri
 
 test('default rpc production wiring starts a real Authority child and closes it after TTL', async ({ skip }) => {
   const roots = await createRuntimeTestRoots()
+  await writeApprovalMode(roots.home, 'webauthn')
   const installation = {
     ...runtimeInstallation(),
     versionRoot: await realpath(process.cwd()),
@@ -1238,6 +1354,14 @@ function executionGrantSubject(snapshot: RuntimeRunSnapshot) {
       actionId: 'ACTION-WS-1', origin: 'https://test.example.com', path: '/events',
       maxInboundMessages: 1, maxBytes: 1024,
     }],
+  }
+}
+
+function localExecutionGrantSubject(snapshot: RuntimeRunSnapshot) {
+  const subject = executionGrantSubject(snapshot)
+  return {
+    ...subject,
+    actions: subject.actions.map((action) => ({ ...action, origin: 'wss://test.example.com' })),
   }
 }
 

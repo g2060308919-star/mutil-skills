@@ -37,7 +37,7 @@ export interface SignedDiscoveryGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
   approvalContext: CanonicalApprovalContext
   subject: DiscoveryApprovalSubject
   subjectDigest: string
@@ -72,12 +72,23 @@ export interface ApproverIdentity {
   roles: string[]
 }
 
+/** 本地确认只证明当前 OS caller 明确确认，不代表已验证自然人身份。 */
+export interface LocalCallerApprover {
+  kind: 'local-caller'
+}
+
+export type ApprovalApprover = ApproverIdentity | LocalCallerApprover
+
+export function approvalApproverSubject(approver: ApprovalApprover): string {
+  return 'kind' in approver ? 'local-caller' : approver.subject
+}
+
 export interface SignedReadGrant {
   grantId: string
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
   approvalContext: CanonicalApprovalContext
   subject: ReadApprovalSubject
   subjectDigest: string
@@ -155,7 +166,7 @@ export interface SignedWriteGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
   approvalContext: CanonicalApprovalContext
   subject: WriteApprovalSubject
   subjectDigest: string
@@ -227,7 +238,7 @@ export interface SignedInjectionGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
   approvalContext: CanonicalApprovalContext
   subject: InjectionApprovalSubject
   subjectDigest: string
@@ -272,7 +283,7 @@ export interface SignedWebSocketReadGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
   approvalContext: CanonicalApprovalContext
   subject: WebSocketReadApprovalSubject
   subjectDigest: string
@@ -317,7 +328,7 @@ export interface SignedSseReadGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
   approvalContext: CanonicalApprovalContext
   subject: SseReadApprovalSubject
   subjectDigest: string

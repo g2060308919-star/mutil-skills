@@ -45,6 +45,19 @@ test('SignedGrantSchema accepts one complete discriminator and rejects extra or 
     .toThrow()
 })
 
+test('SignedGrantSchema distinguishes an unverified local caller from a WebAuthn identity', () => {
+  const local = {
+    ...grant,
+    approver: { kind: 'local-caller' },
+    approvalContext: { ...grant.approvalContext, subject: 'local-caller' },
+  }
+  expect(SignedGrantSchema.parse(local).approver).toEqual({ kind: 'local-caller' })
+  expect(SignedGrantSchema.safeParse({
+    ...local,
+    approver: { kind: 'local-caller', subject: 'pretend-user' },
+  }).success).toBe(false)
+})
+
 test('SignedGrantSchema enforces production injection and streaming bounds', () => {
   const body = 'temporary failure'
   const subject = {

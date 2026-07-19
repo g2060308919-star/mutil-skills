@@ -35,6 +35,17 @@ export {
 } from './local-approval-policy.js'
 
 export {
+  PendingLocalApprovalConfirmationSchema,
+  approvalModeFromTrustedFacts,
+  assertCurrentLocalApprovalConfirmation,
+  createPendingLocalApprovalConfirmation,
+  localConfirmationReceiptDigest,
+  type PendingLocalApprovalConfirmation,
+} from './local-approval-confirmations.js'
+
+export { projectLocalApproval } from './local-approval-projection.js'
+
+export {
   RuntimeDoctorProbeSchema,
   RuntimeDoctorReportSchema,
   RuntimeErrorSchema,

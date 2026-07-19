@@ -1,10 +1,12 @@
 import {
   E2EError,
   canonicalizeJson,
+  approvalApproverSubject,
   digestBytes,
   digestCanonicalGrantApprovalSubject,
   digestText,
   type ApproverIdentity,
+  type ApprovalApprover,
   ApprovalCapabilityRecordSchema,
   ApprovalFinalizationAcknowledgementSchema,
   ApprovalGrantSubjectSchema,
@@ -297,6 +299,10 @@ export class LocalApprovalAuthority {
     },
   ) => StoredWebAuthnApprovalReceipt | undefined | Promise<StoredWebAuthnApprovalReceipt | undefined>
   readonly #stateContext = new AsyncLocalStorage<boolean>()
+  readonly #localApprovalContext = new AsyncLocalStorage<{
+    expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string }
+    binding: ApprovalExecutionBinding
+  }>()
   #activeStateTransactions = 0
   readonly #grants = new Map<string, SignedGrant>()
   readonly #grantFinalizations = new Map<string, StoredGrantFinalization>()
@@ -628,6 +634,31 @@ export class LocalApprovalAuthority {
       approvalSessionRef: input.approvalSessionRef,
     })
     return grant
+  }
+
+  async finalizeLocalApprovalGrant(input: {
+    subject: ApprovalGrantSubject
+    ttlMs: number
+    finalizationId: string
+    requestDigest: string
+    approvalBinding: ApprovalExecutionBinding
+  }): Promise<SignedGrant> {
+    const subject = ApprovalGrantSubjectSchema.parse(immutableSnapshot(input.subject))
+    const binding = parseApprovalExecutionBinding(input.approvalBinding)
+    const expected = {
+      approvalType: canonicalGrantApprovalType(subject),
+      subjectDigest: canonicalGrantApprovalSubjectDigest(subject),
+    }
+    if (expected.approvalType !== binding.approvalType
+      || expected.subjectDigest !== binding.subjectDigest) {
+      throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', '本地确认与 Grant subject 绑定不一致')
+    }
+    return await this.#localApprovalContext.run({ expected, binding }, async () => await this.finalizeApprovalGrant({
+      ...input,
+      subject,
+      approvalBinding: binding,
+      approvalSessionRef: `LOCAL-${input.finalizationId}`,
+    }))
   }
 
   async recoverFinalizedGrant(input: {
@@ -1162,7 +1193,7 @@ export class LocalApprovalAuthority {
     const now = this.#now().getTime()
     if (!context.success
       || context.data.approvalType !== canonicalGrantApprovalType(grant.subject)
-      || context.data.subject !== grant.approver.subject
+      || context.data.subject !== approvalApproverSubject(grant.approver)
       || context.data.subjectDigest !== grant.subjectDigest
       || Date.parse(context.data.issuedAt) > now
       || Date.parse(context.data.expiresAt) <= now
@@ -1845,6 +1876,40 @@ export class LocalApprovalAuthority {
     })
   }
 
+  issueLocalDecisionReceipt(input: {
+    kind: 'scope' | 'lineage' | 'coverage-disposition'
+    decisionId: string
+    decisionStatus: 'approved' | 'rejected'
+    decisionSubject: DecisionSubject
+  }): DecisionReceipt {
+    const request = immutableSnapshot(input)
+    const subject = DecisionSubjectSchema.parse(request.decisionSubject)
+    if (subject.kind !== request.kind) {
+      throw authorityError('E2E_DECISION_SUBJECT_KIND_MISMATCH', 'Decision subject kind 与请求 kind 不一致')
+    }
+    const unsigned = {
+      schemaVersion: '1.0.0' as const,
+      kind: request.kind,
+      decisionId: request.decisionId,
+      decisionStatus: request.decisionStatus,
+      decisionSubjectDigest: digestDecisionSubject(subject),
+      checkedAt: this.#now().toISOString(),
+      nonce: randomBytes(32).toString('hex'),
+      approver: { kind: 'local-caller' as const },
+      issuer: this.#issuer,
+      keyId: this.#decisionKeyId,
+      purpose: `${request.kind}-decision-receipt/v1` as const,
+      algorithm: 'Ed25519' as const,
+    }
+    const signedDigest = digestText('decision-receipt-binding/v1', canonicalizeJson(unsigned))
+    return DecisionReceiptSchema.parse({
+      ...unsigned,
+      signedDigest,
+      signature: sign(null, decisionReceiptProofPayload(unsigned.purpose, this.#issuer,
+        this.#decisionKeyId, signedDigest), this.#decisionPrivateKey).toString('base64url'),
+    })
+  }
+
   verifyDecisionReceipt(receipt: DecisionReceipt, binding: DecisionReceiptVerificationBinding): boolean {
     const material = this.decisionVerifierMaterial
     return createDecisionReceiptVerifier(material, material.publicKeyDigest, this.#now)(receipt, binding)
@@ -2358,7 +2423,7 @@ export class LocalApprovalAuthority {
     expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string },
     ttlMs: number,
     maximum: number,
-  ): Promise<{ approver: ApproverIdentity; context: CanonicalApprovalContext }> {
+  ): Promise<{ approver: ApprovalApprover; context: CanonicalApprovalContext }> {
     if (claimedApprover !== undefined
       && (!matchesRegisteredIdentity(claimedApprover, this.#approvalIdentities.get(claimedApprover.subject))
         || !claimedApprover.roles.includes('e2e-approver'))) {
@@ -2369,6 +2434,25 @@ export class LocalApprovalAuthority {
     }
     if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || ttlMs > maximum) {
       throw authorityError('E2E_APPROVAL_TTL_INVALID', `Grant TTL 必须在 1ms 到 ${maximum}ms 之间`)
+    }
+    const local = this.#localApprovalContext.getStore()
+    if (local !== undefined) {
+      if (claimedApprover !== undefined
+        || local.expected.approvalType !== expected.approvalType
+        || local.expected.subjectDigest !== expected.subjectDigest) {
+        throw authorityError('E2E_APPROVAL_SESSION_BINDING_MISMATCH', '本地确认与实际 Grant subject 不一致')
+      }
+      const issuedAt = this.#now()
+      return {
+        approver: { kind: 'local-caller' },
+        context: CanonicalApprovalContextSchema.parse({
+          schemaVersion: '1.0.0', subject: 'local-caller', runId: local.binding.runId,
+          approvalType: expected.approvalType, subjectDigest: expected.subjectDigest,
+          installationDigest: local.binding.installationDigest, origin: 'http://localhost',
+          issuedAt: issuedAt.toISOString(),
+          expiresAt: new Date(issuedAt.getTime() + ttlMs).toISOString(),
+        }),
+      }
     }
     const receipt = approvalSessionRef
       ? await this.#authenticateApproverSession(approvalSessionRef, expected)
@@ -2414,7 +2498,7 @@ function approvalContextMismatch(
 ): Extract<GrantDecision, { allowed: false }> | undefined {
   if (current.approvalType !== canonicalGrantApprovalType(grant.subject)
     || canonicalizeJson(current) !== canonicalizeJson(grant.approvalContext)
-    || current.subject !== grant.approver.subject
+    || current.subject !== approvalApproverSubject(grant.approver)
     || current.subjectDigest !== grant.subjectDigest
     || Date.parse(current.issuedAt) > now.getTime()
     || Date.parse(current.expiresAt) <= now.getTime()) {
@@ -2982,16 +3066,21 @@ function validateStoredGrantStructure(grant: Record<string, unknown>, policy: Au
     || typeof grant.revocationSequence !== 'number' || !Number.isSafeInteger(grant.revocationSequence)
     || grant.revocationSequence < 0 || !isCanonicalBase64Url(grant.signature, 64)
     || !isPlainSnapshot(grant.approver)) corruptSnapshot()
-  requireExactKeys(grant.approver, ['roles', 'subject'])
-  if (typeof grant.approver.subject !== 'string' || !Array.isArray(grant.approver.roles)
-    || grant.approver.roles.some((role) => typeof role !== 'string')
-    || new Set(grant.approver.roles).size !== grant.approver.roles.length) corruptSnapshot()
+  const localCaller = grant.approver.kind === 'local-caller'
+  if (localCaller) requireExactKeys(grant.approver, ['kind'])
+  else {
+    requireExactKeys(grant.approver, ['roles', 'subject'])
+    if (typeof grant.approver.subject !== 'string' || !Array.isArray(grant.approver.roles)
+      || grant.approver.roles.some((role) => typeof role !== 'string')
+      || new Set(grant.approver.roles).size !== grant.approver.roles.length) corruptSnapshot()
+  }
   const kind = validateStoredGrantSubject(grant.subject, policy.writeContract)
   const context = policy.hasApprovalContext ? CanonicalApprovalContextSchema.safeParse(grant.approvalContext) : undefined
   const expectedSubjectDigest = policy.hasApprovalContext
     ? digestCanonicalGrantApprovalSubject(kind === 'discovery' ? 'discovery' : 'execution', grant.subject)
     : digestText('approval-subject/v1', canonicalizeJson(grant.subject))
-  if ((policy.hasApprovalContext && (!context?.success || context.data.subject !== grant.approver.subject
+  if ((policy.hasApprovalContext && (!context?.success
+    || context.data.subject !== (localCaller ? 'local-caller' : grant.approver.subject)
     || context.data.approvalType !== (kind === 'discovery' ? 'discovery' : 'execution')
     || context.data.subjectDigest !== grant.subjectDigest))
     || expectedSubjectDigest !== grant.subjectDigest
@@ -3645,7 +3734,7 @@ export function createDecisionReceiptVerifier(
       : `${value.kind}-approver`
     if (value.issuer !== material.issuer || value.keyId !== material.keyId
       || value.purpose !== `${value.kind}-decision-receipt/v1` || value.algorithm !== material.algorithm
-      || !value.approver.roles.includes(requiredRole)
+      || (!('kind' in value.approver) && !value.approver.roles.includes(requiredRole))
       || value.kind !== expected.data.kind || value.decisionId !== expected.data.decisionId
       || value.decisionStatus !== expected.data.decisionStatus
       || value.decisionSubjectDigest !== expected.data.decisionSubjectDigest

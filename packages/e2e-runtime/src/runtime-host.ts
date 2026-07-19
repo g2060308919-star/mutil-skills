@@ -18,6 +18,7 @@ import {
   type ArtifactDocument,
   type ArtifactType,
   type ApprovalGrantSubject,
+  type ApprovalMode,
   type DecisionReceipt,
   type DecisionSubject,
   type RuntimeRequestEnvelope,
@@ -87,6 +88,14 @@ import {
   type RuntimeFinalizationMaterialSealerCapability,
 } from './runtime-finalization-material-sealer.js'
 import { createRuntimeOwnedResourceMarker } from './write-attempt.js'
+import {
+  approvalModeFromTrustedFacts,
+  assertCurrentLocalApprovalConfirmation,
+  createPendingLocalApprovalConfirmation,
+  localConfirmationReceiptDigest,
+  type PendingLocalApprovalConfirmation,
+} from './local-approval-confirmations.js'
+import { projectLocalApproval } from './local-approval-projection.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -99,10 +108,13 @@ export interface RuntimeHostDependencies {
   doctor(): Promise<RuntimeDoctorReport>
   runStore: RuntimeRunStore
   now(): Date
+  approvalMode?: ApprovalMode
   projectFileReader?: SecureProjectFileReader
   authorityHostFactory?: () => Promise<Partial<Pick<RuntimeAuthorityHost,
     'requestApproval' | 'recoverApproval' | 'acknowledgeFinalization'
     | 'prepareManualResult' | 'requestManualResultRole' | 'recoverManualResultRole'>>>
+  localAuthorityHostFactory?: () => Promise<Partial<Pick<RuntimeAuthorityHost,
+    'requestApproval' | 'recoverApproval' | 'acknowledgeFinalization'>>>
   presentUserPresenceUrl?(url: string): void | Promise<void>
   readExecutor?: RuntimeReadExecutorCapability
   writeExecutor?: RuntimeWriteExecutorCapability
@@ -141,6 +153,7 @@ export class E2ERuntimeHost {
       // 不得把 pending 当成首次请求重放。execute-run 尤其只能显式 resume。
       if (reservation.kind === 'pending'
         && request.command !== 'open-approval'
+        && request.command !== 'confirm-approval'
         && request.command !== 'run-preflight'
         && request.command !== 'execute-run'
         && request.command !== 'resume-run'
@@ -166,6 +179,7 @@ export class E2ERuntimeHost {
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
       if (request.command === 'open-approval') return await this.openApproval(request, requestDigest)
+      if (request.command === 'confirm-approval') return await this.confirmApproval(request, requestDigest)
       if (request.command === 'prepare-manual-result') {
         return await this.prepareManualResult(request, requestDigest, requestWasPending)
       }
@@ -259,7 +273,7 @@ export class E2ERuntimeHost {
         'project-policy-source': digestBytes('e2e-project-policy-source/v1', projectPolicyBytes),
       },
       frozenArtifacts: {},
-      trustedExecutionFacts: {},
+      trustedExecutionFacts: { 'approval-mode': this.dependencies.approvalMode ?? 'webauthn' },
       writeAttempts: {},
       executionResults: { readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} },
       requestResponses: {},
@@ -605,11 +619,8 @@ export class E2ERuntimeHost {
   private async openApproval(
     request: Extract<RuntimeRequestEnvelope, { command: 'open-approval' }>,
     requestDigest: string,
+    confirmed?: PendingLocalApprovalConfirmation,
   ): Promise<RuntimeResponseEnvelope> {
-    const authorityHostFactory = this.dependencies.authorityHostFactory
-    if (authorityHostFactory === undefined) throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
-    const authorityHost = await authorityHostFactory()
-    if (authorityHost.requestApproval === undefined) throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     const initial = await this.readLockedRun(identity.digest, request.payload.runId)
     this.requireInstallation(initial)
@@ -620,6 +631,67 @@ export class E2ERuntimeHost {
       request.payload.approvalType,
       request.payload.grantSubject,
     )
+    const approvalMode = approvalModeFromTrustedFacts(initial.trustedExecutionFacts)
+    if (confirmed !== undefined) {
+      if (approvalMode !== 'local-confirmation') throw confirmationHostError('E2E_LOCAL_CONFIRMATION_MODE_MISMATCH')
+      assertCurrentLocalApprovalConfirmation(confirmed, {
+        confirmationId: confirmed.confirmationId, subjectDigest,
+        projectIdentityDigest: identity.digest,
+        runtimeInstallationDigest: initial.runtimeInstallationDigest,
+        workflowState: initial.workflow.current, now: this.dependencies.now(),
+      })
+    } else if (approvalMode === 'local-confirmation') {
+      const provisionalExpiry = new Date(this.dependencies.now().getTime() + 10 * 60_000).toISOString()
+      const projected = projectLocalApproval({
+        snapshot: initial, approvalType: request.payload.approvalType,
+        subjectDigest, grantSubject: request.payload.grantSubject, expiresAt: provisionalExpiry,
+      })
+      if (projected.disposition.kind === 'blocked') {
+        throw confirmationHostError(projected.disposition.reasonCode)
+      }
+      if (projected.disposition.kind === 'confirmation-required') {
+        const confirmation = createPendingLocalApprovalConfirmation({
+          approvalType: request.payload.approvalType, subjectDigest,
+          projectIdentityDigest: identity.digest,
+          runtimeInstallationDigest: initial.runtimeInstallationDigest,
+          workflowState: initial.workflow.current, summary: projected.summary,
+          grantSubject: request.payload.grantSubject, now: this.dependencies.now(),
+        })
+        return await this.withRunLock(identity.digest, initial.runId, async (lock) => {
+          const current = await this.dependencies.runStore.getRun(identity.digest, initial.runId)
+          if (current === undefined
+            || computeRuntimeApprovalSubjectDigest(current, request.payload.approvalType,
+              request.payload.grantSubject) !== subjectDigest) {
+            throw confirmationHostError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')
+          }
+          return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+            identity.digest, initial.runId, request.requestId, requestDigest,
+            (snapshot) => ({
+              snapshot: {
+                ...snapshot,
+                trustedExecutionFacts: {
+                  ...snapshot.trustedExecutionFacts,
+                  'pending-local-approval': confirmation,
+                },
+                updatedAt: this.dependencies.now().toISOString(),
+              },
+              response: this.successResponse(request.requestId, {
+                status: 'confirmation-required', approvalMode: 'local-confirmation',
+                confirmationId: confirmation.confirmationId, subjectDigest,
+                expiresAt: confirmation.expiresAt, summary: confirmation.summary,
+              }),
+            }),
+            'local-approval-confirmation-created', lock,
+          ))
+        })
+      }
+    }
+    const authorityHostFactory = approvalMode === 'local-confirmation'
+      ? this.dependencies.localAuthorityHostFactory
+      : this.dependencies.authorityHostFactory
+    if (authorityHostFactory === undefined) throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
+    const authorityHost = await authorityHostFactory()
+    if (authorityHost.requestApproval === undefined) throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
     const approvalBinding = request.payload.grantSubject === undefined ? undefined : {
       runId: initial.runId,
       approvalType: request.payload.approvalType as 'discovery' | 'execution',
@@ -650,7 +722,16 @@ export class E2ERuntimeHost {
         approvalBinding: { runId: string; approvalType: 'discovery' | 'execution'; subjectDigest: string; installationDigest: string }
       },
     ): Promise<RuntimeResponseEnvelope> => {
+      const signedFactDigest = finalized !== undefined
+        ? digestText('local-approved-grant/v1', canonicalizeJson(finalized.grant))
+        : finalizedDecision?.signedDigest ?? digestText('approval-completed/v1', canonicalizeJson({
+          runId: current.runId, approvalType: request.payload.approvalType, subjectDigest, sessionId,
+        }))
+      const receiptDigest = confirmed === undefined ? signedFactDigest : localConfirmationReceiptDigest({
+        confirmation: confirmed, signedFactDigest,
+      })
       const response = this.successResponse(request.requestId, {
+        status: 'approved', approvalMode, receiptDigest,
         runId: current.runId, approvalType: request.payload.approvalType, subjectDigest, sessionId,
         ...(finalized === undefined ? {} : {
           signedGrant: finalized.grant, approvalBinding: finalized.approvalBinding,
@@ -676,7 +757,7 @@ export class E2ERuntimeHost {
             return RuntimeResponseEnvelopeSchema.parse(
               await this.dependencies.runStore.updateRunOutcome(
                 identity.digest, current.runId, request.requestId, requestDigest,
-                (snapshot) => ({ snapshot: { ...snapshot,
+                (snapshot) => ({ snapshot: clearLocalConfirmation({ ...snapshot,
                   workflow: transitionWorkflow({
                     state: snapshot.workflow, next: 'scope-approved',
                     reason: 'scope user-presence approval completed',
@@ -684,7 +765,7 @@ export class E2ERuntimeHost {
                     engineVersion: this.dependencies.installation.version,
                   }).state,
                   updatedAt: this.dependencies.now().toISOString(),
-                }, response }),
+                }, confirmed), response }),
                 'scope-approval-completed', lock,
               ),
             )
@@ -701,7 +782,7 @@ export class E2ERuntimeHost {
                   snapshot, request.payload.approvalType as 'scope' | 'lineage', finalizedDecision!,
                 )
                 return {
-                snapshot: {
+                snapshot: clearLocalConfirmation({
                   ...snapshot,
                   frozenArtifacts: {
                     ...snapshot.frozenArtifacts,
@@ -718,7 +799,7 @@ export class E2ERuntimeHost {
                     engineVersion: this.dependencies.installation.version,
                   }).state : snapshot.workflow,
                   updatedAt: this.dependencies.now().toISOString(),
-                },
+                }, confirmed),
                 response: this.successResponse(request.requestId, {
                   ...((response.result ?? {}) as Record<string, unknown>),
                   decisionReceipt: finalizedDecision,
@@ -739,7 +820,7 @@ export class E2ERuntimeHost {
           await this.dependencies.runStore.writeTrustedFactOutcome({
             capability, requestId: request.requestId, requestDigest,
             factType, fact: finalized.grant, response,
-            update: (snapshot) => ({
+            update: (snapshot) => clearLocalConfirmation({
               ...snapshot,
               workflow: transitionWorkflow({
                 state: snapshot.workflow,
@@ -750,7 +831,7 @@ export class E2ERuntimeHost {
                 ...(factType === 'signed-execution-grant' ? { executionGrantValid: true } : {}),
               }).state,
               updatedAt: this.dependencies.now().toISOString(),
-            }),
+            }, confirmed),
           }),
         )
       }
@@ -811,7 +892,7 @@ export class E2ERuntimeHost {
       installationDigest: initial.runtimeInstallationDigest,
       ...(approvalBinding === undefined ? {} : { finalizationId: request.requestId, requestDigest }),
     })
-    await this.dependencies.presentUserPresenceUrl?.(session.url)
+    if (approvalMode === 'webauthn') await this.dependencies.presentUserPresenceUrl?.(session.url)
     await session.wait()
     const decisionArtifactType = request.payload.approvalType === 'scope'
       ? 'acceptance-scope' : request.payload.approvalType === 'lineage' ? 'prd-diff' : undefined
@@ -848,6 +929,53 @@ export class E2ERuntimeHost {
       )
       return await persistFinalized(current, lock, session.sessionId, finalized)
     })
+  }
+
+  private async confirmApproval(
+    request: Extract<RuntimeRequestEnvelope, { command: 'confirm-approval' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    const claimed = await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const current = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (current === undefined) throw confirmationHostError('E2E_RUNTIME_RUN_NOT_FOUND')
+      this.requireInstallation(current)
+      if (approvalModeFromTrustedFacts(current.trustedExecutionFacts) !== 'local-confirmation') {
+        throw confirmationHostError('E2E_LOCAL_CONFIRMATION_MODE_MISMATCH')
+      }
+      const parsed = assertCurrentLocalApprovalConfirmation(
+        current.trustedExecutionFacts['pending-local-approval'], {
+          confirmationId: request.payload.confirmationId,
+          subjectDigest: request.payload.subjectDigest,
+          projectIdentityDigest: identity.digest,
+          runtimeInstallationDigest: current.runtimeInstallationDigest,
+          workflowState: current.workflow.current,
+          now: this.dependencies.now(),
+        },
+      )
+      const currentDigest = computeRuntimeApprovalSubjectDigest(
+        current, parsed.approvalType, parsed.grantSubject,
+      )
+      if (currentDigest !== parsed.subjectDigest) {
+        throw confirmationHostError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')
+      }
+      return await this.dependencies.runStore.claimLocalApprovalConfirmation({
+        projectIdentityDigest: identity.digest, runId: current.runId,
+        confirmationId: parsed.confirmationId,
+        requestId: request.requestId, requestDigest,
+        claimedAt: this.dependencies.now().toISOString(), lock,
+      })
+    })
+    const synthetic = {
+      ...request,
+      command: 'open-approval' as const,
+      payload: {
+        runId: request.payload.runId,
+        approvalType: claimed.approvalType,
+        ...(claimed.grantSubject === undefined ? {} : { grantSubject: claimed.grantSubject }),
+      },
+    } as Extract<RuntimeRequestEnvelope, { command: 'open-approval' }>
+    return await this.openApproval(synthetic, requestDigest, claimed)
   }
 
   private async prepareManualResult(
@@ -2130,6 +2258,19 @@ function asRuntimeError(error: unknown): E2EError {
     'Runtime Host 处理请求时发生内部错误',
     error,
   )
+}
+
+function clearLocalConfirmation(
+  snapshot: RuntimeRunSnapshot,
+  confirmed: PendingLocalApprovalConfirmation | undefined,
+): RuntimeRunSnapshot {
+  if (confirmed === undefined) return snapshot
+  const { ['pending-local-approval']: _consumed, ...trustedExecutionFacts } = snapshot.trustedExecutionFacts
+  return { ...snapshot, trustedExecutionFacts }
+}
+
+function confirmationHostError(code: string): E2EError {
+  return runtimeHostError(code, 'safety', '本地确认缺失、失效或与当前可信 Run 不一致')
 }
 
 function manualResultPersistenceError(cause: unknown): E2EError {

@@ -17,6 +17,7 @@ import {
 import { RuntimeWriteAttemptRecordSchema } from './write-attempt.js'
 import { parseRuntimeInjectionExecutionOutput, parseRuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
 import { RuntimeReadExecutionRecordSchema } from './runtime-read-result.js'
+import { PendingLocalApprovalConfirmationSchema } from './local-approval-confirmations.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const RunIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -86,11 +87,24 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     'signed-discovery-grant', 'signed-execution-grant', 'browser-preflight',
     'finalization-material', 'finalization-execution-facts', 'quarantined-evidence',
     'manual-results-by-id',
+    'approval-mode', 'pending-local-approval',
   ])
   if (Object.keys(facts).length > allowed.size) context.addIssue({ code: 'custom', message: '可信执行事实数量超限' })
   for (const [key, value] of Object.entries(facts)) {
     if (!allowed.has(key)) {
       context.addIssue({ code: 'custom', path: [key], message: '未知可信执行事实类型' })
+      continue
+    }
+    if (key === 'approval-mode') {
+      if (value !== 'local-confirmation' && value !== 'webauthn') context.addIssue({
+        code: 'custom', path: [key], message: '审批模式非法',
+      })
+      continue
+    }
+    if (key === 'pending-local-approval') {
+      if (!PendingLocalApprovalConfirmationSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: '待确认本地审批结构非法',
+      })
       continue
     }
     if (key === 'browser-preflight') {

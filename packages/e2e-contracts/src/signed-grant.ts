@@ -31,7 +31,10 @@ const QuerySchema = z.array(z.tuple([QueryPartSchema, QueryPartSchema])).max(1_0
 const RolesSchema = z.array(SafeIdSchema).min(1).max(1_000)
   .refine((roles) => new Set(roles).size === roles.length)
 
-const ApproverSchema = z.object({ subject: SafeIdSchema, roles: RolesSchema }).strict()
+const ApproverSchema = z.union([
+  z.object({ subject: SafeIdSchema, roles: RolesSchema }).strict(),
+  z.object({ kind: z.literal('local-caller') }).strict(),
+])
 const InjectionResponseBodySchema = z.union([
   z.object({ kind: z.literal('no-body') }).strict(),
   z.object({ kind: z.literal('utf8'), value: BoundedStringSchema(64 * 1024), digest: DigestSchema })
@@ -149,7 +152,7 @@ export const SignedGrantSchema = z.union([
 ]).superRefine((grant, context) => {
   if (Date.parse(grant.expiresAt) <= Date.parse(grant.issuedAt)
     || grant.subjectDigest !== canonicalGrantApprovalSubjectDigest(grant.subject)
-    || grant.approvalContext.subject !== grant.approver.subject
+    || grant.approvalContext.subject !== ('kind' in grant.approver ? 'local-caller' : grant.approver.subject)
     || grant.approvalContext.subjectDigest !== grant.subjectDigest
     || grant.approvalContext.approvalType !== canonicalGrantApprovalType(grant.subject)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: 'grant binding is inconsistent' })

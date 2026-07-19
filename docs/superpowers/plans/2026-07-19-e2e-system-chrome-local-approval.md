@@ -142,11 +142,11 @@
 - `confirm-approval`：Run lock 内重验项目/安装/workflow/subject/expiry，一次性消费并复用现有签名/finalization recovery。
 - 本地 approver 严格为 `{kind:'local-caller'}`，WebAuthn identity 保持旧字段与角色验证。
 
-- [ ] 写失败测试：自动批准、challenge、主题变化、过期、replay、跨项目、Authority 已签发但 Run Store 未落盘恢复。
-- [ ] 运行定向测试，确认 RED。
-- [ ] 实现确认 store、Host 路由与 Authority 本地签发入口。
-- [ ] 运行定向测试、Authority grant/receipt/replay 测试和 typecheck。
-- [ ] Commit：`feat(e2e): implement subject-bound local confirmations`
+- [x] 写失败测试：自动批准、challenge、主题变化、过期、replay、跨项目、Authority 已签发但 Run Store 未落盘恢复。
+- [x] 运行定向测试，确认 RED。
+- [x] 实现确认 store、Host 路由与 Authority 本地签发入口。
+- [x] 运行定向测试、Authority grant/receipt/replay 测试和 typecheck。
+- [x] Commit：`feat(e2e): implement subject-bound local confirmations`
 
 ### Task 7：人工结果本地双确认与 WebAuthn 兼容
 

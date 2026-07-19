@@ -87,6 +87,7 @@ import {
 } from './secret-contract.js'
 import {
   computeRuntimeApprovalSubjectDigest,
+  createRuntimeLocalApprovalHost,
   openRuntimeArtifactStoreAuthority,
   startRuntimeAuthorityHost,
   type RuntimeArtifactStoreAuthority,
@@ -389,6 +390,7 @@ export async function runCli(
       })
     }
     const projectRoot = 'projectRoot' in request ? request.projectRoot : undefined
+    const configuredApprovalMode = (await readApprovalMode(dependencies.homeDir)).mode
     const runStore = await RuntimeRunStore.open({
       homeDir: dependencies.homeDir,
       ...(projectRoot === undefined ? {} : { projectRoot }),
@@ -411,6 +413,14 @@ export async function runCli(
             ? {} : { approvalSessionTtlMs: dependencies.approvalSessionTtlMs }),
         })
         return authorityHost
+      }
+      const getArtifactAuthority = async () => {
+        if (artifactAuthority !== undefined) return artifactAuthority
+        artifactAuthority = await (dependencies.openArtifactStoreAuthority
+          ?? openRuntimeArtifactStoreAuthority)({
+          homeDir: dependencies.homeDir, installation, subject: localAuthoritySubject(),
+        })
+        return artifactAuthority
       }
       const browserCapabilities = !needsBrowserExecution ? undefined : createProductionBrowserCapabilities({
         homeDir: dependencies.homeDir, installation, authorityHost: getAuthorityHost,
@@ -475,10 +485,7 @@ export async function runCli(
       }
       if ((request.command === 'render-report' || request.command === 'finalize-run')
         && dependencies.projectPublisherFactory === undefined) {
-        artifactAuthority = await (dependencies.openArtifactStoreAuthority
-          ?? openRuntimeArtifactStoreAuthority)({
-          homeDir: dependencies.homeDir, installation, subject: localAuthoritySubject(),
-        })
+        artifactAuthority = await getArtifactAuthority()
       }
       const projectPublisherFactory = dependencies.projectPublisherFactory ?? (artifactAuthority === undefined
         ? undefined
@@ -560,6 +567,7 @@ export async function runCli(
         }),
         runStore,
         now: () => new Date(),
+        approvalMode: configuredApprovalMode,
         ...(browserCapabilities === undefined ? {} : {
           preflightExecutor: browserCapabilities.preflight,
           readExecutor: browserCapabilities.read,
@@ -571,11 +579,17 @@ export async function runCli(
         ...(finalizationMaterialSealer === undefined ? {} : { finalizationMaterialSealer }),
         ...(writeProduction === undefined ? {} : { writeProduction: writeProduction.capability }),
         ...(!['open-approval', 'prepare-manual-result', 'finalize-manual-result-role']
-          .includes(request.command) ? {} : {
+          .includes(request.command) || configuredApprovalMode !== 'webauthn' ? {} : {
           authorityHostFactory: async () => {
             return await getAuthorityHost()
           },
           presentUserPresenceUrl: async (url: string) => await writeText(stderr, `${url}\n`),
+        }),
+        ...(!['open-approval', 'confirm-approval'].includes(request.command)
+          || configuredApprovalMode !== 'local-confirmation' ? {} : {
+          localAuthorityHostFactory: async () => createRuntimeLocalApprovalHost(
+            await getArtifactAuthority(),
+          ),
         }),
         ...(projectPublisherFactory === undefined ? {} : {
           projectPublisherFactory,

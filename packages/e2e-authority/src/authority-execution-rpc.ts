@@ -1,5 +1,6 @@
 import {
   canonicalizeJson,
+  approvalApproverSubject,
   canonicalGrantApprovalSubjectDigest,
   CanonicalApprovalContextSchema,
   DiscoveryApprovalSubjectSchema,
@@ -419,7 +420,7 @@ function verifyRegisteredApprovalContext(
   if (!current || current.approvalType !== 'execution'
     || canonicalizeJson(current) !== canonicalizeJson(grant.approvalContext)
     || current.subjectDigest !== grant.subjectDigest
-    || current.subject !== grant.approver.subject
+    || current.subject !== approvalApproverSubject(grant.approver)
     || !Number.isFinite(now)
     || Date.parse(current.issuedAt) > now
     || Date.parse(current.expiresAt) <= now) {
@@ -437,7 +438,7 @@ function requireRegisteredApprovalContext(
   const current = registeredApprovalContext(rpcContext, approvalType)
   if (canonicalizeJson(current) !== canonicalizeJson(grant.approvalContext)
     || current.subjectDigest !== grant.subjectDigest
-    || current.subject !== grant.approver.subject) {
+    || current.subject !== approvalApproverSubject(grant.approver)) {
     throw executionRpcError('E2E_APPROVAL_CONTEXT_MISMATCH')
   }
 }
