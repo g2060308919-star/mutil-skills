@@ -74,11 +74,11 @@
 - 每次会话创建 `0700 profile-<uuid>`、owner marker；确认进程关闭后删除，超时保留给 recovery。
 - 配置系统 Chrome 时运行临时 Gateway、direct-bypass canary、profile cleanup proof，成功后才持久化 selection。
 
-- [ ] 写失败测试：两种来源共享 launch/profile；日常 Profile canary 不可见；正常删除；未确认关闭保留；proof 绑定 source。
-- [ ] 运行三个定向测试文件，确认 RED。
-- [ ] 实现统一 host 与 capability proof。
-- [ ] 运行定向测试、现有 Gateway 安全测试与 typecheck。
-- [ ] Commit：`feat(e2e): bind system Chrome to controlled browser isolation`
+- [x] 写失败测试：两种来源共享 launch/profile；日常 Profile canary 不可见；正常删除；未确认关闭保留；proof 绑定 source。
+- [x] 运行三个定向测试文件，确认 RED。
+- [x] 实现统一 host 与 capability proof。
+- [x] 运行定向测试、现有 Gateway 安全测试与 typecheck。
+- [x] Commit：`feat(e2e): bind system Chrome to controlled browser isolation`
 
 ### Task 4：CLI 浏览器/审批配置与 Doctor 模式感知
 

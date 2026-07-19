@@ -118,6 +118,26 @@ describe('Controlled Browser Host', () => {
     await session.close()
   })
 
+  test('system Chrome uses the identical isolated profile and Gateway policy with source-bound measurement', async () => {
+    const roots = await createRuntimeTestRoots()
+    const driver = fakeDriver()
+    const session = await new ControlledBrowserHost(driver).open({
+      homeDir: roots.home,
+      runId: 'RUN-SYSTEM-CHROME',
+      installation: systemChromeInstallation(),
+      gateway: gateway(vi.fn(async () => ({ approved: true, denied: true, proofDigest: digest('c') }))),
+    })
+
+    expect(driver.launchInput?.options.executablePath).toBe('/Applications/Google Chrome')
+    expect(driver.launchInput?.profileDir).toMatch(/\/state\/RUN-SYSTEM-CHROME\/browser\/profile-/)
+    expect(driver.launchInput?.options.proxy.server).toBe('http://127.0.0.1:43111')
+    expect(session.measurement.browserExecutableDigest).toBe(digest('a'))
+    expect(session.measurement.browserClosureDigest).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(session.measurement.browserClosureDigest).not.toBe(digest('a'))
+    await session.close()
+    await expect(access(driver.launchInput!.profileDir)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   test('生产 profile 在 mkdir 前持久登记，正常关闭删除后才写 cleaned tombstone', async () => {
     const roots = await createRuntimeTestRoots()
     const driver = fakeDriver()
@@ -293,6 +313,21 @@ function installation() {
       closureDigest: digest('b'), executableDigest: digest('e'),
       runtimeInstallationDigest: digest('r'), playwrightVersion: '1.61.1',
     },
+  } as never
+}
+
+function systemChromeInstallation() {
+  return {
+    selection: {
+      schemaVersion: '1.0.0',
+      source: { kind: 'system-chrome', executablePath: '/Applications/Google Chrome' },
+      browserVersion: 'Google Chrome 126.0.6478.127',
+      executableDigest: digest('a'),
+      runtimeInstallationDigest: digest('b'),
+      controlledLaunchProofDigest: digest('p'),
+      configuredAt: '2026-07-19T00:00:00.000Z',
+    },
+    identity: { device: 1, inode: 2, uid: 501, byteLength: 1024 },
   } as never
 }
 

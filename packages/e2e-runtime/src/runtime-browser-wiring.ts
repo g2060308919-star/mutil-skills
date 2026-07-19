@@ -23,7 +23,7 @@ import {
 import { InjectionGateway, LocalGatewayAuditSigner, ReversibleWriteGateway,
   digestBinaryHttpPayload } from '@mutil-skills/e2e-gateway'
 import { ControlledBrowserHost, getControlledBrowserSessionBinding } from './browser-host.js'
-import { inspectChromiumInstallation, type ChromiumInstallation } from './browser-installer.js'
+import { inspectChromiumInstallation, type BrowserInstallation } from './browser-installer.js'
 import { startGatewayProxyHostForRuntime } from './gateway-proxy-host.js'
 import { projectGatewayRules } from './gateway-rule-projector.js'
 import { runtimeLayout } from './runtime-layout.js'
@@ -877,7 +877,7 @@ function writeWiringError(code: string): E2EError {
 export async function bootstrapInstalledBrowserRuntime(input: {
   homeDir: string
   installation: RuntimeInstallation
-  browserInstallation: ChromiumInstallation
+  browserInstallation: BrowserInstallation
   prepareAuthorityRoot(): Promise<void>
 }): Promise<void> {
   await input.prepareAuthorityRoot()

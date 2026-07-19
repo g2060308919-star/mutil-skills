@@ -5,7 +5,7 @@ import { lstat, open, realpath } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { ChromiumInstallation } from './browser-installer.js'
+import type { BrowserInstallation } from './browser-installer.js'
 import type { GatewayBrowserBinding, RuntimeGatewayProxyHost } from './gateway-proxy-host.js'
 import type { RuntimeOwnedResourceRecord } from './runtime-owned-resource-registry.js'
 import type { RuntimeWriteOwnedResourceLifecycle } from './runtime-write-production.js'
@@ -192,14 +192,15 @@ export class ControlledBrowserHost {
   async open(input: {
     homeDir: string
     runId: string
-    installation: ChromiumInstallation
+    installation: BrowserInstallation
     gateway: Pick<RuntimeGatewayProxyHost, 'handle' | 'browserBinding'>
     ownedResourceLifecycle?: RuntimeWriteOwnedResourceLifecycle
   }): Promise<ControlledBrowserSession> {
+    const browser = browserInstallationBinding(input.installation)
     if (!isAbsolute(input.homeDir)
       || !/^[A-Za-z0-9._:-]{1,256}$/.test(input.runId)
       || input.runId === '.' || input.runId === '..'
-      || input.installation.manifest.runtimeInstallationDigest.length === 0
+      || browser.runtimeInstallationDigest.length === 0
       || input.gateway.browserBinding.gatewaySessionMeasurementDigest
         !== input.gateway.handle.measurement.gatewaySessionMeasurementDigest) {
       throw browserHostError('E2E_BROWSER_HOST_INPUT_INVALID', 'Browser Host binding 非法')
@@ -253,7 +254,7 @@ export class ControlledBrowserHost {
       throw error
     }
     const options = chromiumLaunchOptions({
-      executablePath: input.installation.executablePath,
+      executablePath: browser.executablePath,
       proxyEndpoint: input.gateway.handle.endpoint,
       caSpkiFingerprint: input.gateway.handle.caSpkiFingerprint,
       homeDir: profileDir,
@@ -312,8 +313,8 @@ export class ControlledBrowserHost {
         'e2e-browser-actual-command-line/v1', canonicalizeJson(commandLine),
       )
       const preCanary = {
-        browserClosureDigest: input.installation.manifest.closureDigest,
-        browserExecutableDigest: input.installation.manifest.executableDigest,
+        browserClosureDigest: browser.browserClosureDigest,
+        browserExecutableDigest: browser.browserExecutableDigest,
         gatewaySessionMeasurementDigest: input.gateway.handle.measurement.gatewaySessionMeasurementDigest,
         launchPolicyDigest,
         actualCommandLineDigest,
@@ -453,6 +454,46 @@ export class ControlledBrowserHost {
     if (!outcome.ok) throw browserHostError(
       'E2E_BROWSER_CLOSE_FAILED', 'Browser 已确认关闭，但 close 返回失败', outcome.error,
     )
+  }
+}
+
+interface BrowserInstallationBinding {
+  source: 'system-chrome' | 'managed-chromium'
+  executablePath: string
+  runtimeInstallationDigest: string
+  browserClosureDigest: string
+  browserExecutableDigest: string
+}
+
+function browserInstallationBinding(installation: BrowserInstallation): BrowserInstallationBinding {
+  if ('manifest' in installation) {
+    return {
+      source: 'managed-chromium', executablePath: installation.executablePath,
+      runtimeInstallationDigest: installation.manifest.runtimeInstallationDigest,
+      browserClosureDigest: installation.manifest.closureDigest,
+      browserExecutableDigest: installation.manifest.executableDigest,
+    }
+  }
+  const { selection, identity } = installation
+  if (selection.source.kind !== 'system-chrome' || !isAbsolute(selection.source.executablePath)
+    || !/^sha256:[a-f0-9]{64}$/.test(selection.executableDigest)
+    || !/^sha256:[a-f0-9]{64}$/.test(selection.runtimeInstallationDigest)
+    || !Number.isSafeInteger(identity.device) || identity.device < 0
+    || !Number.isSafeInteger(identity.inode) || identity.inode <= 0
+    || !Number.isSafeInteger(identity.byteLength) || identity.byteLength <= 0) {
+    throw browserHostError('E2E_BROWSER_HOST_INPUT_INVALID', '系统 Chrome installation binding 非法')
+  }
+  return {
+    source: 'system-chrome', executablePath: selection.source.executablePath,
+    runtimeInstallationDigest: selection.runtimeInstallationDigest,
+    browserExecutableDigest: selection.executableDigest,
+    browserClosureDigest: digestText('e2e-system-chrome-closure/v1', canonicalizeJson({
+      source: selection.source.kind,
+      executablePath: selection.source.executablePath,
+      browserVersion: selection.browserVersion,
+      executableDigest: selection.executableDigest,
+      identity,
+    })),
   }
 }
 
