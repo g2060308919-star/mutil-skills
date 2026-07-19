@@ -7,7 +7,7 @@ import { createRuntimeOwnedResourceMarker, sealRuntimeWriteAttemptRecord } from 
 
 function currentSnapshot(): RuntimeRunSnapshot {
   return {
-    schemaVersion: '1.4.0',
+    schemaVersion: '1.5.0',
     runId: 'RUN-1',
     assetId: 'ASSET-1',
     projectIdentityDigest: `sha256:${'a'.repeat(64)}`,
@@ -16,7 +16,7 @@ function currentSnapshot(): RuntimeRunSnapshot {
     workflow: createWorkflow(),
     artifactDigests: {},
     frozenArtifacts: {},
-    trustedExecutionFacts: {},
+    trustedExecutionFacts: { 'approval-mode': 'local-confirmation' },
     writeAttempts: {},
     executionResults: { readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} },
     requestResponses: {},
@@ -34,7 +34,7 @@ describe('runtime state migration', () => {
     expect(migrated).not.toBe(snapshot)
   })
 
-  test('explicitly migrates 1.0 through 1.4 without inventing artifacts, attempts or execution results', () => {
+  test('explicitly migrates 1.0 through 1.5 and preserves legacy WebAuthn approval semantics', () => {
     const current = currentSnapshot()
     const legacy = {
       ...current,
@@ -46,36 +46,54 @@ describe('runtime state migration', () => {
     expect(migrateRuntimeRunSnapshot(legacy)).toEqual({
       ...current,
       frozenArtifacts: {},
-      trustedExecutionFacts: {},
+      trustedExecutionFacts: { 'approval-mode': 'webauthn' },
       writeAttempts: {},
       executionResults: { readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} },
     })
   })
 
-  test('explicitly migrates 1.1 to strict 1.4 with empty WriteAttempt/execution result maps', () => {
+  test('explicitly migrates 1.1 to strict 1.5 with WebAuthn and empty WriteAttempt/execution result maps', () => {
     const current = currentSnapshot()
-    const legacy = { ...current, schemaVersion: '1.1.0' } as Record<string, unknown>
+    const legacy = {
+      ...current, schemaVersion: '1.1.0', trustedExecutionFacts: {},
+    } as Record<string, unknown>
     delete legacy.writeAttempts
-    expect(migrateRuntimeRunSnapshot(legacy)).toEqual(current)
+    expect(migrateRuntimeRunSnapshot(legacy)).toEqual({
+      ...current, trustedExecutionFacts: { 'approval-mode': 'webauthn' },
+    })
   })
 
-  test('explicitly migrates 1.2 to 1.4 and adds the read result domain', () => {
+  test('explicitly migrates 1.2 to 1.5 and adds the read result domain', () => {
     const current = currentSnapshot()
-    const legacy = { ...current, schemaVersion: '1.2.0' } as const
-    expect(migrateRuntimeRunSnapshot(legacy)).toEqual(current)
+    const legacy = { ...current, schemaVersion: '1.2.0', trustedExecutionFacts: {} } as const
+    expect(migrateRuntimeRunSnapshot(legacy)).toEqual({
+      ...current, trustedExecutionFacts: { 'approval-mode': 'webauthn' },
+    })
   })
 
-  test('explicitly migrates 1.3 to 1.4 without conflating read, write and injection domains', () => {
+  test('explicitly migrates 1.3 to 1.5 without conflating read, write and injection domains', () => {
     const current = currentSnapshot()
     const legacy = {
       ...current,
       schemaVersion: '1.3.0',
+      trustedExecutionFacts: {},
       executionResults: { realEnvironment: {}, gatewayInjection: {} },
     } as const
-    expect(migrateRuntimeRunSnapshot(legacy)).toEqual(current)
+    expect(migrateRuntimeRunSnapshot(legacy)).toEqual({
+      ...current, trustedExecutionFacts: { 'approval-mode': 'webauthn' },
+    })
   })
 
-  test.each(['1.5.0', '2.0.0', 'invalid'])(
+  test('1.4 Run 缺少模式时迁移为 WebAuthn，已有本地模式则保持不变', () => {
+    const current = currentSnapshot()
+    const legacy = { ...current, schemaVersion: '1.4.0', trustedExecutionFacts: {} } as const
+    expect(migrateRuntimeRunSnapshot(legacy).trustedExecutionFacts).toEqual({ 'approval-mode': 'webauthn' })
+    expect(migrateRuntimeRunSnapshot({
+      ...legacy, trustedExecutionFacts: { 'approval-mode': 'local-confirmation' },
+    }).trustedExecutionFacts).toEqual({ 'approval-mode': 'local-confirmation' })
+  })
+
+  test.each(['1.6.0', '2.0.0', 'invalid'])(
     'blocks unsupported snapshot version %s instead of guessing a migration',
     (schemaVersion) => {
       expect(() => migrateRuntimeRunSnapshot({ ...currentSnapshot(), schemaVersion }))

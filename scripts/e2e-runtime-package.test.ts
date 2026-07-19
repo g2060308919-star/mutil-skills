@@ -154,7 +154,7 @@ describe('E2E Runtime npm tarball', () => {
           name?: unknown
           version?: unknown
         }
-        expect(manifest).toMatchObject({ name: packageName, version: '0.1.0' })
+        expect(manifest).toMatchObject({ name: packageName, version: '0.2.0' })
         const loaded = await import(pathToFileURL(join(packageRoot, 'dist', 'src', 'index.js')).href)
         expect(loaded).toBeTypeOf('object')
         expect(await realpath(packageRoot)).not.toContain(sourceRoot)
@@ -166,7 +166,7 @@ describe('E2E Runtime npm tarball', () => {
       const version = await execFileAsync(process.execPath, [runtimeBin, '--version'], {
         cwd: project, env: commandEnvironment, timeout: 30_000,
       })
-      expect(version.stdout.trim()).toBe('0.1.0')
+      expect(version.stdout.trim()).toBe('0.2.0')
       expect(`${version.stdout}${version.stderr}`).not.toContain(sourceRoot)
 
       await expect(execFileAsync(process.execPath, [runtimeBin, 'doctor', '--json'], {
@@ -185,9 +185,9 @@ async function resolvePackageTarballs(directory: string): Promise<string[]> {
   const files = await readdir(root)
   return publishedPackages.map((packageName) => {
     const expectedPrefix = packageName.replace('@mutil-skills/', 'mutil-skills-').replaceAll('/', '-')
-    const matches = files.filter((file) => file === `${expectedPrefix}-0.1.0.tgz`)
+    const matches = files.filter((file) => file === `${expectedPrefix}-0.2.0.tgz`)
     if (matches.length !== 1) {
-      throw new Error(`打包目录中 ${packageName}@0.1.0 的 tarball 数量必须为 1`)
+      throw new Error(`打包目录中 ${packageName}@0.2.0 的 tarball 数量必须为 1`)
     }
     return join(root, matches[0]!)
   })

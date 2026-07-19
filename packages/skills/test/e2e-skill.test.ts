@@ -49,7 +49,7 @@ describe('E2E skill package', () => {
           'verified installation manifest + protocol major + safety probes',
         ],
         whenMissing: {
-          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.1.0',
+          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.2.0',
           terminalState: 'environment-blocked', reasonCode: 'E2E_RUNTIME_HOST_UNAVAILABLE',
         },
       }],
@@ -116,6 +116,34 @@ describe('E2E skill package', () => {
     expect(text).toContain('每个业务命令成功后必须立即调用 `get-status`')
     expect(text).toContain('拒绝未知字段')
     expect(text).toContain('不得把 `approved: true` 当作审批')
+  })
+
+  test('默认使用系统 Chrome 与本地确认，不把 WebAuthn 登记设为必经步骤', async () => {
+    const entry = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+    const approval = await readFile(new URL('../skills/testing/e2e/execution-approval.md', import.meta.url), 'utf8')
+    const browser = await readFile(new URL('../skills/testing/e2e/browser-execution.md', import.meta.url), 'utf8')
+
+    expect(entry).toContain('configure-browser --system')
+    expect(entry).toContain('configure-approval --mode local-confirmation')
+    expect(entry).toContain('默认流程不执行 `identity enroll`')
+    expect(entry).toContain('`confirmation-required`')
+    expect(entry).toContain('必须暂停并等待调用者明确确认')
+    expect(entry).toContain('@mutil-skills/e2e-runtime@0.2.0')
+    expect(approval).toContain('`confirm-approval`')
+    expect(approval).toContain('本地确认不验证自然人身份，也不证明职责分离')
+    expect(browser).toContain('系统 Google Chrome')
+    expect(browser).toContain('一次性 Profile')
+    expect(browser).toContain('不读取或改变日常 Chrome Profile')
+  })
+
+  test('报告必须展示实际审批保障，不能把本地调用者确认写成身份审批', async () => {
+    const report = await readFile(new URL('../skills/testing/e2e/report-verdict.md', import.meta.url), 'utf8')
+
+    for (const field of ['approvalMode', 'identityVerified', 'separationOfDutiesVerified']) {
+      expect(report).toContain(`\`${field}\``)
+    }
+    expect(report).toContain('本地确认（不验证身份/职责分离）')
+    expect(report).toContain('WebAuthn 仅作为显式增强模式')
   })
 
   test('恢复与报告子流程只能调用真实 Runtime 命令', async () => {

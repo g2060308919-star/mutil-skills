@@ -6,7 +6,7 @@ import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
 const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const PACKAGE_VERSION = '0.1.0'
+const PACKAGE_VERSION = '0.2.0'
 
 export interface CrossRepoRuntimeGoldenResult {
   doctor: { ready: boolean; [key: string]: unknown }

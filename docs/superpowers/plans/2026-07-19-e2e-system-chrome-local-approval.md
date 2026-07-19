@@ -207,11 +207,11 @@
 - Modify: `CHANGELOG.md`
 - Modify: seven E2E `package.json` files and `package-lock.json`
 
-- [ ] 写失败测试：Skill 默认流程没有 identity enroll；confirmation-required 必须停等明确确认；旧 Run→webauthn、旧 browser→managed selection；包版本和内部依赖全为 0.2.0。
-- [ ] 运行定向测试，确认 RED。
-- [ ] 实现中文 Skill/文档、迁移和版本闭包。
-- [ ] 运行定向测试、package topology 和 typecheck。
-- [ ] Commit：`docs(e2e): publish the 0.2 local-first workflow`
+- [x] 写失败测试：Skill 默认流程没有 identity enroll；confirmation-required 必须停等明确确认；旧 Run→webauthn、旧 browser→managed selection；包版本和内部依赖全为 0.2.0。
+- [x] 运行定向测试，确认 RED。
+- [x] 实现中文 Skill/文档、迁移和版本闭包。
+- [x] 运行定向测试、package topology 和 typecheck。
+- [x] Commit：`docs(e2e): publish the 0.2 local-first workflow`
 
 ### Task 10：Golden、安全矩阵与发布闭包验证
 

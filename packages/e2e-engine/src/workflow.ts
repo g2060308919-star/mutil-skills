@@ -255,7 +255,7 @@ function recordWorkflowEvent(input: {
     next: input.next,
     reason: input.reason,
     timestamp,
-    engineVersion: input.engineVersion ?? '0.1.0',
+    engineVersion: input.engineVersion ?? '0.2.0',
     commitVerified: input.commitVerified === true,
     previousChainDigest: input.state.eventChainDigest,
   }

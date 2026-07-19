@@ -298,7 +298,7 @@ const RuntimePublicationRecordSchema = z.object({
 }).strict()
 
 const RuntimeRunSnapshotSchema = z.object({
-  schemaVersion: z.literal('1.4.0'),
+  schemaVersion: z.literal('1.5.0'),
   runId: RunIdSchema,
   assetId: AssetIdSchema,
   projectIdentityDigest: DigestSchema,
@@ -387,6 +387,15 @@ export const RuntimeStateMigrationRegistry: Readonly<Record<string, RuntimeState
       ...(snapshot.executionResults as Record<string, unknown> | undefined),
     },
   }),
+  '1.4.0': (snapshot) => ({
+    ...snapshot,
+    schemaVersion: '1.5.0',
+    trustedExecutionFacts: {
+      ...(snapshot.trustedExecutionFacts as Record<string, unknown> | undefined),
+      'approval-mode': (snapshot.trustedExecutionFacts as Record<string, unknown> | undefined)?.['approval-mode']
+        ?? 'webauthn',
+    },
+  }),
 })
 
 export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
@@ -398,7 +407,7 @@ export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
   }
   let candidateVersion = sourceVersion
   const visited = new Set<string>()
-  while (candidateVersion !== '1.4.0') {
+  while (candidateVersion !== '1.5.0') {
     if (visited.has(candidateVersion)) throw migrationRequired(sourceVersion)
     visited.add(candidateVersion)
     const migrator = RuntimeStateMigrationRegistry[candidateVersion]

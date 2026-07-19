@@ -263,7 +263,7 @@ export class E2ERuntimeHost {
     }).prdRevision
     const timestamp = this.dependencies.now().toISOString()
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.4.0',
+      schemaVersion: '1.5.0',
       runId,
       assetId: request.payload.assetId,
       projectIdentityDigest: identity.digest,

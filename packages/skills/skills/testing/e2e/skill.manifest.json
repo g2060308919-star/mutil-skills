@@ -18,7 +18,7 @@
       "whenMissing": {
         "action": "prompt-install",
         "package": "@mutil-skills/e2e-runtime",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "terminalState": "environment-blocked",
         "reasonCode": "E2E_RUNTIME_HOST_UNAVAILABLE"
       }
