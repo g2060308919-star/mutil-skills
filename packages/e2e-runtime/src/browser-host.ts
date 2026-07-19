@@ -15,6 +15,7 @@ import {
   type BrowserProfileSupervisorHandle,
 } from './browser-profile-supervisor.js'
 import { currentProcessStartIdentity } from './runtime-install-recovery.js'
+import { systemChromeClosureDigest } from './system-chrome.js'
 export type { BrowserProfileSupervisor } from './browser-profile-supervisor.js'
 
 const HOST_RESOLVER_POLICY = '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'
@@ -487,13 +488,7 @@ function browserInstallationBinding(installation: BrowserInstallation): BrowserI
     source: 'system-chrome', executablePath: selection.source.executablePath,
     runtimeInstallationDigest: selection.runtimeInstallationDigest,
     browserExecutableDigest: selection.executableDigest,
-    browserClosureDigest: digestText('e2e-system-chrome-closure/v1', canonicalizeJson({
-      source: selection.source.kind,
-      executablePath: selection.source.executablePath,
-      browserVersion: selection.browserVersion,
-      executableDigest: selection.executableDigest,
-      identity,
-    })),
+    browserClosureDigest: systemChromeClosureDigest(installation),
   }
 }
 

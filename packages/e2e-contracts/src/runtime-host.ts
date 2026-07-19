@@ -171,6 +171,8 @@ export const RuntimeDoctorReportSchema = z.object({
   ready: z.boolean(),
   runtimeVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
   installationDigest: DigestSchema,
+  browserSource: z.enum(['system-chrome', 'managed-chromium', 'unconfigured']),
+  approvalMode: z.enum(['local-confirmation', 'webauthn']),
   probes: z.record(RuntimeDoctorProbeSchema),
 }).strict()
 

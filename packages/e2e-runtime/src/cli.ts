@@ -19,7 +19,7 @@ import {
 import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { Readable, type Writable } from 'node:stream'
 import {
   installRuntime as installRuntimeDefault,
@@ -66,6 +66,16 @@ import { ProductionGenerationFinalizer } from './production-generation-finalizer
 import { RegressionPublisher } from './regression-publisher.js'
 import { GenerationAssembler } from './generation-assembler.js'
 import { runtimeLayout } from './runtime-layout.js'
+import {
+  ApprovalModeSchema,
+  readApprovalMode,
+  writeApprovalMode as writeApprovalModeDefault,
+  writeBrowserSelection,
+  type ApprovalMode,
+  type BrowserSelection,
+} from './runtime-user-config.js'
+import { discoverSystemChrome, inspectSystemChrome } from './system-chrome.js'
+import { inspectRuntimeCapabilityProof } from './runtime-capability-proof.js'
 import {
   openRuntimeWriteProduction,
   type OpenRuntimeWriteProductionResult,
@@ -132,6 +142,12 @@ export interface RuntimeCliDependencies {
     projectRoot: string
   }) => Promise<CliSecretBroker>
   installChromium?: (options: InstallChromiumOptions) => Promise<unknown>
+  configureSystemBrowser?: (input: {
+    homeDir: string
+    projectRoot: string
+    executablePath?: string
+  }) => Promise<BrowserSelection>
+  writeApprovalMode?: (homeDir: string, mode: ApprovalMode) => Promise<void>
   bootstrapBrowserRuntime?: typeof bootstrapInstalledBrowserRuntime
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
   /**
@@ -179,6 +195,49 @@ export async function runCli(
     return runInstallManagementCommand(arguments_, responseWriter, dependencies)
   }
 
+  if (arguments_[0] === 'configure-browser') {
+    const explicit = arguments_.length === 4 && arguments_[1] === '--system'
+      && arguments_[2] === '--executable' && isAbsolute(arguments_[3]!)
+    const discovered = arguments_.length === 2 && arguments_[1] === '--system'
+    if (!explicit && !discovered) return writeErrorResponse(responseWriter, 'CONFIGURE-BROWSER', new E2EError({
+      code: 'E2E_RUNTIME_REQUEST_INVALID', category: 'input',
+      message: 'configure-browser 只接受 --system [--executable <absolute>]', retryable: false,
+    }))
+    try {
+      const selection = await (dependencies.configureSystemBrowser ?? configureSystemBrowserDefault)({
+        homeDir: dependencies.homeDir,
+        projectRoot: (dependencies.currentWorkingDirectory ?? process.cwd)(),
+        ...(explicit ? { executablePath: arguments_[3]! } : {}),
+      })
+      await responseWriter.write(`${canonicalizeJson({ ok: true, result: {
+        configured: true, browserSource: selection.source.kind,
+        browserVersion: selection.browserVersion,
+        executableDigest: selection.executableDigest,
+        controlledLaunchProofDigest: selection.controlledLaunchProofDigest,
+      } })}\n`)
+      return 0
+    } catch (error) {
+      return writeErrorResponse(responseWriter, 'CONFIGURE-BROWSER', error instanceof E2EError ? error : new E2EError({
+        code: 'E2E_SYSTEM_CHROME_CONFIGURATION_FAILED', category: 'environment',
+        message: '系统 Chrome 受控配置失败；不会自动下载托管 Chromium', retryable: false, cause: error,
+      }))
+    }
+  }
+
+  if (arguments_[0] === 'configure-approval') {
+    const mode = arguments_.length === 3 && arguments_[1] === '--mode'
+      ? ApprovalModeSchema.safeParse(arguments_[2]) : undefined
+    if (mode === undefined || !mode.success) return writeErrorResponse(responseWriter, 'CONFIGURE-APPROVAL', new E2EError({
+      code: 'E2E_RUNTIME_REQUEST_INVALID', category: 'input',
+      message: 'configure-approval 只接受 --mode local-confirmation|webauthn', retryable: false,
+    }))
+    await (dependencies.writeApprovalMode ?? writeApprovalModeDefault)(dependencies.homeDir, mode.data)
+    await responseWriter.write(`${canonicalizeJson({ ok: true, result: {
+      configured: true, approvalMode: mode.data,
+    } })}\n`)
+    return 0
+  }
+
   if (arguments_.length === 1 && arguments_[0] === 'install-browser') {
     try {
       const installation = await (dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault)({
@@ -201,6 +260,34 @@ export async function runCli(
           await authority.close()
         },
       })
+      if (isRecord(result) && isRecord(result.manifest)) {
+        const manifest = result.manifest
+        const valid = typeof manifest.chromiumVersion === 'string'
+          && typeof manifest.executableDigest === 'string'
+          && typeof manifest.closureDigest === 'string'
+          && typeof manifest.runtimeInstallationDigest === 'string'
+        if (valid) {
+          const proof = await inspectRuntimeCapabilityProof({
+            homeDir: dependencies.homeDir,
+            runtimeInstallationDigest: installation.installationDigest,
+          }).catch((error) => {
+            if (dependencies.bootstrapBrowserRuntime !== undefined) return undefined
+            throw error
+          })
+          if (proof !== undefined) await writeBrowserSelection(dependencies.homeDir, {
+            schemaVersion: '1.0.0',
+            source: {
+              kind: 'managed-chromium',
+              installationId: `${installation.version}-${process.platform}-${process.arch}`,
+            },
+            browserVersion: manifest.chromiumVersion as string,
+            executableDigest: manifest.executableDigest as string,
+            runtimeInstallationDigest: installation.installationDigest,
+            controlledLaunchProofDigest: proof.proofDigest,
+            configuredAt: new Date().toISOString(),
+          })
+        }
+      }
       await responseWriter.write(`${canonicalizeJson({
         ok: true,
         result: publicBrowserInstallResult(result, installation),
@@ -866,6 +953,44 @@ function defaultDependencies(): RuntimeCliDependencies {
   }
 }
 
+async function configureSystemBrowserDefault(input: {
+  homeDir: string
+  projectRoot: string
+  executablePath?: string
+}): Promise<BrowserSelection> {
+  const installation = await inspectRuntimeInstallationDefault({ homeDir: input.homeDir })
+  const executablePath = input.executablePath ?? await discoverSystemChrome()
+  const inspected = await inspectSystemChrome({
+    executablePath,
+    projectRoot: input.projectRoot,
+    runtimeInstallationDigest: installation.installationDigest,
+    controlledLaunchProofDigest: `sha256:${'0'.repeat(64)}`,
+    configuredAt: new Date().toISOString(),
+  })
+  await bootstrapInstalledBrowserRuntime({
+    homeDir: input.homeDir,
+    installation,
+    browserInstallation: inspected,
+    prepareAuthorityRoot: async () => {
+      const authority = await startRuntimeAuthorityHost({
+        homeDir: input.homeDir, installation, subject: localAuthoritySubject(),
+      })
+      await authority.close()
+    },
+  })
+  const proof = await inspectRuntimeCapabilityProof({
+    homeDir: input.homeDir,
+    runtimeInstallationDigest: installation.installationDigest,
+  })
+  const selection = {
+    ...inspected.selection,
+    controlledLaunchProofDigest: proof.proofDigest,
+    configuredAt: new Date().toISOString(),
+  }
+  await writeBrowserSelection(input.homeDir, selection)
+  return selection
+}
+
 function isHumanAuthorityCommand(arguments_: string[]): boolean {
   if (arguments_.length === 2 && arguments_[0] === 'identity' && arguments_[1] === 'enroll') return true
   if (arguments_[0] !== 'approve' || arguments_[1] !== '--run-id' || !SAFE_ID.test(arguments_[2]!)
@@ -889,6 +1014,13 @@ async function openDefaultHumanAuthoritySession(
     }),
   })
   if (arguments_[0] === 'identity') {
+    if ((await readApprovalMode(dependencies.homeDir)).mode !== 'webauthn') {
+      throw new E2EError({
+        code: 'E2E_WEBAUTHN_MODE_REQUIRED', category: 'input',
+        message: 'identity enroll 仅用于 approvalMode=webauthn；默认本地确认无需登记身份',
+        retryable: false,
+      })
+    }
     const authority = await startAuthority()
     try {
       return closeAuthorityAfterWait(await authority.enroll({ subject: localAuthoritySubject() }), authority)
@@ -1220,6 +1352,8 @@ function formatDoctorReport(report: RuntimeDoctorReport): string {
   const lines = [
     'Runtime Doctor',
     `运行时版本：${report.runtimeVersion}`,
+    `浏览器来源：${report.browserSource}`,
+    `审批模式：${report.approvalMode}`,
     `就绪：${report.ready ? '是' : '否'}`,
     '探针\t状态\t原因代码\t修复建议',
   ]

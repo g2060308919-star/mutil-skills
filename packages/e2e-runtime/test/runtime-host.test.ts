@@ -1190,7 +1190,8 @@ describe('E2ERuntimeHost', () => {
       installation,
       doctor: async () => ({
         ready: true, runtimeVersion: installation.version,
-        installationDigest: installation.installationDigest, probes: {},
+        installationDigest: installation.installationDigest,
+        browserSource: 'system-chrome', approvalMode: 'local-confirmation', probes: {},
       }),
       runStore: fixture.store,
       now: () => new Date('2026-07-17T00:00:00.000Z'),
@@ -1474,6 +1475,8 @@ async function hostFixture(options: {
       ready: true,
       runtimeVersion: installation.version,
       installationDigest: installation.installationDigest,
+      browserSource: 'system-chrome',
+      approvalMode: 'local-confirmation',
       probes: {},
     }),
     runStore: store,

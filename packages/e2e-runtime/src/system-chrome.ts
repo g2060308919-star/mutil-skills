@@ -1,4 +1,4 @@
-import { digestBytes, E2EError } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, digestBytes, digestText, E2EError } from '@mutil-skills/e2e-contracts'
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
@@ -132,6 +132,16 @@ export async function revalidateSystemChrome(
       '系统 Chrome 路径、版本或 executable digest 已改变；请重新配置')
   }
   return inspected
+}
+
+export function systemChromeClosureDigest(inspected: InspectedSystemChrome): string {
+  return digestText('e2e-system-chrome-closure/v1', canonicalizeJson({
+    source: inspected.selection.source.kind,
+    executablePath: inspected.selection.source.executablePath,
+    browserVersion: inspected.selection.browserVersion,
+    executableDigest: inspected.selection.executableDigest,
+    identity: inspected.identity,
+  }))
 }
 
 async function executableExists(path: string): Promise<boolean> {

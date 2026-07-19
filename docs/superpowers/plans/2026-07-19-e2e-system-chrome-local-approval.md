@@ -96,11 +96,11 @@
 - `repo-e2e configure-approval --mode ...`。
 - Doctor 输出 `browserSource`、`approvalMode`；系统 Chrome 每次重验 path/version/digest；本地模式 enrollment 不影响 ready。
 
-- [ ] 写失败测试：CLI 参数闭包、无静默 fallback、系统 Chrome 更新返回 `E2E_SYSTEM_CHROME_REVALIDATION_REQUIRED`、本地模式无 credential 仍 ready、WebAuthn 模式继续阻断。
-- [ ] 运行定向测试，确认 RED。
-- [ ] 实现 CLI/Doctor 与严格公共输出。
-- [ ] 运行定向测试和 typecheck。
-- [ ] Commit：`feat(e2e): configure browser and approval modes`
+- [x] 写失败测试：CLI 参数闭包、无静默 fallback、系统 Chrome 更新返回 `E2E_SYSTEM_CHROME_REVALIDATION_REQUIRED`、本地模式无 credential 仍 ready、WebAuthn 模式继续阻断。
+- [x] 运行定向测试，确认 RED。
+- [x] 实现 CLI/Doctor 与严格公共输出。
+- [x] 运行定向测试和 typecheck。
+- [x] Commit：`feat(e2e): configure browser and approval modes`
 
 ### Task 5：审批保证 Contracts、风险分级与本地处置函数
 

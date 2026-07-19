@@ -17,6 +17,12 @@ import {
 } from './authority-host.js'
 import { runtimeLayout } from './runtime-layout.js'
 import { renderCompleteReport } from '@mutil-skills/e2e-report'
+import {
+  readApprovalMode,
+  readBrowserSelection,
+  type ApprovalMode,
+} from './runtime-user-config.js'
+import { revalidateSystemChrome, systemChromeClosureDigest } from './system-chrome.js'
 
 export const RUNTIME_DOCTOR_PROBE_NAMES = [
   'installation',
@@ -40,6 +46,8 @@ export interface RuntimeProbeContext {
   installation: RuntimeInstallation
   homeDir: string
   authorityInspection?: Promise<RuntimeAuthorityInspection>
+  approvalMode: ApprovalMode
+  systemChromeVersionReader?: (executablePath: string) => Promise<string>
 }
 
 export type RuntimeProbe = (context: RuntimeProbeContext) => Promise<RuntimeDoctorProbe>
@@ -48,12 +56,15 @@ export interface RunRuntimeDoctorOptions {
   installation: RuntimeInstallation
   homeDir: string
   probes?: Partial<Record<RuntimeDoctorProbeName, RuntimeProbe>>
+  systemChromeVersionReader?: (executablePath: string) => Promise<string>
 }
 
 export interface AggregateDoctorReportInput {
   runtimeVersion: string
   installationDigest: string
   probes: Record<string, RuntimeDoctorProbe>
+  browserSource?: 'system-chrome' | 'managed-chromium' | 'unconfigured'
+  approvalMode?: ApprovalMode
 }
 
 export function aggregateDoctorReport(input: AggregateDoctorReportInput): RuntimeDoctorReport {
@@ -61,12 +72,23 @@ export function aggregateDoctorReport(input: AggregateDoctorReportInput): Runtim
     ready: RUNTIME_DOCTOR_PROBE_NAMES.every((name) => input.probes[name]?.status === 'passed'),
     runtimeVersion: input.runtimeVersion,
     installationDigest: input.installationDigest,
+    browserSource: input.browserSource ?? 'unconfigured',
+    approvalMode: input.approvalMode ?? 'local-confirmation',
     probes: input.probes,
   })
 }
 
 export async function runRuntimeDoctor(options: RunRuntimeDoctorOptions): Promise<RuntimeDoctorReport> {
-  const context: RuntimeProbeContext = { installation: options.installation, homeDir: options.homeDir }
+  const approvalMode = (await readApprovalMode(options.homeDir)).mode
+  const browserSource = await readBrowserSelection(options.homeDir)
+    .then((selection) => selection.source.kind)
+    .catch(() => 'unconfigured' as const)
+  const context: RuntimeProbeContext = {
+    installation: options.installation, homeDir: options.homeDir, approvalMode,
+    ...(options.systemChromeVersionReader === undefined ? {} : {
+      systemChromeVersionReader: options.systemChromeVersionReader,
+    }),
+  }
   const probes: Record<string, RuntimeDoctorProbe> = {}
   for (const name of RUNTIME_DOCTOR_PROBE_NAMES) {
     try {
@@ -84,7 +106,7 @@ export async function runRuntimeDoctor(options: RunRuntimeDoctorOptions): Promis
   return aggregateDoctorReport({
     runtimeVersion: options.installation.version,
     installationDigest: options.installation.installationDigest,
-    probes,
+    probes, browserSource, approvalMode,
   })
 }
 
@@ -107,6 +129,8 @@ export function runtimeDoctorFailureReport(runtimeVersion: string): RuntimeDocto
     ready: false,
     runtimeVersion,
     installationDigest: `sha256:${'0'.repeat(64)}`,
+    browserSource: 'unconfigured',
+    approvalMode: 'local-confirmation',
     probes,
   })
 }
@@ -118,15 +142,15 @@ const DEFAULT_RUNTIME_PROBES: Record<RuntimeDoctorProbeName, RuntimeProbe> = {
   authority: authorityProbe,
   'approval-presence': approvalPresenceProbe,
   gateway: capabilityProofProbe('gateway'),
-  chromium: async ({ homeDir, installation }) => {
+  chromium: async (context) => {
+    const { homeDir, installation } = context
     try {
-      const browser = await inspectChromiumInstallation({
-        homeDir, runtimeVersion: installation.version,
-        runtimeInstallationDigest: installation.installationDigest,
-      })
+      const browser = await inspectConfiguredBrowser(context)
       return {
-        status: 'passed', reasonCode: 'E2E_CHROMIUM_INSTALLATION_OK',
-        proofDigest: browser.manifest.closureDigest, remediation: '无需处理',
+        status: 'passed',
+        reasonCode: browser.source === 'system-chrome'
+          ? 'E2E_SYSTEM_CHROME_SELECTION_OK' : 'E2E_CHROMIUM_INSTALLATION_OK',
+        proofDigest: browser.browserClosureDigest, remediation: '无需处理',
       }
     } catch (error) {
       const code = error instanceof Error && 'code' in error && typeof error.code === 'string'
@@ -134,8 +158,10 @@ const DEFAULT_RUNTIME_PROBES: Record<RuntimeDoctorProbeName, RuntimeProbe> = {
       return {
         status: code === 'E2E_CHROMIUM_NOT_INSTALLED' ? 'not-installed' : 'blocked', reasonCode: code,
         remediation: code === 'E2E_CHROMIUM_NOT_INSTALLED'
-          ? '使用 repo-e2e install-browser 安装固定 Chromium'
-          : 'Chromium 安装完整性验证失败；保留现场并重新安装 Runtime 与固定 Chromium',
+          ? '先运行 repo-e2e configure-browser --system；系统 Chrome 不可用时再显式 install-browser'
+          : code === 'E2E_SYSTEM_CHROME_REVALIDATION_REQUIRED'
+            ? '重新运行 repo-e2e configure-browser --system'
+            : '浏览器完整性验证失败；保留现场并重新配置浏览器',
       }
     }
   },
@@ -169,6 +195,11 @@ async function authorityProbe(context: RuntimeProbeContext): Promise<RuntimeDoct
 async function approvalPresenceProbe(context: RuntimeProbeContext): Promise<RuntimeDoctorProbe> {
   try {
     const inspected = await inspectRuntimeAuthority(context)
+    if (context.approvalMode === 'local-confirmation') return {
+      status: 'passed', reasonCode: 'E2E_LOCAL_CONFIRMATION_READY',
+      proofDigest: inspected.proofDigest,
+      remediation: '无需登记 WebAuthn；高风险操作仍需明确本地确认',
+    }
     return inspected.credentialCount > 0 ? {
       status: 'passed', reasonCode: 'E2E_APPROVAL_IDENTITY_ENROLLED',
       proofDigest: inspected.proofDigest, remediation: '无需处理',
@@ -372,17 +403,17 @@ function trustedPythonProbe(reasonCode: string): RuntimeProbe {
 }
 
 function capabilityProofProbe(kind: 'gateway' | 'isolation'): RuntimeProbe {
-  return async ({ homeDir, installation }) => {
+  return async (context) => {
+    const { homeDir, installation } = context
     try {
       const proof = await inspectRuntimeCapabilityProof({
         homeDir, runtimeInstallationDigest: installation.installationDigest,
       })
-      const browser = await inspectChromiumInstallation({
-        homeDir, runtimeVersion: installation.version,
-        runtimeInstallationDigest: installation.installationDigest,
-      })
-      if (proof.isolation.browserClosureDigest !== browser.manifest.closureDigest
-        || proof.isolation.browserExecutableDigest !== browser.manifest.executableDigest) {
+      const browser = await inspectConfiguredBrowser(context)
+      if (proof.isolation.browserClosureDigest !== browser.browserClosureDigest
+        || proof.isolation.browserExecutableDigest !== browser.browserExecutableDigest
+        || (browser.controlledLaunchProofDigest !== undefined
+          && browser.controlledLaunchProofDigest !== proof.proofDigest)) {
         const mismatch = new Error('E2E_RUNTIME_CAPABILITY_PROOF_BROWSER_MISMATCH') as Error & { code: string }
         mismatch.code = 'E2E_RUNTIME_CAPABILITY_PROOF_BROWSER_MISMATCH'
         throw mismatch
@@ -405,4 +436,58 @@ function capabilityProofProbe(kind: 'gateway' | 'isolation'): RuntimeProbe {
       }
     }
   }
+}
+
+async function inspectConfiguredBrowser(context: RuntimeProbeContext): Promise<{
+  source: 'system-chrome' | 'managed-chromium'
+  browserClosureDigest: string
+  browserExecutableDigest: string
+  controlledLaunchProofDigest?: string
+}> {
+  const selection = await readBrowserSelection(context.homeDir).catch((error) => {
+    if (isNodeError(error, 'ENOENT')) return undefined
+    throw error
+  })
+  if (selection !== undefined) {
+    if (selection.runtimeInstallationDigest !== context.installation.installationDigest) {
+      throw doctorError('E2E_BROWSER_SELECTION_RUNTIME_MISMATCH')
+    }
+    if (selection.source.kind === 'system-chrome') {
+      const inspected = await revalidateSystemChrome({ ...selection,
+        source: selection.source }, {
+        projectRoot: runtimeLayout(context.homeDir).state,
+        ...(context.systemChromeVersionReader === undefined ? {} : {
+          readVersion: context.systemChromeVersionReader,
+        }),
+      })
+      return {
+        source: 'system-chrome',
+        browserClosureDigest: systemChromeClosureDigest(inspected),
+        browserExecutableDigest: inspected.selection.executableDigest,
+        controlledLaunchProofDigest: inspected.selection.controlledLaunchProofDigest,
+      }
+    }
+  }
+  const browser = await inspectChromiumInstallation({
+    homeDir: context.homeDir, runtimeVersion: context.installation.version,
+    runtimeInstallationDigest: context.installation.installationDigest,
+  })
+  return {
+    source: 'managed-chromium',
+    browserClosureDigest: browser.manifest.closureDigest,
+    browserExecutableDigest: browser.manifest.executableDigest,
+    ...(selection === undefined ? {} : {
+      controlledLaunchProofDigest: selection.controlledLaunchProofDigest,
+    }),
+  }
+}
+
+function doctorError(code: string): Error & { code: string } {
+  const error = new Error(code) as Error & { code: string }
+  error.code = code
+  return error
+}
+
+function isNodeError(error: unknown, code: string): boolean {
+  return error instanceof Error && 'code' in error && error.code === code
 }

@@ -83,7 +83,8 @@ describe('ProjectPublisher', () => {
         uninstallRuntime: async () => ({ version: '0.0.0' }),
         inspectRuntimeInstallation: async () => installation,
         runRuntimeDoctor: async () => ({ ready: true, runtimeVersion: '0.0.0',
-          installationDigest: installation.installationDigest, probes: {} }),
+          installationDigest: installation.installationDigest,
+          browserSource: 'system-chrome', approvalMode: 'local-confirmation', probes: {} }),
         currentWorkingDirectory: () => projectRoot,
       },
     )

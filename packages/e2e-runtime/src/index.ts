@@ -21,6 +21,7 @@ export {
   discoverSystemChrome,
   inspectSystemChrome,
   revalidateSystemChrome,
+  systemChromeClosureDigest,
   type InspectedSystemChrome,
   type SystemChromeSelection,
   type SystemChromeIdentity,

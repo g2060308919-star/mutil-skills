@@ -18,6 +18,9 @@ import { inspectRuntimeInstallation } from '../src/runtime-discovery.js'
 import { installRuntime } from '../src/runtime-installer.js'
 import { openRuntimeArtifactStoreAuthority } from '../src/authority-host.js'
 import { createRuntimeTestRoots } from './fixtures.js'
+import { writeBrowserSelection } from '../src/runtime-user-config.js'
+import { inspectSystemChrome, systemChromeClosureDigest } from '../src/system-chrome.js'
+import { recordRuntimeCapabilityProof } from '../src/runtime-capability-proof.js'
 
 const digest = `sha256:${'a'.repeat(64)}`
 const installation: RuntimeInstallation = {
@@ -98,6 +101,46 @@ describe('Runtime doctor', () => {
     expect(report.ready).toBe(true)
   })
 
+  test('system Chrome selection makes browser, Gateway and isolation probes pass without managed Chromium', async () => {
+    const roots = await createRuntimeTestRoots()
+    const chrome = join(roots.source, 'Google Chrome')
+    await writeFile(chrome, 'system chrome bytes', { mode: 0o700 })
+    const readVersion = async () => 'Google Chrome 126.0.6478.127'
+    const inspected = await inspectSystemChrome({
+      executablePath: chrome, projectRoot: roots.project,
+      runtimeInstallationDigest: installation.installationDigest,
+      controlledLaunchProofDigest: `sha256:${'0'.repeat(64)}`,
+      configuredAt: '2026-07-19T00:00:00.000Z', readVersion,
+    })
+    await writeBrowserSelection(roots.home, inspected.selection)
+    const proof = await recordRuntimeCapabilityProof({
+      homeDir: roots.home, runtimeInstallationDigest: installation.installationDigest,
+      gateway: { sessionMeasurementDigest: digest, policyDigest: digest, auditDigest: digest },
+      isolation: {
+        browserMeasurementDigest: digest, sandboxProfileDigest: digest, canaryProofDigest: digest,
+        browserClosureDigest: systemChromeClosureDigest(inspected),
+        browserExecutableDigest: inspected.selection.executableDigest,
+      },
+      verifiedAt: new Date().toISOString(),
+    })
+    await writeBrowserSelection(roots.home, {
+      ...inspected.selection, controlledLaunchProofDigest: proof.proofDigest,
+    })
+    const probes = Object.fromEntries(RUNTIME_DOCTOR_PROBE_NAMES
+      .filter((name) => !['chromium', 'gateway', 'isolation'].includes(name))
+      .map((name) => [name, passedProbe(`E2E_${name.replaceAll('-', '_').toUpperCase()}_OK`)]))
+
+    const report = await runRuntimeDoctor({
+      installation, homeDir: roots.home, probes, systemChromeVersionReader: readVersion,
+    })
+
+    expect(report.browserSource).toBe('system-chrome')
+    expect(report.probes.chromium).toMatchObject({ status: 'passed', reasonCode: 'E2E_SYSTEM_CHROME_SELECTION_OK' })
+    expect(report.probes.gateway?.status).toBe('passed')
+    expect(report.probes.isolation?.status).toBe('passed')
+    expect(report.ready).toBe(true)
+  })
+
   test('真实 Authority、Artifact、Quarantine 与 Report 探针不再是永久占位', async () => {
     const roots = await createRuntimeTestRoots()
     try {
@@ -135,9 +178,10 @@ describe('Runtime doctor', () => {
       expect(report.probes.quarantine?.status).toBe('passed')
       expect(report.probes.report?.status).toBe('passed')
       expect(report.probes['approval-presence']).toMatchObject({
-        status: 'not-installed', reasonCode: 'E2E_APPROVAL_IDENTITY_NOT_ENROLLED',
+        status: 'passed', reasonCode: 'E2E_LOCAL_CONFIRMATION_READY',
       })
-      expect(report.ready).toBe(false)
+      expect(report.approvalMode).toBe('local-confirmation')
+      expect(report.ready).toBe(true)
     } finally { await rm(roots.root, { recursive: true, force: true }) }
   })
 

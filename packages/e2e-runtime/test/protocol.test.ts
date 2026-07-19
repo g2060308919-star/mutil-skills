@@ -96,6 +96,58 @@ describe('Runtime protocol', () => {
 })
 
 describe('repo-e2e CLI protocol slice', () => {
+  test('configure-browser --system delegates only to controlled system Chrome configuration', async () => {
+    const stdout = captureWritable()
+    const configureSystemBrowser = vi.fn(async (input: {
+      homeDir: string; projectRoot: string; executablePath?: string
+    }) => ({
+      schemaVersion: '1.0.0' as const,
+      source: { kind: 'system-chrome' as const, executablePath: input.executablePath ?? '/Applications/Google Chrome' },
+      browserVersion: 'Google Chrome 126', executableDigest: `sha256:${'1'.repeat(64)}`,
+      runtimeInstallationDigest: digest, controlledLaunchProofDigest: `sha256:${'2'.repeat(64)}`,
+      configuredAt: '2026-07-19T00:00:00.000Z',
+    }))
+    const installChromium = vi.fn()
+
+    const code = await runCli(
+      ['configure-browser', '--system', '--executable', '/Applications/Google Chrome'],
+      Readable.from([]), stdout.stream, captureWritable().stream,
+      { ...minimalCliDependencies(), configureSystemBrowser, installChromium,
+        currentWorkingDirectory: () => '/safe/project' },
+    )
+
+    expect(code).toBe(0)
+    expect(configureSystemBrowser).toHaveBeenCalledWith({
+      homeDir: '/safe/home', projectRoot: '/safe/project',
+      executablePath: '/Applications/Google Chrome',
+    })
+    expect(installChromium).not.toHaveBeenCalled()
+    expect(JSON.parse(stdout.text())).toMatchObject({ ok: true, result: {
+      configured: true, browserSource: 'system-chrome', browserVersion: 'Google Chrome 126',
+    } })
+  })
+
+  test('configure-approval persists only an exact supported mode', async () => {
+    const writeApprovalMode = vi.fn(async () => undefined)
+    const stdout = captureWritable()
+    expect(await runCli(
+      ['configure-approval', '--mode', 'local-confirmation'], Readable.from([]),
+      stdout.stream, captureWritable().stream,
+      { ...minimalCliDependencies(), writeApprovalMode },
+    )).toBe(0)
+    expect(writeApprovalMode).toHaveBeenCalledWith('/safe/home', 'local-confirmation')
+    expect(JSON.parse(stdout.text())).toEqual({ ok: true, result: {
+      configured: true, approvalMode: 'local-confirmation',
+    } })
+
+    const invalid = captureWritable()
+    expect(await runCli(
+      ['configure-approval', '--mode', 'admin'], Readable.from([]), invalid.stream,
+      captureWritable().stream, { ...minimalCliDependencies(), writeApprovalMode },
+    )).toBe(2)
+    expect(JSON.parse(invalid.text())).toMatchObject({ ok: false, error: { code: 'E2E_RUNTIME_REQUEST_INVALID' } })
+  })
+
   test('installed CLI 为 resume-run 打开并关闭 production write recovery', async () => {
     const roots = await createRuntimeTestRoots()
     await mkdir(join(roots.project, '.biztest'), { recursive: true })
@@ -498,6 +550,14 @@ describe('repo-e2e CLI protocol slice', () => {
     })
   })
 })
+
+function minimalCliDependencies() {
+  return {
+    homeDir: '/safe/home',
+    installRuntime: async () => ({ version: '0.1.0', installationDigest: digest, launcher: '/safe/repo-e2e' }),
+    uninstallRuntime: async () => ({ version: '0.1.0' }),
+  }
+}
 
 function expectInvalidRequest(parse: () => unknown): void {
   expectRuntimeError(parse, 'E2E_RUNTIME_REQUEST_INVALID', 'input')
