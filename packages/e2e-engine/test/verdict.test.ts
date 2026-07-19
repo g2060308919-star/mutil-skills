@@ -84,6 +84,8 @@ function manualResult(overrides: Partial<ManualResult> = {}): ManualResult {
     authorityProof: proofOverride ?? {
       issuer: 'local-authority', keyId: 'authority-key', proofScope: 'local-os-user', algorithm: 'Ed25519',
       signedDigest: digest('e'), signature: 'valid-signature',
+      approvalAssurance: { approvalMode: 'webauthn', identityVerified: true,
+        separationOfDutiesVerified: true },
       executorPresence: {
         ...presenceBase, role: 'executor', approvalType: 'manual-executor',
         requiredRole: 'e2e-manual-executor', subject: draft.executor.subject, sessionId: 'SESSION-EXECUTOR',

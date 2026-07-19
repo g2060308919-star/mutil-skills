@@ -390,6 +390,8 @@ function manualRunFixture(): { snapshot: RuntimeRunSnapshot; result: ManualResul
     authorityProof: {
       issuer: 'fixture-authority', keyId: 'fixture-manual-key', proofScope: 'local-os-user' as const,
       algorithm: 'Ed25519' as const, signedDigest: d('manual-result'), signature: 'fixture-signature',
+      approvalAssurance: { approvalMode: 'webauthn' as const, identityVerified: true,
+        separationOfDutiesVerified: true },
       executorPresence: { role: 'executor' as const, approvalType: 'manual-executor' as const,
         requiredRole: 'e2e-manual-executor' as const, subject: draft.executor.subject,
         sessionId: 'SESSION-EXECUTOR', runId: draft.runId,

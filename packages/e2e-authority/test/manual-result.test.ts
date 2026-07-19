@@ -77,6 +77,40 @@ describe('LocalApprovalAuthority ManualResult', () => {
     expect(authority.verifyManualResult(reviewer.result)).toEqual({ valid: true })
   })
 
+  test('local mode requires two distinct confirmations but does not claim identity or duty separation', async () => {
+    const candidate = draft()
+    const authority = LocalApprovalAuthority.create({
+      issuer: 'local-authority', keyId: 'authority-key',
+      now: () => new Date('2026-07-11T10:10:00.000Z'),
+    })
+    const prepared = await authority.prepareLocalManualResult({
+      draft: candidate, ...prepareBinding(candidate.manualResultId),
+    })
+    await authority.finalizeLocalManualResultRole({
+      manualResultId: candidate.manualResultId, draftDigest: prepared.draftDigest,
+      role: 'executor', confirmationId: 'CONFIRM-EXECUTOR',
+      ...roleBinding(candidate.manualResultId, 'executor'),
+    })
+    await expect(authority.finalizeLocalManualResultRole({
+      manualResultId: candidate.manualResultId, draftDigest: prepared.draftDigest,
+      role: 'reviewer', confirmationId: 'CONFIRM-EXECUTOR',
+      ...roleBinding(candidate.manualResultId, 'reviewer', 'reused'),
+    })).rejects.toMatchObject({ code: 'E2E_MANUAL_RESULT_DUAL_CONTROL_INVALID' })
+    const issued = await authority.finalizeLocalManualResultRole({
+      manualResultId: candidate.manualResultId, draftDigest: prepared.draftDigest,
+      role: 'reviewer', confirmationId: 'CONFIRM-REVIEWER',
+      ...roleBinding(candidate.manualResultId, 'reviewer'),
+    })
+    expect(issued).toMatchObject({ status: 'issued', result: { authorityProof: {
+      approvalAssurance: { approvalMode: 'local-confirmation', identityVerified: false,
+        separationOfDutiesVerified: false },
+      executorPresence: { subject: 'local-caller', sessionId: 'CONFIRM-EXECUTOR' },
+      reviewerPresence: { subject: 'local-caller', sessionId: 'CONFIRM-REVIEWER' },
+    } } })
+    if (issued.status !== 'issued') throw new Error('manual result not issued')
+    expect(authority.verifyManualResult(issued.result)).toEqual({ valid: true })
+  })
+
   test('refuses self-asserted manual identities that are absent from the trusted registry', async () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'local-authority', keyId: 'authority-key', now: () => new Date('2026-07-11T10:10:00.000Z'),

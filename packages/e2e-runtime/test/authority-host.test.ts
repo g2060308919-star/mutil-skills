@@ -11,7 +11,8 @@ import {
   openRuntimeArtifactStoreAuthority,
   startRuntimeAuthorityHost,
 } from '../src/authority-host.js'
-import { createPendingLocalApprovalConfirmation } from '../src/local-approval-confirmations.js'
+import { createPendingLocalApprovalConfirmation,
+  localManualConfirmationSubjectDigest } from '../src/local-approval-confirmations.js'
 import { writeApprovalMode } from '../src/runtime-user-config.js'
 import type { RuntimeRunSnapshot } from '../src/run-store.js'
 import { RuntimeRunStore } from '../src/run-store.js'
@@ -147,6 +148,79 @@ test('Runtime Host consumes one subject-bound local confirmation and persists th
     expect(persisted?.trustedExecutionFacts['signed-execution-grant']).toMatchObject({
       approver: { kind: 'local-caller' },
     })
+  } finally {
+    await authority?.close()
+    await runStore.close()
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
+test('Runtime Host routes a distinct local manual confirmation to the prepared executor role', async () => {
+  const roots = await createRuntimeTestRoots()
+  const runStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+  let authority: Awaited<ReturnType<typeof openRuntimeArtifactStoreAuthority>> | undefined
+  try {
+    await mkdir(`${roots.project}/.biztest`, { recursive: true })
+    await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-LOCAL-MANUAL',
+    }))
+    const identity = await resolveProjectIdentity(roots.project)
+    const base = { ...runSnapshot(), projectIdentityDigest: identity.digest,
+      workflow: { current: 'compiled' as const, sequence: 10,
+        eventChainDigest: `sha256:${'9'.repeat(64)}` } }
+    const draft = { ...manualDraft(), startedAt: '2026-07-18T23:00:00.000Z',
+      finishedAt: '2026-07-18T23:05:00.000Z', expiresAt: '2026-07-20T00:00:00.000Z' }
+    authority = await openRuntimeArtifactStoreAuthority({
+      homeDir: roots.home,
+      installation: { ...runtimeInstallation(), versionRoot: roots.source,
+        entrypoint: `${roots.source}/runtime-host.js` },
+      subject: `local:uid:${process.getuid!()}`,
+    })
+    const prepared = await authority.prepareLocalManualResult({
+      draft, finalizationId: 'PREPARE-LOCAL-MANUAL', requestDigest: `sha256:${'6'.repeat(64)}`,
+    })
+    const subjectDigest = localManualConfirmationSubjectDigest({
+      runId: base.runId, manualResultId: draft.manualResultId, draftDigest: prepared.draftDigest,
+      role: 'executor', workflowState: base.workflow.current,
+    })
+    const confirmation = createPendingLocalApprovalConfirmation({
+      approvalType: 'manual-executor', subjectDigest, projectIdentityDigest: identity.digest,
+      runtimeInstallationDigest: installationDigest, workflowState: base.workflow.current,
+      manualResult: { manualResultId: draft.manualResultId, draftDigest: prepared.draftDigest,
+        role: 'executor' }, now: new Date('2026-07-19T00:00:00.000Z'),
+      summary: {
+        runId: base.runId, approvalType: 'manual-executor', environmentId: 'test', riskTier: 'test',
+        origins: [], methods: [], actionCount: 0, effects: ['manual'], maxUses: 0,
+        secretRefs: [], dataLeaseRefs: [], cleanupRefs: [], injectionClassifications: [],
+        subjectDigest, expiresAt: '2026-07-19T00:10:00.000Z',
+      },
+    })
+    const snapshot = { ...base, trustedExecutionFacts: { 'approval-mode': 'local-confirmation',
+      'pending-local-approval': confirmation } }
+    const seedDigest = `sha256:${'5'.repeat(64)}`
+    await runStore.beginRequest('SEED-LOCAL-MANUAL', seedDigest)
+    const lock = await runStore.acquireRunLock(identity.digest, base.runId)
+    try { await runStore.createRunOutcome(snapshot, 'SEED-LOCAL-MANUAL', seedDigest, { seeded: true }, lock) }
+    finally { await lock.close() }
+    const host = new E2ERuntimeHost({
+      installation: runtimeInstallation(), doctor: async () => { throw new Error('not used') },
+      runStore, now: () => new Date('2026-07-19T00:01:00.000Z'),
+      localAuthorityHostFactory: async () => createRuntimeLocalApprovalHost(authority!),
+    })
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'CONFIRM-LOCAL-MANUAL-EXECUTOR',
+      client: { name: 'test', version: '1.0.0' }, command: 'confirm-approval',
+      projectRoot: roots.project,
+      payload: { runId: base.runId, confirmationId: confirmation.confirmationId, subjectDigest },
+    })
+    const response = await host.handle(request, JSON.stringify(request))
+    expect(response.ok, JSON.stringify(response)).toBe(true)
+    expect(response).toMatchObject({
+      ok: true, result: { status: 'awaiting-reviewer', role: 'executor',
+        approvalMode: 'local-confirmation' },
+    })
+    expect((await runStore.getRun(identity.digest, base.runId))
+      ?.trustedExecutionFacts['pending-local-approval']).toBeUndefined()
   } finally {
     await authority?.close()
     await runStore.close()

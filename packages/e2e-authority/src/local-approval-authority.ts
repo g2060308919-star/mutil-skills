@@ -303,6 +303,7 @@ export class LocalApprovalAuthority {
     expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string }
     binding: ApprovalExecutionBinding
   }>()
+  readonly #localManualContext = new AsyncLocalStorage<boolean>()
   #activeStateTransactions = 0
   readonly #grants = new Map<string, SignedGrant>()
   readonly #grantFinalizations = new Map<string, StoredGrantFinalization>()
@@ -2024,8 +2025,9 @@ export class LocalApprovalAuthority {
       || !/^sha256:[a-f0-9]{64}$/.test(input.requestDigest)) {
       throw authorityError('E2E_MANUAL_RESULT_PREPARE_INPUT_INVALID', 'ManualResult preparation 绑定无效')
     }
-    if (!matchesRegisteredIdentity(draft.executor, this.#manualIdentities.get(draft.executor.subject))
-      || !matchesRegisteredIdentity(draft.reviewer, this.#manualIdentities.get(draft.reviewer.subject))) {
+    if (!this.#localManualContext.getStore()
+      && (!matchesRegisteredIdentity(draft.executor, this.#manualIdentities.get(draft.executor.subject))
+        || !matchesRegisteredIdentity(draft.reviewer, this.#manualIdentities.get(draft.reviewer.subject)))) {
       throw authorityError('E2E_MANUAL_IDENTITY_UNTRUSTED', '执行者或复核者不在 Authority 可信主体登记中')
     }
     this.#requireCurrentManualDraft(draft)
@@ -2053,6 +2055,27 @@ export class LocalApprovalAuthority {
       preparationFinalizationId: input.finalizationId,
       preparationRequestDigest: input.requestDigest })
     return { manualResultId: draft.manualResultId, draftDigest, nextRole: 'executor' }
+  }
+
+  async prepareLocalManualResult(input: {
+    draft: ManualResultDraft
+    finalizationId: string
+    requestDigest: string
+  }) {
+    return await this.#localManualContext.run(true, async () => await this.prepareManualResult(input))
+  }
+
+  async finalizeLocalManualResultRole(input: {
+    manualResultId: string
+    draftDigest: string
+    role: 'executor' | 'reviewer'
+    confirmationId: string
+    finalizationId: string
+    requestDigest: string
+  }) {
+    return await this.#localManualContext.run(true, async () => await this.finalizeManualResultRole({
+      ...input, approvalSessionRef: input.confirmationId,
+    }))
   }
 
   async finalizeManualResultRole(input: {
@@ -2092,28 +2115,43 @@ export class LocalApprovalAuthority {
     const actor = input.role === 'executor' ? pending.draft.executor : pending.draft.reviewer
     const approvalType = input.role === 'executor' ? 'manual-executor' : 'manual-reviewer'
     const requiredRole = input.role === 'executor' ? 'e2e-manual-executor' : 'e2e-manual-reviewer'
-    const receipt = await this.#authenticateManualApproverSession(input.approvalSessionRef, {
-      approvalType, subjectDigest: pending.draftDigest,
-      runId: pending.draft.runId, installationDigest: pending.draft.runtimeInstallationDigest,
-    })
-    const registered = receipt === undefined ? undefined : this.#manualIdentities.get(receipt.subject)
+    const local = this.#localManualContext.getStore() === true
     const now = this.#now().getTime()
-    if (receipt === undefined || receipt.approvalType !== approvalType
-      || receipt.subject !== actor.subject || receipt.subjectDigest !== pending.draftDigest
-      || receipt.runId !== pending.draft.runId
-      || receipt.installationDigest !== pending.draft.runtimeInstallationDigest
-      || now < Date.parse(receipt.issuedAt) || now >= Date.parse(receipt.expiresAt)
-      || !matchesRegisteredIdentity(actor, registered) || !registered?.roles.includes(requiredRole)) {
-      throw authorityError(
-        'E2E_MANUAL_RESULT_SESSION_BINDING_MISMATCH',
-        'WebAuthn receipt 未与 ManualResult 草稿、Run、安装、角色及登记身份精确绑定',
-      )
-    }
-    const presence: ManualResultUserPresenceProof = {
-      role: input.role, approvalType, requiredRole, subject: receipt.subject,
-      sessionId: input.approvalSessionRef, runId: receipt.runId,
-      installationDigest: receipt.installationDigest, draftDigest: pending.draftDigest,
-      origin: receipt.origin, issuedAt: receipt.issuedAt, expiresAt: receipt.expiresAt,
+    let presence: ManualResultUserPresenceProof
+    if (local) {
+      const issuedAt = this.#now()
+      presence = ManualResultUserPresenceProofSchema.parse({
+        role: input.role, approvalType, requiredRole, subject: 'local-caller',
+        sessionId: input.approvalSessionRef, runId: pending.draft.runId,
+        installationDigest: pending.draft.runtimeInstallationDigest,
+        draftDigest: pending.draftDigest, origin: 'http://localhost:1',
+        issuedAt: issuedAt.toISOString(),
+        expiresAt: new Date(Math.min(Date.parse(pending.draft.expiresAt),
+          issuedAt.getTime() + 10 * 60_000)).toISOString(),
+      })
+    } else {
+      const receipt = await this.#authenticateManualApproverSession(input.approvalSessionRef, {
+        approvalType, subjectDigest: pending.draftDigest,
+        runId: pending.draft.runId, installationDigest: pending.draft.runtimeInstallationDigest,
+      })
+      const registered = receipt === undefined ? undefined : this.#manualIdentities.get(receipt.subject)
+      if (receipt === undefined || receipt.approvalType !== approvalType
+        || receipt.subject !== actor.subject || receipt.subjectDigest !== pending.draftDigest
+        || receipt.runId !== pending.draft.runId
+        || receipt.installationDigest !== pending.draft.runtimeInstallationDigest
+        || now < Date.parse(receipt.issuedAt) || now >= Date.parse(receipt.expiresAt)
+        || !matchesRegisteredIdentity(actor, registered) || !registered?.roles.includes(requiredRole)) {
+        throw authorityError(
+          'E2E_MANUAL_RESULT_SESSION_BINDING_MISMATCH',
+          'WebAuthn receipt 未与 ManualResult 草稿、Run、安装、角色及登记身份精确绑定',
+        )
+      }
+      presence = {
+        role: input.role, approvalType, requiredRole, subject: receipt.subject,
+        sessionId: input.approvalSessionRef, runId: receipt.runId,
+        installationDigest: receipt.installationDigest, draftDigest: pending.draftDigest,
+        origin: receipt.origin, issuedAt: receipt.issuedAt, expiresAt: receipt.expiresAt,
+      }
     }
     if (input.role === 'executor') {
       const response = {
@@ -2125,13 +2163,18 @@ export class LocalApprovalAuthority {
       return response
     }
     if (pending.executorPresence === undefined
-      || pending.executorPresence.subject === presence.subject
+      || (!local && pending.executorPresence.subject === presence.subject)
       || pending.executorPresence.sessionId === presence.sessionId
       || now >= Date.parse(pending.executorPresence.expiresAt)) {
       throw authorityError('E2E_MANUAL_RESULT_DUAL_CONTROL_INVALID', 'executor 与 reviewer 必须是不同主体和不同会话')
     }
     const authorityBinding = {
       draft: pending.draft,
+      approvalAssurance: local
+        ? { approvalMode: 'local-confirmation' as const, identityVerified: false,
+            separationOfDutiesVerified: false }
+        : { approvalMode: 'webauthn' as const, identityVerified: true,
+            separationOfDutiesVerified: true },
       executorPresence: pending.executorPresence,
       reviewerPresence: presence,
     }
@@ -2145,6 +2188,7 @@ export class LocalApprovalAuthority {
       signature: sign(null, manualResultProofPayload(signedDigest), this.#privateKey).toString('base64url'),
       executorPresence: pending.executorPresence,
       reviewerPresence: presence,
+      approvalAssurance: authorityBinding.approvalAssurance,
     }
     const result = ManualResultSchema.parse({ ...pending.draft, authorityProof })
     this.#pendingManualResults.set(result.manualResultId, { ...pending,
@@ -2186,6 +2230,9 @@ export class LocalApprovalAuthority {
   }
 
   verifyManualResult(candidate: ManualResult): ManualResultVerification {
+    const legacyWebAuthnProof = isPlainSnapshot(candidate)
+      && isPlainSnapshot(candidate.authorityProof)
+      && !Object.hasOwn(candidate.authorityProof, 'approvalAssurance')
     const parsed = ManualResultSchema.safeParse(candidate)
     if (!parsed.success) {
       return { valid: false, code: 'E2E_MANUAL_RESULT_SCHEMA_INVALID', impact: 'safety-blocked' }
@@ -2205,6 +2252,7 @@ export class LocalApprovalAuthority {
     }
     const expectedDigest = digestText('manual-result/v2', canonicalizeJson({
       draft,
+      ...(legacyWebAuthnProof ? {} : { approvalAssurance: authorityProof.approvalAssurance }),
       executorPresence: authorityProof.executorPresence,
       reviewerPresence: authorityProof.reviewerPresence,
     }))
@@ -3532,7 +3580,8 @@ function parsePendingManualResult(value: unknown): PendingManualResult {
   if (!presence.success || presence.data.role !== 'executor'
     || presence.data.approvalType !== 'manual-executor'
     || presence.data.requiredRole !== 'e2e-manual-executor'
-    || presence.data.subject !== draft.data.executor.subject
+    || (presence.data.subject !== draft.data.executor.subject
+      && presence.data.subject !== 'local-caller')
     || presence.data.runId !== draft.data.runId
     || presence.data.installationDigest !== draft.data.runtimeInstallationDigest
     || presence.data.draftDigest !== value.draftDigest

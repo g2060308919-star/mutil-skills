@@ -509,13 +509,28 @@ export interface RuntimeArtifactStoreAuthority extends CompleteGenerationAuthori
     decisionStatus: 'approved' | 'rejected'
     decisionSubject: DecisionSubject
   }): DecisionReceipt
+  prepareLocalManualResult(input: {
+    draft: ManualResultDraft; finalizationId: string; requestDigest: string
+  }): Promise<{ manualResultId: string; draftDigest: string; nextRole: 'executor' }>
+  finalizeLocalManualResultRole(input: {
+    manualResultId: string; draftDigest: string; role: 'executor' | 'reviewer'
+    confirmationId: string; finalizationId: string; requestDigest: string
+  }): Promise<{ status: 'awaiting-reviewer'; manualResultId: string; draftDigest: string; nextRole: 'reviewer' }
+    | { status: 'issued'; result: ManualResult }>
+  recoverManualResultRole(input: {
+    manualResultId: string; draftDigest: string; role: 'executor' | 'reviewer'
+    finalizationId: string; requestDigest: string
+  }): Promise<{ status: 'awaiting-reviewer'; manualResultId: string; draftDigest: string; nextRole: 'reviewer' }
+    | { status: 'issued'; result: ManualResult } | undefined>
   close(): Promise<void>
 }
 
 /** 把持久 Authority 暴露成无需 WebAuthn child/browser 的本地确认签发适配器。 */
 export function createRuntimeLocalApprovalHost(
   authority: RuntimeArtifactStoreAuthority,
-): Partial<Pick<RuntimeAuthorityHost, 'requestApproval' | 'recoverApproval' | 'acknowledgeFinalization'>> {
+): Partial<Pick<RuntimeAuthorityHost,
+  'requestApproval' | 'recoverApproval' | 'acknowledgeFinalization'
+  | 'prepareManualResult' | 'requestManualResultRole' | 'recoverManualResultRole'>> {
   return {
     async requestApproval(input) {
       const grantsCapability = input.approvalType === 'discovery' || input.approvalType === 'execution'
@@ -568,6 +583,27 @@ export function createRuntimeLocalApprovalHost(
     },
     async acknowledgeFinalization(input) {
       await authority.acknowledgeFinalizedGrant(input)
+    },
+    async prepareManualResult(input) {
+      return await authority.prepareLocalManualResult(input)
+    },
+    async requestManualResultRole(input) {
+      const sessionId = `LOCAL-${input.finalizationId}-${input.role}`
+      return Object.freeze({
+        url: 'http://localhost/#AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+        sessionId,
+        async wait() {},
+        async finalizeManualResultRole() {
+          return await authority.finalizeLocalManualResultRole({
+            manualResultId: input.manualResultId, draftDigest: input.draftDigest,
+            role: input.role, confirmationId: sessionId,
+            finalizationId: input.finalizationId, requestDigest: input.requestDigest,
+          })
+        },
+      })
+    },
+    async recoverManualResultRole(input) {
+      return await authority.recoverManualResultRole(input)
     },
   }
 }
@@ -680,6 +716,18 @@ export async function openRuntimeArtifactStoreAuthority(options: {
     issueLocalDecisionReceipt: (input) => {
       if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
       return authority.issueLocalDecisionReceipt(input)
+    },
+    prepareLocalManualResult: async (input) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return await authority.prepareLocalManualResult(input)
+    },
+    finalizeLocalManualResultRole: async (input) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return await authority.finalizeLocalManualResultRole(input)
+    },
+    recoverManualResultRole: async (input) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return await authority.recoverManualResultRole(input)
     },
     async close() {
       if (closed) return

@@ -93,6 +93,7 @@ import {
   assertCurrentLocalApprovalConfirmation,
   createPendingLocalApprovalConfirmation,
   localConfirmationReceiptDigest,
+  localManualConfirmationSubjectDigest,
   type PendingLocalApprovalConfirmation,
 } from './local-approval-confirmations.js'
 import { projectLocalApproval } from './local-approval-projection.js'
@@ -114,7 +115,8 @@ export interface RuntimeHostDependencies {
     'requestApproval' | 'recoverApproval' | 'acknowledgeFinalization'
     | 'prepareManualResult' | 'requestManualResultRole' | 'recoverManualResultRole'>>>
   localAuthorityHostFactory?: () => Promise<Partial<Pick<RuntimeAuthorityHost,
-    'requestApproval' | 'recoverApproval' | 'acknowledgeFinalization'>>>
+    'requestApproval' | 'recoverApproval' | 'acknowledgeFinalization'
+    | 'prepareManualResult' | 'requestManualResultRole' | 'recoverManualResultRole'>>>
   presentUserPresenceUrl?(url: string): void | Promise<void>
   readExecutor?: RuntimeReadExecutorCapability
   writeExecutor?: RuntimeWriteExecutorCapability
@@ -953,9 +955,11 @@ export class E2ERuntimeHost {
           now: this.dependencies.now(),
         },
       )
-      const currentDigest = computeRuntimeApprovalSubjectDigest(
-        current, parsed.approvalType, parsed.grantSubject,
-      )
+      const currentDigest = parsed.manualResult === undefined
+        ? computeRuntimeApprovalSubjectDigest(current, parsed.approvalType, parsed.grantSubject)
+        : localManualConfirmationSubjectDigest({
+          runId: current.runId, ...parsed.manualResult, workflowState: current.workflow.current,
+        })
       if (currentDigest !== parsed.subjectDigest) {
         throw confirmationHostError('E2E_RUNTIME_APPROVAL_SUBJECT_CHANGED')
       }
@@ -966,6 +970,13 @@ export class E2ERuntimeHost {
         claimedAt: this.dependencies.now().toISOString(), lock,
       })
     })
+    if (claimed.manualResult !== undefined) {
+      const synthetic = {
+        ...request, command: 'finalize-manual-result-role' as const,
+        payload: { runId: request.payload.runId, ...claimed.manualResult },
+      } as Extract<RuntimeRequestEnvelope, { command: 'finalize-manual-result-role' }>
+      return await this.finalizeManualResultRole(synthetic, requestDigest, true, claimed)
+    }
     const synthetic = {
       ...request,
       command: 'open-approval' as const,
@@ -983,16 +994,18 @@ export class E2ERuntimeHost {
     requestDigest: string,
     _requestWasPending: boolean,
   ): Promise<RuntimeResponseEnvelope> {
-    const authorityHostFactory = this.dependencies.authorityHostFactory
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    const initial = await this.readLockedRun(identity.digest, request.payload.runId)
+    this.requireInstallation(initial)
+    requireManualResultWorkflow(initial)
+    const approvalMode = approvalModeFromTrustedFacts(initial.trustedExecutionFacts)
+    const authorityHostFactory = approvalMode === 'local-confirmation'
+      ? this.dependencies.localAuthorityHostFactory : this.dependencies.authorityHostFactory
     if (authorityHostFactory === undefined) throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
     const authorityHost = await authorityHostFactory()
     if (authorityHost.prepareManualResult === undefined) {
       throw blockedError('E2E_MANUAL_RESULT_AUTHORITY_NOT_READY')
     }
-    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
-    const initial = await this.readLockedRun(identity.digest, request.payload.runId)
-    this.requireInstallation(initial)
-    requireManualResultWorkflow(initial)
     const draft = bindManualResultDraftToRuntimeSnapshot(initial, request.payload.draft, this.dependencies.now())
     const prepared = await authorityHost.prepareManualResult({ draft,
       finalizationId: request.requestId, requestDigest })
@@ -1026,18 +1039,67 @@ export class E2ERuntimeHost {
     request: Extract<RuntimeRequestEnvelope, { command: 'finalize-manual-result-role' }>,
     requestDigest: string,
     requestWasPending: boolean,
+    confirmed?: PendingLocalApprovalConfirmation,
   ): Promise<RuntimeResponseEnvelope> {
-    const authorityHostFactory = this.dependencies.authorityHostFactory
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    const initial = await this.readLockedRun(identity.digest, request.payload.runId)
+    this.requireInstallation(initial)
+    requireManualResultWorkflow(initial)
+    const approvalMode = approvalModeFromTrustedFacts(initial.trustedExecutionFacts)
+    const subjectDigest = localManualConfirmationSubjectDigest({
+      runId: initial.runId, manualResultId: request.payload.manualResultId,
+      draftDigest: request.payload.draftDigest, role: request.payload.role,
+      workflowState: initial.workflow.current,
+    })
+    if (approvalMode === 'local-confirmation' && confirmed === undefined) {
+      const projected = projectLocalApproval({
+        snapshot: initial, approvalType: `manual-${request.payload.role}`,
+        subjectDigest, expiresAt: new Date(this.dependencies.now().getTime() + 10 * 60_000).toISOString(),
+      })
+      if (projected.disposition.kind === 'blocked') {
+        throw confirmationHostError(projected.disposition.reasonCode)
+      }
+      const confirmation = createPendingLocalApprovalConfirmation({
+        approvalType: `manual-${request.payload.role}`, subjectDigest,
+        projectIdentityDigest: identity.digest,
+        runtimeInstallationDigest: initial.runtimeInstallationDigest,
+        workflowState: initial.workflow.current, summary: projected.summary,
+        manualResult: {
+          manualResultId: request.payload.manualResultId,
+          draftDigest: request.payload.draftDigest, role: request.payload.role,
+        },
+        now: this.dependencies.now(),
+      })
+      return await this.withRunLock(identity.digest, initial.runId, async (lock) =>
+        RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+          identity.digest, initial.runId, request.requestId, requestDigest,
+          (snapshot) => ({
+            snapshot: { ...snapshot, trustedExecutionFacts: {
+              ...snapshot.trustedExecutionFacts, 'pending-local-approval': confirmation,
+            }, updatedAt: this.dependencies.now().toISOString() },
+            response: this.successResponse(request.requestId, {
+              status: 'confirmation-required', approvalMode: 'local-confirmation',
+              confirmationId: confirmation.confirmationId, subjectDigest,
+              expiresAt: confirmation.expiresAt, summary: confirmation.summary,
+            }),
+          }),
+          'local-manual-confirmation-created', lock,
+        )))
+    }
+    if (confirmed !== undefined) assertCurrentLocalApprovalConfirmation(confirmed, {
+      confirmationId: confirmed.confirmationId, subjectDigest,
+      projectIdentityDigest: identity.digest,
+      runtimeInstallationDigest: initial.runtimeInstallationDigest,
+      workflowState: initial.workflow.current, now: this.dependencies.now(),
+    })
+    const authorityHostFactory = approvalMode === 'local-confirmation'
+      ? this.dependencies.localAuthorityHostFactory : this.dependencies.authorityHostFactory
     if (authorityHostFactory === undefined) throw blockedError('E2E_RUNTIME_AUTHORITY_NOT_READY')
     const authorityHost = await authorityHostFactory()
     if (authorityHost.requestManualResultRole === undefined
       && authorityHost.recoverManualResultRole === undefined) {
       throw blockedError('E2E_MANUAL_RESULT_AUTHORITY_NOT_READY')
     }
-    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
-    const initial = await this.readLockedRun(identity.digest, request.payload.runId)
-    this.requireInstallation(initial)
-    requireManualResultWorkflow(initial)
     const persist = async (finalized: {
       status: 'awaiting-reviewer'; manualResultId: string; draftDigest: string; nextRole: 'reviewer'
     } | { status: 'issued'; result: import('@mutil-skills/e2e-contracts').ManualResult }) => {
@@ -1052,13 +1114,19 @@ export class E2ERuntimeHost {
         requireManualResultWorkflow(current)
         const response = this.successResponse(request.requestId, {
           runId: current.runId, manualResultId: request.payload.manualResultId,
-          role: request.payload.role, ...finalized,
+          role: request.payload.role, approvalMode, ...finalized,
         })
         if (finalized.status === 'awaiting-reviewer') {
           try {
-            return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.readRunOutcome(
-              identity.digest, current.runId, request.requestId, requestDigest, () => response, lock,
-            ))
+            return RuntimeResponseEnvelopeSchema.parse(confirmed === undefined
+              ? await this.dependencies.runStore.readRunOutcome(
+                identity.digest, current.runId, request.requestId, requestDigest, () => response, lock,
+              )
+              : await this.dependencies.runStore.updateRunOutcome(
+                identity.digest, current.runId, request.requestId, requestDigest,
+                (snapshot) => ({ snapshot: clearLocalConfirmation(snapshot, confirmed), response }),
+                'manual-result-role-confirmed', lock,
+              ))
           } catch (cause) {
             throw manualResultPersistenceError(cause)
           }
@@ -1067,12 +1135,14 @@ export class E2ERuntimeHost {
           const capability = await this.dependencies.runStore.authorizeTrustedFactWrite(
             identity.digest, current.runId, lock,
           )
-          return RuntimeResponseEnvelopeSchema.parse(
+          const persisted = RuntimeResponseEnvelopeSchema.parse(
             await this.dependencies.runStore.appendTrustedManualResultOutcome({
               capability, requestId: request.requestId, requestDigest,
               result: finalized.result, response,
+              update: (snapshot) => clearLocalConfirmation(snapshot, confirmed),
             }),
           )
+          return persisted
         } catch (cause) {
           throw manualResultPersistenceError(cause)
         }
@@ -1102,7 +1172,7 @@ export class E2ERuntimeHost {
       finalizationId: request.requestId,
       requestDigest,
     })
-    await this.dependencies.presentUserPresenceUrl?.(session.url)
+    if (approvalMode === 'webauthn') await this.dependencies.presentUserPresenceUrl?.(session.url)
     await session.wait()
     if (session.finalizeManualResultRole === undefined) {
       throw blockedError('E2E_MANUAL_RESULT_AUTHORITY_NOT_READY')

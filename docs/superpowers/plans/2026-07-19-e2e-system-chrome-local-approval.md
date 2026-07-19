@@ -164,11 +164,11 @@
 - 本地模式允许同一 caller 分别确认 executor/reviewer challenge，但 session/confirmation 必须不同。
 - WebAuthn 模式仍要求不同登记身份与原角色。
 
-- [ ] 写失败测试：本地同 caller 两次独立确认可签发但职责分离 false；复用确认拒绝；WebAuthn 同身份继续拒绝。
-- [ ] 运行定向测试，确认 RED。
-- [ ] 实现 mode-aware manual finalization。
-- [ ] 运行定向测试和 typecheck。
-- [ ] Commit：`feat(e2e): support local manual result confirmations`
+- [x] 写失败测试：本地同 caller 两次独立确认可签发但职责分离 false；复用确认拒绝；WebAuthn 同身份继续拒绝。
+- [x] 运行定向测试，确认 RED。
+- [x] 实现 mode-aware manual finalization。
+- [x] 运行定向测试和 typecheck。
+- [x] Commit：`feat(e2e): support local manual result confirmations`
 
 ### Task 8：报告保证等级、审计与展示
 

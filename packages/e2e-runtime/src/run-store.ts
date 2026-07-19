@@ -1130,6 +1130,7 @@ export class RuntimeRunStore {
     requestDigest: string
     result: ManualResult
     response: unknown
+    update?: (snapshot: RuntimeRunSnapshot) => RuntimeRunSnapshot
   }): Promise<unknown> {
     const record = trustedFactCapabilities.get(input.capability)
     if (!record || record.store !== this || record.used) throw runtimeStoreError(
@@ -1157,15 +1158,16 @@ export class RuntimeRunStore {
           if (Object.keys(existing).length >= MAX_TRUSTED_MANUAL_RESULTS) throw runtimeStoreError(
             'E2E_RUNTIME_MANUAL_RESULT_CAPACITY_EXCEEDED', '可信 ManualResult 集合超过容量上限',
           )
-          return {
-            snapshot: {
+          const updated = {
               ...snapshot,
               runRevision: (snapshot.runRevision ?? 0) + 1,
               trustedExecutionFacts: {
                 ...snapshot.trustedExecutionFacts,
                 'manual-results-by-id': { ...existing, [result.manualResultId]: result },
               },
-            },
+            }
+          return {
+            snapshot: input.update === undefined ? updated : input.update(updated),
             response: input.response,
           }
         },

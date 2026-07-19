@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { AssetIdSchema, canonicalizeJson, digestText } from './common.js'
+import { ApprovalAssuranceSchema } from './approval-assurance.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -77,6 +78,9 @@ export const ManualResultAuthorityProofSchema = z.object({
   algorithm: z.literal('Ed25519'),
   signedDigest: DigestSchema,
   signature: z.string().min(1).max(16 * 1024),
+  approvalAssurance: ApprovalAssuranceSchema.default({
+    approvalMode: 'webauthn', identityVerified: true, separationOfDutiesVerified: true,
+  }),
   executorPresence: ManualResultUserPresenceProofSchema,
   reviewerPresence: ManualResultUserPresenceProofSchema,
 }).strict()
@@ -143,8 +147,10 @@ function validateManualResultAuthorityProof(
   ] as const
   for (const binding of roles) {
     const proof = authorityProof[binding.key]
+    const local = authorityProof.approvalAssurance.approvalMode === 'local-confirmation'
     if (proof.role !== binding.role || proof.approvalType !== binding.approvalType
-      || proof.requiredRole !== binding.requiredRole || proof.subject !== binding.actor.subject
+      || proof.requiredRole !== binding.requiredRole
+      || (local ? proof.subject !== 'local-caller' : proof.subject !== binding.actor.subject)
       || !binding.actor.roles.includes(binding.requiredRole)
       || proof.runId !== result.runId || proof.installationDigest !== result.runtimeInstallationDigest
       || proof.draftDigest !== expectedDraftDigest) {
@@ -153,6 +159,12 @@ function validateManualResultAuthorityProof(
         message: 'manual user-presence proof is not exactly bound to the result draft and actor role',
       })
     }
+  }
+  if (authorityProof.approvalAssurance.approvalMode === 'webauthn'
+    && (!authorityProof.approvalAssurance.identityVerified
+      || !authorityProof.approvalAssurance.separationOfDutiesVerified)) {
+    context.addIssue({ code: 'custom', path: ['authorityProof', 'approvalAssurance'],
+      message: 'WebAuthn manual proof 必须声明已验证身份和职责分离' })
   }
   if (authorityProof.executorPresence.sessionId === authorityProof.reviewerPresence.sessionId) {
     context.addIssue({

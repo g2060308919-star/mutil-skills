@@ -1,6 +1,7 @@
 import {
   ApprovalGrantSubjectSchema,
   ApprovalModeSchema,
+  ApprovalTypeSchema,
   LocalApprovalSummarySchema,
   canonicalizeJson,
   digestText,
@@ -19,7 +20,7 @@ const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 export const PendingLocalApprovalConfirmationSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
   confirmationId: SafeIdSchema,
-  approvalType: z.enum(['scope', 'lineage', 'discovery', 'execution', 'privacy']),
+  approvalType: ApprovalTypeSchema,
   subjectDigest: DigestSchema,
   projectIdentityDigest: DigestSchema,
   runtimeInstallationDigest: DigestSchema,
@@ -27,6 +28,10 @@ export const PendingLocalApprovalConfirmationSchema = z.object({
   expiresAt: z.string().datetime({ offset: true }),
   summary: LocalApprovalSummarySchema,
   grantSubject: ApprovalGrantSubjectSchema.optional(),
+  manualResult: z.object({
+    manualResultId: SafeIdSchema, draftDigest: DigestSchema,
+    role: z.enum(['executor', 'reviewer']),
+  }).strict().optional(),
   claimRequestId: SafeIdSchema.optional(),
   claimRequestDigest: DigestSchema.optional(),
 }).strict().superRefine((value, context) => {
@@ -34,6 +39,14 @@ export const PendingLocalApprovalConfirmationSchema = z.object({
   if (grantsCapability !== (value.grantSubject !== undefined)) context.addIssue({
     code: 'custom', path: ['grantSubject'],
     message: 'discovery/execution confirmation 必须且只能保存 grantSubject',
+  })
+  const manual = value.approvalType === 'manual-executor' || value.approvalType === 'manual-reviewer'
+  if (manual !== (value.manualResult !== undefined)) context.addIssue({
+    code: 'custom', path: ['manualResult'], message: 'manual confirmation 必须且只能保存 ManualResult 绑定',
+  })
+  if (value.manualResult !== undefined
+    && value.approvalType !== `manual-${value.manualResult.role}`) context.addIssue({
+    code: 'custom', path: ['manualResult', 'role'], message: 'ManualResult role 与 approvalType 不一致',
   })
   if ((value.claimRequestId === undefined) !== (value.claimRequestDigest === undefined)) context.addIssue({
     code: 'custom', path: ['claimRequestId'], message: 'confirmation claim 必须同时绑定 requestId/digest',
@@ -50,6 +63,7 @@ export function createPendingLocalApprovalConfirmation(input: {
   workflowState: WorkflowNode
   summary: LocalApprovalSummary
   grantSubject?: ApprovalGrantSubject
+  manualResult?: PendingLocalApprovalConfirmation['manualResult']
   now: Date
   ttlMs?: number
 }): PendingLocalApprovalConfirmation {
@@ -67,7 +81,18 @@ export function createPendingLocalApprovalConfirmation(input: {
     workflowState: input.workflowState, expiresAt,
     summary: { ...input.summary, expiresAt },
     ...(input.grantSubject === undefined ? {} : { grantSubject: input.grantSubject }),
+    ...(input.manualResult === undefined ? {} : { manualResult: input.manualResult }),
   })
+}
+
+export function localManualConfirmationSubjectDigest(input: {
+  runId: string
+  manualResultId: string
+  draftDigest: string
+  role: 'executor' | 'reviewer'
+  workflowState: WorkflowNode
+}): string {
+  return digestText('local-manual-confirmation-subject/v1', canonicalizeJson(input))
 }
 
 export function assertCurrentLocalApprovalConfirmation(

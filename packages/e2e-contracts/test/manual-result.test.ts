@@ -106,6 +106,35 @@ describe('ManualResult contracts', () => {
     } })).success).toBe(false)
   })
 
+  test('local mode accepts two distinct confirmations by the same unverified caller', () => {
+    const candidate = draft()
+    const draftDigest = digestText('manual-result-draft/v1', canonicalizeJson(candidate))
+    const presence = (role: 'executor' | 'reviewer', sessionId: string) => ({
+      role, approvalType: `manual-${role}` as const,
+      requiredRole: `e2e-manual-${role}` as const,
+      subject: 'local-caller', sessionId, runId: candidate.runId,
+      installationDigest: candidate.runtimeInstallationDigest, draftDigest,
+      origin: 'http://localhost:1', issuedAt: '2026-07-11T10:06:00.000Z',
+      expiresAt: '2026-07-11T10:11:00.000Z',
+    })
+    const local = {
+      ...candidate,
+      authorityProof: {
+        issuer: 'local-authority', keyId: 'authority-key', proofScope: 'local-os-user',
+        algorithm: 'Ed25519', signedDigest: digest('e'), signature: 'signature',
+        approvalAssurance: { approvalMode: 'local-confirmation', identityVerified: false,
+          separationOfDutiesVerified: false },
+        executorPresence: presence('executor', 'CONFIRM-EXECUTOR'),
+        reviewerPresence: presence('reviewer', 'CONFIRM-REVIEWER'),
+      },
+    }
+    expect(ManualResultSchema.safeParse(local).success).toBe(true)
+    expect(ManualResultSchema.safeParse({
+      ...local, authorityProof: { ...local.authorityProof,
+        reviewerPresence: presence('reviewer', 'CONFIRM-EXECUTOR') },
+    }).success).toBe(false)
+  })
+
   test('rejects self-review, invalid chronology, duplicate obligations, and outcome-step contradiction', () => {
     expect(ManualResultDraftSchema.safeParse({
       ...draft(), reviewer: { subject: 'executor:alice', roles: ['e2e-manual-reviewer'] },

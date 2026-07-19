@@ -585,7 +585,8 @@ export async function runCli(
           },
           presentUserPresenceUrl: async (url: string) => await writeText(stderr, `${url}\n`),
         }),
-        ...(!['open-approval', 'confirm-approval'].includes(request.command)
+        ...(!['open-approval', 'confirm-approval', 'prepare-manual-result',
+          'finalize-manual-result-role'].includes(request.command)
           || configuredApprovalMode !== 'local-confirmation' ? {} : {
           localAuthorityHostFactory: async () => createRuntimeLocalApprovalHost(
             await getArtifactAuthority(),
