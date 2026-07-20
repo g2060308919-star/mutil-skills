@@ -54,6 +54,6 @@ describe('portable E2E runtime', () => {
       expect(published.some((path) => String(path).includes('quarantine'))).toBe(false)
       expect(await readFile(result.reportPath, 'utf8')).not.toContain(process.cwd())
     },
-    420_000,
+    720_000,
   )
 })

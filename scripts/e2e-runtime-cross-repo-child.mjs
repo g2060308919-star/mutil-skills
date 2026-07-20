@@ -325,7 +325,7 @@ async function executePublishedRegression(input) {
     const originalDiscoveryGrant = SignedGrantSchema.parse(
       snapshot.trustedExecutionFacts['signed-discovery-grant'],
     )
-    const browserInstallation = await resolveRuntimeBrowserInstallation({ homeDir, installation })
+    const browserInstallation = await resolveRuntimeBrowserInstallation({ homeDir, projectRoot, installation })
     const freshPreflight = await preparePublishedRegressionPreflight({
       subject: originalDiscoveryGrant.subject,
       browserInstallation,

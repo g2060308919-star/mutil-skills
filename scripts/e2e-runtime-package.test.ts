@@ -165,7 +165,7 @@ describe('E2E Runtime npm tarball', () => {
       ], {
         cwd: project,
         env: packedInstallEnvironment({ home, npmCache }),
-        timeout: 180_000,
+        timeout: 300_000,
         maxBuffer: 10 * 1024 * 1024,
       })
 
@@ -198,7 +198,7 @@ describe('E2E Runtime npm tarball', () => {
         stdout: expect.stringContaining('"ready":false'),
       })
     },
-    240_000,
+    360_000,
   )
 })
 

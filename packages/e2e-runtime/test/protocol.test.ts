@@ -491,6 +491,7 @@ describe('repo-e2e CLI protocol slice', () => {
         }),
         uninstallRuntime: async () => ({ version: '0.0.0' }),
         openHumanAuthoritySession,
+        readHumanRunApprovalMode: async () => 'webauthn' as const,
       })
       expect(exitCode).toBe(0)
       expect(openHumanAuthoritySession).toHaveBeenCalledWith(arguments_)
@@ -522,6 +523,26 @@ describe('repo-e2e CLI protocol slice', () => {
     expect(openHumanAuthoritySession).not.toHaveBeenCalled()
     expect(JSON.parse(stdout.text())).toMatchObject({
       ok: false, error: { code: 'E2E_RUNTIME_REQUEST_INVALID' },
+    })
+  })
+
+  test('默认本地确认模式下 direct approve 不得伪装成 WebAuthn session', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    const openHumanAuthoritySession = vi.fn()
+
+    const exitCode = await runCli(
+      ['approve', '--run-id', 'RUN-1', '--type', 'lineage'],
+      Readable.from([]), stdout.stream, stderr.stream,
+      { ...minimalCliDependencies(), openHumanAuthoritySession,
+        readHumanRunApprovalMode: async () => 'local-confirmation' as const },
+    )
+
+    expect(exitCode).toBe(2)
+    expect(openHumanAuthoritySession).not.toHaveBeenCalled()
+    expect(stderr.text()).toBe('')
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false, error: { code: 'E2E_LOCAL_APPROVAL_RPC_REQUIRED' },
     })
   })
 

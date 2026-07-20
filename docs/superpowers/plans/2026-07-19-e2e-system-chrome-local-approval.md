@@ -227,5 +227,5 @@
 - [x] 完成 fixtures 与生产装配，运行 Golden GREEN。
 - [x] 运行 `npm run build`、`npm run typecheck`、`npm run lint:architecture`、`npm test -- --reporter=dot`、`npm run e2e:golden`。
 - [x] 运行 `npm pack --dry-run --workspaces` 和 release closure 测试；不得 publish。
-- [ ] 使用 `code-review` 与 `superpowers:verification-before-completion` 审查并修复所有发现。
-- [ ] Commit：`test(e2e): verify local-first cross-repo acceptance`
+- [x] 使用 `code-review` 与 `superpowers:verification-before-completion` 审查并修复所有发现。
+- [x] Commit：`test(e2e): verify local-first cross-repo acceptance`

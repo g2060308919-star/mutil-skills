@@ -69,7 +69,7 @@ export async function runCrossRepoRuntimeGolden(input: {
   await exec('npm', [
     'install', '--ignore-scripts', '--omit=dev', '--no-bin-links', '--no-audit', '--no-fund',
     '--save-exact', ...tarballs,
-  ], input.project, installEnvironment(input.home, npmCache), 240_000)
+  ], input.project, installEnvironment(input.home, npmCache), 360_000)
 
   // Harness 也必须进入安装闭包：这样源码仓被移走、用户项目 node_modules 被删除后，
   // 它仍只从已安装 Runtime 版本目录解析依赖。

@@ -94,6 +94,7 @@ import {
   type RuntimeAuthorityHost,
   type RuntimeAuthoritySession,
 } from './authority-host.js'
+import { approvalModeFromTrustedFacts } from './local-approval-confirmations.js'
 import {
   RUNTIME_PACKAGE_VERSION,
   exitCodeForResponse,
@@ -149,6 +150,8 @@ export interface RuntimeCliDependencies {
     executablePath?: string
   }) => Promise<BrowserSelection>
   writeApprovalMode?: (homeDir: string, mode: ApprovalMode) => Promise<void>
+  /** 仅供替换人类 Authority session 的测试同步模拟目标 Run 冻结模式。 */
+  readHumanRunApprovalMode?: (arguments_: string[]) => Promise<ApprovalMode>
   bootstrapBrowserRuntime?: typeof bootstrapInstalledBrowserRuntime
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
   /**
@@ -306,6 +309,14 @@ export async function runCli(
 
   if (isHumanAuthorityCommand(arguments_)) {
     try {
+      if (arguments_[0] === 'approve' && dependencies.openHumanAuthoritySession !== undefined
+        && await dependencies.readHumanRunApprovalMode?.(arguments_) === 'local-confirmation') {
+        throw new E2EError({
+          code: 'E2E_LOCAL_APPROVAL_RPC_REQUIRED', category: 'input',
+          message: '本地确认必须由 Skill 依次调用 rpc open-approval、展示 summary，再调用 confirm-approval；不得伪装成 WebAuthn session',
+          retryable: false,
+        })
+      }
       const session = await (dependencies.openHumanAuthoritySession?.(arguments_)
         ?? openDefaultHumanAuthoritySession(arguments_, dependencies))
       if (session.url !== '') await writeText(stderr, `${session.url}\n`)
@@ -421,7 +432,8 @@ export async function runCli(
         return artifactAuthority
       }
       const browserCapabilities = !needsBrowserExecution ? undefined : createProductionBrowserCapabilities({
-        homeDir: dependencies.homeDir, installation, authorityHost: getAuthorityHost,
+        homeDir: dependencies.homeDir, projectRoot: request.projectRoot,
+        installation, authorityHost: getAuthorityHost,
       })
       // 生产执行资源只能在 Host 的最外层 workflow 前置条件可能通过时装配。
       // 这里仅做只读短路；最终判定仍由持锁的 E2ERuntimeHost 完成，避免无效请求
@@ -469,6 +481,7 @@ export async function runCli(
         })
         if (request.command === 'execute-run') writeExecutor = createProductionWriteBrowserCapability({
           homeDir: dependencies.homeDir,
+          projectRoot: request.projectRoot,
           installation,
           authorityHost: getAuthorityHost,
           secretBroker: executionSecretBroker!,
@@ -476,6 +489,7 @@ export async function runCli(
         })
         if (request.command === 'execute-run') injectionExecutor = createProductionInjectionBrowserCapability({
           homeDir: dependencies.homeDir,
+          projectRoot: request.projectRoot,
           installation,
           authorityHost: getAuthorityHost,
         })
@@ -1076,6 +1090,13 @@ async function openDefaultHumanAuthoritySession(
     const initial = await readRunWithLease(store, identity.digest, runId)
     if (initial.runtimeInstallationDigest !== installation.installationDigest) {
       throw cliAuthorityError('E2E_RUNTIME_INSTALLATION_BINDING_MISMATCH')
+    }
+    if (approvalModeFromTrustedFacts(initial.trustedExecutionFacts) === 'local-confirmation') {
+      throw new E2EError({
+        code: 'E2E_LOCAL_APPROVAL_RPC_REQUIRED', category: 'input',
+        message: '本地确认必须由 Skill 依次调用 rpc open-approval、展示 summary，再调用 confirm-approval；不得伪装成 WebAuthn session',
+        retryable: false,
+      })
     }
     const approvalType = approvalTypeForWorkflow(initial.workflow.current, arguments_[4]!)
     const grantSubject = await readHumanGrantSubject(arguments_, approvalType, identity)

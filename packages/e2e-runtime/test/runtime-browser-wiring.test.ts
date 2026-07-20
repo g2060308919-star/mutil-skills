@@ -1,5 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
+import { rm } from 'node:fs/promises'
 import {
+  bindRuntimeCapabilityProofToBrowserSelection,
   consumeRpcConnectionCredential,
   createAuditedRuntimeReadAuthority,
   createRuntimeFixedHttpWriteEvidence,
@@ -7,6 +9,9 @@ import {
   settleRuntimeBrowserResourcesThenRecordProof,
   settleRuntimeBrowserResources,
 } from '../src/runtime-browser-wiring.js'
+import { systemChromeClosureDigest } from '../src/system-chrome.js'
+import { readBrowserSelection, writeBrowserSelection } from '../src/runtime-user-config.js'
+import { createRuntimeTestRoots } from './fixtures.js'
 
 describe('Runtime browser production wiring cleanup', () => {
   test('生产装配按用户选择重验系统 Chrome，且旧托管安装只迁移为 managed-chromium', async () => {
@@ -21,30 +26,119 @@ describe('Runtime browser production wiring cleanup', () => {
     const inspected = { selection, identity: { device: 1, inode: 2, uid: 0, byteLength: 3 } }
     const inspectManaged = vi.fn()
     const revalidateSystem = vi.fn(async () => inspected)
+    const inspectCapabilityProof = vi.fn(async () => ({
+      proofDigest: selection.controlledLaunchProofDigest,
+      isolation: {
+        browserClosureDigest: systemChromeClosureDigest(inspected),
+        browserExecutableDigest: selection.executableDigest,
+      },
+    }))
     await expect(resolveRuntimeBrowserInstallation({
-      homeDir: '/safe/home', installation: {
+      homeDir: '/safe/home', projectRoot: '/safe/project', installation: {
         version: '0.2.0', installationDigest: runtimeInstallationDigest,
       },
     } as never, {
       readSelection: async () => selection,
       inspectManaged,
       revalidateSystem,
-    })).resolves.toEqual(inspected)
+      inspectCapabilityProof,
+    } as never)).resolves.toEqual(inspected)
     expect(revalidateSystem).toHaveBeenCalledWith(selection, {
-      projectRoot: '/safe/home/.mutil-skills/e2e/state',
+      projectRoot: '/safe/project',
+    })
+    expect(inspectCapabilityProof).toHaveBeenCalledWith({
+      homeDir: '/safe/home', runtimeInstallationDigest,
     })
     expect(inspectManaged).not.toHaveBeenCalled()
 
-    const managed = { root: '/safe/managed', executablePath: '/safe/managed/chrome', manifest: {} }
+    const managed = { root: '/safe/managed', executablePath: '/safe/managed/chrome', manifest: {
+      executableDigest: selection.executableDigest,
+      closureDigest: systemChromeClosureDigest(inspected),
+    } }
     await expect(resolveRuntimeBrowserInstallation({
-      homeDir: '/safe/home', installation: {
+      homeDir: '/safe/home', projectRoot: '/safe/project', installation: {
         version: '0.2.0', installationDigest: runtimeInstallationDigest,
       },
     } as never, {
       readSelection: async () => undefined,
       inspectManaged: async () => managed as never,
       revalidateSystem,
-    })).resolves.toBe(managed)
+      inspectCapabilityProof,
+    } as never)).resolves.toBe(managed)
+  })
+
+  test('系统 Chrome selection 与可信 capability proof 不一致时 fail closed', async () => {
+    const runtimeInstallationDigest = `sha256:${'1'.repeat(64)}`
+    const selection = {
+      schemaVersion: '1.0.0' as const,
+      source: { kind: 'system-chrome' as const, executablePath: '/Applications/Google Chrome' },
+      browserVersion: 'Google Chrome 150.0.0.0', executableDigest: `sha256:${'2'.repeat(64)}`,
+      runtimeInstallationDigest, controlledLaunchProofDigest: `sha256:${'3'.repeat(64)}`,
+      configuredAt: '2026-07-19T00:00:00.000Z',
+    }
+    const revalidateSystem = vi.fn()
+
+    await expect(resolveRuntimeBrowserInstallation({
+      homeDir: '/safe/home', projectRoot: '/safe/project',
+      installation: { version: '0.2.0', installationDigest: runtimeInstallationDigest },
+    } as never, {
+      readSelection: async () => selection,
+      inspectManaged: vi.fn(),
+      revalidateSystem,
+      inspectCapabilityProof: async () => ({
+        proofDigest: `sha256:${'9'.repeat(64)}`,
+        isolation: {
+          browserClosureDigest: `sha256:${'4'.repeat(64)}`,
+          browserExecutableDigest: selection.executableDigest,
+        },
+      }),
+    } as never)).rejects.toMatchObject({
+      code: 'E2E_RUNTIME_CAPABILITY_PROOF_BROWSER_MISMATCH',
+    })
+    expect(revalidateSystem).not.toHaveBeenCalled()
+  })
+
+  test('成功刷新 capability proof 后同步 selection，保证下一次 Run 仍能 fail closed 复验', async () => {
+    const roots = await createRuntimeTestRoots()
+    try {
+      const runtimeInstallationDigest = `sha256:${'1'.repeat(64)}`
+      const executableDigest = `sha256:${'2'.repeat(64)}`
+      await writeBrowserSelection(roots.home, {
+        schemaVersion: '1.0.0',
+        source: { kind: 'system-chrome', executablePath: '/Applications/Google Chrome' },
+        browserVersion: 'Google Chrome 150.0.0.0', executableDigest,
+        runtimeInstallationDigest, controlledLaunchProofDigest: `sha256:${'3'.repeat(64)}`,
+        configuredAt: '2026-07-19T00:00:00.000Z',
+      })
+      const proof = {
+        schemaVersion: '1.0.0' as const,
+        runtimeInstallationDigest,
+        proofDigest: `sha256:${'4'.repeat(64)}`,
+        gateway: {
+          sessionMeasurementDigest: `sha256:${'5'.repeat(64)}`,
+          policyDigest: `sha256:${'6'.repeat(64)}`,
+          auditDigest: `sha256:${'7'.repeat(64)}`,
+        },
+        isolation: {
+          browserMeasurementDigest: `sha256:${'8'.repeat(64)}`,
+          sandboxProfileDigest: `sha256:${'9'.repeat(64)}`,
+          canaryProofDigest: `sha256:${'a'.repeat(64)}`,
+          browserClosureDigest: `sha256:${'b'.repeat(64)}`,
+          browserExecutableDigest: executableDigest,
+        },
+        verifiedAt: '2026-07-19T00:00:00.000Z',
+      }
+
+      await bindRuntimeCapabilityProofToBrowserSelection(roots.home, proof)
+
+      await expect(readBrowserSelection(roots.home)).resolves.toMatchObject({
+        controlledLaunchProofDigest: proof.proofDigest,
+        executableDigest,
+        configuredAt: '2026-07-19T00:00:00.000Z',
+      })
+    } finally {
+      await rm(roots.root, { recursive: true, force: true })
+    }
   })
 
   test('固定 HTTP write 从真实 transport observation 生成可隔离的确定性证据', () => {
@@ -111,14 +205,17 @@ describe('Runtime browser production wiring cleanup', () => {
 
     const calls: string[] = []
     const recordProof = vi.fn(async () => { calls.push('proof'); return proof })
+    const bindProof = vi.fn(async () => { calls.push('bind') })
     await expect(settleRuntimeBrowserResourcesThenRecordProof(
       undefined,
       ['browser', 'gateway', 'authority'].map((name) => async () => { calls.push(name) }),
       proof,
       recordProof,
+      bindProof,
     )).resolves.toBeUndefined()
-    expect(calls).toEqual(['browser', 'gateway', 'authority', 'proof'])
+    expect(calls).toEqual(['browser', 'gateway', 'authority', 'proof', 'bind'])
     expect(recordProof).toHaveBeenCalledOnce()
+    expect(bindProof).toHaveBeenCalledOnce()
   })
 
   test('Authority RPC connection 的临时 session key 在 client 构造成功和异常时都立即清除', () => {

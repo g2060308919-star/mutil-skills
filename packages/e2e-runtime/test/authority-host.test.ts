@@ -980,6 +980,56 @@ test.each(['physical', 'logical'] as const)(
   },
 )
 
+test('direct approve 按目标 Run 冻结模式路由，旧 local Run 不因当前配置变化进入 WebAuthn', async () => {
+  const roots = await createRuntimeTestRoots()
+  const store = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+  try {
+    await mkdir(`${roots.project}/.biztest`, { recursive: true })
+    await writeFile(`${roots.project}/.biztest/project.json`, JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-LOCAL-DIRECT-APPROVE',
+    }))
+    const identity = await resolveProjectIdentity(roots.project)
+    const snapshot = {
+      ...runSnapshot(), projectIdentityDigest: identity.digest,
+      trustedExecutionFacts: {
+        ...runSnapshot().trustedExecutionFacts,
+        'approval-mode': 'local-confirmation' as const,
+      },
+    }
+    const seedDigest = `sha256:${'4'.repeat(64)}`
+    await store.beginRequest('SEED-LOCAL-DIRECT-APPROVE', seedDigest)
+    const lock = await store.acquireRunLock(identity.digest, snapshot.runId)
+    try {
+      await store.createRunOutcome(snapshot, 'SEED-LOCAL-DIRECT-APPROVE', seedDigest, { seeded: true }, lock)
+    } finally { await lock.close() }
+
+    const startAuthorityHost = vi.fn()
+    const stdout = captureWritable()
+    const exitCode = await runCli(
+      ['approve', '--run-id', snapshot.runId, '--type', 'scope'],
+      Readable.from([]), stdout.stream, captureWritable().stream,
+      {
+        homeDir: roots.home,
+        installRuntime: async () => { throw new Error('not used') },
+        uninstallRuntime: async () => { throw new Error('not used') },
+        inspectRuntimeInstallation: async () => runtimeInstallation(),
+        startAuthorityHost,
+        openRunStore: async () => store,
+        currentWorkingDirectory: () => roots.project,
+      },
+    )
+
+    expect(exitCode).toBe(2)
+    expect(startAuthorityHost).not.toHaveBeenCalled()
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      ok: false, error: { code: 'E2E_LOCAL_APPROVAL_RPC_REQUIRED' },
+    })
+  } finally {
+    await store.close()
+    await rm(roots.root, { recursive: true, force: true })
+  }
+})
+
 test('direct CLI reserves a stable finalization before WebAuthn and recovers after Run Store persistence failure', async () => {
   const roots = await createRuntimeTestRoots()
   const firstStore = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
