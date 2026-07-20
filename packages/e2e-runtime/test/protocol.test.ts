@@ -256,6 +256,14 @@ describe('repo-e2e CLI protocol slice', () => {
       Readable.from([JSON.stringify(doctorRequest)]),
       stdout.stream,
       stderr.stream,
+      {
+        homeDir: '/safe/uninstalled-home',
+        installRuntime: async () => ({
+          version: '0.0.0', installationDigest: digest, launcher: '/safe/uninstalled-home/bin/repo-e2e',
+        }),
+        uninstallRuntime: async () => ({ version: '0.0.0' }),
+        inspectRuntimeInstallation: async () => { throw new Error('not installed') },
+      },
     )
 
     const response = RuntimeResponseEnvelopeSchema.parse(JSON.parse(stdout.text()))

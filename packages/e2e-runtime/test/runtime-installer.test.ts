@@ -353,6 +353,8 @@ describe('versioned runtime installer', () => {
     }
     expect(observed.arguments).toEqual([
       'install',
+      '--prefix',
+      prefix,
       '--ignore-scripts',
       '--omit=dev',
       '--no-bin-links',

@@ -125,6 +125,8 @@ export class ProductionClosureInstaller {
     const npmArguments = [
       npmCliPath,
       'install',
+      '--prefix',
+      input.prefix,
       '--ignore-scripts',
       '--omit=dev',
       '--no-bin-links',
