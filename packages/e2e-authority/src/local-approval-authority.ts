@@ -3857,7 +3857,9 @@ function toApprovalCapabilityRecord(
 
 function isReadGrant(grant: SignedGrant): grant is SignedReadGrant {
   return ReadApprovalSubjectSchema.safeParse(grant.subject).success
-    && grant.capabilities.every((capability) => 'operation' in capability && capability.transport === 'browser-local')
+    && grant.capabilities.every((capability) => 'operation' in capability
+      && 'effect' in capability && capability.effect === 'read'
+      && (capability.transport === 'browser-local' || capability.transport === 'http'))
 }
 
 function isWriteGrant(grant: SignedGrant): grant is SignedWriteGrant {

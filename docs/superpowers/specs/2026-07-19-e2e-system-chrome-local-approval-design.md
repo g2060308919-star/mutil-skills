@@ -98,7 +98,7 @@ repo-e2e configure-browser --system --executable /absolute/path/to/google-chrome
 
 Runtime 对候选执行：
 
-1. canonicalize 路径；最终对象必须是 root 或当前 UID 所有的可执行普通文件，并拒绝 group/world writable、项目目录内文件和路径替换。
+1. canonicalize 路径；最终对象必须是 root 或当前 UID 所有的可执行普通文件。拒绝 world writable；root 所有文件同时拒绝 group writable。当前 UID 所有文件允许 group writable，以兼容 macOS 标准 App 安装权限（owner 本就可修改该文件），但仍必须在每次 Run 重验路径、inode、版本与 executable digest。始终拒绝项目目录内文件和路径替换。
 2. 读取版本并计算 executable digest。
 3. 使用现有 `ControlledBrowserHost` 创建一次性 Profile。
 4. 启动临时 Gateway，完成代理、隔离、direct-bypass canary 和 cleanup proof。
@@ -303,7 +303,7 @@ repo-e2e rpc                             # Skill 专用
 
 - 固定 allowlist 自动发现系统 Chrome。
 - 显式绝对路径配置。
-- 拒绝相对路径、项目内恶意 Chrome、symlink swap、group/world-writable executable。
+- 拒绝相对路径、项目内恶意 Chrome、symlink swap、world-writable executable，以及 root 所有但 group-writable 的 executable；覆盖当前用户所有、group-writable 的标准 macOS App 模式。
 - 版本读取、digest 绑定和自动更新后 revalidation。
 - 系统 Chrome 受控启动生成 Gateway/隔离 proof。
 - 系统 Chrome 不可用时只给 remediation，不静默下载。

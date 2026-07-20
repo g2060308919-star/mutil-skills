@@ -253,12 +253,10 @@ export async function runCli(
         homeDir: dependencies.homeDir, installation,
         browserInstallation: result as Awaited<ReturnType<typeof installChromiumDefault>>,
         prepareAuthorityRoot: async () => {
-          const authority = await (dependencies.startAuthorityHost ?? startRuntimeAuthorityHost)({
-            homeDir: dependencies.homeDir, installation, subject: localAuthoritySubject(),
-            ...(dependencies.approvalSessionTtlMs === undefined
-              ? {} : { approvalSessionTtlMs: dependencies.approvalSessionTtlMs }),
+          await prepareBrowserBootstrapAuthorityRoot({
+            homeDir: dependencies.homeDir, installation,
+            openAuthority: dependencies.openArtifactStoreAuthority ?? openRuntimeArtifactStoreAuthority,
           })
-          await authority.close()
         },
       })
       if (isRecord(result) && isRecord(result.manifest)) {
@@ -512,7 +510,12 @@ export async function runCli(
           issuer: 'e2e-runtime-regression', keyId: `regression-${snapshot.runId}`, tempParent,
         })
         const provider = new ProductionFinalizationMaterialProvider({
-          quarantine,
+          quarantine: {
+            readEvidence: async ({ runId, relativePath }) => await quarantine!.readEvidence({
+              runId, relativePath,
+              actor: { subject: 'runtime:finalization-material-provider', roles: ['e2e-sanitizer'] },
+            }),
+          },
           authority: artifactAuthority,
           projectCompilerInput: ({ artifacts }) => {
             const readinessArtifacts = artifacts.filter((artifact) =>
@@ -987,10 +990,10 @@ async function configureSystemBrowserDefault(input: {
     installation,
     browserInstallation: inspected,
     prepareAuthorityRoot: async () => {
-      const authority = await startRuntimeAuthorityHost({
-        homeDir: input.homeDir, installation, subject: localAuthoritySubject(),
+      await prepareBrowserBootstrapAuthorityRoot({
+        homeDir: input.homeDir, installation,
+        openAuthority: openRuntimeArtifactStoreAuthority,
       })
-      await authority.close()
     },
   })
   const proof = await inspectRuntimeCapabilityProof({
@@ -1004,6 +1007,19 @@ async function configureSystemBrowserDefault(input: {
   }
   await writeBrowserSelection(input.homeDir, selection)
   return selection
+}
+
+async function prepareBrowserBootstrapAuthorityRoot(input: {
+  homeDir: string
+  installation: RuntimeInstallation
+  openAuthority: typeof openRuntimeArtifactStoreAuthority
+}): Promise<void> {
+  const authority = await input.openAuthority({
+    homeDir: input.homeDir,
+    installation: input.installation,
+    subject: localAuthoritySubject(),
+  })
+  await authority.close()
 }
 
 function isHumanAuthorityCommand(arguments_: string[]): boolean {

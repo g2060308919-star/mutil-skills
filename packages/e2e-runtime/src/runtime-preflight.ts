@@ -240,8 +240,13 @@ function buildPreflightResult(
 }
 
 function preflightError(code: string, cause?: unknown): E2EError {
+  const issueSummary = cause instanceof z.ZodError
+    ? cause.issues.map((issue) => `${issue.path.join('.') || '<root>'}:${issue.code}`).join(',')
+    : undefined
   return new E2EError({
-    code, category: 'safety', message: `${code}: Runtime browser preflight 未通过可信边界校验`,
+    code, category: 'safety', message: `${code}: Runtime browser preflight 未通过可信边界校验${
+      issueSummary === undefined ? '' : `（${issueSummary}）`
+    }`,
     retryable: false, cause,
   })
 }

@@ -90,7 +90,8 @@ export class SandboxedOneShotExecutor {
       throw invalidInput('cwd must be contained in readOnlyRoots')
     }
 
-    const home = await mkdtemp(join(resolve(this.options.tempParent), 'e2e-one-shot-home-'))
+    const createdHome = await mkdtemp(join(resolve(this.options.tempParent), 'e2e-one-shot-home-'))
+    const home = await realpath(createdHome)
     try {
       const env = fixedEnvironment(home)
       const invocation = this.options.backend === 'macos-sandbox-exec'
@@ -121,7 +122,7 @@ export class SandboxedOneShotExecutor {
         message: 'sandboxed one-shot command execution failed', cause,
       })
     } finally {
-      await rm(home, { recursive: true, force: true })
+      await rm(createdHome, { recursive: true, force: true })
     }
   }
 }
@@ -131,7 +132,9 @@ function buildMacInvocation(command: string, args: string[], cwd: string, roots:
   const policy = [
     '(version 1)', '(deny default)', '(allow process-exec)', '(allow process-fork)',
     '(allow sysctl-read)', '(allow file-read-metadata)',
+    '(allow file-read-data (literal "/"))',
     ...readable.map((root) => `(allow file-read* (subpath ${sandboxString(root)}))`),
+    `(allow file-read* (subpath ${sandboxString(home)}))`,
     `(allow file-write* (subpath ${sandboxString(home)}))`,
     '(deny network*)',
   ].join(' ')

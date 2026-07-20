@@ -171,7 +171,10 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
         await completeWebAuthnApproval(url, credential)
       },
     })
-    vi.spyOn(runStore, 'readRunOutcome').mockRejectedValueOnce(new Error('simulated Run Store fsync failure'))
+    const originalWriteTrustedFactOutcome = runStore.writeTrustedFactOutcome.bind(runStore)
+    vi.spyOn(runStore, 'writeTrustedFactOutcome')
+      .mockRejectedValueOnce(new Error('simulated Run Store fsync failure'))
+      .mockImplementation(originalWriteTrustedFactOutcome)
 
     const first = await runtime.handle(request, JSON.stringify(request))
     if (first.error?.code === 'E2E_APPROVAL_PLATFORM_PERMISSION_DENIED') { skip(); return }

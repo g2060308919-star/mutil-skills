@@ -49,6 +49,22 @@ describe('E2E Runtime npm tarball', () => {
     expect(child).not.toContain('runCli(')
     expect(child).toContain("join(homeDir, '.mutil-skills', 'bin', 'repo-e2e')")
     expect(child).toContain("spawn(launcher, ['rpc']")
+    expect(child).toContain('manifestDocument.signatures.length !== 0')
+    expect(child).not.toContain('artifactAuthority.verifyArtifactSignature(signature, expectedManifestDigest)')
+    expect(child).toContain('createTrustedCompilerExecutionTrust({')
+    expect(child).toContain('discoveryAuthority: {')
+    expect(child).toContain('runBrowserPreflight({')
+    expect(child).toContain("approvalType: 'discovery'")
+    expect(child).toContain('projectGatewayRules({')
+    expect(child).toContain("freshSnapshot.trustedExecutionFacts['signed-discovery-grant'] = freshPreflight.grant")
+    expect(child).toContain("freshSnapshot.trustedExecutionFacts['browser-preflight'] = freshPreflight.fact")
+    expect(child).toContain('approvalFreshnessClient: artifactAuthority.createTrustedApprovalFreshnessClient()')
+    expect(child).toContain("'manifest' in browserInstallation")
+    expect(child).toContain('browserInstallation.selection.source.executablePath')
+    expect(child).toContain('const bridgeSnapshot = readBridge.snapshot()')
+    expect(child).toContain('compilerExecutionDiagnostic(execution)')
+    expect(child).toContain('activeApprovalContext = structuredClone(input.grant.approvalContext)')
+    expect(child).toContain('{ approvalContext: activeApprovalContext }')
     expect(driver).toContain("rm(join(input.project, 'node_modules')")
     expect(driver).toContain("rm(join(input.project, 'package.json')")
     expect(driver).toContain('const harnessRoot = join(root, \'harness\')')
@@ -67,6 +83,12 @@ describe('E2E Runtime npm tarball', () => {
       const parsed = ArtifactSchemaRegistry[artifact.artifactType].safeParse(artifact)
       expect(parsed.success, `${artifact.artifactType}:${parsed.success ? '' : parsed.error.message}`).toBe(true)
     }
+    const executionContract = fixture.frozenArtifacts['execution-contract'].content as {
+      identities: Array<{ roleIds: string[]; secretRef: string }>
+    }
+    expect(executionContract.identities).toEqual([
+      { identityId: 'IDENTITY-AUDITOR', roleIds: ['auditor'], secretRef: 'SECRET-REF-LOCAL' },
+    ])
   })
 
   test('allowlist 包含 launcher、审批资产与 helper，并排除测试、原始证据和环境文件', async () => {

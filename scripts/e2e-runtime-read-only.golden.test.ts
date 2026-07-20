@@ -11,6 +11,7 @@ import {
   SignedGrantSchema,
   canonicalizeJson,
   type ApprovalGrantSubject,
+  type DecisionReceipt,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
   type SignedGrant,
@@ -207,7 +208,7 @@ describe('self-contained Runtime CLI read-only real Golden', () => {
           'prd-request', fixture.semanticArtifacts['prd-request'])
         await submit(runCli, dependencies, projectRoot, runId, 'SUBMIT-SCOPE', 'source-frozen',
           'acceptance-scope', fixture.semanticArtifacts['acceptance-scope'])
-        await invokeCli(runCli, dependencies, projectRoot, 'APPROVE-SCOPE', 'open-approval', {
+        const scope = await invokeCli(runCli, dependencies, projectRoot, 'APPROVE-SCOPE', 'open-approval', {
           runId, approvalType: 'scope',
         })
         await submit(runCli, dependencies, projectRoot, runId, 'SUBMIT-MODEL', 'scope-approved',
@@ -216,7 +217,9 @@ describe('self-contained Runtime CLI read-only real Golden', () => {
           'coverage-universe', fixture.semanticArtifacts['coverage-universe'])
 
         const discovery = await invokeCli(runCli, dependencies, projectRoot, 'APPROVE-DISCOVERY', 'open-approval', {
-          runId, approvalType: 'discovery', grantSubject: fixture.discoverySubject,
+          runId, approvalType: 'discovery', grantSubject: fixture.discoverySubject({
+            scopeReceipt: scope.decisionReceipt as DecisionReceipt,
+          }),
         })
         const discoveryGrant = SignedGrantSchema.parse(discovery.signedGrant)
         const preflight = await invokeCli(runCli, dependencies, projectRoot, 'RUN-PREFLIGHT', 'run-preflight', { runId })
@@ -234,7 +237,9 @@ describe('self-contained Runtime CLI read-only real Golden', () => {
         const execution = await invokeCli(runCli, dependencies, projectRoot, 'APPROVE-EXECUTION', 'open-approval', {
           runId,
           approvalType: 'execution',
-          grantSubject: fixture.readSubject(discoveryGrant.grantId, preflightDigest),
+          grantSubject: fixture.readSubject(discoveryGrant.grantId, preflightDigest, {
+            scopeReceipt: scope.decisionReceipt as DecisionReceipt,
+          }),
         })
         expect(execution).toMatchObject({ approvalType: 'execution' })
         await submit(runCli, dependencies, projectRoot, runId, 'SUBMIT-REGRESSION', 'execution-approved',

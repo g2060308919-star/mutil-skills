@@ -42,7 +42,10 @@ export function runtimeReadOnlyFixture(input: {
   const executionContract = artifact(input, 'execution-contract', {
     environment: 'test', baseOrigin: origin,
     browserMatrix: [{ browserId: 'chromium', channel: 'chromium', viewportId: 'desktop' }],
-    identities: [], caseQueue: [{ ordinal: 0, caseId: 'CASE-ORDER-1' }],
+    identities: [{
+      identityId: 'IDENTITY-AUDITOR', roleIds: ['auditor'], secretRef: 'SECRET-REF-LOCAL',
+    }],
+    caseQueue: [{ ordinal: 0, caseId: 'CASE-ORDER-1' }],
     actionIntents: [{
       actionId: 'ACTION-ORDER-1', effect: 'read', intentDigest: d('intent'), requestIds: ['REQUEST-1'],
     }],
@@ -67,7 +70,9 @@ export function runtimeReadOnlyFixture(input: {
     }], unmappedSteps: [], discoveredRisks: [],
   })
   const projectPolicy = semanticArtifact(input, 'project-policy', '2.0.0', {
-    policyVersion: '1.0.0', environments: [{ environmentId: 'test', baseOrigin: origin }],
+    policyVersion: '1.0.0', environments: [{
+      environmentId: 'test', baseOrigin: origin, riskTier: 'test',
+    }],
     originPolicies: [{ origin, allowRead: true, allowWrite: false }],
     browserMatrix: [{ browserId: 'chromium', channel: 'chromium', required: true }],
     coveragePolicy: { id: 'COVERAGE-POLICY', digest: d('coverage-policy') },
@@ -132,23 +137,31 @@ export function runtimeReadOnlyFixture(input: {
     inputDigests: [requirementModel.contentDigest, coverageUniverse.contentDigest], metrics: [], findings: [],
     orphanIds: [], weakIds: [], status: 'passed',
   })
-  const discoverySubject: DiscoveryApprovalSubject = {
-    schemaVersion: '1.1.0', assetId: input.assetId, prdRevision: input.prdRevision, scopeDigest: d('scope'),
+  const decidedScopeContent = (scopeReceipt?: DecisionReceipt): Record<string, unknown> => {
+    const content = structuredClone(acceptanceScope.content) as Record<string, unknown>
+    if (scopeReceipt) content.scopeDecision = {
+      decisionId: 'SCOPE-1', status: 'approved', receipt: scopeReceipt,
+    }
+    return content
+  }
+  const discoverySubject = (
+    decisions?: { scopeReceipt?: DecisionReceipt },
+  ): DiscoveryApprovalSubject => ({
+    schemaVersion: '1.1.0', assetId: input.assetId, prdRevision: input.prdRevision,
+    scopeDigest: digestApprovalProjection('acceptance-scope',
+      decidedScopeContent(decisions?.scopeReceipt)),
     environment: 'test', baseOrigin: origin, actor: 'auditor',
     expectedPageIdentity: { url: input.url, title: '订单', heading: '订单列表', ariaSignals: [] },
     bootstrapIntentsDigest: d('bootstrap'),
     requests: [],
     actions: [{ actionId: 'PREFLIGHT-1', operation: 'local-navigation', maxUses: 1, requestIds: [] }],
-  }
+  })
   const readSubject = (
     discoveryGrantId: string,
     preflightDigest: string,
     decisions?: { scopeReceipt?: DecisionReceipt },
   ): ReadApprovalSubject => {
-    const scopeContent = structuredClone(acceptanceScope.content) as Record<string, unknown>
-    if (decisions?.scopeReceipt) scopeContent.scopeDecision = {
-      decisionId: 'SCOPE-1', status: 'approved', receipt: decisions.scopeReceipt,
-    }
+    const scopeContent = decidedScopeContent(decisions?.scopeReceipt)
     const runBundleProjection = {
       runId: input.runId,
       allInputRefs: [
@@ -170,7 +183,7 @@ export function runtimeReadOnlyFixture(input: {
         { capabilityId: 'PENDING-SHOT', actionId: 'ACTION-ORDER-1', operation: 'screenshot', effect: 'read', maxUses: 1, digest: d('pending-shot') },
         { capabilityId: 'PENDING-HTTP', actionId: 'ACTION-ORDER-1', operation: 'http-request', effect: 'read', maxUses: 1, digest: d('pending-http') },
       ],
-      secretRefs: [], runtimePolicyDigest, runtimeIsolationPolicyDigest: 'not-applicable',
+      secretRefs: ['SECRET-REF-LOCAL'], runtimePolicyDigest, runtimeIsolationPolicyDigest: 'not-applicable',
     }
     return {
       schemaVersion: '2.1.0', assetId: input.assetId, prdRevision: input.prdRevision,

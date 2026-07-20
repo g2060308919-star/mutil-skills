@@ -19,21 +19,29 @@ import {
   type RuntimeFixedHttpRequest,
   type RuntimeHttpReadProbe,
   type SignedInjectionGrant,
+  type CapabilityReservation,
 } from '@mutil-skills/e2e-contracts'
 import { InjectionGateway, LocalGatewayAuditSigner, ReversibleWriteGateway,
-  digestBinaryHttpPayload } from '@mutil-skills/e2e-gateway'
+  digestBinaryHttpPayload, type TrustedGatewayPublicationAuditRecorder } from '@mutil-skills/e2e-gateway'
 import { ControlledBrowserHost, getControlledBrowserSessionBinding } from './browser-host.js'
 import { inspectChromiumInstallation, type BrowserInstallation } from './browser-installer.js'
+import { readBrowserSelection, type BrowserSelection } from './runtime-user-config.js'
+import {
+  revalidateSystemChrome,
+  type InspectedSystemChrome,
+  type SystemChromeSelection,
+} from './system-chrome.js'
 import { startGatewayProxyHostForRuntime } from './gateway-proxy-host.js'
 import { projectGatewayRules } from './gateway-rule-projector.js'
 import { runtimeLayout } from './runtime-layout.js'
 import { recordRuntimeCapabilityProof } from './runtime-capability-proof.js'
-import type { RuntimeAuthorityHost } from './authority-host.js'
+import { runtimeApprovalExecutionBinding, type RuntimeAuthorityHost } from './authority-host.js'
 import type { RuntimeInstallation } from './runtime-discovery.js'
 import { authorizeRuntimePreflight, type RuntimePreflightCapability } from './runtime-preflight.js'
 import {
   TrustedActionRunner,
   authorizeRuntimeReadExecutor,
+  projectRuntimeReadGatewayAudit,
   authorizeRuntimeInjectionExecutor,
   authorizeRuntimeWriteExecutor,
   type RuntimeInjectionExecutorCapability,
@@ -50,24 +58,130 @@ import {
 } from './runtime-write-production.js'
 import { join } from 'node:path'
 
+export interface RuntimeBrowserInstallationOperations {
+  readSelection(homeDir: string): Promise<BrowserSelection | undefined>
+  inspectManaged(input: {
+    homeDir: string
+    runtimeVersion: string
+    runtimeInstallationDigest: string
+  }): Promise<BrowserInstallation>
+  revalidateSystem(
+    selection: SystemChromeSelection,
+    options: { projectRoot: string },
+  ): Promise<InspectedSystemChrome>
+}
+
+/**
+ * 生产浏览器解析只消费已验证的用户选择。旧版本只安装了托管 Chromium、尚无
+ * selection 文件时保持原语义；系统 Chrome 每次 Run 都重新验证，绝不静默回退下载。
+ */
+export async function resolveRuntimeBrowserInstallation(
+  input: { homeDir: string; browserHomeDir?: string; installation: RuntimeInstallation },
+  operations: RuntimeBrowserInstallationOperations = productionRuntimeBrowserInstallationOperations,
+): Promise<BrowserInstallation> {
+  const browserHomeDir = input.browserHomeDir ?? input.homeDir
+  const selection = input.browserHomeDir !== undefined && input.browserHomeDir !== input.homeDir
+    ? undefined : await operations.readSelection(input.homeDir)
+  if (selection !== undefined
+    && selection.runtimeInstallationDigest !== input.installation.installationDigest) {
+    throw new E2EError({
+      code: 'E2E_BROWSER_SELECTION_RUNTIME_MISMATCH', category: 'safety',
+      message: 'Browser Selection 与当前 Runtime installation 不一致', retryable: false,
+    })
+  }
+  if (selection?.source.kind === 'system-chrome') {
+    return await operations.revalidateSystem(selection as SystemChromeSelection, {
+      projectRoot: runtimeLayout(input.homeDir).state,
+    })
+  }
+  return await operations.inspectManaged({
+    homeDir: browserHomeDir,
+    runtimeVersion: input.installation.version,
+    runtimeInstallationDigest: input.installation.installationDigest,
+  })
+}
+
+const productionRuntimeBrowserInstallationOperations: RuntimeBrowserInstallationOperations = Object.freeze({
+  readSelection: async (homeDir: string) => await readBrowserSelection(homeDir).catch((error) => {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return undefined
+    throw error
+  }),
+  inspectManaged: async (input: {
+    homeDir: string; runtimeVersion: string; runtimeInstallationDigest: string
+  }) => await inspectChromiumInstallation(input),
+  revalidateSystem: async (selection: SystemChromeSelection, options: { projectRoot: string }) =>
+    await revalidateSystemChrome(selection, options),
+})
+
+type RuntimeReadAuthority = ReturnType<typeof createAuthorityReadRpcClient>
+
+/**
+ * Read Runner 的 capability reservation 发生在 Authority RPC，而 HTTP 决策发生在 Gateway。
+ * 可信装配层在 Authority 终态成功后把同一 reservation 交给 Gateway recorder，供最终
+ * attempt 审计闭合；调用方不能自行伪造 completed/unknown 事实。
+ */
+export function createAuditedRuntimeReadAuthority(
+  authority: RuntimeReadAuthority,
+  recorder: TrustedGatewayPublicationAuditRecorder,
+): RuntimeReadAuthority {
+  const pending = new Map<string, CapabilityReservation>()
+  const requirePending = (reservationId: string): CapabilityReservation => {
+    const reservation = pending.get(reservationId)
+    if (reservation === undefined) throw new E2EError({
+      code: 'E2E_RUNTIME_READ_RESERVATION_AUDIT_MISSING', category: 'safety',
+      message: 'Read reservation 未在可信装配层登记', retryable: false,
+    })
+    return reservation
+  }
+  return Object.freeze({
+    async reserveForSubject(input: Parameters<RuntimeReadAuthority['reserveForSubject']>[0]) {
+      const reservation = await authority.reserveForSubject(input)
+      if (pending.has(reservation.reservationId)) throw new E2EError({
+        code: 'E2E_RUNTIME_READ_RESERVATION_AUDIT_DUPLICATE', category: 'safety',
+        message: 'Read reservationId 重复', retryable: false,
+      })
+      pending.set(reservation.reservationId, structuredClone(reservation))
+      return reservation
+    },
+    async complete(reservationId: string, outcomeDigest: string) {
+      const reservation = requirePending(reservationId)
+      await authority.complete(reservationId, outcomeDigest)
+      recorder.recordCapabilityReservation({
+        reservation: { ...reservation, status: 'completed', outcomeDigest }, consumed: true,
+      })
+      pending.delete(reservationId)
+    },
+    async markUnknown(reservationId: string, observation: string) {
+      const reservation = requirePending(reservationId)
+      await authority.markUnknown(reservationId, observation)
+      recorder.recordCapabilityReservation({
+        reservation: { ...reservation, status: 'unknown', observation }, consumed: false,
+      })
+      pending.delete(reservationId)
+    },
+    destroy() {
+      pending.clear()
+      authority.destroy()
+    },
+  })
+}
+
 export function createProductionBrowserCapabilities(input: {
   homeDir: string
   browserHomeDir?: string
   installation: RuntimeInstallation
   authorityHost(): Promise<RuntimeAuthorityHost>
 }): { preflight: RuntimePreflightCapability; read: RuntimeReadExecutorCapability } {
-  const browserInstallation = async () => await inspectChromiumInstallation({
-    homeDir: input.browserHomeDir ?? input.homeDir, runtimeVersion: input.installation.version,
-    runtimeInstallationDigest: input.installation.installationDigest,
-  })
+  const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
   const preflight = authorizeRuntimePreflight({
     prepare: async ({ snapshot, grant, attemptId }) => {
     const navigation = grant.capabilities.filter((capability) => capability.operation === 'local-navigation')
     if (navigation.length !== 1) throw new Error('E2E_RUNTIME_DISCOVERY_CAPABILITY_AMBIGUOUS')
     const capability = navigation[0]!
     const authorityHost = await input.authorityHost()
-    await authorityHost.activateGrant({ grant, approvalBinding: grant.approvalContext })
-    const connection = authorityHost.executionRpcConnection(grant.approvalContext)
+    const approvalBinding = runtimeApprovalExecutionBinding(grant.approvalContext)
+    await authorityHost.activateGrant({ grant, approvalBinding })
+    const connection = authorityHost.executionRpcConnection(approvalBinding)
     const authority = consumeRpcConnectionCredential(connection, (consumed) =>
       createAuthorityDiscoveryRpcClient({
         credential: consumed.credential, verifierMaterial: consumed.verifierMaterial,
@@ -166,7 +280,13 @@ export function createProductionBrowserCapabilities(input: {
         output: {
           status: 'ready', reservationId: outcome.reservationId,
           observedIdentity: outcome.observedIdentity,
-          browserMeasurement: browser.measurement,
+          browserMeasurement: {
+            browserMeasurementDigest: browser.measurement.browserMeasurementDigest,
+            browserClosureDigest: browser.measurement.browserClosureDigest,
+            browserExecutableDigest: browser.measurement.browserExecutableDigest,
+            gatewaySessionMeasurementDigest: browser.measurement.gatewaySessionMeasurementDigest,
+            canaryProofDigest: browser.measurement.canaryProofDigest,
+          },
           gatewayPolicyDigest: gateway.handle.measurement.policyDigest,
           gatewayAuditDigest,
         },
@@ -186,8 +306,9 @@ export function createProductionBrowserCapabilities(input: {
       const output = preparation.output
       if (output.reservationId === undefined) return output
       const authorityHost = await input.authorityHost()
-      await authorityHost.activateGrant({ grant, approvalBinding: grant.approvalContext })
-      const connection = authorityHost.executionRpcConnection(grant.approvalContext)
+      const approvalBinding = runtimeApprovalExecutionBinding(grant.approvalContext)
+      await authorityHost.activateGrant({ grant, approvalBinding })
+      const connection = authorityHost.executionRpcConnection(approvalBinding)
       const authority = consumeRpcConnectionCredential(connection, (consumed) =>
         createAuthorityDiscoveryRpcClient({
           credential: consumed.credential, verifierMaterial: consumed.verifierMaterial,
@@ -236,8 +357,9 @@ export function createProductionBrowserCapabilities(input: {
 
   const read = authorizeRuntimeReadExecutor(async ({ snapshot, action, grant, currentSubject, attemptId }) => {
     const authorityHost = await input.authorityHost()
-    await authorityHost.activateGrant({ grant, approvalBinding: grant.approvalContext })
-    const connection = authorityHost.executionRpcConnection(grant.approvalContext)
+    const approvalBinding = runtimeApprovalExecutionBinding(grant.approvalContext)
+    await authorityHost.activateGrant({ grant, approvalBinding })
+    const connection = authorityHost.executionRpcConnection(approvalBinding)
     const authority = consumeRpcConnectionCredential(connection, (consumed) =>
       createAuthorityReadRpcClient({
         credential: consumed.credential, verifierMaterial: consumed.verifierMaterial,
@@ -258,21 +380,30 @@ export function createProductionBrowserCapabilities(input: {
     let operationError: unknown
     let proofInput: Parameters<typeof recordRuntimeCapabilityProof>[0] | undefined
     let gatewayAuditVerifierMaterial: Record<string, unknown> | undefined
+    let gatewayAuditRecorder: TrustedGatewayPublicationAuditRecorder | undefined
+    let auditedAuthority: RuntimeReadAuthority | undefined
     try {
       gateway = await startGatewayProxyHostForRuntime({
         runId: snapshot.runId, mode: 'real-environment', authorityRoot: runtimeLayout(input.homeDir).authority,
         approvedRequests,
-        policyObjects: { factory: ({ signer }) => {
+        policyObjects: { factory: ({ signer, recorder }) => {
           gatewayAuditVerifierMaterial = signer.exportVerifierMaterial() as unknown as Record<string, unknown>
+          gatewayAuditRecorder = recorder
           return {}
         } },
       })
+      if (gatewayAuditRecorder === undefined) throw new E2EError({
+        code: 'E2E_RUNTIME_READ_AUDIT_RECORDER_MISSING', category: 'safety',
+        message: '只读执行缺少可信 Gateway audit recorder', retryable: false,
+      })
+      auditedAuthority = createAuditedRuntimeReadAuthority(authority, gatewayAuditRecorder)
       browser = await new ControlledBrowserHost().open({
         homeDir: input.homeDir, runId: snapshot.runId,
         installation: await browserInstallation(), gateway,
       })
       const executed = await new TrustedActionRunner().executeReadOnly({
-        action, grant, currentSubject, authority, browser, gateway: gateway.handle, attemptId,
+        action, grant, currentSubject, authority: auditedAuthority,
+        browser, gateway: gateway.handle, attemptId,
       })
       const publication = await gateway.handle.finalize()
       if (gatewayAuditVerifierMaterial === undefined) {
@@ -299,7 +430,7 @@ export function createProductionBrowserCapabilities(input: {
       }
       return {
         status: executed.result.status, result: executed.result,
-        gatewayAudit: gateway.handle.auditSummary(),
+        gatewayAudit: projectRuntimeReadGatewayAudit(gateway.handle.auditSummary()),
         gatewayAuditDigest,
         ...(executed.evidence === undefined ? {} : { evidence: executed.evidence }),
         finalizationFacts: {
@@ -322,7 +453,7 @@ export function createProductionBrowserCapabilities(input: {
       await settleRuntimeBrowserResourcesThenRecordProof(operationError, [
         ...(browser === undefined ? [] : [async () => await browser!.close()]),
         ...(gateway === undefined ? [] : [async () => await gateway!.handle.close()]),
-        async () => authority.destroy(),
+        async () => (auditedAuthority ?? authority).destroy(),
       ], proofInput)
     }
   })
@@ -341,10 +472,7 @@ export function createProductionWriteBrowserCapability(input: {
   secretBroker: SecretTemplateBroker
   writeProduction: RuntimeWriteProductionCapability
 }): RuntimeWriteExecutorCapability {
-  const browserInstallation = async () => await inspectChromiumInstallation({
-    homeDir: input.browserHomeDir ?? input.homeDir, runtimeVersion: input.installation.version,
-    runtimeInstallationDigest: input.installation.installationDigest,
-  })
+  const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
   return authorizeRuntimeWriteExecutor(async ({ snapshot, attemptId, caseId, actionId }) => {
     if (snapshot === undefined) throw writeWiringError('E2E_RUNTIME_WRITE_SNAPSHOT_REQUIRED')
     const runtimeSnapshot = snapshot
@@ -360,8 +488,9 @@ export function createProductionWriteBrowserCapability(input: {
       throw writeWiringError('E2E_RUNTIME_WRITE_PROJECTED_ACTION_MISMATCH')
     }
     const authorityHost = await input.authorityHost()
-    await authorityHost.activateGrant({ grant: projection.grant, approvalBinding: projection.grant.approvalContext })
-    const executionConnection = authorityHost.executionRpcConnection(projection.grant.approvalContext)
+    const approvalBinding = runtimeApprovalExecutionBinding(projection.grant.approvalContext)
+    await authorityHost.activateGrant({ grant: projection.grant, approvalBinding })
+    const executionConnection = authorityHost.executionRpcConnection(approvalBinding)
     const authority = consumeRpcConnectionCredential(executionConnection, (consumed) =>
       createAuthorityExecutionRpcClients({
         credential: consumed.credential, verifierMaterial: consumed.verifierMaterial,
@@ -369,7 +498,7 @@ export function createProductionWriteBrowserCapability(input: {
         transport: createAuthenticatedRpcHttpTransport(consumed.endpoint),
         approvalBinding: consumed.approvalBinding,
       }))
-    const maintenanceConnection = authorityHost.executionRpcConnection(projection.grant.approvalContext)
+    const maintenanceConnection = authorityHost.executionRpcConnection(approvalBinding)
     const maintenance = consumeRpcConnectionCredential(maintenanceConnection, (consumed) =>
       createAuthorityMaintenanceRpcClient({
         credential: consumed.credential, verifierMaterial: consumed.verifierMaterial,
@@ -576,11 +705,7 @@ export function createProductionInjectionBrowserCapability(input: {
   installation: RuntimeInstallation
   authorityHost(): Promise<RuntimeAuthorityHost>
 }): RuntimeInjectionExecutorCapability {
-  const browserInstallation = async () => await inspectChromiumInstallation({
-    homeDir: input.browserHomeDir ?? input.homeDir,
-    runtimeVersion: input.installation.version,
-    runtimeInstallationDigest: input.installation.installationDigest,
-  })
+  const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
   return authorizeRuntimeInjectionExecutor(async ({ snapshot, attemptId, caseId, actionId }) => {
     if (snapshot === undefined) throw writeWiringError('E2E_RUNTIME_INJECTION_SNAPSHOT_REQUIRED')
     const parsed = SignedGrantSchema.safeParse(
@@ -618,8 +743,9 @@ export function createProductionInjectionBrowserCapability(input: {
       url: target.href, maxUses: capability.expectedMatches, behavior,
     }]
     const authorityHost = await input.authorityHost()
-    await authorityHost.activateGrant({ grant, approvalBinding: grant.approvalContext })
-    const connection = authorityHost.executionRpcConnection(grant.approvalContext)
+    const approvalBinding = runtimeApprovalExecutionBinding(grant.approvalContext)
+    await authorityHost.activateGrant({ grant, approvalBinding })
+    const connection = authorityHost.executionRpcConnection(approvalBinding)
     const authority = consumeRpcConnectionCredential(connection, (consumed) =>
       createAuthorityInjectionRpcClient({
         credential: consumed.credential,

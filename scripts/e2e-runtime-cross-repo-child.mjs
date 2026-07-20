@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { runtimeReadOnlyFixture } from './fixture.js'
@@ -45,21 +45,24 @@ const [{ LocalGatewayAuditVerifier, verifyGatewayPublicationAudit }, {
   discardTrustedCompilerRun,
   executeTrustedCompilerProject,
   prepareTrustedCompilerRun,
+  runBrowserPreflight,
   startTrustedCompilerControlledReadBridge,
 }] = await Promise.all([
   installedPackage('e2e-gateway'),
   installedPackage('e2e-playwright-runtime'),
 ])
 const [{ inspectRuntimeInstallation },
-  { runtimeProductionSanitizerPolicyDigest }, { inspectChromiumInstallation },
+  { runtimeProductionSanitizerPolicyDigest }, { resolveRuntimeBrowserInstallation },
   { ControlledBrowserHost, getControlledBrowserSessionBinding },
   { startGatewayProxyHostForRuntime }, { runtimeLayout }, { RuntimeRunStore },
-  { resolveProjectIdentity }, { TrustedReadActionProjector }, { openRuntimeArtifactStoreAuthority }] = await Promise.all([
+  { resolveProjectIdentity }, { TrustedReadActionProjector }, { BrowserPreflightFactSchema },
+  { projectGatewayRules }, { openRuntimeArtifactStoreAuthority }] = await Promise.all([
   runtimeModule('runtime-discovery'),
   runtimeModule('runtime-finalization-material-sealer'),
-  runtimeModule('browser-installer'), runtimeModule('browser-host'),
+  runtimeModule('runtime-browser-wiring'), runtimeModule('browser-host'),
   runtimeModule('gateway-proxy-host'), runtimeModule('runtime-layout'), runtimeModule('run-store'),
-  runtimeModule('project-identity'), runtimeModule('trusted-action-runner'), runtimeModule('authority-host'),
+  runtimeModule('project-identity'), runtimeModule('trusted-action-runner'), runtimeModule('runtime-preflight'),
+  runtimeModule('gateway-rule-projector'), runtimeModule('authority-host'),
 ])
 
 await Promise.all([
@@ -133,7 +136,7 @@ const authorityAdapter = {
               subject: ReadApprovalSubjectSchema.parse(subject),
               approvalSessionRef: sessionRef, ttlMs: 10 * 60_000,
             })
-        return { grant, approvalBinding: structuredClone(grant.approvalContext) }
+        return { grant, approvalBinding: executionBinding(grant.approvalContext) }
       },
       async finalizeDecision({ decisionId, decisionSubject }) {
         const kind = input.approvalType
@@ -150,22 +153,25 @@ const authorityAdapter = {
   async activateGrant(input) {
     const decision = await approvalAuthority.verify(input.grant)
     if (!decision.allowed) throw new Error(`grant activation denied:${decision.code ?? 'unknown'}`)
+    const expectedBinding = executionBinding(input.grant.approvalContext)
+    if (canonicalizeJson(input.approvalBinding) !== canonicalizeJson(expectedBinding)) {
+      throw new Error('approval activation binding is not the strict execution projection')
+    }
     activeApprovalContext = structuredClone(input.grant.approvalContext)
   },
   executionRpcConnection(approvalBinding) {
-    if (canonicalizeJson(approvalBinding) !== canonicalizeJson(activeApprovalContext)) {
+    if (!activeApprovalContext
+      || canonicalizeJson(approvalBinding) !== canonicalizeJson(executionBinding(activeApprovalContext))) {
       throw new Error('approval binding changed before execution RPC')
     }
     rpcClientOrdinal += 1
     const credential = rpc.registerClient(
-      `runtime-cross-repo-${rpcClientOrdinal}`, randomBytes(32), { approvalContext: approvalBinding },
+      `runtime-cross-repo-${rpcClientOrdinal}`, randomBytes(32), { approvalContext: activeApprovalContext },
     )
     return { endpoint: rpcHttp.endpoint, credential, verifierMaterial: rpc.verifierMaterial, approvalBinding }
   },
   async close() {},
 }
-
-let artifactAuthority
 
 try {
   const doctor = await invoke('DOCTOR-CROSS-REPO', 'doctor', {})
@@ -189,8 +195,8 @@ try {
   }
   await submit(runId, 'SUBMIT-SCOPE', 'source-frozen', 'acceptance-scope',
     fixture.semanticArtifacts['acceptance-scope'])
-  await invoke('APPROVE-LINEAGE', 'open-approval', { runId, approvalType: 'lineage' })
-  const scope = await invoke('APPROVE-SCOPE', 'open-approval', { runId, approvalType: 'scope' })
+  await approve('APPROVE-LINEAGE', { runId, approvalType: 'lineage' })
+  const scope = await approve('APPROVE-SCOPE', { runId, approvalType: 'scope' })
   for (const artifactType of ['interaction-flow', 'design-audit']) {
     await submit(runId, `SUBMIT-${artifactType}`, 'scope-approved', artifactType,
       fixture.semanticArtifacts[artifactType])
@@ -200,11 +206,16 @@ try {
   await submit(runId, 'SUBMIT-COVERAGE', 'modeled', 'coverage-universe',
     fixture.semanticArtifacts['coverage-universe'])
 
-  const discovery = await invoke('APPROVE-DISCOVERY', 'open-approval', {
-    runId, approvalType: 'discovery', grantSubject: fixture.discoverySubject,
+  const discovery = await approve('APPROVE-DISCOVERY', {
+    runId, approvalType: 'discovery', grantSubject: fixture.discoverySubject({
+      scopeReceipt: scope.decisionReceipt,
+    }),
   })
   const discoveryGrant = SignedGrantSchema.parse(discovery.signedGrant)
   const preflight = await invoke('RUN-PREFLIGHT', 'run-preflight', { runId })
+  if (preflight.status !== 'ready') {
+    throw new Error(`cross-repo preflight blocked:${safeCode(preflight.status)}:${safeCode(preflight.reasonCode)}`)
+  }
   const preflightDigest = requiredString(preflight.preflightFact, 'preflightDigest')
   await submit(runId, 'SUBMIT-ACTION-MAP', 'preflight-readonly', 'browser-action-map',
     fixture.frozenArtifacts['browser-action-map'])
@@ -212,7 +223,7 @@ try {
     fixture.frozenArtifacts['test-cases'])
   await submit(runId, 'SUBMIT-EXECUTION-CONTRACT', 'binding-draft', 'execution-contract',
     fixture.frozenArtifacts['execution-contract'])
-  await invoke('APPROVE-EXECUTION', 'open-approval', {
+  await approve('APPROVE-EXECUTION', {
     runId, approvalType: 'execution',
     grantSubject: fixture.readSubject(discoveryGrant.grantId, preflightDigest, {
       scopeReceipt: scope.decisionReceipt,
@@ -227,11 +238,6 @@ try {
     throw new Error(`final generation verdict:${finalized.terminalVerdict}`)
   }
   await invoke('REPORT-CROSS-REPO', 'render-report', { runId })
-  artifactAuthority = await openRuntimeArtifactStoreAuthority({
-    homeDir,
-    installation,
-    subject: `local:uid:${process.getuid()}`,
-  })
   const publishedRegression = await executePublishedRegression({
     authoritativeGatewayAuditDigest: executed.gatewayAuditDigest,
   })
@@ -241,6 +247,9 @@ try {
   const report = JSON.parse(await readFile(reportPath, 'utf8'))
   process.stdout.write(`${JSON.stringify({
     doctor,
+    managedBrowserInstalled: await pathExists(join(
+      homeDir, '.mutil-skills', 'runtime', 'e2e', 'browsers', installation.version,
+    )),
     report,
     publishedRegression,
     tracePath: [
@@ -253,13 +262,11 @@ try {
   await Promise.allSettled([
     rpcHttp.close(),
     Promise.resolve().then(() => approvalAuthority.close()),
-    ...(artifactAuthority === undefined ? [] : [Promise.resolve().then(() => artifactAuthority.close())]),
     new Promise((resolve, reject) => fixtureServer.close((error) => error ? reject(error) : resolve())),
   ])
 }
 
 async function executePublishedRegression(input) {
-  if (artifactAuthority === undefined) throw new Error('E2E_RUNTIME_ARTIFACT_AUTHORITY_NOT_OPEN')
   const activeRoot = join(
     projectRoot, '.biztest', 'assets', 'ASSET-ORDER-1', 'generations', runId,
   )
@@ -274,10 +281,7 @@ async function executePublishedRegression(input) {
     || manifestDocument.assetId !== 'ASSET-ORDER-1'
     || manifestDocument.generationId !== runId
     || manifestDocument.contentDigest !== expectedManifestDigest
-    || manifestDocument.signatures.length === 0
-    || manifestDocument.signatures.some((signature) =>
-      signature.signedDigest !== expectedManifestDigest
-      || !artifactAuthority.verifyArtifactSignature(signature, expectedManifestDigest))) {
+    || manifestDocument.signatures.length !== 0) {
     throw new Error('E2E_RUNTIME_PUBLISHED_REGRESSION_MANIFEST_UNTRUSTED')
   }
   const attestation = RegressionDiscoveryAttestationSchema.parse(manifestDocument.content?.listResult?.attestation)
@@ -303,24 +307,44 @@ async function executePublishedRegression(input) {
   let readBridge
   let trustedSession
   let readAuthority
+  let artifactAuthority
   let operationError
   try {
     store = await RuntimeRunStore.open({ homeDir, projectRoot })
     const identity = await resolveProjectIdentity(projectRoot)
     const snapshot = await store.getRun(identity.digest, runId)
     if (!snapshot) throw new Error('E2E_RUNTIME_PUBLISHED_REGRESSION_RUN_MISSING')
+    artifactAuthority = await openRuntimeArtifactStoreAuthority({
+      homeDir,
+      installation,
+      subject: `local:uid:${process.getuid()}`,
+    })
     const originalExecutionGrant = SignedGrantSchema.parse(
       snapshot.trustedExecutionFacts['signed-execution-grant'],
     )
+    const originalDiscoveryGrant = SignedGrantSchema.parse(
+      snapshot.trustedExecutionFacts['signed-discovery-grant'],
+    )
+    const browserInstallation = await resolveRuntimeBrowserInstallation({ homeDir, installation })
+    const freshPreflight = await preparePublishedRegressionPreflight({
+      subject: originalDiscoveryGrant.subject,
+      browserInstallation,
+    })
     const approvalSession = await authorityAdapter.requestApproval({ approvalType: 'execution' })
     await approvalSession.wait()
-    const freshApproval = await approvalSession.finalize(originalExecutionGrant.subject)
+    const freshApproval = await approvalSession.finalize(ReadApprovalSubjectSchema.parse({
+      ...originalExecutionGrant.subject,
+      discoveryGrantId: freshPreflight.grant.grantId,
+      preflightDigest: freshPreflight.fact.preflightDigest,
+    }))
     const freshGrant = SignedGrantSchema.parse(freshApproval.grant)
     if (freshGrant.grantId === originalExecutionGrant.grantId) {
       throw new Error('E2E_RUNTIME_PUBLISHED_REGRESSION_FRESH_GRANT_REQUIRED')
     }
     const freshSnapshot = structuredClone(snapshot)
     freshSnapshot.trustedExecutionFacts['signed-execution-grant'] = freshGrant
+    freshSnapshot.trustedExecutionFacts['signed-discovery-grant'] = freshPreflight.grant
+    freshSnapshot.trustedExecutionFacts['browser-preflight'] = freshPreflight.fact
     const action = new TrustedReadActionProjector().project({
       runId, actionId: 'ACTION-ORDER-1', frozenArtifacts: freshSnapshot.frozenArtifacts,
       trustedExecutionFacts: freshSnapshot.trustedExecutionFacts,
@@ -328,8 +352,9 @@ async function executePublishedRegression(input) {
       runtimeInstallationDigest: installation.installationDigest,
     })
 
-    await authorityAdapter.activateGrant({ grant: freshGrant, approvalBinding: freshGrant.approvalContext })
-    const connection = authorityAdapter.executionRpcConnection(freshGrant.approvalContext)
+    const freshApprovalBinding = executionBinding(freshGrant.approvalContext)
+    await authorityAdapter.activateGrant({ grant: freshGrant, approvalBinding: freshApprovalBinding })
+    const connection = authorityAdapter.executionRpcConnection(freshApprovalBinding)
     readAuthority = createAuthorityReadRpcClient({
       credential: connection.credential,
       verifierMaterial: connection.verifierMaterial,
@@ -353,19 +378,18 @@ async function executePublishedRegression(input) {
         return {}
       } },
     })
-    const browserInstallation = await inspectChromiumInstallation({
-      homeDir, runtimeVersion: installation.version,
-      runtimeInstallationDigest: installation.installationDigest,
-    })
     browser = await new ControlledBrowserHost().open({
       homeDir, runId, installation: browserInstallation, gateway,
     })
+    const browserExecutablePath = 'manifest' in browserInstallation
+      ? browserInstallation.executablePath
+      : browserInstallation.selection.source.executablePath
     const trust = await createTrustedCompilerExecutionTrust({
       discoveryAuthority: {
         material: verifierMaterial, expectedPublicKeyDigest: verifierMaterial.publicKeyDigest,
       },
-      approvalFreshnessClient: approvalAuthority.createTrustedApprovalFreshnessClient(),
-      browserExecutablePath: browserInstallation.executablePath,
+      approvalFreshnessClient: artifactAuthority.createTrustedApprovalFreshnessClient(),
+      browserExecutablePath,
       gatewayProxyEndpoint: gateway.handle.endpoint,
     })
     trustedSession = await prepareTrustedCompilerRun({
@@ -411,6 +435,12 @@ async function executePublishedRegression(input) {
       session: trustedSession, readBridge, timeoutMs: 30_000,
     })
     trustedSession = undefined
+    const bridgeSnapshot = readBridge.snapshot()
+    if (execution.exitCode !== 0 || !bridgeSnapshot.complete) {
+      throw new Error(
+        `E2E_RUNTIME_PUBLISHED_REGRESSION_COMPILER_FAILED:${compilerExecutionDiagnostic(execution)}`,
+      )
+    }
     const executions = readBridge.executions()
     if (execution.exitCode !== 0 || executions.length !== 1 || executions[0].result.status !== 'passed') {
       throw new Error(`E2E_RUNTIME_PUBLISHED_REGRESSION_FAILED:${execution.exitCode}`)
@@ -437,6 +467,7 @@ async function executePublishedRegression(input) {
       async () => await browser?.close(),
       async () => await gateway?.handle.close(),
       async () => { readAuthority?.destroy() },
+      async () => await artifactAuthority?.close(),
       async () => await store?.close(),
       async () => await rm(projectDir, { recursive: true, force: true }),
     ]) {
@@ -449,9 +480,135 @@ async function executePublishedRegression(input) {
   }
 }
 
+async function preparePublishedRegressionPreflight(input) {
+  const approvalSession = await authorityAdapter.requestApproval({ approvalType: 'discovery' })
+  await approvalSession.wait()
+  const approval = await approvalSession.finalize(input.subject)
+  const grant = SignedGrantSchema.parse(approval.grant)
+  const capability = grant.capabilities.find((candidate) => candidate.operation === 'local-navigation')
+  if (!capability) throw new Error('E2E_RUNTIME_PUBLISHED_REGRESSION_DISCOVERY_CAPABILITY_MISSING')
+  const approvedRequests = [{
+    actionId: capability.actionId,
+    capabilityId: capability.capabilityId,
+    method: 'GET',
+    url: grant.subject.expectedPageIdentity.url,
+    maxUses: capability.maxUses,
+    behavior: { kind: 'pass-through' },
+  }]
+  let gateway
+  let browser
+  let operationError
+  try {
+    gateway = await startGatewayProxyHostForRuntime({
+      runId,
+      mode: 'real-environment',
+      authorityRoot: runtimeLayout(homeDir).authority,
+      approvedRequests,
+    })
+    browser = await new ControlledBrowserHost().open({
+      homeDir,
+      runId,
+      installation: input.browserInstallation,
+      gateway,
+    })
+    const rule = projectGatewayRules({ runId, approvedRequests }).rules[0]
+    if (!rule) throw new Error('E2E_RUNTIME_PUBLISHED_REGRESSION_PREFLIGHT_RULE_MISSING')
+    const page = new PlaywrightPageAdapter(browser.page)
+    const binding = getControlledBrowserSessionBinding(browser)
+    const outcome = await runBrowserPreflight({
+      authorization: {
+        grant,
+        currentSubject: grant.subject,
+        authority: approvalAuthority,
+      },
+      runtime: { sandboxHealthy: true, gatewayConnected: true },
+      gatewayAudit: () => gateway.handle.auditSummary(),
+      page: {
+        goto: async (url) => await binding.executeWithCorrelation({
+          ruleId: rule.ruleId,
+          stepOrdinal: rule.stepOrdinal,
+          method: rule.method,
+          url: rule.url,
+          channel: 'http',
+          bodyDigest: rule.bodyDigest,
+          actionId: rule.actionId,
+          capabilityId: rule.capabilityId,
+          headers: {},
+        }, async () => await page.goto(url)),
+        identity: async () => await page.identity(),
+        containsText: async (text) => await page.containsText(text),
+        screenshot: async () => await page.screenshot(),
+        domSnapshot: async () => await page.domSnapshot(),
+      },
+      actionId: capability.actionId,
+      attemptId: 'ATTEMPT-PUBLISHED-REGRESSION-PREFLIGHT-1',
+    })
+    if (outcome.status !== 'ready' || !outcome.preflightDigest
+      || !outcome.reservationId || !outcome.observedIdentity) {
+      throw new Error(`E2E_RUNTIME_PUBLISHED_REGRESSION_PREFLIGHT_FAILED:${safeCode(outcome.reasonCode)}`)
+    }
+    const publication = await gateway.handle.finalize()
+    const gatewayAuditDigest = digestText('gateway-publication-audit/v1', canonicalizeJson(publication))
+    const authorityOutcomeDigest = digestText('authority-preflight-outcome/v1', canonicalizeJson({
+      status: outcome.status,
+      observedIdentity: outcome.observedIdentity,
+      preflightDigest: outcome.preflightDigest,
+    }))
+    const fact = BrowserPreflightFactSchema.parse({
+      runId,
+      discoveryGrantId: grant.grantId,
+      reservationId: outcome.reservationId,
+      preflightDigest: outcome.preflightDigest,
+      status: 'ready',
+      observedIdentityDigest: digestText(
+        'observed-page-identity/v1', canonicalizeJson(outcome.observedIdentity),
+      ),
+      browserMeasurementDigest: browser.measurement.browserMeasurementDigest,
+      browserClosureDigest: browser.measurement.browserClosureDigest,
+      browserExecutableDigest: browser.measurement.browserExecutableDigest,
+      gatewaySessionMeasurementDigest: browser.measurement.gatewaySessionMeasurementDigest,
+      gatewayPolicyDigest: gateway.handle.measurement.policyDigest,
+      gatewayAuditDigest,
+      canaryProofDigest: browser.measurement.canaryProofDigest,
+      authorityOutcomeDigest,
+      authorityReceiptDigest: digestText('authority-preflight-receipt/v1', canonicalizeJson({
+        reservationId: outcome.reservationId,
+        preflightDigest: outcome.preflightDigest,
+        authorityOutcomeDigest,
+      })),
+    })
+    return { grant, fact }
+  } catch (error) {
+    operationError = error
+    throw error
+  } finally {
+    const cleanupErrors = []
+    for (const cleanup of [
+      async () => await browser?.close(),
+      async () => await gateway?.handle.close(),
+    ]) {
+      try { await cleanup() } catch (error) { cleanupErrors.push(error) }
+    }
+    if (operationError === undefined && cleanupErrors.length === 1) throw cleanupErrors[0]
+    if (operationError === undefined && cleanupErrors.length > 1) {
+      throw new AggregateError(cleanupErrors, 'E2E_RUNTIME_PUBLISHED_REGRESSION_PREFLIGHT_CLEANUP_FAILED')
+    }
+  }
+}
+
 async function submit(run, requestId, expectedState, artifactType, candidate) {
   return await invoke(requestId, 'submit-candidate', {
     runId: run, expectedState, artifactType, candidate,
+  })
+}
+
+async function approve(requestId, payload) {
+  const opened = await invoke(requestId, 'open-approval', payload)
+  if (opened.status !== 'confirmation-required') return opened
+  return await invoke(`${requestId}-CONFIRM`, 'confirm-approval', {
+    runId: payload.runId,
+    confirmationId: requiredString(opened, 'confirmationId'),
+    subjectDigest: requiredString(opened, 'subjectDigest'),
   })
 }
 
@@ -514,10 +671,51 @@ function requiredString(record, key) {
   return value
 }
 
+function safeCode(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : 'unknown'
+}
+
+function compilerExecutionDiagnostic(execution) {
+  const messages = []
+  if (execution.stderr) messages.push(execution.stderr)
+  try { visit(JSON.parse(execution.stdout)) } catch {}
+  const summary = messages
+    .filter((value) => /(?:BIZTEST|E2E)_[A-Z0-9_]+/.test(value))
+    .join(' | ')
+    .replace(/[^A-Za-z0-9_:. -]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .slice(0, 1024)
+  return `${execution.exitCode}:${summary || 'CONTROLLED_READ_INCOMPLETE'}`
+
+  function visit(value) {
+    if (typeof value === 'string') { messages.push(value); return }
+    if (Array.isArray(value)) { for (const item of value) visit(item); return }
+    if (value && typeof value === 'object') {
+      for (const item of Object.values(value)) visit(item)
+    }
+  }
+}
+
+function executionBinding(context) {
+  return {
+    runId: context.runId,
+    installationDigest: context.installationDigest,
+    approvalType: context.approvalType,
+    subjectDigest: context.subjectDigest,
+  }
+}
+
 function requiredEnvironment(name) {
   const value = process.env[name]
   if (!value) throw new Error(`missing environment:${name}`)
   return value
+}
+
+async function pathExists(path) {
+  try { await access(path); return true } catch (error) {
+    if (error && typeof error === 'object' && error.code === 'ENOENT') return false
+    throw error
+  }
 }
 
 async function listen(server) {

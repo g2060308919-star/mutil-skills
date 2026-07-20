@@ -2,6 +2,7 @@ import {
   ARTIFACT_TYPES,
   RuntimeProvenanceSchema,
   canonicalizeJson,
+  digestApprovalProjection,
   digestBytes,
   digestText,
   E2EError,
@@ -135,7 +136,9 @@ export class ProductionFinalizationMaterialProvider implements RuntimeFinalizati
     const material = parsePersistedRuntimeFinalizationMaterial(candidate)
     assertSnapshotBinding(input, material)
     const artifacts = material.artifacts.map(({ artifact }) => artifact)
-    assertArtifactAuthority(artifacts, this.dependencies.authority)
+    const generationEnvelope = finalizationGenerationEnvelope(artifacts)
+    const authorities = projectCompleteGenerationAuthority(this.dependencies.authority)
+    assertArtifactAuthority(artifacts, authorities)
     const compilerInput = this.dependencies.projectCompilerInput({ artifacts, material })
     const evidence = await this.readSanitizedEvidence(material)
     const semanticDrafts = draftsFromMaterial(material, evidence)
@@ -156,8 +159,8 @@ export class ProductionFinalizationMaterialProvider implements RuntimeFinalizati
             assetId: input.snapshot.assetId,
             generationId: input.snapshot.runId,
             prdRevision: artifacts[0]!.prdRevision,
-            engineVersion: artifacts[0]!.engineVersion,
-            createdAt: input.snapshot.updatedAt,
+            engineVersion: generationEnvelope.engineVersion,
+            createdAt: generationEnvelope.createdAt,
             fencingToken,
           },
           semanticDrafts: boundDrafts,
@@ -166,7 +169,7 @@ export class ProductionFinalizationMaterialProvider implements RuntimeFinalizati
           evidence,
           cleanup: structuredClone(material.cleanup),
           provenance: structuredClone(material.provenance),
-          authorities: this.dependencies.authority,
+          authorities,
           reportPresentation: structuredClone(material.reportPresentation),
           verifiers: productionVerifiers(material, regression, this.dependencies),
         }
@@ -202,6 +205,19 @@ export class ProductionFinalizationMaterialProvider implements RuntimeFinalizati
       throw error
     }
   }
+}
+
+function finalizationGenerationEnvelope(
+  artifacts: ArtifactDocument[],
+): Pick<ArtifactDocument, 'createdAt' | 'engineVersion'> {
+  const browserPreflight = artifacts.find((artifact) => artifact.artifactType === 'browser-preflight')
+  const runBundle = artifacts.find((artifact) => artifact.artifactType === 'run-bundle')
+  if (browserPreflight === undefined || runBundle === undefined
+    || browserPreflight.createdAt !== runBundle.createdAt
+    || browserPreflight.engineVersion !== runBundle.engineVersion) {
+    throw materialError('E2E_RUNTIME_FINALIZATION_ENVELOPE_BINDING_MISMATCH')
+  }
+  return { createdAt: browserPreflight.createdAt, engineVersion: browserPreflight.engineVersion }
 }
 
 function productionVerifiers(
@@ -345,11 +361,22 @@ function assertSnapshotBinding(
   }
   for (const [type, frozen] of Object.entries(input.snapshot.frozenArtifacts)) {
     const persisted = artifacts.find((artifact) => artifact.artifactType === type)
-    if (persisted === undefined || canonicalizeJson({ ...persisted, signatures: [] })
-      !== canonicalizeJson({ ...frozen, signatures: [] })) {
+    const browserActionMapResolved = type === 'browser-action-map' && persisted !== undefined
+      && canonicalizeJson(artifactEnvelopeWithoutContent(persisted))
+        === canonicalizeJson(artifactEnvelopeWithoutContent(frozen))
+      && digestApprovalProjection('browser-action-map', persisted.content)
+        === digestApprovalProjection('browser-action-map', frozen.content)
+    if (persisted === undefined || (!browserActionMapResolved
+      && canonicalizeJson({ ...persisted, signatures: [] })
+        !== canonicalizeJson({ ...frozen, signatures: [] }))) {
       throw materialError('E2E_RUNTIME_FINALIZATION_FROZEN_ARTIFACT_MISMATCH')
     }
   }
+}
+
+function artifactEnvelopeWithoutContent(artifact: ArtifactDocument): Record<string, unknown> {
+  const { content: _content, contentDigest: _contentDigest, signatures: _signatures, ...envelope } = artifact
+  return envelope
 }
 
 function assertArtifactAuthority(
@@ -363,6 +390,20 @@ function assertArtifactAuthority(
       || !authority.verifyArtifactSignature(signature, artifact.contentDigest))) {
       throw materialError('E2E_RUNTIME_FINALIZATION_ARTIFACT_AUTHORITY_INVALID')
     }
+  }
+}
+
+/** 生产 Authority 还有审批、存储与关闭能力；generation builder 只能看到四个签验方法。 */
+function projectCompleteGenerationAuthority(
+  authority: CompleteGenerationAuthority,
+): CompleteGenerationAuthority {
+  return {
+    signArtifactDigest: (digest) => authority.signArtifactDigest(digest),
+    verifyArtifactSignature: (signature, signedDigest) =>
+      authority.verifyArtifactSignature(signature, signedDigest),
+    verifyApprovalFreshnessReceipt: (receipt, binding) =>
+      authority.verifyApprovalFreshnessReceipt(receipt, binding),
+    verifyDecisionReceipt: (receipt, binding) => authority.verifyDecisionReceipt(receipt, binding),
   }
 }
 
@@ -406,7 +447,7 @@ function bindRegression(
   content.discoveryVerifierMaterial = structuredClone(regression.verifierMaterial)
   content.listResult = {
     caseIds: [...regression.caseIds],
-    digest: digestText('playwright-list-result/v1', canonicalizeJson(regression.caseIds)),
+    digest: regression.discoveryAttestation.isolation.stdoutDigest,
     attestation: structuredClone(regression.discoveryAttestation),
   }
   drafts['regression-manifest'] = {

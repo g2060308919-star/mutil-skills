@@ -93,7 +93,7 @@ export async function runBrowserPreflight(input: {
   } catch (error) {
     return {
       status: 'safety-blocked',
-      reasonCode: error instanceof E2EError ? error.code : 'E2E_RUNTIME_DISCOVERY_AUTHORIZATION_DENIED',
+      reasonCode: safeAuthorizationErrorCode(error, 'E2E_RUNTIME_DISCOVERY_AUTHORIZATION_DENIED'),
     }
   }
 
@@ -186,7 +186,12 @@ export async function runReadOnlyCase(input: RunReadOnlyCaseInput): Promise<Read
 
   const grant = immutableJsonSnapshot<SignedReadGrant>(input.authorization.grant)
   const currentSubject = immutableJsonSnapshot<ReadApprovalSubject>(input.authorization.currentSubject)
-  const requiredOperations = ['local-navigation', 'dom-read', 'screenshot'] as const
+  const requiredOperations: Array<SignedReadGrant['capabilities'][number]['operation']> = [
+    'local-navigation', 'dom-read', 'screenshot',
+    ...(grant.capabilities.some((candidate) =>
+      candidate.actionId === input.actionId && candidate.operation === 'http-request')
+      ? ['http-request' as const] : []),
+  ]
   const capabilities = requiredOperations.map((operation) => grant.capabilities.find((candidate) =>
     candidate.actionId === input.actionId && candidate.operation === operation))
   if (capabilities.some((capability) => capability === undefined)) {
@@ -202,7 +207,7 @@ export async function runReadOnlyCase(input: RunReadOnlyCaseInput): Promise<Read
       }))
     }
   } catch (error) {
-    const reasonCode = error instanceof E2EError ? error.code : 'E2E_RUNTIME_READ_AUTHORIZATION_DENIED'
+    const reasonCode = safeAuthorizationErrorCode(error, 'E2E_RUNTIME_READ_AUTHORIZATION_DENIED')
     if (reservations.length > 0) {
       const compensationDigest = digestText('read-reservation-compensation/v1', canonicalizeJson({
         caseId: input.caseId, actionId: input.actionId, attemptId: input.attemptId,
@@ -310,6 +315,13 @@ export async function runReadOnlyCase(input: RunReadOnlyCaseInput): Promise<Read
     }
   }
   return { ...result, reservationIds: reservations.map((reservation) => reservation.reservationId), outcomeDigest }
+}
+
+function safeAuthorizationErrorCode(error: unknown, fallback: string): string {
+  const code = error instanceof E2EError ? error.code
+    : typeof error === 'object' && error !== null && 'code' in error
+      ? (error as { code?: unknown }).code : undefined
+  return typeof code === 'string' && /^E2E_[A-Z0-9_]+$/.test(code) ? code : fallback
 }
 
 function canonicalPageUrl(value: string): string {

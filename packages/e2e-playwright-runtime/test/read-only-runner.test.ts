@@ -60,6 +60,20 @@ describe('runReadOnlyCase', () => {
     expect(result).not.toHaveProperty('executionGrant')
   })
 
+  test('Discovery preflight 保留已认证 RPC 返回的固定错误码', async () => {
+    const authorization = discoveryAuthorization()
+    authorization.authority.reserveForSubject = async () => {
+      throw Object.assign(new Error('remote denied'), { code: 'E2E_APPROVAL_GRANT_EXPIRED' })
+    }
+    const result = await runBrowserPreflight({
+      authorization, runtime: { sandboxHealthy: true, gatewayConnected: true },
+      gatewayAudit: { received: 0, forwarded: 0, blocked: 0, byIntent: {} }, page: fakePage(),
+      attemptId: 'ATTEMPT-PREFLIGHT-RPC-DENIED', actionId: 'ACTION-PREFLIGHT',
+    })
+
+    expect(result).toEqual({ status: 'safety-blocked', reasonCode: 'E2E_APPROVAL_GRANT_EXPIRED' })
+  })
+
   test('fails closed before navigation when the controlled runtime is not healthy', async () => {
     const page = fakePage()
     const result = await runReadOnlyCase({
@@ -242,6 +256,48 @@ describe('runReadOnlyCase', () => {
     })
     expect(digestBytes('runtime-evidence/screenshot/v1', new Uint8Array([3, 2, 1])))
       .not.toBe(result.evidence[0]?.digest)
+  })
+
+  test('HTTP read capability 与浏览器本地 capability 一起保留并闭合终态事实', async () => {
+    const authorized = readAuthorizationInput()
+    const digest = digestText('test/v1', 'http-read')
+    authorized.authorization.currentSubject.requests.push({
+      requestId: 'REQUEST-HTTP-1', method: 'GET', url: 'https://test.example.com/orders',
+      headers: [], bodyDigest: digest, redirectPolicy: { mode: 'deny' },
+    })
+    authorized.authorization.currentSubject.actions.push({
+      actionId: 'ACTION-READ-1', operation: 'http-request', maxUses: 1,
+      requestIds: ['REQUEST-HTTP-1'],
+    })
+    authorized.authorization.grant.capabilities.push({
+      capabilityId: 'CAP-READ-HTTP', nonce: '4'.repeat(64), transport: 'http', effect: 'read',
+      actionId: 'ACTION-READ-1', operation: 'http-request', requestIds: ['REQUEST-HTTP-1'], maxUses: 1,
+    })
+    const reserved: string[] = []
+    const completed: string[] = []
+    authorized.authorization.authority = {
+      async reserveForSubject(input) {
+        reserved.push(input.capabilityId)
+        return {
+          reservationId: `RES-${input.capabilityId}`, grantId: authorized.authorization.grant.grantId,
+          capabilityId: input.capabilityId, actionId: input.actionId, attemptId: input.attemptId,
+          status: 'reserved' as const, reservedAt: '2026-07-12T00:00:00.000Z',
+        }
+      },
+      async complete(reservationId) { completed.push(reservationId) },
+      async markUnknown() {},
+    }
+
+    const result = await runReadOnlyCase({
+      caseId: 'CASE-READ-1', actionId: 'ACTION-READ-1', url: 'https://test.example.com/orders',
+      expectedIdentity: { title: '订单', heading: '订单列表' }, expectedText: '待审核',
+      runtime: { sandboxHealthy: true, gatewayConnected: true }, ...authorized,
+      gatewayAudit: { received: 1, forwarded: 1, blocked: 0, byIntent: {} }, page: fakePage(),
+    })
+
+    expect(result.status).toBe('passed')
+    expect(reserved).toEqual(['CAP-READ-1', 'CAP-READ-2', 'CAP-READ-3', 'CAP-READ-HTTP'])
+    expect(completed).toEqual(reserved.map((capabilityId) => `RES-${capabilityId}`))
   })
 
   test('classifies a wrong page before evaluating the business assertion', async () => {

@@ -200,7 +200,9 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
     approvedRequests: [{
       actionId: `CANARY-${canaryNonce}`, capabilityId: `CANARY-CAP-${canaryNonce}`,
       method: 'GET', url: canaryApprovedUrl, maxUses: 1,
-      behavior: { kind: 'http-response', status: 204, body: '' },
+      // 204 导航会被 Chromium 表示为 ERR_ABORTED，Playwright 因而无法取得
+      // response status；固定 200 静态体才能同时证明 Browser 与 Gateway 链路。
+      behavior: { kind: 'http-response', status: 200, body: 'e2e-gateway-canary' },
     }],
   })
   const canaryRule = canaryProjection.rules[0]!
@@ -495,7 +497,9 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
         continuation: Parameters<GatewayBrowserBinding['continueCorrelatedRequest']>[1],
       ) => {
         if (closed || !accepting) throw gatewayHostError('E2E_GATEWAY_CLOSED')
-        const rule = selectProjectedRuleForBrowser(projection.rules, input)
+        // Browser bootstrap canary 与业务规则走完全相同的 correlation 校验；canary
+        // 是内部追加到 allRules 的固定规则，不能误用仅含业务规则的 projection.rules。
+        const rule = selectProjectedRuleForBrowser(allRules, input)
         const headers = { ...input.headers }
         for (const forbidden of [
           'x-mutil-e2e-action-token', 'x-mutil-e2e-action-id', 'x-mutil-e2e-capability-id', 'proxy-authorization',
@@ -537,7 +541,10 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
         if (approved.status < 200 || approved.status >= 400 || denied.status !== 403
           || afterApproved.forwarded !== before.forwarded + 1 || afterApproved.blocked !== before.blocked
           || afterDenied.forwarded !== afterApproved.forwarded || afterDenied.blocked !== afterApproved.blocked + 1) {
-          throw gatewayHostError('E2E_GATEWAY_ENFORCEMENT_UNPROVEN')
+          throw Object.assign(new Error(`E2E_GATEWAY_ENFORCEMENT_UNPROVEN:${canonicalizeJson({
+            approvedStatus: approved.status, deniedStatus: denied.status,
+            before, afterApproved, afterDenied,
+          })}`), { code: 'E2E_GATEWAY_ENFORCEMENT_UNPROVEN' })
         }
         return {
           approved: true as const, denied: true as const,

@@ -39,7 +39,7 @@ describe('read-only Runtime vertical flow', () => {
     expect(Buffer.from(flow.evidence?.dom ?? []).toString('utf8')).toContain('待审核订单')
     expect(counters.forwarded).toBeGreaterThan(0)
     expect(counters.blocked).toBeGreaterThan(0)
-    expect(completed).toHaveLength(3)
+    expect(completed).toHaveLength(4)
     expect([]).toEqual([]) // Runtime authoritative path never loads generated source files.
     await browser.close()
   })
@@ -142,7 +142,7 @@ function fakeReadDriver(): BrowserHostDriver {
     async launch(profileDir) { profile = profileDir },
     async actualCommandLine() {
       return [
-        'chromium', '--disable-quic', '--disable-extensions', '--disable-background-networking',
+        'chromium', '--enable-automation', '--disable-quic', '--disable-extensions', '--disable-background-networking',
         '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
         '--proxy-server=http://127.0.0.1:43111', '--proxy-bypass-list=<-loopback>',
         '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',

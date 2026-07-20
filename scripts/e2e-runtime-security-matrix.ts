@@ -53,6 +53,14 @@ export const E2E_RUNTIME_SECURITY_MATRIX = Object.freeze([
     'packages/e2e-runtime/test/runtime-installer.test.ts'),
   row('缺失 state 迁移器', 'E2E_RUNTIME_STATE_MIGRATION_REQUIRED', 'artifact', 'migration-required',
     'packages/e2e-runtime/test/runtime-state-migration.test.ts'),
+  row('系统 Chrome 替换 / 权限漂移', 'E2E_SYSTEM_CHROME_REVALIDATION_REQUIRED',
+    'environment', 'environment-blocked', 'packages/e2e-runtime/test/system-chrome.test.ts'),
+  row('一次性 Profile 未确认关闭', 'E2E_BROWSER_CLOSE_TIMEOUT', 'safety', 'safety-blocked',
+    'packages/e2e-runtime/test/browser-host.test.ts'),
+  row('本地确认错绑 / 过期 / replay', 'E2E_LOCAL_CONFIRMATION_BINDING_MISMATCH',
+    'safety', 'safety-blocked', 'packages/e2e-runtime/test/local-approval-confirmations.test.ts'),
+  row('本地确认伪造身份或职责分离', 'E2E_GENERATION_REPORT_APPROVAL_ASSURANCE_MISMATCH',
+    'artifact', 'artifact-blocked', 'packages/e2e-engine/test/complete-generation-builder.test.ts'),
 ] satisfies readonly RuntimeSecurityMatrixRow[])
 
 function row(

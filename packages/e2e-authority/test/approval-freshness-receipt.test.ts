@@ -32,8 +32,12 @@ async function readyReadGrant(now: () => Date) {
       headings: ['Home'], role: 'USER', ariaSignals: ['main'] } } })
   const runBundle = { runId: 'RUN-1', allInputRefs: [{ artifactId: 'A', digest: d('input') }],
     schedule: [{ ordinal: 0, caseId: 'CASE-1', stepIds: ['STEP-1'], actionIds: ['ACTION-1'] }],
-    attemptPlans: [{ caseId: 'CASE-1', slots: 1 }], signedCapabilities: [{ capabilityId: 'PENDING',
-      actionId: 'ACTION-1', operation: 'dom-read', effect: 'read', maxUses: 1, digest: d('pending') }],
+    attemptPlans: [{ caseId: 'CASE-1', slots: 1 }], signedCapabilities: [
+      { capabilityId: 'PENDING-DOM', actionId: 'ACTION-1', operation: 'dom-read',
+        effect: 'read', maxUses: 1, digest: d('pending-dom') },
+      { capabilityId: 'PENDING-HTTP', actionId: 'ACTION-1', operation: 'http-request',
+        effect: 'read', maxUses: 1, digest: d('pending-http') },
+    ],
     secretRefs: ['SECRET-1'], runtimePolicyDigest: d('runtime'),
     runtimeIsolationPolicyDigest: 'not-applicable' }
   const subject: ReadApprovalSubject = {
@@ -43,8 +47,12 @@ async function readyReadGrant(now: () => Date) {
     executionContractDigest: d('execution-contract'),
     runBundleProjectionDigest: digestApprovalProjection('run-bundle', runBundle), environment: 'test',
     baseOrigin: 'https://example.test', actor: 'USER', discoveryGrantId: discovery.grantId, preflightDigest,
-    requests: [],
-    actions: [{ actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1, requestIds: [] }],
+    requests: [{ requestId: 'REQUEST-1', method: 'GET', url: 'https://example.test/api/orders',
+      headers: [], bodyDigest: d('empty-body'), redirectPolicy: { mode: 'deny' } }],
+    actions: [
+      { actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1, requestIds: [] },
+      { actionId: 'ACTION-1', operation: 'http-request', maxUses: 1, requestIds: ['REQUEST-1'] },
+    ],
   }
   const grant = await authority.issueReadGrant({ subject,
     approver: { subject: 'alice', roles: ['e2e-approver'] }, ttlMs: 30_000 })
@@ -148,6 +156,9 @@ describe('LocalApprovalAuthority approval freshness receipt', () => {
       currentSubject: fixture.subject, expectedCapabilities: fixture.capabilities,
       browserPreflight: fixture.browserPreflight, runBundle: fixture.runBundle })
     expect(valid()).toMatchObject({ authentic: true, current: true, allowed: true, status: 'valid' })
+    expect(receipt.capabilities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: 'http-request', effect: 'read' }),
+    ]))
 
     expect(fixture.authority.verifyApprovalFreshnessReceipt({ receipt,
       currentSubject: { ...fixture.subject, actor: 'ADMIN' }, expectedCapabilities: fixture.capabilities,

@@ -61,6 +61,9 @@ describe('RuntimeFinalizationMaterialSealer', () => {
         : { event: workflow.events[1], eventChainDigest: workflow.selection.eventChainDigest }),
       close: vi.fn(), credentialCount: 1,
     }
+    const preparedSnapshot = snapshot({ frozenArtifacts, projection, fixture, dom })
+    ;(preparedSnapshot.trustedExecutionFacts['browser-preflight'] as any).gatewayPolicyDigest =
+      digestText('test/v1', 'preflight-gateway-policy')
     const material = await new RuntimeFinalizationMaterialSealer({
       quarantine: {
         readEvidence: async ({ relativePath }: any) => Buffer.from(stored.get(relativePath)!),
@@ -73,10 +76,32 @@ describe('RuntimeFinalizationMaterialSealer', () => {
       authority: authority as never,
       runtimeVersion: '0.1.0', contractsVersion: '0.1.0', engineVersion: '0.1.0',
       playwrightVersion: '1.61.1',
-    }).seal(snapshot({ frozenArtifacts, projection, fixture, dom }))
+    }).seal(preparedSnapshot)
 
     expect(material.artifacts).toHaveLength(25)
     expect(new Set(material.artifacts.map(({ artifact }) => artifact.artifactType)).size).toBe(25)
+    const resolvedActionMap = material.artifacts.find(({ artifact }) =>
+      artifact.artifactType === 'browser-action-map')!.artifact.content as any
+    const resolvedRunBundle = material.artifacts.find(({ artifact }) =>
+      artifact.artifactType === 'run-bundle')!.artifact.content as any
+    for (const capability of resolvedActionMap.actions[0].capabilities) {
+      expect(capability.capabilityId).toBe(resolvedRunBundle.signedCapabilities.find((item: any) =>
+        item.actionId === resolvedActionMap.actions[0].actionId
+        && item.operation === capability.operation)?.capabilityId)
+    }
+    const browserPreflight = material.artifacts.find(({ artifact }) =>
+      artifact.artifactType === 'browser-preflight')!.artifact.content as any
+    const executedGatewayAudit = fixture.drafts['gateway-audit'].content as any
+    expect(browserPreflight.gatewayChecks).toContainEqual({
+      id: executedGatewayAudit.gatewayInstance.instanceId,
+      digest: executedGatewayAudit.policyDigest,
+    })
+    expect(material.provenance.gatewayPolicyDigest).toBe(executedGatewayAudit.policyDigest)
+    expect(material.provenance.isolationProofDigest).toBe(digestText(
+      'runtime-isolation-proof/v1', canonicalizeJson(browserPreflight.sandboxChecks),
+    ))
+    expect(material.artifacts.find(({ artifact }) => artifact.artifactType === 'approval-grants')?.artifact.createdAt)
+      .toBe(grants[0].checkedAt)
     expect(material.evidence).toEqual([expect.objectContaining({
       evidenceId: 'EVIDENCE-ACTION-1', quarantinePath: 'sanitized/EVIDENCE-ACTION-1.json',
     })])

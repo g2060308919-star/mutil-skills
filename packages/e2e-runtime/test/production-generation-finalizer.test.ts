@@ -80,6 +80,88 @@ describe('ProductionGenerationFinalizer', () => {
     await expect(executeRuntimeGenerationFinalization(finalizer.capability(), input(true)))
       .rejects.toMatchObject({ code: 'E2E_RUNTIME_FINALIZATION_PRIVACY_RECOVERY_REQUIRED' })
   })
+
+  test.each([
+    ['material', 'E2E_RUNTIME_FINALIZATION_MATERIAL_FAILED'],
+    ['compile', 'E2E_RUNTIME_FINALIZATION_COMPILE_FAILED'],
+    ['publish', 'E2E_RUNTIME_FINALIZATION_PUBLISH_FAILED'],
+    ['readback', 'E2E_RUNTIME_FINALIZATION_READBACK_FAILED'],
+    ['erasure', 'E2E_RUNTIME_FINALIZATION_ERASURE_FAILED'],
+  ] as const)('%s 边界的普通异常转换为固定安全码且不暴露原始消息', async (stage, code) => {
+    const active = { generationId: 'RUN-1', generationDigest: digest('4'), terminalVerdict: 'accepted' as const }
+    const fail = async () => { throw new Error('secret path: /Users/example/.ssh/id_rsa') }
+    const finalizer = new ProductionGenerationFinalizer({
+      materialProvider: { prepare: stage === 'material' ? fail : async () => ({
+        compilerInput: {} as never, bind: () => ({}) as never, release() {},
+      }) },
+      regressionPublisher: { compile: stage === 'compile' ? fail : async () => ({}) as never },
+      assembler: {} as never,
+      projectPublisher: {
+        publish: stage === 'publish' ? fail : async () => active,
+        readActiveGeneration: stage === 'readback' ? fail : async () => active,
+      },
+      quarantine: {
+        destroyAfterPublication: stage === 'erasure' ? fail : async () => undefined,
+        resumePendingErasure: async () => [],
+      },
+    } as never)
+
+    const error = await executeRuntimeGenerationFinalization(finalizer.capability(), input(false))
+      .then(() => undefined, (cause: unknown) => cause as Error & { code?: string })
+    expect(error).toMatchObject({ code })
+    expect(error?.message).not.toContain('.ssh')
+  })
+
+  test('publisher 回调中的组装异常与原子发布异常分开分类', async () => {
+    const active = { generationId: 'RUN-1', generationDigest: digest('4'), terminalVerdict: 'accepted' as const }
+    const finalizer = new ProductionGenerationFinalizer({
+      materialProvider: { prepare: async () => ({
+        compilerInput: {} as never,
+        bind: () => ({}) as never,
+        release() {},
+      }) },
+      regressionPublisher: { compile: async () => ({}) as never },
+      assembler: { finalize: () => { throw new Error('invalid assembled draft') } },
+      projectPublisher: {
+        publish: async (request: { prepare(input: { fencingToken: number }): Promise<unknown> }) => {
+          await request.prepare({ fencingToken: 1 })
+          return active
+        },
+        readActiveGeneration: async () => active,
+      },
+      quarantine: { destroyAfterPublication: async () => undefined, resumePendingErasure: async () => [] },
+    } as never)
+
+    await expect(executeRuntimeGenerationFinalization(finalizer.capability(), input(false)))
+      .rejects.toMatchObject({ code: 'E2E_RUNTIME_FINALIZATION_ASSEMBLE_FAILED' })
+  })
+
+  test('旧构建器 Error 消息只投影开头的固定 E2E 码并丢弃后续详情', async () => {
+    const active = { generationId: 'RUN-1', generationDigest: digest('4'), terminalVerdict: 'accepted' as const }
+    const finalizer = new ProductionGenerationFinalizer({
+      materialProvider: { prepare: async () => ({
+        compilerInput: {} as never, bind: () => ({}) as never, release() {},
+      }) },
+      regressionPublisher: { compile: async () => ({}) as never },
+      assembler: { finalize: () => {
+        throw new Error('E2E_GENERATION_TEST_FAILURE:DETAIL:/Users/example/.ssh/id_rsa')
+      } },
+      projectPublisher: {
+        publish: async (request: { prepare(input: { fencingToken: number }): Promise<unknown> }) => {
+          await request.prepare({ fencingToken: 1 }); return active
+        },
+        readActiveGeneration: async () => active,
+      },
+      quarantine: { destroyAfterPublication: async () => undefined, resumePendingErasure: async () => [] },
+    } as never)
+
+    const error = await executeRuntimeGenerationFinalization(finalizer.capability(), input(false))
+      .then(() => undefined, (cause: unknown) => cause as Error & { code?: string })
+    expect(error).toMatchObject({
+      code: 'E2E_GENERATION_TEST_FAILURE_DETAIL', message: 'E2E_GENERATION_TEST_FAILURE_DETAIL',
+    })
+    expect(error?.message).not.toContain('.ssh')
+  })
 })
 
 function input(recovery: boolean) {

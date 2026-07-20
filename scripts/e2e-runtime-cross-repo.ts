@@ -1,8 +1,9 @@
 import { execFile, spawn } from 'node:child_process'
-import { cp, mkdir, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
+import ts from 'typescript'
 
 const execFileAsync = promisify(execFile)
 const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -10,7 +11,12 @@ const PACKAGE_VERSION = '0.2.0'
 
 export interface CrossRepoRuntimeGoldenResult {
   doctor: { ready: boolean; [key: string]: unknown }
-  report: { content: { verdict: string; runtimeProvenance: {
+  managedBrowserInstalled: boolean
+  report: { content: { verdict: string; approvalAssurance: {
+    approvalMode: string
+    identityVerified: boolean
+    separationOfDutiesVerified: boolean
+  }; runtimeProvenance: {
     sourceRepositoryIndependent: boolean
   } } }
   publishedRegression: { exitCode: 0; gatewayAuditDigest: string }
@@ -29,11 +35,6 @@ export async function runCrossRepoRuntimeGolden(input: {
   const unavailableSource = join(root, 'publication-source.unavailable')
   const harnessRoot = join(root, 'harness')
   const npmCache = join(root, 'npm-cache')
-  const externalGoldenHome = process.env.E2E_RUNTIME_REAL_GOLDEN_HOME
-  if (externalGoldenHome === undefined || !isAbsolute(externalGoldenHome)) {
-    throw new Error('E2E_RUNTIME_REAL_GOLDEN_HOME 必须指向已验证的真实 Chromium 闭包')
-  }
-
   await Promise.all([
     mkdir(input.home, { recursive: true, mode: 0o700 }),
     mkdir(input.project, { recursive: true, mode: 0o700 }),
@@ -45,12 +46,12 @@ export async function runCrossRepoRuntimeGolden(input: {
   await exec('npm', ['run', 'build'], SOURCE_ROOT, buildEnvironment(npmCache), 180_000)
   await copyPublicationSource(publicationSource)
   try {
-    await Promise.all([
-      cp(join(publicationSource, 'scripts', 'e2e-runtime-cross-repo-child.mjs'),
-        join(harnessRoot, 'runner.mjs')),
-      cp(join(publicationSource, 'dist', 'scripts', 'e2e-runtime-read-only.fixture.js'),
-        join(harnessRoot, 'fixture.js')),
-    ])
+    await cp(join(publicationSource, 'scripts', 'e2e-runtime-cross-repo-child.mjs'),
+      join(harnessRoot, 'runner.mjs'))
+    await compileHarnessFixture(
+      join(publicationSource, 'scripts', 'e2e-runtime-read-only.fixture.ts'),
+      join(harnessRoot, 'fixture.js'),
+    )
     await exec('npm', ['pack', '--workspaces', '--pack-destination', input.packs],
       publicationSource, buildEnvironment(npmCache), 180_000)
   } finally {
@@ -70,16 +71,25 @@ export async function runCrossRepoRuntimeGolden(input: {
     '--save-exact', ...tarballs,
   ], input.project, installEnvironment(input.home, npmCache), 240_000)
 
+  // Harness 也必须进入安装闭包：这样源码仓被移走、用户项目 node_modules 被删除后，
+  // 它仍只从已安装 Runtime 版本目录解析依赖。
+  await Promise.all([
+    cp(join(harnessRoot, 'runner.mjs'), join(input.project, 'runner.mjs')),
+    cp(join(harnessRoot, 'fixture.js'), join(input.project, 'fixture.js')),
+  ])
+
   const runtimePackageRoot = join(input.project, 'node_modules', '@mutil-skills', 'e2e-runtime')
   await installPackedRuntime({
     home: input.home,
     project: input.project,
     runtimePackageRoot,
-    externalGoldenHome,
   })
   const installedRuntimePackageRoot = join(
     input.home, '.mutil-skills', 'runtime', 'e2e', 'versions', PACKAGE_VERSION,
     'node_modules', '@mutil-skills', 'e2e-runtime',
+  )
+  const installedRuntimeVersionRoot = resolve(
+    installedRuntimePackageRoot, '..', '..', '..',
   )
 
   // 用户项目中的 node_modules 只用于构造安装闭包；真实 child 启动前必须移除，
@@ -89,7 +99,7 @@ export async function runCrossRepoRuntimeGolden(input: {
     rm(join(input.project, 'package.json'), { force: true }),
     rm(join(input.project, 'package-lock.json'), { force: true }),
   ])
-  const harness = join(harnessRoot, 'runner.mjs')
+  const harness = join(installedRuntimeVersionRoot, 'runner.mjs')
   const { stdout, stderr } = await execWithLiveStderr(process.execPath, [harness], input.project,
     childRuntimeEnvironment({
       home: input.home,
@@ -104,6 +114,24 @@ export async function runCrossRepoRuntimeGolden(input: {
     throw new Error('跨仓结果泄漏真实源码仓路径')
   }
   return result
+}
+
+async function compileHarnessFixture(source: string, target: string): Promise<void> {
+  const output = ts.transpileModule(await readFile(source, 'utf8'), {
+    compilerOptions: {
+      module: ts.ModuleKind.ESNext,
+      target: ts.ScriptTarget.ES2022,
+      verbatimModuleSyntax: true,
+    },
+    fileName: source,
+    reportDiagnostics: true,
+  })
+  const errors = output.diagnostics?.filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error) ?? []
+  if (errors.length > 0) {
+    throw new Error(`跨仓 fixture 编译失败：${errors.map((diagnostic) =>
+      ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n')).join('; ')}`)
+  }
+  await writeFile(target, output.outputText, { mode: 0o600 })
 }
 
 async function copyPublicationSource(target: string): Promise<void> {
@@ -125,56 +153,38 @@ async function installPackedRuntime(input: {
   home: string
   project: string
   runtimePackageRoot: string
-  externalGoldenHome: string
 }): Promise<void> {
   const installerUrl = pathToFileURL(join(input.runtimePackageRoot, 'dist', 'src', 'runtime-installer.js')).href
-  const discoveryUrl = pathToFileURL(join(input.runtimePackageRoot, 'dist', 'src', 'runtime-discovery.js')).href
-  const capabilityUrl = pathToFileURL(join(input.runtimePackageRoot, 'dist', 'src', 'runtime-capability-proof.js')).href
   const source = `
-    import { cp, chmod, mkdir, readdir } from 'node:fs/promises'
+    import { cp, readdir } from 'node:fs/promises'
     import { join } from 'node:path'
     import { installRuntime } from ${JSON.stringify(installerUrl)}
-    import { inspectRuntimeInstallation } from ${JSON.stringify(discoveryUrl)}
-    import { inspectRuntimeCapabilityProof, recordRuntimeCapabilityProof } from ${JSON.stringify(capabilityUrl)}
     const home = process.env.HOME
     const project = process.env.E2E_PACKED_PROJECT
-    const sourceHome = process.env.E2E_REAL_GOLDEN_HOME
-    if (!home || !project || !sourceHome) throw new Error('cross-repo bootstrap env missing')
+    if (!home || !project) throw new Error('cross-repo bootstrap env missing')
     await installRuntime({ homeDir: home, version: ${JSON.stringify(PACKAGE_VERSION)}, installClosure: async ({ stagingPrefix }) => {
       for (const entry of await readdir(project)) {
         await cp(join(project, entry), join(stagingPrefix, entry), { recursive: true, dereference: false, preserveTimestamps: true })
       }
     } })
-    const [sourceInstallation, targetInstallation] = await Promise.all([
-      inspectRuntimeInstallation({ homeDir: sourceHome }), inspectRuntimeInstallation({ homeDir: home }),
-    ])
-    if (sourceInstallation.installationDigest !== targetInstallation.installationDigest) {
-      throw new Error('E2E_RUNTIME_REAL_GOLDEN_DIGEST_MISMATCH')
-    }
-    const sourceBrowser = join(sourceHome, '.mutil-skills', 'runtime', 'e2e', 'browsers')
-    const targetBrowser = join(home, '.mutil-skills', 'runtime', 'e2e', 'browsers')
-    const sourceAuthority = join(sourceHome, '.mutil-skills', 'e2e', 'authority')
-    const targetAuthority = join(home, '.mutil-skills', 'e2e', 'authority')
-    await cp(sourceBrowser, targetBrowser, { recursive: true, force: true, dereference: false, preserveTimestamps: true })
-    await cp(sourceAuthority, targetAuthority, { recursive: true, force: true, dereference: false, preserveTimestamps: true })
-    await chmod(targetBrowser, 0o700)
-    await chmod(targetAuthority, 0o700)
-    const proof = await inspectRuntimeCapabilityProof({ homeDir: sourceHome,
-      runtimeInstallationDigest: sourceInstallation.installationDigest })
-    const targetState = join(home, '.mutil-skills', 'e2e', 'state')
-    await mkdir(targetState, { recursive: true, mode: 0o700 })
-    await chmod(targetState, 0o700)
-    await recordRuntimeCapabilityProof({ homeDir: home,
-      runtimeInstallationDigest: targetInstallation.installationDigest,
-      gateway: proof.gateway, isolation: proof.isolation, verifiedAt: proof.verifiedAt })
   `
   await exec(process.execPath, ['--input-type=module', '--eval', source], input.project,
     runtimeEnvironment({
       home: input.home,
       runtimePackageRoot: input.runtimePackageRoot,
-      externalGoldenHome: input.externalGoldenHome,
       project: input.project,
     }), 180_000)
+  const launcher = join(input.home, '.mutil-skills', 'bin', 'repo-e2e')
+  const environment = childRuntimeEnvironment({
+    home: input.home, project: input.project, runtimePackageRoot: input.runtimePackageRoot,
+  })
+  await exec(launcher, ['configure-approval', '--mode', 'local-confirmation'],
+    input.project, environment, 30_000)
+  const chromeArguments = ['configure-browser', '--system']
+  if (process.env.E2E_RUNTIME_SYSTEM_CHROME_EXECUTABLE !== undefined) {
+    chromeArguments.push('--executable', process.env.E2E_RUNTIME_SYSTEM_CHROME_EXECUTABLE)
+  }
+  await exec(launcher, chromeArguments, input.project, environment, 180_000)
 }
 
 async function exec(
@@ -243,7 +253,6 @@ function runtimeEnvironment(input: {
   home: string
   project: string
   runtimePackageRoot: string
-  externalGoldenHome: string
 }): NodeJS.ProcessEnv {
   return {
     HOME: input.home,
@@ -251,7 +260,6 @@ function runtimeEnvironment(input: {
     TMPDIR: process.env.TMPDIR,
     E2E_PACKED_PROJECT: input.project,
     E2E_PACKED_RUNTIME_PACKAGE_ROOT: input.runtimePackageRoot,
-    E2E_REAL_GOLDEN_HOME: input.externalGoldenHome,
   }
 }
 
@@ -280,7 +288,11 @@ function parseResult(value: unknown): CrossRepoRuntimeGoldenResult {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('跨仓结果无效')
   const result = value as CrossRepoRuntimeGoldenResult
   if (result.doctor?.ready !== true
+    || result.managedBrowserInstalled !== false
     || result.report?.content?.runtimeProvenance?.sourceRepositoryIndependent !== true
+    || result.report?.content?.approvalAssurance?.approvalMode !== 'local-confirmation'
+    || result.report.content.approvalAssurance.identityVerified !== false
+    || result.report.content.approvalAssurance.separationOfDutiesVerified !== false
     || result.publishedRegression?.exitCode !== 0
     || !/^sha256:[a-f0-9]{64}$/.test(result.publishedRegression.gatewayAuditDigest)
     || !Array.isArray(result.tracePath)

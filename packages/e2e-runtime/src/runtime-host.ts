@@ -433,9 +433,11 @@ export class E2ERuntimeHost {
         recovery,
       })
     } catch (cause) {
+      const causeCode = safeExecutionCauseCode(cause)
       throw runtimeHostError(
         'E2E_RUNTIME_FINALIZATION_RECOVERY_REQUIRED', 'safety',
-        'finalization 可能已发布但 Run outcome 尚未闭合；必须以同一请求恢复且不得重复执行副作用',
+        `finalization 可能已发布但 Run outcome 尚未闭合；必须以同一请求恢复且不得重复执行副作用${
+          causeCode === undefined ? '' : `；内部错误码 ${causeCode}`}`,
         cause,
       )
     }
@@ -495,9 +497,11 @@ export class E2ERuntimeHost {
         return RuntimeResponseEnvelopeSchema.parse(outcome)
       })
     } catch (cause) {
+      const causeCode = safeExecutionCauseCode(cause)
       throw runtimeHostError(
         'E2E_RUNTIME_FINALIZATION_RECOVERY_REQUIRED', 'safety',
-        'active generation 已复读但 Run outcome 未原子闭合；请以同一请求恢复', cause,
+        `active generation 已复读但 Run outcome 未原子闭合；请以同一请求恢复${
+          causeCode === undefined ? '' : `；内部错误码 ${causeCode}`}`, cause,
       )
     }
   }
@@ -1466,9 +1470,11 @@ export class E2ERuntimeHost {
     } catch (cause) {
       let releaseCause: unknown
       try { await started.owner.release() } catch (error) { releaseCause = error }
+      const causeCode = safeExecutionCauseCode(cause)
       throw runtimeHostError(
         executionMode === 'read' ? 'E2E_RUNTIME_READ_EXECUTION_CRASHED' : 'E2E_RUNTIME_EXECUTION_CRASHED', 'safety',
-        '可信执行器异常退出；Run 保持 running-real fenced attempt 等待显式恢复',
+        `可信执行器异常退出；Run 保持 running-real fenced attempt 等待显式恢复${
+          causeCode === undefined ? '' : `；内部错误码 ${causeCode}`}`,
         releaseCause === undefined ? cause : new AggregateError([cause, releaseCause]),
       )
     }
@@ -2361,6 +2367,22 @@ function runtimeHostError(
   cause?: unknown,
 ): E2EError {
   return new E2EError({ code, category, message: `${code}: ${message}`, retryable: false, cause })
+}
+
+/** 只公开固定格式错误码，避免把浏览器、文件路径、环境变量或网络响应带入 RPC。 */
+function safeExecutionCauseCode(cause: unknown): string | undefined {
+  // Packed workspaces can load more than one @mutil-skills/e2e-contracts instance, so an
+  // E2EError created across that package boundary is not guaranteed to satisfy instanceof.
+  // Only project the fixed-format code; never expose the foreign error message or stack.
+  if (typeof cause === 'object' && cause !== null && 'code' in cause
+    && typeof cause.code === 'string' && /^E2E_[A-Z0-9_]+$/.test(cause.code)) return cause.code
+  if (cause instanceof AggregateError) {
+    for (const error of cause.errors) {
+      const code = safeExecutionCauseCode(error)
+      if (code !== undefined) return code
+    }
+  }
+  return undefined
 }
 
 function blockedError(code: string): E2EError {

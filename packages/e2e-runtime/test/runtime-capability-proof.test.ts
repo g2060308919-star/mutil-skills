@@ -1,6 +1,6 @@
 import { chmod, link, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { Readable, Writable } from 'node:stream'
 import { createRuntimeTestRoots } from './fixtures.js'
 import { RuntimeRunStore } from '../src/run-store.js'
@@ -80,6 +80,8 @@ describe('Runtime capability proof', () => {
         version: '0.0.0', protocolMajor: 1 as const, versionRoot: '/runtime', entrypoint: '/runtime/repo-e2e.js',
         installationDigest: d('a'), sourceRepositoryIndependent: true as const,
       }
+      const closeAuthority = vi.fn(async () => undefined)
+      const openArtifactStoreAuthority = vi.fn(async () => ({ close: closeAuthority }))
       const exitCode = await runCli(
         ['install-browser'], Readable.from([]), output.stream, capture().stream,
         {
@@ -88,7 +90,10 @@ describe('Runtime capability proof', () => {
           uninstallRuntime: async () => { throw new Error('unused') },
           inspectRuntimeInstallation: async () => installation,
           installChromium: async () => ({ installed: true }),
-          bootstrapBrowserRuntime: async () => {
+          openArtifactStoreAuthority: openArtifactStoreAuthority as never,
+          startAuthorityHost: async () => { throw new Error('WebAuthn Authority must stay stopped') },
+          bootstrapBrowserRuntime: async (input) => {
+            await input.prepareAuthorityRoot()
             if (shouldFail) throw new Error('bootstrap canary failed')
             const store = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
             await store.close()
@@ -96,6 +101,8 @@ describe('Runtime capability proof', () => {
           },
         },
       )
+      expect(openArtifactStoreAuthority).toHaveBeenCalledOnce()
+      expect(closeAuthority).toHaveBeenCalledOnce()
       expect(exitCode === 0).toBe(!shouldFail)
       if (shouldFail) {
         await expect(inspectRuntimeCapabilityProof({

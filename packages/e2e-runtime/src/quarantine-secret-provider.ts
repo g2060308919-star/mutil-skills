@@ -54,8 +54,13 @@ export class RuntimeQuarantineSecretProvider implements QuarantineSecretProvider
   }): Promise<RuntimeQuarantineSecretProvider> {
     const derived = await deriveRuntimeQuarantineMasterKey(input.homeDir)
     try {
+      const quarantineRoot = runtimeLayout(input.homeDir).quarantine
+      // EncryptedQuarantine 在 createRun 的第一步即验证根目录；Provider 必须先建立
+      // 并验证该 Git 外安全边界，不能等到稍后的 createRunKey 才创建。
+      await mkdir(quarantineRoot, { recursive: true, mode: 0o700 })
+      await assertSecureDirectory(quarantineRoot, 'E2E_QUARANTINE_KEY_ROOT_INSECURE')
       return new RuntimeQuarantineSecretProvider({
-        quarantineRoot: runtimeLayout(input.homeDir).quarantine,
+        quarantineRoot,
         projectRoot: input.projectRoot,
         masterKey: derived.masterKey,
       })

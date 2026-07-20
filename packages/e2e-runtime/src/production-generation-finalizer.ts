@@ -71,44 +71,48 @@ export class ProductionGenerationFinalizer {
     input: RuntimeGenerationFinalizationInput,
   ): Promise<RuntimeGenerationFinalizationResult> {
     if (input.recovery) return await this.reconcileCommittedPublication(input)
-    const prepared = await this.dependencies.materialProvider.prepare(input)
+    const prepared = await safeFinalizationStage('E2E_RUNTIME_FINALIZATION_MATERIAL_FAILED', async () =>
+      await this.dependencies.materialProvider.prepare(input))
     try {
-      const regression = await this.dependencies.regressionPublisher.compile({
-        compilerInput: prepared.compilerInput,
-      })
-      const active = await this.dependencies.projectPublisher.publish({
+      const regression = await safeFinalizationStage('E2E_RUNTIME_FINALIZATION_COMPILE_FAILED', async () =>
+        await this.dependencies.regressionPublisher.compile({ compilerInput: prepared.compilerInput }))
+      const active = await safeFinalizationStage('E2E_RUNTIME_FINALIZATION_PUBLISH_FAILED', async () =>
+        await this.dependencies.projectPublisher.publish({
         assetId: input.snapshot.assetId,
         generationId: input.snapshot.runId,
-        prepare: ({ fencingToken }) => {
-          const material = prepared.bind({ regression, fencingToken })
-          return this.dependencies.assembler.finalize({
-            context: material.context,
-            semanticDrafts: material.semanticDrafts as never,
-            execution: material.execution,
-            gatewayAudit: material.gatewayAudit,
-            evidence: material.evidence,
-            cleanup: material.cleanup,
-            regression,
-            provenance: material.provenance,
-            authorities: material.authorities,
-            ...(material.reportPresentation === undefined ? {} : {
-              reportPresentation: material.reportPresentation,
-            }),
-            ...(material.verifiers === undefined ? {} : { verifiers: material.verifiers }),
-          })
-        },
-      })
-      const readback = await this.dependencies.projectPublisher.readActiveGeneration(
-        input.snapshot.assetId, input.snapshot.runId,
-      )
+        prepare: async ({ fencingToken }) =>
+          await safeFinalizationStage('E2E_RUNTIME_FINALIZATION_ASSEMBLE_FAILED', async () => {
+            const material = prepared.bind({ regression, fencingToken })
+            return this.dependencies.assembler.finalize({
+              context: material.context,
+              semanticDrafts: material.semanticDrafts as never,
+              execution: material.execution,
+              gatewayAudit: material.gatewayAudit,
+              evidence: material.evidence,
+              cleanup: material.cleanup,
+              regression,
+              provenance: material.provenance,
+              authorities: material.authorities,
+              ...(material.reportPresentation === undefined ? {} : {
+                reportPresentation: material.reportPresentation,
+              }),
+              ...(material.verifiers === undefined ? {} : { verifiers: material.verifiers }),
+            })
+          }),
+        }))
+      const readback = await safeFinalizationStage('E2E_RUNTIME_FINALIZATION_READBACK_FAILED', async () =>
+        await this.dependencies.projectPublisher.readActiveGeneration(
+          input.snapshot.assetId, input.snapshot.runId,
+        ))
       if (readback === undefined || readback.generationDigest !== active.generationDigest) {
         throw finalizationError('E2E_RUNTIME_FINALIZATION_ACTIVE_READBACK_MISMATCH')
       }
-      await this.dependencies.quarantine.destroyAfterPublication({
-        runId: input.snapshot.runId,
-        generationDigest: active.generationDigest,
-        actor: publisherActor(),
-      })
+      await safeFinalizationStage('E2E_RUNTIME_FINALIZATION_ERASURE_FAILED', async () =>
+        await this.dependencies.quarantine.destroyAfterPublication({
+          runId: input.snapshot.runId,
+          generationDigest: active.generationDigest,
+          actor: publisherActor(),
+        }))
       return resultFor(active, input.snapshot.runId)
     } finally {
       await prepared.release()
@@ -118,14 +122,16 @@ export class ProductionGenerationFinalizer {
   private async reconcileCommittedPublication(
     input: RuntimeGenerationFinalizationInput,
   ): Promise<RuntimeGenerationFinalizationResult> {
-    const active = await this.dependencies.projectPublisher.readActiveGeneration(
-      input.snapshot.assetId, input.snapshot.runId,
-    )
+    const active = await safeFinalizationStage('E2E_RUNTIME_FINALIZATION_READBACK_FAILED', async () =>
+      await this.dependencies.projectPublisher.readActiveGeneration(
+        input.snapshot.assetId, input.snapshot.runId,
+      ))
     if (active === undefined) throw finalizationError(
       'E2E_RUNTIME_FINALIZATION_PRIVACY_RECOVERY_REQUIRED',
       '崩溃后没有已提交 active generation；只能由隐私审批恢复或销毁 Quarantine，禁止自动重发',
     )
-    await this.dependencies.quarantine.resumePendingErasure(publisherActor())
+    await safeFinalizationStage('E2E_RUNTIME_FINALIZATION_ERASURE_FAILED', async () =>
+      await this.dependencies.quarantine.resumePendingErasure(publisherActor()))
     return resultFor(active, input.snapshot.runId)
   }
 }
@@ -151,6 +157,24 @@ function publisherActor(): QuarantineActor {
   return { subject: 'runtime:project-publisher', roles: ['e2e-publisher'] }
 }
 
-function finalizationError(code: string, message = code): E2EError {
-  return new E2EError({ code, category: 'artifact', message, retryable: false })
+async function safeFinalizationStage<T>(code: string, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation()
+  } catch (cause) {
+    const objectCause = typeof cause === 'object' && cause !== null ? cause : undefined
+    const structuredCode = objectCause !== undefined && 'code' in objectCause
+      && typeof objectCause.code === 'string' && /^E2E_[A-Z0-9_]+$/.test(objectCause.code)
+      ? objectCause.code : undefined
+    const messageMatch = objectCause !== undefined && 'message' in objectCause
+      && typeof objectCause.message === 'string'
+      ? /^(E2E_[A-Z0-9_]+)(?::([A-Z][A-Z0-9_]*))?(?=:|$)/.exec(objectCause.message) : null
+    const messageCode = messageMatch === null ? undefined
+      : `${messageMatch[1]}${messageMatch[2] === undefined ? '' : `_${messageMatch[2]}`}`
+    const foreignCode = structuredCode ?? messageCode
+    throw finalizationError(foreignCode ?? code, foreignCode ?? code, cause)
+  }
+}
+
+function finalizationError(code: string, message = code, cause?: unknown): E2EError {
+  return new E2EError({ code, category: 'artifact', message, retryable: false, cause })
 }

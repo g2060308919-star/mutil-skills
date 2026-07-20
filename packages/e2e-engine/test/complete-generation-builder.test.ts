@@ -939,6 +939,19 @@ describe('完整 generation builder', () => {
     expect(auditFinalReportFactBinding(artifacts).valid).toBe(false)
   })
 
+  test('本地确认报告不得伪造身份验证或职责分离保证', () => {
+    const built = buildCompleteGeneration(completeGenerationFixture())
+    const artifacts = structuredClone(built.artifacts)
+    const report: any = artifacts.find((artifact) => artifact.artifactType === 'final-report')!.content
+    report.approvalAssurance = {
+      approvalMode: 'local-confirmation',
+      identityVerified: true,
+      separationOfDutiesVerified: true,
+    }
+    expect(auditFinalReportFactBinding(artifacts).findings.map((finding) => finding.code))
+      .toContain('E2E_GENERATION_REPORT_APPROVAL_ASSURANCE_MISMATCH')
+  })
+
   test('Gateway 关键事实被篡改但未由 Gateway 重签时 fail closed', () => {
     const input = completeGenerationFixture()
     ;(input.drafts['gateway-audit'].content as any).requestEvents[0].actionId = 'ACTION-TAMPERED'

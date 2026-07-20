@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,6 +18,23 @@ const roots: string[] = []
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))))
 
 describe('RegressionPublisher', () => {
+  test.runIf(process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec'))(
+    '真实 macOS sandbox 在 Git 外 staging 仍能从已安装可信闭包解析 Playwright', async () => {
+      const tempParent = await mkdtemp(join(tmpdir(), 'e2e-regression-publisher-real-')); roots.push(tempParent)
+      const publisher = await RegressionPublisher.create({
+        issuer: 'DISCOVERY', keyId: 'DISCOVERY-REAL', tempParent,
+      })
+      const result = await publisher.compile({ compilerInput: projectCompilerInputFromArtifacts({
+        artifacts: approvedCompilerArtifacts(), playwrightVersion: '1.61.1', ...compilerArtifactVerification,
+      }) })
+
+      expect(result.caseIds).toEqual(['CASE-READ-1'])
+      expect(result.isolationProof.backend).toBe('macos-sandbox-exec')
+      expect(await readdir(tempParent)).toEqual([])
+    },
+    30_000,
+  )
+
   test('只发布受信编译输出，并要求 discovery 来自实际 OS sandbox proof', async () => {
     const tempParent = await mkdtemp(join(tmpdir(), 'e2e-regression-publisher-')); roots.push(tempParent)
     const execute = vi.fn<RegressionDiscoverySandboxExecutor['execute']>(async () => ({

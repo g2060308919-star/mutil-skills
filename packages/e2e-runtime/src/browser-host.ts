@@ -20,6 +20,7 @@ export type { BrowserProfileSupervisor } from './browser-profile-supervisor.js'
 
 const HOST_RESOLVER_POLICY = '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'
 const REQUIRED_FLAGS = [
+  '--enable-automation',
   '--disable-quic',
   '--disable-extensions',
   '--disable-background-networking',
@@ -57,6 +58,7 @@ export function chromiumLaunchOptions(input: ChromiumLaunchOptionsInput) {
       TMPDIR: input.tempDir ?? '/runtime/browser-tmp',
     },
     args: [
+      '--enable-automation',
       '--disable-quic',
       '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
       '--disable-features=WebRtcAllowInputVolumeAdjustment,WebRtcHideLocalIpsWithMdns',
@@ -263,6 +265,20 @@ export class ControlledBrowserHost {
     })
     let currentCorrelation: RequestCorrelation | undefined
     let currentResolver: ActionRequestResolver | undefined
+    let interceptionFailure: unknown
+    const runBrowserOperation = async <T>(operation: () => Promise<T>): Promise<T> => {
+      let result: T | undefined
+      let primary: unknown
+      try { result = await operation() } catch (error) { primary = error }
+      const intercepted = interceptionFailure
+      interceptionFailure = undefined
+      if (primary !== undefined && intercepted !== undefined) {
+        throw new AggregateError([primary, intercepted], 'E2E_BROWSER_INTERCEPTION_FAILED')
+      }
+      if (primary !== undefined) throw primary
+      if (intercepted !== undefined) throw intercepted
+      return result as T
+    }
     let launchStarted = false
     try {
       if (ownedResource !== undefined && profileMarker !== undefined) {
@@ -304,7 +320,11 @@ export class ControlledBrowserHost {
               correlation.requestId, Math.max(0, (currentResolver.consumed.get(correlation.requestId) ?? 1) - 1),
             )
           }
-          throw error
+          interceptionFailure ??= error
+          try { await request.abort() } catch (abortError) {
+            interceptionFailure = new AggregateError([interceptionFailure, abortError],
+              'E2E_BROWSER_INTERCEPTION_ABORT_FAILED')
+          }
         }
       })
       const commandLine = await this.driver.actualCommandLine()
@@ -333,7 +353,7 @@ export class ControlledBrowserHost {
           currentCorrelation = request.correlation === undefined ? undefined : {
             ...request.correlation, url: request.url, headers: {},
           }
-          try { return await this.driver.requestThroughPage(request.url) }
+          try { return await runBrowserOperation(async () => await this.driver.requestThroughPage(request.url)) }
           finally { currentCorrelation = previous }
         },
       })
@@ -368,7 +388,7 @@ export class ControlledBrowserHost {
             throw browserHostError('E2E_BROWSER_SESSION_BUSY', 'Browser session 已关闭或存在并发 Action')
           }
           currentCorrelation = structuredClone(correlation)
-          try { return await operation() } finally { currentCorrelation = undefined }
+          try { return await runBrowserOperation(operation) } finally { currentCorrelation = undefined }
         },
         executeWithCorrelations: async <T>(
           correlations: readonly ActionRequestCorrelation[],
@@ -378,7 +398,7 @@ export class ControlledBrowserHost {
             throw browserHostError('E2E_BROWSER_SESSION_BUSY', 'Browser session 已关闭或存在并发 Action')
           }
           currentResolver = createActionRequestResolver(correlations)
-          try { return await operation() } finally { currentResolver = undefined }
+          try { return await runBrowserOperation(operation) } finally { currentResolver = undefined }
         },
       })
       return session
@@ -523,7 +543,10 @@ class PlaywrightBrowserHostDriver implements BrowserHostDriver {
   async actualCommandLine(): Promise<string[]> {
     const session = await this.context.newCDPSession(this.page)
     try {
-      const result = await session.send('Browser.getBrowserCommandLine') as { arguments?: unknown }
+      const result = await session.send('Browser.getBrowserCommandLine').catch((cause) => {
+        throw browserHostError('E2E_BROWSER_COMMAND_LINE_UNAVAILABLE',
+          'CDP 无法返回实际 Browser command line', cause)
+      }) as { arguments?: unknown }
       if (!Array.isArray(result.arguments) || !result.arguments.every((value) => typeof value === 'string')) {
         throw browserHostError('E2E_BROWSER_COMMAND_LINE_UNAVAILABLE', 'CDP 未返回实际 command line')
       }

@@ -1,12 +1,52 @@
 import { describe, expect, test, vi } from 'vitest'
 import {
   consumeRpcConnectionCredential,
+  createAuditedRuntimeReadAuthority,
   createRuntimeFixedHttpWriteEvidence,
+  resolveRuntimeBrowserInstallation,
   settleRuntimeBrowserResourcesThenRecordProof,
   settleRuntimeBrowserResources,
 } from '../src/runtime-browser-wiring.js'
 
 describe('Runtime browser production wiring cleanup', () => {
+  test('生产装配按用户选择重验系统 Chrome，且旧托管安装只迁移为 managed-chromium', async () => {
+    const runtimeInstallationDigest = `sha256:${'1'.repeat(64)}`
+    const selection = {
+      schemaVersion: '1.0.0' as const,
+      source: { kind: 'system-chrome' as const, executablePath: '/Applications/Google Chrome' },
+      browserVersion: 'Google Chrome 150.0.0.0', executableDigest: `sha256:${'2'.repeat(64)}`,
+      runtimeInstallationDigest, controlledLaunchProofDigest: `sha256:${'3'.repeat(64)}`,
+      configuredAt: '2026-07-19T00:00:00.000Z',
+    }
+    const inspected = { selection, identity: { device: 1, inode: 2, uid: 0, byteLength: 3 } }
+    const inspectManaged = vi.fn()
+    const revalidateSystem = vi.fn(async () => inspected)
+    await expect(resolveRuntimeBrowserInstallation({
+      homeDir: '/safe/home', installation: {
+        version: '0.2.0', installationDigest: runtimeInstallationDigest,
+      },
+    } as never, {
+      readSelection: async () => selection,
+      inspectManaged,
+      revalidateSystem,
+    })).resolves.toEqual(inspected)
+    expect(revalidateSystem).toHaveBeenCalledWith(selection, {
+      projectRoot: '/safe/home/.mutil-skills/e2e/state',
+    })
+    expect(inspectManaged).not.toHaveBeenCalled()
+
+    const managed = { root: '/safe/managed', executablePath: '/safe/managed/chrome', manifest: {} }
+    await expect(resolveRuntimeBrowserInstallation({
+      homeDir: '/safe/home', installation: {
+        version: '0.2.0', installationDigest: runtimeInstallationDigest,
+      },
+    } as never, {
+      readSelection: async () => undefined,
+      inspectManaged: async () => managed as never,
+      revalidateSystem,
+    })).resolves.toBe(managed)
+  })
+
   test('固定 HTTP write 从真实 transport observation 生成可隔离的确定性证据', () => {
     const result = createRuntimeFixedHttpWriteEvidence({
       actionId: 'ACTION-WRITE-1',
@@ -92,5 +132,39 @@ describe('Runtime browser production wiring cleanup', () => {
       else expect(invoke()).toBe('client')
       expect(connection.credential.sessionKeyBase64Url).toBe('')
     }
+  })
+
+  test('只读 Authority reservation 只有终态提交成功后才进入 Gateway 签名审计', async () => {
+    const recordCapabilityReservation = vi.fn()
+    const complete = vi.fn(async () => undefined)
+    const markUnknown = vi.fn(async () => undefined)
+    const authority = createAuditedRuntimeReadAuthority({
+      reserveForSubject: async (input: { capabilityId: string; actionId: string; attemptId: string }) => ({
+        reservationId: `RES-${input.capabilityId}`, grantId: 'GRANT-1',
+        capabilityId: input.capabilityId, actionId: input.actionId, attemptId: input.attemptId,
+        status: 'reserved' as const, reservedAt: '2026-07-20T00:00:00.000Z',
+      }),
+      complete, markUnknown, destroy() {},
+    } as never, { recordCapabilityReservation } as never)
+    const grant = { grantId: 'GRANT-1' }
+    const currentSubject = {}
+    await authority.reserveForSubject({ grant, currentSubject,
+      capabilityId: 'CAP-1', actionId: 'ACTION-1', attemptId: 'ATTEMPT-1' } as never)
+    expect(recordCapabilityReservation).not.toHaveBeenCalled()
+    await authority.complete('RES-CAP-1', `sha256:${'1'.repeat(64)}`)
+    expect(recordCapabilityReservation).toHaveBeenLastCalledWith({ consumed: true, reservation: {
+      reservationId: 'RES-CAP-1', grantId: 'GRANT-1', capabilityId: 'CAP-1', actionId: 'ACTION-1',
+      attemptId: 'ATTEMPT-1', status: 'completed', outcomeDigest: `sha256:${'1'.repeat(64)}`,
+      reservedAt: '2026-07-20T00:00:00.000Z',
+    } })
+
+    await authority.reserveForSubject({ grant, currentSubject,
+      capabilityId: 'CAP-2', actionId: 'ACTION-1', attemptId: 'ATTEMPT-1' } as never)
+    await authority.markUnknown('RES-CAP-2', 'browser-closed')
+    expect(recordCapabilityReservation).toHaveBeenLastCalledWith({ consumed: false, reservation: {
+      reservationId: 'RES-CAP-2', grantId: 'GRANT-1', capabilityId: 'CAP-2', actionId: 'ACTION-1',
+      attemptId: 'ATTEMPT-1', status: 'unknown', observation: 'browser-closed',
+      reservedAt: '2026-07-20T00:00:00.000Z',
+    } })
   })
 })

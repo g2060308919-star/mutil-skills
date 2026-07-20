@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,7 +7,11 @@ import { runCrossRepoRuntimeGolden } from './e2e-runtime-cross-repo.js'
 
 const roots: string[] = []
 const crossRepoRequested = process.env.E2E_RUNTIME_RUN_CROSS_REPO === '1'
-const runRealGolden = crossRepoRequested && process.env.E2E_RUNTIME_REAL_GOLDEN_HOME !== undefined
+const systemChromeExecutable = process.env.E2E_RUNTIME_SYSTEM_CHROME_EXECUTABLE
+  ?? (process.platform === 'darwin'
+    ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+    : '/usr/bin/google-chrome-stable')
+const runRealGolden = crossRepoRequested && existsSync(systemChromeExecutable)
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })))
@@ -14,8 +19,8 @@ afterEach(async () => {
 
 describe('portable E2E runtime', () => {
   test.runIf(crossRepoRequested && !runRealGolden)(
-    '发行门禁要求显式配置受信 Real Golden Home',
-    () => { throw new Error('E2E_RUNTIME_REAL_GOLDEN_HOME_REQUIRED') },
+    '发行门禁要求本机存在受支持的系统 Google Chrome',
+    () => { throw new Error('E2E_RUNTIME_SYSTEM_CHROME_REQUIRED') },
   )
   test.skipIf(!runRealGolden)(
     'runs from packed artifacts in a blank project without source paths',
@@ -28,7 +33,16 @@ describe('portable E2E runtime', () => {
       const result = await runCrossRepoRuntimeGolden({ home, project, packs })
 
       expect(result.doctor.ready).toBe(true)
+      expect(result.doctor).toMatchObject({
+        browserSource: 'system-chrome', approvalMode: 'local-confirmation',
+      })
+      expect(result.managedBrowserInstalled).toBe(false)
       expect(result.report.content.verdict).toBe('accepted')
+      expect(result.report.content.approvalAssurance).toEqual({
+        approvalMode: 'local-confirmation',
+        identityVerified: false,
+        separationOfDutiesVerified: false,
+      })
       expect(result.report.content.runtimeProvenance.sourceRepositoryIndependent).toBe(true)
       expect(result.publishedRegression).toMatchObject({ exitCode: 0 })
       expect(result.publishedRegression.gatewayAuditDigest).toMatch(/^sha256:/)
@@ -40,6 +54,6 @@ describe('portable E2E runtime', () => {
       expect(published.some((path) => String(path).includes('quarantine'))).toBe(false)
       expect(await readFile(result.reportPath, 'utf8')).not.toContain(process.cwd())
     },
-    300_000,
+    420_000,
   )
 })

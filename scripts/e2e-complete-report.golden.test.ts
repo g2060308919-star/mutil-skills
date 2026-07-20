@@ -27,6 +27,7 @@ describe('完整 E2E 报告真实浏览器交互', () => {
     await page.setContent(report.html, { waitUntil: 'domcontentloaded' })
 
     expect(await page.locator('h1').textContent()).toContain('订单验收报告')
+    expect(await page.getByText('本地确认（不验证身份/职责分离）').first().isVisible()).toBe(true)
     expect(await page.getByLabel('搜索 CASE-ID、标题或状态').isVisible()).toBe(true)
     expect(await page.locator('[data-case]').count()).toBe(2)
 

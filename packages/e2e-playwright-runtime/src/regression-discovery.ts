@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { createPublicKey, generateKeyPairSync, sign, verify, type KeyObject } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
@@ -140,19 +140,28 @@ export class LocalRegressionDiscoveryAuthority {
     }
     let stdout: string
     let isolationProof: CompileAndAttestRegressionResult['isolationProof']
+    const trustedModulesRoot = dirname(dirname(dirname(packagePath)))
+    const moduleResolutionLink = join(projectDir, 'node_modules')
+    // staging 位于 Git 外独立目录，不能依赖 cwd 的祖先 node_modules。此链接只用于
+    // 可信 Playwright --list，目标同时作为沙箱只读根；源集已在创建链接前冻结审计。
+    await symlink(trustedModulesRoot, moduleResolutionLink, 'dir')
+    try {
     if (this.#sandboxExecutor !== undefined) {
       try {
         const result = await this.#sandboxExecutor.execute({
           command: process.execPath,
           args: [cliPath, 'test', '--list', '--reporter=json'],
           cwd: projectDir,
-          readOnlyRoots: [projectDir, dirname(dirname(dirname(packagePath))), dirname(process.execPath)],
+          readOnlyRoots: [projectDir, trustedModulesRoot, dirname(process.execPath)],
           timeoutMs: 30_000,
         })
-        if (result.exitCode !== 0) throw new Error(`sandbox exit code ${result.exitCode}`)
+        if (result.exitCode !== 0) throw discoveryError(
+          classifyTrustedListFailure(result.stderr), 'OS 沙箱内 Playwright --list 返回非零状态',
+        )
         stdout = result.stdout
         isolationProof = { backend: result.backend, proofDigest: result.proofDigest }
       } catch (cause) {
+        if (cause instanceof E2EError) throw cause
         throw discoveryError('E2E_REGRESSION_DISCOVERY_LIST_FAILED', 'OS 沙箱内 Playwright --list 未成功', cause)
       }
     } else {
@@ -171,6 +180,9 @@ export class LocalRegressionDiscoveryAuthority {
       } finally {
         await rm(listHome, { recursive: true, force: true })
       }
+    }
+    } finally {
+      await rm(moduleResolutionLink, { force: true })
     }
     const discovered = parseJsonReporter(stdout)
     const expectedCaseIds = [...input.cases.map((item) => item.caseId)].sort()
@@ -309,4 +321,15 @@ function byCaseId(left: { caseId: string }, right: { caseId: string }): number {
 
 function discoveryError(code: string, message: string, cause?: unknown): E2EError {
   return new E2EError({ code, category: 'automation', message: `${code}: ${message}`, retryable: false, cause })
+}
+
+function classifyTrustedListFailure(stderr: string): string {
+  if (/ERR_MODULE_NOT_FOUND|Cannot find (?:package|module)/i.test(stderr)) {
+    return 'E2E_REGRESSION_DISCOVERY_MODULE_RESOLUTION_FAILED'
+  }
+  if (/Operation not permitted|Permission denied|EACCES|EPERM|sandbox/i.test(stderr)) {
+    return 'E2E_REGRESSION_DISCOVERY_SANDBOX_POLICY_DENIED'
+  }
+  if (/No tests found/i.test(stderr)) return 'E2E_REGRESSION_DISCOVERY_NO_TESTS'
+  return 'E2E_REGRESSION_DISCOVERY_LIST_EXIT_NONZERO'
 }

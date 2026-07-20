@@ -1,6 +1,8 @@
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { SandboxedOneShotExecutor, type OneShotExecFile } from '../src/sandboxed-one-shot-executor.js'
 
@@ -8,6 +10,35 @@ const roots: string[] = []
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))))
 
 describe('SandboxedOneShotExecutor', () => {
+  test.runIf(process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec'))(
+    '真实 macOS sandbox 可在只读 staging 中执行 Playwright list', async () => {
+      const root = await mkdtemp(join(tmpdir(), 'e2e-one-shot-real-')); roots.push(root)
+      const staging = join(root, 'staging')
+      await mkdir(join(staging, 'tests'), { recursive: true })
+      await Promise.all([
+        writeFile(join(staging, 'package.json'), '{"type":"module"}\n'),
+        writeFile(join(staging, 'playwright.config.js'),
+          "import { defineConfig } from '@playwright/test'; export default defineConfig({ testDir: './tests' });\n"),
+        writeFile(join(staging, 'tests', 'generated.spec.js'),
+          "import { test } from '@playwright/test'; test('CASE-1', async () => {});\n"),
+      ])
+      const require = createRequire(import.meta.url)
+      const cliPath = require.resolve('@playwright/test/cli')
+      const packagePath = require.resolve('@playwright/test/package.json')
+      const modulesRoot = dirname(dirname(dirname(packagePath)))
+      await symlink(modulesRoot, join(staging, 'node_modules'), 'dir')
+      const executor = await SandboxedOneShotExecutor.create({ tempParent: root })
+      const result = await executor.execute({
+        command: process.execPath, args: [cliPath, 'test', '--list', '--reporter=json'], cwd: staging,
+        readOnlyRoots: [staging, modulesRoot, dirname(process.execPath)], timeoutMs: 30_000,
+      })
+
+      if (result.exitCode !== 0) throw new Error(`Playwright list failed: ${result.stderr}`)
+      expect(result.stdout).toContain('CASE-1')
+    },
+    30_000,
+  )
+
   test('只在实际 macOS sandbox backend 中用固定最小 env 与临时 HOME 执行，并返回不可伪造路径的证明', async () => {
     const root = await mkdtemp(join(tmpdir(), 'e2e-one-shot-')); roots.push(root)
     const staging = join(root, 'staging'); const runtime = join(root, 'runtime')

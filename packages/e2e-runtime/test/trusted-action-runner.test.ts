@@ -1,6 +1,7 @@
 import {
   canonicalGrantApprovalSubjectDigest,
   canonicalizeJson,
+  digestApprovalProjection,
   digestArtifactContent,
   digestText,
   type ArtifactDocument,
@@ -15,11 +16,18 @@ import {
   TrustedReadActionProjector,
   authorizeRuntimeReadExecutor,
   executeRuntimeRead,
+  projectRuntimeReadGatewayAudit,
 } from '../src/trusted-action-runner.js'
 
 const d = (label: string) => digestText('trusted-action-test/v1', label)
 
 describe('TrustedReadActionProjector', () => {
+  test('只读 Gateway 审计投影排除其他执行模式的 injected 计数', () => {
+    expect(projectRuntimeReadGatewayAudit({
+      received: 2, forwarded: 1, blocked: 1, injected: 9, byIntent: { READ: 2 },
+    })).toEqual({ received: 2, forwarded: 1, blocked: 1, byIntent: { READ: 2 } })
+  })
+
   test('projects URL/identity from trusted discovery fact and expected text from the frozen oracle', () => {
     const fixture = projectionFixture()
     const action = new TrustedReadActionProjector().project(fixture)
@@ -87,7 +95,7 @@ describe('TrustedReadActionProjector', () => {
         requestResponses: {}, createdAt: '2026-07-17T00:00:00.000Z', updatedAt: '2026-07-17T00:00:00.000Z',
       },
       attemptId: 'ATTEMPT-1',
-    })).rejects.toThrow(/E2E_RUNTIME_READ_EXECUTOR_OUTPUT_INVALID/)
+    })).rejects.toThrow(/E2E_RUNTIME_READ_EXECUTOR_BINDING_INVALID/)
   })
 })
 
@@ -172,8 +180,10 @@ export function projectionFixture() {
   const readSubject: ReadApprovalSubject = {
     schemaVersion: '2.1.0', assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
     requirementModelDigest: d('model'), coveragePolicyDigest: d('coverage-policy'), universeDigest: d('universe'),
-    caseDigest: testCases.contentDigest, actionMapDigest: actionMap.contentDigest, policyDigest: d('policy'),
-    executionContractDigest: executionContract.contentDigest, runBundleProjectionDigest: d('run-bundle'),
+    caseDigest: digestApprovalProjection('test-cases', testCases.content),
+    actionMapDigest: digestApprovalProjection('browser-action-map', actionMap.content), policyDigest: d('policy'),
+    executionContractDigest: digestApprovalProjection('execution-contract', executionContract.content),
+    runBundleProjectionDigest: d('run-bundle'),
     environment: 'test', baseOrigin: 'https://test.example.com', actor: 'auditor',
     discoveryGrantId: 'DISCOVERY-1', preflightDigest: d('preflight'),
     requests: readRequests,

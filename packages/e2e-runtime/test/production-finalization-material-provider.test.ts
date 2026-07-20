@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import { addFixtureInjectionResult, completeGenerationFixture } from '../../e2e-engine/test/complete-generation.fixture.js'
 import { buildCompleteGeneration } from '@mutil-skills/e2e-engine'
-import { digestBytes } from '@mutil-skills/e2e-contracts'
+import { digestArtifactContent, digestBytes } from '@mutil-skills/e2e-contracts'
 import { LocalGatewayAuditSigner } from '@mutil-skills/e2e-gateway'
 import {
   ProductionFinalizationMaterialProvider,
@@ -17,6 +17,14 @@ describe('ProductionFinalizationMaterialProvider', () => {
     const built = buildCompleteGeneration(fixture)
     const factArtifacts = built.artifacts.filter((artifact) =>
       !['final-report', 'generation-manifest'].includes(artifact.artifactType))
+    const persistedArtifacts = factArtifacts.map((artifact) => {
+      if (artifact.artifactType !== 'project-policy') return artifact
+      const candidate = { ...structuredClone(artifact), engineVersion: '9.9.9', signatures: [] }
+      const contentDigest = digestArtifactContent(
+        `artifact-content/${candidate.schemaVersion}/${candidate.artifactType}`, candidate,
+      )
+      return { ...candidate, contentDigest, signatures: [fixture.authority.signArtifactDigest(contentDigest)] }
+    })
     const evidence = fixture.drafts['browser-evidence'].files![0]!
     const evidenceBytes = Buffer.from(evidence.base64, 'base64')
     const executionOutcomeSigner = LocalGatewayAuditSigner.create({
@@ -25,7 +33,7 @@ describe('ProductionFinalizationMaterialProvider', () => {
     const material = createPersistedRuntimeFinalizationMaterial({
       runId: fixture.context.generationId,
       attemptId: 'ATTEMPT-1',
-      artifacts: factArtifacts.map((artifact) => ({
+      artifacts: persistedArtifacts.map((artifact) => ({
         artifact,
         relativePath: fixture.drafts[artifact.artifactType as keyof typeof fixture.drafts].relativePath,
       })),
@@ -63,12 +71,13 @@ describe('ProductionFinalizationMaterialProvider', () => {
       },
     })
     const snapshot = finalizingSnapshot(material, fixture.provenance)
+    snapshot.updatedAt = '2026-07-19T12:34:56.000Z'
     const readEvidence = vi.fn(async () => Buffer.from(evidenceBytes))
     const compilerInput = Object.freeze({})
     const provider = new ProductionFinalizationMaterialProvider({
       quarantine: { readEvidence },
       projectCompilerInput: vi.fn(() => compilerInput),
-      authority: fixture.authority,
+      authority: { ...fixture.authority, verifySignature: () => true },
       gatewayVerifier: fixture.gatewayVerifier,
       sanitizerVerifier: fixture.sanitizerVerifier,
       privacyReviewVerifier: fixture.privacyReviewVerifier,
@@ -80,12 +89,24 @@ describe('ProductionFinalizationMaterialProvider', () => {
 
     expect(prepared.compilerInput).toBe(compilerInput)
     expect(readEvidence).toHaveBeenCalledWith({ runId: 'GEN-1', relativePath: 'sanitized/EVIDENCE-1.bin' })
-    const bound = prepared.bind({ regression: regressionResult(fixture), fencingToken: 11 })
+    const regression = regressionResult(fixture)
+    const bound = prepared.bind({ regression, fencingToken: 11 })
     expect(Object.keys(bound.semanticDrafts)).toHaveLength(25)
     expect(bound.evidence[0]?.bytes).toEqual(evidenceBytes)
-    expect(bound.context).toMatchObject({ generationId: 'GEN-1', fencingToken: 11 })
+    const browserPreflight = factArtifacts.find((artifact) => artifact.artifactType === 'browser-preflight')!
+    expect(bound.context).toMatchObject({
+      generationId: 'GEN-1', fencingToken: 11,
+      engineVersion: browserPreflight.engineVersion,
+      createdAt: browserPreflight.createdAt,
+    })
+    expect(Object.keys(bound.authorities).sort()).toEqual([
+      'signArtifactDigest', 'verifyApprovalFreshnessReceipt',
+      'verifyArtifactSignature', 'verifyDecisionReceipt',
+    ])
     expect((bound.semanticDrafts['regression-manifest']!.content as any).discoveryVerifierMaterial)
       .toEqual(regressionVerifierMaterial())
+    expect((bound.semanticDrafts['regression-manifest']!.content as any).listResult.digest)
+      .toBe(regression.discoveryAttestation.isolation.stdoutDigest)
     expect((bound.semanticDrafts['browser-results']!.content as any).trustedCompilerExecution.caseResults)
       .toEqual([{ caseId: 'CASE-1', status: 'passed' }])
     expect(bound.verifiers?.executionOutcomeVerifier).toBeTypeOf('function')

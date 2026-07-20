@@ -19,6 +19,7 @@ import { connect } from 'node:net'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
   openRuntimeArtifactStoreAuthority,
+  runtimeApprovalExecutionBinding,
   startRuntimeAuthorityHost,
   type RuntimeAuthorityHost,
 } from './authority-host.js'
@@ -85,8 +86,9 @@ export async function openRuntimeWriteProduction(input: {
     let client: (AuthorityMaintenanceRpcClient & { destroy(): void }) | undefined
     let primary: unknown
     try {
-      await host.activateRecoveryGrant({ grant: projection.grant, approvalBinding: projection.grant.approvalContext })
-      const connection = host.executionRpcConnection(projection.grant.approvalContext)
+      const approvalBinding = runtimeApprovalExecutionBinding(projection.grant.approvalContext)
+      await host.activateRecoveryGrant({ grant: projection.grant, approvalBinding })
+      const connection = host.executionRpcConnection(approvalBinding)
       try {
         client = createAuthorityMaintenanceRpcClient({
           credential: connection.credential,

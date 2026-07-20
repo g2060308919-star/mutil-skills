@@ -74,11 +74,14 @@ export async function inspectSystemChrome(input: {
   })
   try {
     const before = await opened.stat()
+    const ownedByCurrentUser = before.uid === currentUid()
     if (!before.isFile() || before.nlink < 1 || (before.mode & 0o111) === 0
-      || (before.mode & 0o022) !== 0 || ![0, currentUid()].includes(before.uid)
+      || (before.mode & 0o002) !== 0
+      || (!ownedByCurrentUser && (before.mode & 0o020) !== 0)
+      || ![0, currentUid()].includes(before.uid)
       || before.size <= 0 || before.size > 2 * 1024 * 1024 * 1024) {
       throw chromeError('E2E_SYSTEM_CHROME_EXECUTABLE_UNSAFE',
-        '系统 Chrome 必须是 root/当前用户所有、不可由组或其他用户写入的可执行普通文件')
+        '系统 Chrome 必须是 root/当前用户所有、不可由其他用户写入；root 所有文件也不可由组写入')
     }
     const bytes = await opened.readFile()
     const after = await opened.stat()

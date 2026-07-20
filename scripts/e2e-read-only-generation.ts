@@ -378,7 +378,13 @@ async function createGoldenCompilerArtifacts(
   })
   const compilerContents: Record<string, unknown> = {
     ...contents,
-    'approval-grants': { runBundleDigest, grants: [receipt] },
+    'approval-grants': {
+      runBundleDigest,
+      approvalAssurance: {
+        approvalMode: 'webauthn', identityVerified: true, separationOfDutiesVerified: true,
+      },
+      grants: [receipt],
+    },
   }
   const requiredTypes = [
     'prd-manifest', 'prd-diff', 'acceptance-scope', 'project-policy', 'requirement-model',
@@ -575,7 +581,11 @@ export async function createReadOnlyGoldenGenerationInput(input: {
       dataNeeds: [], manualProcedures, evidencePolicyDigest, runtimeIsolation: null, unresolvedItems: [],
     }),
     'approval-grants': draft('run/approval-grants.json', {
-      runBundleDigest: d('pending-run-bundle'), grants: [],
+      runBundleDigest: d('pending-run-bundle'),
+      approvalAssurance: {
+        approvalMode: 'webauthn', identityVerified: true, separationOfDutiesVerified: true,
+      },
+      grants: [],
     }),
     'manual-results': draft('run/manual-results.json', { results: [] }),
     'data-leases': draft('run/data-leases.json', { leases: [], allocatorEpoch: 1 }),
@@ -739,7 +749,11 @@ export async function createReadOnlyGoldenGenerationInput(input: {
       content: drafts['run-bundle'].content },
   })
   drafts['approval-grants'].content = {
-    runBundleDigest: predictedContentDigest(context, 'run-bundle', drafts['run-bundle']), grants: [receipt],
+    runBundleDigest: predictedContentDigest(context, 'run-bundle', drafts['run-bundle']),
+    approvalAssurance: {
+      approvalMode: 'webauthn', identityVerified: true, separationOfDutiesVerified: true,
+    },
+    grants: [receipt],
   }
   return {
     context,

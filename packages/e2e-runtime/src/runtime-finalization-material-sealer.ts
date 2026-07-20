@@ -140,7 +140,7 @@ export class RuntimeFinalizationMaterialSealer {
     const evidencePath = `evidence/${read.actionId}.dom.json`
     const rawBytes = Buffer.from(await this.dependencies.quarantine.readEvidence({
       runId: snapshot.runId, relativePath: rawDom.quarantinePath,
-      actor: { subject: 'runtime:finalization-sealer', roles: ['e2e-publisher'] },
+      actor: sanitizerReaderActor(),
     }))
     if (rawBytes.byteLength !== rawDom.byteLength
       || digestBytes('quarantine-plaintext/v1', rawBytes) !== rawDom.plaintextDigest) {
@@ -162,7 +162,7 @@ export class RuntimeFinalizationMaterialSealer {
       runId: snapshot.runId, relativePath: sanitizedPath, bytes: sanitized.bytes,
     })
     const documents = new Map<ArtifactType, ArtifactDocument>()
-    for (const type of EXTERNAL_TYPES) documents.set(type, signArtifact(external[type], this.dependencies.authority))
+    addResolvedExternalArtifacts(documents, external, executionGrant, this.dependencies.authority)
 
     const executionContract = record(external['execution-contract'].content, 'E2E_RUNTIME_EXECUTION_CONTRACT_INVALID')
     if (records(executionContract.actionIntents).some((intent) => intent.effect !== 'read')
@@ -185,7 +185,7 @@ export class RuntimeFinalizationMaterialSealer {
       observedIdentity: { identityId: 'OBSERVED-PAGE', digest: preflight.observedIdentityDigest },
       actorChecks: [], leaseChecks: [],
       gatewayChecks: [
-        { id: gatewayInstanceId, digest: preflight.gatewayPolicyDigest },
+        { id: gatewayInstanceId, digest: text(gatewayAudit.policyDigest, 'E2E_RUNTIME_GATEWAY_POLICY_MISSING') },
         { id: 'TRUSTED-GATEWAY-PROXY', digest: preflight.gatewaySessionMeasurementDigest },
       ],
       sandboxChecks: [{ id: 'TRUSTED-CHROME-EXECUTABLE', digest: preflight.browserExecutableDigest }],
@@ -227,7 +227,7 @@ export class RuntimeFinalizationMaterialSealer {
         approvalModeFromTrustedFacts(snapshot.trustedExecutionFacts),
       ),
       grants: [receipt],
-    }, this.dependencies.authority))
+    }, this.dependencies.authority, receipt.checkedAt))
     documents.set('manual-results', createArtifact(snapshot, 'manual-results', {
       results: this.requireManualResults(snapshot, external),
     }, this.dependencies.authority))
@@ -429,7 +429,7 @@ export class RuntimeFinalizationMaterialSealer {
     const evidencePath = `evidence/${write.actionId}.dom.json`
     const rawBytes = Buffer.from(await this.dependencies.quarantine.readEvidence({
       runId: snapshot.runId, relativePath: rawDom.quarantinePath,
-      actor: { subject: 'runtime:finalization-sealer', roles: ['e2e-publisher'] },
+      actor: sanitizerReaderActor(),
     }))
     if (rawBytes.byteLength !== rawDom.byteLength
       || digestBytes('quarantine-plaintext/v1', rawBytes) !== rawDom.plaintextDigest) {
@@ -451,7 +451,7 @@ export class RuntimeFinalizationMaterialSealer {
       runId: snapshot.runId, relativePath: sanitizedPath, bytes: sanitized.bytes,
     })
     const documents = new Map<ArtifactType, ArtifactDocument>()
-    for (const type of EXTERNAL_TYPES) documents.set(type, signArtifact(external[type], this.dependencies.authority))
+    addResolvedExternalArtifacts(documents, external, executionGrant, this.dependencies.authority)
     const testCases = records(record(external['test-cases'].content, 'E2E_RUNTIME_TEST_CASES_INVALID').cases)
     const actionMap = records(record(external['browser-action-map'].content, 'E2E_RUNTIME_ACTION_MAP_INVALID').actions)
     const testCase = testCases.find((candidate) => candidate.caseId === write.caseId)
@@ -471,7 +471,7 @@ export class RuntimeFinalizationMaterialSealer {
       observedIdentity: { identityId: 'OBSERVED-PAGE', digest: preflight.observedIdentityDigest },
       actorChecks: [], leaseChecks: [{ id: capability.dataLeaseId, digest: targetFingerprints[0] }],
       gatewayChecks: [
-        { id: gatewayInstanceId, digest: preflight.gatewayPolicyDigest },
+        { id: gatewayInstanceId, digest: text(gatewayAudit.policyDigest, 'E2E_RUNTIME_GATEWAY_POLICY_MISSING') },
         { id: 'TRUSTED-GATEWAY-PROXY', digest: preflight.gatewaySessionMeasurementDigest },
       ],
       sandboxChecks: [{ id: 'TRUSTED-CHROME-EXECUTABLE', digest: preflight.browserExecutableDigest }],
@@ -509,7 +509,7 @@ export class RuntimeFinalizationMaterialSealer {
         approvalModeFromTrustedFacts(snapshot.trustedExecutionFacts),
       ),
       grants: [freshness],
-    }, this.dependencies.authority))
+    }, this.dependencies.authority, freshness.checkedAt))
     documents.set('manual-results', createArtifact(snapshot, 'manual-results', {
       results: this.requireManualResults(snapshot, external),
     }, this.dependencies.authority))
@@ -690,7 +690,7 @@ export class RuntimeFinalizationMaterialSealer {
     const evidencePath = `evidence/injection/${injection.actionId}.dom.json`
     const rawBytes = Buffer.from(await this.dependencies.quarantine.readEvidence({
       runId: snapshot.runId, relativePath: rawDom.quarantinePath,
-      actor: { subject: 'runtime:finalization-sealer', roles: ['e2e-publisher'] },
+      actor: sanitizerReaderActor(),
     }))
     if (rawBytes.byteLength !== rawDom.byteLength
       || digestBytes('quarantine-plaintext/v1', rawBytes) !== rawDom.plaintextDigest) {
@@ -960,12 +960,13 @@ function createArtifact(
   type: ArtifactType,
   content: unknown,
   authority: RuntimeArtifactStoreAuthority,
+  createdAt = snapshot.updatedAt,
 ): ArtifactDocument {
   const base = {
     artifactId: artifactId(type), artifactType: type, schemaVersion: schemaVersion(type),
     engineVersion: '0.2.0', assetId: snapshot.assetId,
     prdRevision: snapshot.artifactDigests['prd-source']!, generationId: snapshot.runId,
-    createdAt: snapshot.updatedAt, contentDigest: '', signatures: [], dependencies: [],
+    createdAt, contentDigest: '', signatures: [], dependencies: [],
     graph: { defines: [], references: [] }, content,
   }
   const contentDigest = digestArtifactContent(`artifact-content/${base.schemaVersion}/${type}`, base)
@@ -977,6 +978,52 @@ function signArtifact(artifact: ArtifactDocument, authority: RuntimeArtifactStor
   return ArtifactSchemaRegistry[artifact.artifactType].parse({
     ...structuredClone(artifact), signatures: [authority.signArtifactDigest(artifact.contentDigest)],
   }) as ArtifactDocument
+}
+
+function addResolvedExternalArtifacts(
+  documents: Map<ArtifactType, ArtifactDocument>,
+  external: Record<(typeof EXTERNAL_TYPES)[number], ArtifactDocument>,
+  executionGrant: SignedGrant,
+  authority: RuntimeArtifactStoreAuthority,
+): void {
+  for (const type of EXTERNAL_TYPES) {
+    documents.set(type, type === 'browser-action-map'
+      ? resolveBrowserActionMap(external[type], executionGrant, authority)
+      : signArtifact(external[type], authority))
+  }
+}
+
+function resolveBrowserActionMap(
+  artifact: ArtifactDocument,
+  executionGrant: SignedGrant,
+  authority: RuntimeArtifactStoreAuthority,
+): ArtifactDocument {
+  const content = structuredClone(record(artifact.content, 'E2E_RUNTIME_ACTION_MAP_INVALID'))
+  const grantCapabilities = records(executionGrant.capabilities)
+  content.actions = records(content.actions).map((action) => {
+    const actionId = text(action.actionId, 'E2E_RUNTIME_ACTION_MAP_INVALID')
+    const actionGrantCapabilities = grantCapabilities.filter((candidate) => candidate.actionId === actionId)
+    if (actionGrantCapabilities.length === 0) return action
+    return {
+      ...action,
+      capabilities: records(action.capabilities).map((candidate) => {
+        const operation = text(candidate.operation, 'E2E_RUNTIME_ACTION_MAP_INVALID')
+        const matches = actionGrantCapabilities.filter((grantCapability) =>
+          grantCapability.operation === operation)
+        if (matches.length !== 1) {
+          throw sealerError('E2E_RUNTIME_ACTION_MAP_CAPABILITY_BINDING_INVALID')
+        }
+        return { ...candidate, capabilityId: text(matches[0]!.capabilityId) }
+      }),
+    }
+  })
+  const unsigned = { ...structuredClone(artifact), content, contentDigest: '', signatures: [] }
+  const contentDigest = digestArtifactContent(
+    `artifact-content/${artifact.schemaVersion}/${artifact.artifactType}`, unsigned,
+  )
+  return signArtifact(ArtifactSchemaRegistry['browser-action-map'].parse({
+    ...unsigned, contentDigest,
+  }) as ArtifactDocument, authority)
 }
 
 function schemaVersion(type: ArtifactType): string {
@@ -1015,19 +1062,15 @@ function runtimeProvenance(
     protocolVersion: '1.0.0', contractsVersion: dependencies.contractsVersion,
     engineVersion: dependencies.engineVersion, playwrightVersion: dependencies.playwrightVersion,
     chromiumDigest: preflight.browserExecutableDigest,
-    gatewayPolicyDigest: preflight.gatewayPolicyDigest,
+    gatewayPolicyDigest: text(record(executionFacts.gatewayAudit,
+      'E2E_RUNTIME_GATEWAY_AUDIT_MISSING').policyDigest, 'E2E_RUNTIME_GATEWAY_POLICY_MISSING'),
     authorityPublicKeyDigest: dependencies.authority.artifactVerifierMaterial.publicKeyDigest,
     authorityStateProtectionLevel: dependencies.authority.stateProtectionLevel,
     projectIdentityDigest: snapshot.projectIdentityDigest,
     sourceRevisionDigest: snapshot.artifactDigests['prd-source']!, sourceRepositoryIndependent: true,
-    isolationProofDigest: digestText('runtime-isolation-proof/v1', canonicalizeJson({
-      preflight: {
-        browserMeasurementDigest: preflight.browserMeasurementDigest,
-        browserClosureDigest: preflight.browserClosureDigest,
-        canaryProofDigest: preflight.canaryProofDigest,
-      },
-      execution: executionFacts.isolationMeasurements,
-    })),
+    isolationProofDigest: digestText('runtime-isolation-proof/v1', canonicalizeJson([
+      { id: 'TRUSTED-CHROME-EXECUTABLE', digest: preflight.browserExecutableDigest },
+    ])),
   }
 }
 
@@ -1084,19 +1127,23 @@ async function writeOrVerifySanitized(
   quarantine: Pick<EncryptedQuarantine, 'readEvidence' | 'writeEvidence'>,
   input: { runId: string; relativePath: string; bytes: Uint8Array },
 ): Promise<void> {
-  const actor: QuarantineActor = { subject: 'runtime:finalization-sealer', roles: ['e2e-publisher'] }
+  const writer: QuarantineActor = { subject: 'runtime:finalization-sealer', roles: ['e2e-runner'] }
   try {
     await quarantine.writeEvidence({ runId: input.runId, relativePath: input.relativePath,
-      plaintext: input.bytes, actor })
+      plaintext: input.bytes, actor: writer })
   } catch (error) {
     if (!(error instanceof E2EError) || error.code !== 'E2E_QUARANTINE_EVIDENCE_EXISTS') throw error
     const existing = Buffer.from(await quarantine.readEvidence({
-      runId: input.runId, relativePath: input.relativePath, actor,
+      runId: input.runId, relativePath: input.relativePath, actor: sanitizerReaderActor(),
     }))
     const matches = existing.equals(Buffer.from(input.bytes))
     existing.fill(0)
     if (!matches) throw sealerError('E2E_RUNTIME_FINALIZATION_SANITIZED_EVIDENCE_REBOUND')
   }
+}
+
+function sanitizerReaderActor(): QuarantineActor {
+  return { subject: 'runtime:finalization-sealer', roles: ['e2e-sanitizer'] }
 }
 
 function record(value: unknown, code = 'E2E_RUNTIME_FINALIZATION_FACT_INVALID'): Record<string, any> {

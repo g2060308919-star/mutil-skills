@@ -23,6 +23,10 @@ const EXPECTED_THREATS = [
   '同版安装内容冲突',
   'active version 卸载',
   '缺失 state 迁移器',
+  '系统 Chrome 替换 / 权限漂移',
+  '一次性 Profile 未确认关闭',
+  '本地确认错绑 / 过期 / replay',
+  '本地确认伪造身份或职责分离',
 ]
 
 describe('E2E Runtime 发行安全矩阵', () => {

@@ -193,7 +193,13 @@ export function approvedCompilerArtifacts(options: {
       attemptPlans: [{ caseId, slots: 1 }], signedCapabilities: capabilities, secretRefs: ['SECRET-1'],
       runtimePolicyDigest: digest('runtime-policy'), runtimeIsolationPolicyDigest: 'not-applicable',
     },
-    'approval-grants': { runBundleDigest: digest('run-bundle-artifact'), grants: [approvalReceipt] },
+    'approval-grants': {
+      runBundleDigest: digest('run-bundle-artifact'),
+      approvalAssurance: {
+        approvalMode: 'webauthn', identityVerified: true, separationOfDutiesVerified: true,
+      },
+      grants: [approvalReceipt],
+    },
   }
   Object.assign(approvalSubject, {
     scopeDigest: digestApprovalProjection('acceptance-scope', contents['acceptance-scope']),

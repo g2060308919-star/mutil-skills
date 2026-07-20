@@ -59,6 +59,7 @@ describe('Controlled Browser Host', () => {
       serviceWorkers: 'block', acceptDownloads: false, permissions: [],
     })
     expect(options.args).toEqual(expect.arrayContaining([
+      '--enable-automation',
       '--disable-quic',
       '--force-webrtc-ip-handling-policy=disable_non_proxied_udp',
       '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',
@@ -116,6 +117,26 @@ describe('Controlled Browser Host', () => {
       TMPDIR: `${launchInput.profileDir}/tmp`,
     })
     await session.close()
+  })
+
+  test('surfaces Gateway correlation rejection through the browser operation and closes cleanly', async () => {
+    const roots = await createRuntimeTestRoots()
+    const driver = fakeDriver()
+    const controlledGateway = gateway(vi.fn(async (input) => {
+      await input.executeThroughControlledBrowser({
+        url: 'http://canary.test/approved', correlation: correlation(),
+      })
+      return { approved: true, denied: true, proofDigest: digest('c') }
+    })) as any
+    controlledGateway.browserBinding.continueCorrelatedRequest.mockRejectedValue(
+      new Error('E2E_GATEWAY_BROWSER_CORRELATION_DENIED'),
+    )
+
+    await expect(new ControlledBrowserHost(driver).open({
+      homeDir: roots.home, runId: 'RUN-CORRELATION-DENIED', installation: installation(),
+      gateway: controlledGateway,
+    })).rejects.toThrow(/E2E_GATEWAY_BROWSER_CORRELATION_DENIED/)
+    expect(driver.close).toHaveBeenCalledOnce()
   })
 
   test('system Chrome uses the identical isolated profile and Gateway policy with source-bound measurement', async () => {
@@ -354,7 +375,7 @@ function gateway(runCanary: ReturnType<typeof vi.fn>) {
 }
 
 function fixedCommandLine() { return [
-  'chromium', '--disable-quic', '--disable-extensions', '--disable-background-networking',
+  'chromium', '--enable-automation', '--disable-quic', '--disable-extensions', '--disable-background-networking',
   '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--proxy-server=http://127.0.0.1:43111',
   '--proxy-bypass-list=<-loopback>',
   '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1',

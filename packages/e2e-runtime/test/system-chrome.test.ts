@@ -45,7 +45,7 @@ describe('system Google Chrome', () => {
     expect(inspected.identity.inode).toBeGreaterThan(0)
   })
 
-  test('rejects relative, project-owned and group/world-writable candidates', async () => {
+  test('rejects relative, project-owned and unsafe writable candidates while accepting standard macOS ownership', async () => {
     const roots = await createRuntimeTestRoots()
     const projectChrome = join(roots.project, 'chrome')
     await writeFile(projectChrome, 'malicious', { mode: 0o700 })
@@ -60,6 +60,12 @@ describe('system Google Chrome', () => {
       .rejects.toMatchObject({ code: 'E2E_SYSTEM_CHROME_PATH_INVALID' })
     await expect(inspectSystemChrome({ ...common, executablePath: projectChrome }))
       .rejects.toMatchObject({ code: 'E2E_SYSTEM_CHROME_PROJECT_PATH_FORBIDDEN' })
+
+    const currentUserChrome = join(roots.source, 'current-user-chrome')
+    await writeFile(currentUserChrome, 'standard macOS application mode', { mode: 0o770 })
+    await chmod(currentUserChrome, 0o770)
+    await expect(inspectSystemChrome({ ...common, executablePath: currentUserChrome }))
+      .resolves.toMatchObject({ selection: { source: { executablePath: await realpath(currentUserChrome) } } })
 
     const openChrome = join(roots.source, 'open-chrome')
     await writeFile(openChrome, 'open', { mode: 0o777 })

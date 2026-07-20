@@ -4,9 +4,11 @@ import {
   type AuthorityExecutionRpcProcessHandle,
   type WebAuthnApprovalAssets,
   type WebAuthnApprovalType,
+  type TrustedApprovalFreshnessClient,
 } from '@mutil-skills/e2e-authority'
 import {
   ApprovalFinalizationAcknowledgementSchema,
+  ApprovalExecutionBindingSchema,
   ManualResultDraftSchema,
   ManualResultSchema,
   canonicalizeJson,
@@ -59,6 +61,18 @@ import {
 const BUNDLE_DIGEST = 'sha256:cf4469953efcb5617a870ae3f022b3ad48aee8c06012ccdafcabc73058f123a0'
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
+
+/** 从完整、可审计的审批上下文显式投影严格四字段执行绑定。 */
+export function runtimeApprovalExecutionBinding(
+  context: SignedGrant['approvalContext'],
+): ApprovalExecutionBinding {
+  return ApprovalExecutionBindingSchema.parse({
+    runId: context.runId,
+    installationDigest: context.installationDigest,
+    approvalType: context.approvalType,
+    subjectDigest: context.subjectDigest,
+  })
+}
 
 type RuntimeAuthorityProcess = Pick<AuthorityExecutionRpcProcessHandle,
   'enrollIdentity' | 'openApprovalSession' | 'waitForSession' | 'close'> &
@@ -475,6 +489,7 @@ export interface RuntimeArtifactStoreAuthority extends CompleteGenerationAuthori
   readonly decisionVerifierMaterial: DecisionVerifierMaterial
   readonly privacyReviewVerifierMaterial: PrivacyReviewVerifierMaterial
   readonly attemptEventVerifierMaterial: AttemptEventVerifierMaterial
+  createTrustedApprovalFreshnessClient(): TrustedApprovalFreshnessClient
   signDigest(digest: string): ArtifactSignature
   verifySignature(signature: ArtifactSignature): boolean
   issueApprovalFreshnessReceipt(input: {
@@ -674,6 +689,10 @@ export async function openRuntimeArtifactStoreAuthority(options: {
     decisionVerifierMaterial: authority.decisionVerifierMaterial,
     privacyReviewVerifierMaterial: authority.privacyReviewVerifierMaterial,
     attemptEventVerifierMaterial: authority.attemptEventVerifierMaterial,
+    createTrustedApprovalFreshnessClient: () => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return authority.createTrustedApprovalFreshnessClient()
+    },
     signArtifactDigest: (digest) => {
       if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
       return authority.signArtifactDigest(digest)

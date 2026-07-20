@@ -10,6 +10,7 @@ import {
 import {
   LocalRegressionDiscoveryAuthority,
   createTrustedCompilerControlledReadLauncher,
+  discardTrustedCompilerRun,
   executeTrustedCompilerProject,
   prepareTrustedCompilerRun,
   projectCompilerInputFromArtifacts,
@@ -29,6 +30,32 @@ afterEach(async () => {
 })
 
 describe('受控只读多 Action 回归', () => {
+  test('授权在采集页面证据前阻断时仍返回结构化安全结果，不被 evidence incomplete 覆盖', async () => {
+    const session = await createMultiActionSession()
+    const actions = [
+      { actionId: 'ACTION-READ-1', target: '订单状态', expected: '待审核' },
+      { actionId: 'ACTION-READ-2', target: '订单状态详情', expected: '待审核详情' },
+    ]
+    const launcher = createTrustedCompilerControlledReadLauncher(actions.map((action, index) => ({
+      action,
+      runnerInput: {
+        caseId: 'CASE-READ-1', actionId: action.actionId, url: 'https://test.example.com/orders',
+        expectedIdentity: { url: 'https://test.example.com/orders', title: '订单', heading: '订单列表' },
+        expectedText: action.expected, runtime: { sandboxHealthy: true, gatewayConnected: true },
+        ...readAuthorizationInput(action.actionId, index, false, index === 0),
+        gatewayAudit: { received: 1, forwarded: 1, blocked: 0, byIntent: { 'INTENT-DOCUMENT': 1 } },
+        page: fakePage(true, index),
+      },
+    })), session)
+
+    const execution = await launcher(actions[0]!).finally(() => discardTrustedCompilerRun(session))
+    expect(execution.result).toMatchObject({
+      status: 'safety-blocked', reasonCode: 'E2E_TEST_READ_RESERVATION_DENIED',
+    })
+    expect(execution.evidence.screenshot).toHaveLength(0)
+    expect(execution.evidence.dom).toHaveLength(0)
+  })
+
   test('首个业务断言失败后继续采集后续 Action，并在 Case 末尾统一失败', async () => {
     const session = await createMultiActionSession()
     const actions = [
@@ -150,7 +177,7 @@ function fakePage(containsExpectedText: boolean, index: number, onContains = () 
   }
 }
 
-function readAuthorizationInput(actionId: string, index: number, finalizeFails = false): {
+function readAuthorizationInput(actionId: string, index: number, finalizeFails = false, reserveFails = false): {
   authorization: {
     grant: SignedReadGrant
     currentSubject: ReadApprovalSubject
@@ -197,6 +224,9 @@ function readAuthorizationInput(actionId: string, index: number, finalizeFails =
       currentSubject,
       authority: {
         async reserveForSubject(input) {
+          if (reserveFails) {
+            throw Object.assign(new Error('reservation denied'), { code: 'E2E_TEST_READ_RESERVATION_DENIED' })
+          }
           return {
             reservationId: `RES-${input.capabilityId}`, grantId: grant.grantId,
             capabilityId: input.capabilityId, actionId: input.actionId, attemptId: input.attemptId,

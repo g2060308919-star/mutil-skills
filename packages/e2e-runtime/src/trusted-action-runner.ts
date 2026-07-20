@@ -3,6 +3,7 @@ import {
   ReadApprovalSubjectSchema,
   SignedGrantSchema,
   canonicalizeJson,
+  digestApprovalProjection,
   digestBytes,
   digestText,
   E2EError,
@@ -282,9 +283,9 @@ export class TrustedReadActionProjector {
     const testCases = parseFrozen(input.frozenArtifacts, 'test-cases')
     const executionContract = parseFrozen(input.frozenArtifacts, 'execution-contract')
     const actionMap = parseFrozen(input.frozenArtifacts, 'browser-action-map')
-    if (subject.caseDigest !== testCases.contentDigest
-      || subject.executionContractDigest !== executionContract.contentDigest
-      || subject.actionMapDigest !== actionMap.contentDigest) {
+    if (subject.caseDigest !== digestApprovalProjection('test-cases', testCases.content)
+      || subject.executionContractDigest !== digestApprovalProjection('execution-contract', executionContract.content)
+      || subject.actionMapDigest !== digestApprovalProjection('browser-action-map', actionMap.content)) {
       throw trustedActionError('E2E_RUNTIME_READ_ARTIFACT_BINDING_MISMATCH', 'Grant 未绑定冻结执行资产')
     }
     const mapContent = actionMap.content as Record<string, unknown>
@@ -532,7 +533,7 @@ export class TrustedActionRunner {
         authorization: { grant: input.grant, currentSubject: input.currentSubject, authority: input.authority },
         attemptId: input.attemptId,
         runtime: { sandboxHealthy: true, gatewayConnected: true },
-        gatewayAudit: () => input.gateway.auditSummary(), page: capture,
+        gatewayAudit: () => projectRuntimeReadGatewayAudit(input.gateway.auditSummary()), page: capture,
       }))
       const evidence = capture.releaseVerified(result)
       return { result, ...(evidence === undefined ? {} : { evidence }) }
@@ -540,6 +541,21 @@ export class TrustedActionRunner {
       capture.clear()
       throw error
     }
+  }
+}
+
+/** 将多模式 Gateway 计数器缩减为只读执行协议允许的固定字段。 */
+export function projectRuntimeReadGatewayAudit<T extends {
+  received: number
+  forwarded: number
+  blocked: number
+  byIntent: Record<string, number>
+}>(audit: T): { received: number; forwarded: number; blocked: number; byIntent: Record<string, number> } {
+  return {
+    received: audit.received,
+    forwarded: audit.forwarded,
+    blocked: audit.blocked,
+    byIntent: { ...audit.byIntent },
   }
 }
 
@@ -673,14 +689,21 @@ function parseRuntimeReadExecutionOutput(
       isolationMeasurements: JsonRecordSchema,
     }).strict().optional(),
   }).strict().safeParse(value)
-  if (!parsed.success || parsed.data.status !== parsed.data.result.status
+  if (!parsed.success) throw trustedActionError(
+    runtimeReadOutputSchemaErrorCode(parsed.error.issues[0]?.path[0]),
+    'Read executor 输出未通过严格 schema 与状态/容量闭合', parsed.error,
+  )
+  if (parsed.data.status !== parsed.data.result.status
     || parsed.data.result.caseId !== expectedAction.caseId
-    || parsed.data.result.actionId !== expectedAction.actionId
-    || (parsed.data.evidence?.screenshot.byteLength ?? 0) > 16 * 1024 * 1024
-    || (parsed.data.evidence?.dom.byteLength ?? 0) > 4 * 1024 * 1024
-    || (parsed.success && !runtimeEvidenceCloses(parsed.data))) throw trustedActionError(
-    'E2E_RUNTIME_READ_EXECUTOR_OUTPUT_INVALID', 'Read executor 输出未通过严格 schema 与状态/容量闭合',
-    parsed.success ? undefined : parsed.error,
+    || parsed.data.result.actionId !== expectedAction.actionId) throw trustedActionError(
+    'E2E_RUNTIME_READ_EXECUTOR_BINDING_INVALID', 'Read executor 输出未闭合绑定 action 与 status',
+  )
+  if ((parsed.data.evidence?.screenshot.byteLength ?? 0) > 16 * 1024 * 1024
+    || (parsed.data.evidence?.dom.byteLength ?? 0) > 4 * 1024 * 1024) throw trustedActionError(
+    'E2E_RUNTIME_READ_EXECUTOR_EVIDENCE_SIZE_INVALID', 'Read executor 原始证据超过固定容量上限',
+  )
+  if (!runtimeEvidenceCloses(parsed.data)) throw trustedActionError(
+    'E2E_RUNTIME_READ_EXECUTOR_EVIDENCE_CLOSURE_INVALID', 'Read executor 证据摘要与 Gateway 审计未闭合',
   )
   return parsed.data as RuntimeReadExecutionOutput
 }
@@ -707,6 +730,18 @@ function runtimeEvidenceCloses(output: RuntimeReadExecutionOutput): boolean {
     && dom.digest === digestText('runtime-evidence/dom/v1', Buffer.from(output.evidence.dom).toString('utf8'))
     && audit.byteLength === Buffer.byteLength(auditText, 'utf8')
     && audit.digest === digestText('runtime-evidence/gateway-audit/v1', auditText)
+}
+
+function runtimeReadOutputSchemaErrorCode(section: string | number | undefined): string {
+  const fixedSections: Record<string, string> = {
+    status: 'STATUS', result: 'RESULT', gatewayAudit: 'GATEWAY_AUDIT',
+    gatewayAuditDigest: 'GATEWAY_AUDIT_DIGEST', evidence: 'EVIDENCE',
+    finalizationFacts: 'FINALIZATION_FACTS',
+  }
+  const suffix = section === undefined ? undefined : fixedSections[String(section)]
+  return suffix === undefined
+    ? 'E2E_RUNTIME_READ_EXECUTOR_OUTPUT_INVALID'
+    : `E2E_RUNTIME_READ_EXECUTOR_${suffix}_INVALID`
 }
 
 function trustedActionError(code: string, message: string, cause?: unknown): E2EError {

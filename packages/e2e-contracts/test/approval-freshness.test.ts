@@ -69,7 +69,13 @@ describe('ApprovalFreshnessReceipt v1 / approval-grants v2', () => {
       schemaVersion: '2.0.0', engineVersion: '2.0.0', assetId: 'ASSET-1', prdRevision: d('prd'),
       generationId: 'GEN-1', createdAt: '2026-07-12T00:00:00.000Z', contentDigest: d('content'),
       signatures: [], dependencies: [], graph: { defines: [], references: [] },
-      content: { runBundleDigest: d('bundle'), grants: [receipt()] },
+      content: {
+        runBundleDigest: d('bundle'),
+        approvalAssurance: {
+          approvalMode: 'webauthn', identityVerified: true, separationOfDutiesVerified: true,
+        },
+        grants: [receipt()],
+      },
     }
     expect(ArtifactSchemaRegistry['approval-grants'].safeParse(base).success).toBe(true)
     expect(ArtifactSchemaRegistry['approval-grants'].safeParse({ ...base, schemaVersion: '1.0.0' }).success).toBe(false)

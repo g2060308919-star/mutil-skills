@@ -2,13 +2,14 @@ import { link, lstat, mkdir, readFile, realpath, rename, rm, stat, symlink, writ
 import { Readable, Writable } from 'node:stream'
 import { expect, test, vi } from 'vitest'
 import { canonicalizeJson, digestText, RuntimeRequestEnvelopeSchema } from '@mutil-skills/e2e-contracts'
-import { LocalApprovalAuthority } from '@mutil-skills/e2e-authority'
+import { LocalApprovalAuthority, getTrustedApprovalFreshnessClientKind } from '@mutil-skills/e2e-authority'
 import {
   RuntimeAuthorityHost,
   computeRuntimeApprovalSubjectDigest,
   createRuntimeLocalApprovalHost,
   loadRuntimeApprovalAssets,
   openRuntimeArtifactStoreAuthority,
+  runtimeApprovalExecutionBinding,
   startRuntimeAuthorityHost,
 } from '../src/authority-host.js'
 import { createPendingLocalApprovalConfirmation,
@@ -23,6 +24,18 @@ import { createRuntimeTestRoots } from './fixtures.js'
 
 const installationDigest = `sha256:${'a'.repeat(64)}`
 
+test('完整审批上下文只投影严格四字段 execution binding', () => {
+  expect(runtimeApprovalExecutionBinding({
+    schemaVersion: '1.0.0', subject: 'local-caller', runId: 'RUN-BINDING-1',
+    approvalType: 'discovery', subjectDigest: `sha256:${'b'.repeat(64)}`,
+    installationDigest, origin: 'http://localhost',
+    issuedAt: '2026-07-19T00:00:00.000Z', expiresAt: '2026-07-19T00:05:00.000Z',
+  })).toEqual({
+    runId: 'RUN-BINDING-1', approvalType: 'discovery',
+    subjectDigest: `sha256:${'b'.repeat(64)}`, installationDigest,
+  })
+})
+
 test('production artifact authority reopens the persistent Authority identity for signing and verification', async () => {
   const roots = await createRuntimeTestRoots()
   const installation = {
@@ -34,6 +47,8 @@ test('production artifact authority reopens the persistent Authority identity fo
   })
   const signature = first.signDigest(`sha256:${'6'.repeat(64)}`)
   expect(first.verifySignature(signature)).toBe(true)
+  expect(getTrustedApprovalFreshnessClientKind(first.createTrustedApprovalFreshnessClient()))
+    .toBe('authority-state')
   await first.close()
 
   const reopened = await openRuntimeArtifactStoreAuthority({
@@ -125,10 +140,16 @@ test('Runtime Host consumes one subject-bound local confirmation and persists th
         entrypoint: `${roots.source}/runtime-host.js` },
       subject: `local:uid:${process.getuid!()}`,
     })
+    const readExecutor = vi.fn()
+    const writeExecutor = vi.fn()
+    const injectionExecutor = vi.fn()
     const host = new E2ERuntimeHost({
       installation: runtimeInstallation(), doctor: async () => { throw new Error('not used') },
       runStore, now: () => new Date('2026-07-16T00:01:00.000Z'),
       localAuthorityHostFactory: async () => createRuntimeLocalApprovalHost(authority!),
+      readExecutor: readExecutor as never,
+      writeExecutor: writeExecutor as never,
+      injectionExecutor: injectionExecutor as never,
     })
     const request = RuntimeRequestEnvelopeSchema.parse({
       schemaVersion: '1.0.0', requestId: 'CONFIRM-LOCAL-1',
@@ -148,6 +169,9 @@ test('Runtime Host consumes one subject-bound local confirmation and persists th
     expect(persisted?.trustedExecutionFacts['signed-execution-grant']).toMatchObject({
       approver: { kind: 'local-caller' },
     })
+    expect(readExecutor).not.toHaveBeenCalled()
+    expect(writeExecutor).not.toHaveBeenCalled()
+    expect(injectionExecutor).not.toHaveBeenCalled()
   } finally {
     await authority?.close()
     await runStore.close()
@@ -168,8 +192,10 @@ test('Runtime Host routes a distinct local manual confirmation to the prepared e
     const base = { ...runSnapshot(), projectIdentityDigest: identity.digest,
       workflow: { current: 'compiled' as const, sequence: 10,
         eventChainDigest: `sha256:${'9'.repeat(64)}` } }
-    const draft = { ...manualDraft(), startedAt: '2026-07-18T23:00:00.000Z',
-      finishedAt: '2026-07-18T23:05:00.000Z', expiresAt: '2026-07-20T00:00:00.000Z' }
+    const authorityNow = Date.now()
+    const draft = { ...manualDraft(), startedAt: new Date(authorityNow - 10 * 60_000).toISOString(),
+      finishedAt: new Date(authorityNow - 5 * 60_000).toISOString(),
+      expiresAt: new Date(authorityNow + 24 * 60 * 60_000).toISOString() }
     authority = await openRuntimeArtifactStoreAuthority({
       homeDir: roots.home,
       installation: { ...runtimeInstallation(), versionRoot: roots.source,

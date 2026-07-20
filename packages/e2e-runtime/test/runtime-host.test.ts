@@ -6,6 +6,7 @@ import {
   canonicalGrantApprovalSubjectDigest,
   canonicalizeJson,
   computeRegressionSourceSetDigest,
+  digestApprovalProjection,
   digestArtifactContent,
   digestBytes,
   digestText,
@@ -622,8 +623,9 @@ describe('E2ERuntimeHost', () => {
     const readSubject = {
       ...structuredClone(projected.currentSubject),
       assetId: binding.assetId, prdRevision: binding.prdRevision,
-      caseDigest: testCases.contentDigest, actionMapDigest: actionMap.contentDigest,
-      executionContractDigest: executionContract.contentDigest,
+      caseDigest: digestApprovalProjection('test-cases', testCases.content),
+      actionMapDigest: digestApprovalProjection('browser-action-map', actionMap.content),
+      executionContractDigest: digestApprovalProjection('execution-contract', executionContract.content),
       discoveryGrantId: discoveryGrant.grantId, preflightDigest: formalPreflightDigest,
     }
     const executionResult = await handleSuccess(fixture.host, RuntimeRequestEnvelopeSchema.parse({
@@ -1259,9 +1261,11 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
-  test('execute-run 崩溃后保持 running-real fenced attempt，不能回到 compiled 重复执行', async () => {
+  test('execute-run 崩溃后保持 running-real fenced attempt，跨 package 错误只公开安全码且不能重复执行', async () => {
     const fixture = await hostFixture({ executeReadOnlyRun: async () => {
-      throw new Error('executor crashed')
+      throw Object.assign(new Error('包含不应泄漏的本机路径 /Users/example/private'), {
+        code: 'E2E_RUNTIME_BROWSER_TEST_CRASH',
+      })
     } })
     const created = successResult(await handleRequest(fixture.host,
       createRunRequest('REQUEST-CREATE-CRASH', fixture.roots.project),
@@ -1289,7 +1293,11 @@ describe('E2ERuntimeHost', () => {
       payload: { runId: created.runId },
     })
     const response = await handleRequest(fixture.host, executeRequest)
-    expect(response).toMatchObject({ ok: false, error: { code: 'E2E_RUNTIME_READ_EXECUTION_CRASHED' } })
+    expect(response).toMatchObject({ ok: false, error: {
+      code: 'E2E_RUNTIME_READ_EXECUTION_CRASHED',
+      message: expect.stringContaining('内部错误码 E2E_RUNTIME_BROWSER_TEST_CRASH'),
+    } })
+    expect(response.error?.message).not.toContain('/Users/example/private')
     const persisted = await fixture.store.getRun(created.projectIdentityDigest as string, created.runId as string)
     expect(persisted).toMatchObject({
       workflow: { current: 'running-real' },

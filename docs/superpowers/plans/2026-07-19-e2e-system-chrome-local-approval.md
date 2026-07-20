@@ -50,7 +50,7 @@
 
 **Interfaces:**
 - `discoverSystemChrome()`：仅固定 macOS/Linux allowlist。
-- `inspectSystemChrome()`：绝对路径 canonicalize、regular executable、owner、非 group/world writable、非项目内、digest/version。
+- `inspectSystemChrome()`：绝对路径 canonicalize、regular executable、owner、非 world writable；root 所有文件还须非 group writable，当前 UID 所有文件兼容 macOS App 的 group-writable 模式；非项目内、digest/version。
 - `BrowserInstallation`：统一 `system-chrome` 与 `managed-chromium`，保留启动所需 closure/executable digest。
 
 - [x] 写失败测试：allowlist 顺序、显式路径、相对/项目内/symlink swap/错误 owner/可写文件拒绝、digest 与版本绑定。
@@ -222,10 +222,10 @@
 - Modify: `scripts/e2e-runtime-security-matrix.test.ts`
 - Modify: `scripts/e2e-complete-report.golden.test.ts`
 
-- [ ] 增加失败 Golden：空白项目使用系统 Chrome且不安装 managed Chromium；写入未确认不启动 Action；确认后执行/cleanup；报告保证等级准确。
-- [ ] 运行对应 Golden，确认 RED；真实系统 Chrome 不可用时只登记显式外部门禁。
-- [ ] 完成 fixtures 与生产装配，运行 Golden GREEN。
-- [ ] 运行 `npm run build`、`npm run typecheck`、`npm run lint:architecture`、`npm test -- --reporter=dot`、`npm run e2e:golden`。
-- [ ] 运行 `npm pack --dry-run --workspaces` 和 release closure 测试；不得 publish。
+- [x] 增加失败 Golden：空白项目使用系统 Chrome且不安装 managed Chromium；写入未确认不启动 Action；确认后执行/cleanup；报告保证等级准确。
+- [x] 运行对应 Golden，确认 RED；真实系统 Chrome 不可用时只登记显式外部门禁。
+- [x] 完成 fixtures 与生产装配，运行 Golden GREEN。
+- [x] 运行 `npm run build`、`npm run typecheck`、`npm run lint:architecture`、`npm test -- --reporter=dot`、`npm run e2e:golden`。
+- [x] 运行 `npm pack --dry-run --workspaces` 和 release closure 测试；不得 publish。
 - [ ] 使用 `code-review` 与 `superpowers:verification-before-completion` 审查并修复所有发现。
 - [ ] Commit：`test(e2e): verify local-first cross-repo acceptance`
