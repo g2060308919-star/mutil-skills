@@ -9,7 +9,7 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 
 ## 默认首次使用流程
 
-1. 缺少 Runtime 时，只提示用户显式安装精确 `0.2.0`。
+1. 缺少 Runtime 时，只提示用户显式安装精确 `0.2.1`。
 2. 运行 `~/.mutil-skills/bin/repo-e2e configure-browser --system`，验证并选择系统 Google Chrome；只有系统 Chrome 不可用且用户明确选择兜底时，才运行 `install-browser` 安装托管 Chromium。
 3. 运行 `~/.mutil-skills/bin/repo-e2e configure-approval --mode local-confirmation`。默认流程不执行 `identity enroll`；WebAuthn 是用户显式选择的增强模式。
 4. 运行 `~/.mutil-skills/bin/repo-e2e doctor --json`；仅在 `ready:true` 后创建 Run。
@@ -24,7 +24,7 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 | --- | --- | --- |
 | Runtime Host | `doctor --json` 返回经过验证的 installation manifest、protocol major 和 safety probes | `environment-blocked / E2E_RUNTIME_HOST_UNAVAILABLE`，仅建议精确版本安装 |
 
-缺失时只展示以下精确建议，不得自行执行：`npm exec --yes --package=@mutil-skills/e2e-runtime@0.2.0 -- repo-e2e install-runtime --version 0.2.0`。不得探测、导入或建议安装 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Report、Store 等低层包。
+缺失时只展示以下精确建议，不得自行执行：`npm exec --yes --package=@mutil-skills/e2e-runtime@0.2.1 -- repo-e2e install-runtime --version 0.2.1`。不得探测、导入或建议安装 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Report、Store 等低层包。
 
 ## 固定 Runtime JSON 调用协议
 

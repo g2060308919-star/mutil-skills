@@ -207,7 +207,7 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
   })
   const canaryRule = canaryProjection.rules[0]!
   const signer = options.policyObjects?.auditSigner ?? LocalGatewayAuditSigner.create({
-    issuer: 'e2e-runtime-gateway', keyId: 'gateway-v1', instanceId: options.runId, version: '0.2.0',
+    issuer: 'e2e-runtime-gateway', keyId: 'gateway-v1', instanceId: options.runId, version: '0.2.1',
   })
   const recorder = signer.createRecorder(projection.policyDigest)
   const factoryPolicies = options.policyObjects?.factory?.({

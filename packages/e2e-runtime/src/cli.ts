@@ -572,8 +572,8 @@ export async function runCli(
         finalizationMaterialSealer = authorizeRuntimeFinalizationMaterialSealer(
           new RuntimeFinalizationMaterialSealer({
             quarantine, authority: artifactAuthority,
-            runtimeVersion: RUNTIME_PACKAGE_VERSION, contractsVersion: '0.2.0',
-            engineVersion: '0.2.0', playwrightVersion: '1.61.1',
+            runtimeVersion: RUNTIME_PACKAGE_VERSION, contractsVersion: '0.2.1',
+            engineVersion: '0.2.1', playwrightVersion: '1.61.1',
           }),
         )
       }

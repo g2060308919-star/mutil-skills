@@ -964,7 +964,7 @@ function createArtifact(
 ): ArtifactDocument {
   const base = {
     artifactId: artifactId(type), artifactType: type, schemaVersion: schemaVersion(type),
-    engineVersion: '0.2.0', assetId: snapshot.assetId,
+    engineVersion: '0.2.1', assetId: snapshot.assetId,
     prdRevision: snapshot.artifactDigests['prd-source']!, generationId: snapshot.runId,
     createdAt, contentDigest: '', signatures: [], dependencies: [],
     graph: { defines: [], references: [] }, content,

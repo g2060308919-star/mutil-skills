@@ -330,7 +330,7 @@ describe('Runtime doctor', () => {
     expect(exitCode).toBe(3)
     expect(report).toMatchObject({
       ready: false,
-      runtimeVersion: '0.2.0',
+      runtimeVersion: '0.2.1',
       installationDigest: `sha256:${'0'.repeat(64)}`,
       probes: {
         installation: {

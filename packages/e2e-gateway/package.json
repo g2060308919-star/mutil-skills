@@ -1,6 +1,6 @@
 {
   "name": "@mutil-skills/e2e-gateway",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "files": ["dist/src"],
   "exports": {
@@ -13,6 +13,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@mutil-skills/e2e-contracts": "0.2.0"
+    "@mutil-skills/e2e-contracts": "0.2.1"
   }
 }

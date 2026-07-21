@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1] - 2026-07-20
+
+### Fixed
+
+- Runtime 闭包安装显式绑定事务 staging prefix，避免与既有 Telemetry Runtime 共用父目录时 npm 向上解析并污染父级依赖。
+- CLI 协议测试显式注入未安装环境，不再因开发机真实 HOME 已安装 Runtime 而进入生产执行路径。
+
 ## [0.2.0] - 2026-07-19
 
 ### Added

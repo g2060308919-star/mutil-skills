@@ -33,15 +33,15 @@ describe('package publishing metadata', () => {
     expect(skills.files).toContain('skills')
   })
 
-  test.each(e2ePackages)('%s 使用 0.2.0 且内部依赖全部精确同版', async (packageName) => {
+  test.each(e2ePackages)('%s 使用 0.2.1 且内部依赖全部精确同版', async (packageName) => {
     const pkg = JSON.parse(await readFile(
       new URL(`../packages/${packageName}/package.json`, import.meta.url),
       'utf8',
     )) as { version?: string; dependencies?: Record<string, string> }
 
-    expect(pkg.version).toBe('0.2.0')
+    expect(pkg.version).toBe('0.2.1')
     for (const [dependency, version] of Object.entries(pkg.dependencies ?? {})) {
-      if (dependency.startsWith('@mutil-skills/e2e-')) expect(version, dependency).toBe('0.2.0')
+      if (dependency.startsWith('@mutil-skills/e2e-')) expect(version, dependency).toBe('0.2.1')
       expect(version).not.toBe('latest')
       expect(version).not.toMatch(/^workspace:/)
     }

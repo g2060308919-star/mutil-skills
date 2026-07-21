@@ -15,7 +15,7 @@ assert.equal(
 
 const normal = runBin(compiledBin, ['--version'])
 assert.equal(normal.status, 0)
-assert.equal(normal.stdout, '0.2.0\n')
+assert.equal(normal.stdout, '0.2.1\n')
 assert.equal(normal.stderr, '')
 
 const fixtureRoot = await mkdtemp(join(tmpdir(), 'mutil-e2e-compiled-bin-'))

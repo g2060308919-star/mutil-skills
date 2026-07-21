@@ -35,7 +35,7 @@ describe('Runtime browser production wiring cleanup', () => {
     }))
     await expect(resolveRuntimeBrowserInstallation({
       homeDir: '/safe/home', projectRoot: '/safe/project', installation: {
-        version: '0.2.0', installationDigest: runtimeInstallationDigest,
+        version: '0.2.1', installationDigest: runtimeInstallationDigest,
       },
     } as never, {
       readSelection: async () => selection,
@@ -57,7 +57,7 @@ describe('Runtime browser production wiring cleanup', () => {
     } }
     await expect(resolveRuntimeBrowserInstallation({
       homeDir: '/safe/home', projectRoot: '/safe/project', installation: {
-        version: '0.2.0', installationDigest: runtimeInstallationDigest,
+        version: '0.2.1', installationDigest: runtimeInstallationDigest,
       },
     } as never, {
       readSelection: async () => undefined,
@@ -80,7 +80,7 @@ describe('Runtime browser production wiring cleanup', () => {
 
     await expect(resolveRuntimeBrowserInstallation({
       homeDir: '/safe/home', projectRoot: '/safe/project',
-      installation: { version: '0.2.0', installationDigest: runtimeInstallationDigest },
+      installation: { version: '0.2.1', installationDigest: runtimeInstallationDigest },
     } as never, {
       readSelection: async () => selection,
       inspectManaged: vi.fn(),
