@@ -6,6 +6,8 @@
 
 - Runtime 闭包安装显式绑定事务 staging prefix，避免与既有 Telemetry Runtime 共用父目录时 npm 向上解析并污染父级依赖。
 - CLI 协议测试显式注入未安装环境，不再因开发机真实 HOME 已安装 Runtime 而进入生产执行路径。
+- `create-run` 对协议允许但不符合发布 ID 格式的 requestId 使用大写摘要派生 runId，避免浏览器执行完成后才在 finalization 阶段失败。
+- 跨仓发行验收不再复制被 Git 忽略的 `.tmp`，避免受信执行生成的只读临时文件阻断源码副本清理。
 
 ## [0.2.0] - 2026-07-19
 

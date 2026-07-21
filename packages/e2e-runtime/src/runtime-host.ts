@@ -2241,9 +2241,12 @@ function runtimeRequestDigest(
 }
 
 function runIdForRequest(requestId: string): string {
-  return requestId.length <= 252
-    ? `RUN-${requestId}`
-    : `RUN-${digestText('e2e-runtime-run-id/v1', requestId).slice('sha256:'.length, 'sha256:'.length + 32)}`
+  const candidate = `RUN-${requestId}`
+  if (requestId.length <= 252 && /^[A-Z0-9]+(?:-[A-Z0-9]+)*$/.test(candidate)) return candidate
+  const digest = digestText('e2e-runtime-run-id/v1', requestId)
+    .slice('sha256:'.length, 'sha256:'.length + 32)
+    .toUpperCase()
+  return `RUN-${digest}`
 }
 
 function runtimeIdentity(installation: RuntimeInstallation): RuntimeResponseEnvelope['runtime'] {
