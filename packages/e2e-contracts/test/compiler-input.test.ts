@@ -51,6 +51,7 @@ function compilerInput(): CompilerInputV1 {
     } },
     policyDigest: digest('c'),
     playwrightVersion: '1.61.1',
+    nodeVersion: '24.18.0',
     cases: [{
       caseId: 'CASE-1', title: '首页可见', reqIds: ['REQ-1'], ruleIds: ['RULE-1'],
       obligationIds: ['COV-1'], mode: 'real-environment',
@@ -104,6 +105,7 @@ describe('CompilerInputV1', () => {
       dataLeaseId: 'LEASE-1',
       cleanupPlanId: 'CLEANUP-1',
       timeoutMs: 30_000,
+      cleanupTimeoutMs: 30_000,
     }
     const fullInput = {
       ...input,

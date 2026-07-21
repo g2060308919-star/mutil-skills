@@ -254,7 +254,7 @@ const fixtureReadiness = createTrustedCompilerReadiness({
   verifyArtifactSignature: artifactAuthority.verifyArtifactSignature.bind(artifactAuthority),
   verifyDecisionReceipt: verifyFixtureDecisionReceipt,
 })
-export const compilerArtifactVerification = { trust: createTrustedCompilerProjectorTrust({
+export const compilerArtifactVerification = { nodeVersion: '24.18.0', trust: createTrustedCompilerProjectorTrust({
   artifactAuthority: { material: artifactAuthority.artifactVerifierMaterial,
     expectedPublicKeyDigest: artifactAuthority.artifactVerifierMaterial.publicKeyDigest },
   approvalFreshnessAuthority: { material: freshnessMaterial,
@@ -324,6 +324,7 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   runBundleCapabilityId?: string
   approvalRequestPath?: string
   sourceDigest?: string
+  extraFullAction?: boolean
 } = {}): unknown[] {
   const source = options.source ?? FULL_PLAYWRIGHT_SOURCE
   const cleanupSource = options.cleanupSource ?? FULL_PLAYWRIGHT_CLEANUP_SOURCE
@@ -352,6 +353,13 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   const cleanupPlanDigest = digestCleanupPlanDefinition(cleanupPlan)
   const capability = { capabilityId: 'CAP-FULL-1', actionId: 'ACTION-WRITE-1', operation: 'full-playwright',
     effect: 'reversible-write', maxUses: 1, digest: digest('cap-full') }
+  const extraRequest = { ...request, intentId: 'INTENT-FULL-EXTRA', exactPath: '/extra', expectedOrder: 2 }
+  const extraProgram = { ...program, stepId: 'STEP-WRITE-EXTRA', actionId: 'ACTION-WRITE-EXTRA',
+    cleanupPlanId: 'CLEANUP-EXTRA', networkRequests: [extraRequest] }
+  const extraCleanupPlan = { ...cleanupPlan, cleanupPlanId: 'CLEANUP-EXTRA', actionId: 'ACTION-WRITE-EXTRA',
+    cleanupRequestIntentIds: ['INTENT-FULL-EXTRA'] }
+  const extraCapability = { ...capability, capabilityId: 'CAP-FULL-EXTRA', actionId: 'ACTION-WRITE-EXTRA',
+    digest: digest('cap-full-extra') }
   const artifacts = approvedCompilerArtifacts({ effect: 'reversible-write' })
   const content = (artifactType: string) => (artifacts.find((candidate) =>
     (candidate as Record<string, unknown>).artifactType === artifactType) as { content: Record<string, any> }).content
@@ -361,26 +369,45 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   actionMap.fullPlaywrightPrograms = [program]
   actionMap.actions[0] = { ...actionMap.actions[0], playwrightAction: 'full-playwright/v1',
     capabilities: [{ operation: 'full-playwright', capabilityId: capability.capabilityId }], requestIds: [] }
+  if (options.extraFullAction) {
+    actionMap.fullPlaywrightPrograms.push(extraProgram)
+    actionMap.actions.push({ ...actionMap.actions[0], stepId: extraProgram.stepId, actionId: extraProgram.actionId,
+      capabilities: [{ operation: 'full-playwright', capabilityId: extraCapability.capabilityId }] })
+  }
 
   const execution = content('execution-contract')
   execution.executionProfile = 'full-playwright'
   execution.fullPlaywrightPrograms = [executionProgram]
   execution.writeCleanupPlans = [cleanupPlan]
   execution.actionIntents[0] = { ...execution.actionIntents[0], requestIds: [] }
+  if (options.extraFullAction) {
+    execution.fullPlaywrightPrograms.push(extraProgram)
+    execution.writeCleanupPlans.push(extraCleanupPlan)
+    execution.actionIntents.push({ actionId: extraProgram.actionId, effect: 'reversible-write',
+      intentDigest: digest('intent-full-extra'), requestIds: [] })
+  }
 
   const runBundle = content('run-bundle')
   runBundle.signedCapabilities = [{ ...capability,
     capabilityId: options.runBundleCapabilityId ?? capability.capabilityId }]
+  if (options.extraFullAction) runBundle.signedCapabilities.push(extraCapability)
   const approval = content('approval-grants')
   const receipt = approval.grants[0]
-  receipt.capabilities = [capability]
+  receipt.capabilities = options.extraFullAction ? [capability, extraCapability] : [capability]
   receipt.capabilitySetDigest = digestText('approval-capability-set/v1', canonicalizeJson(receipt.capabilities))
-  receipt.executionSubjectSnapshot.actions = [{
+  const subjectActions = [{
     actionId: 'ACTION-WRITE-1', effect: 'reversible-write', dataLeaseId: 'LEASE-1', fencingToken: 1,
     cleanupPlanDigest, transport: 'browser-local', operation: 'full-playwright',
     programDigest: sourceDigest, cleanupProgramDigest: cleanupSourceDigest,
     requests: [{ ...request, exactPath: options.approvalRequestPath ?? request.exactPath }],
   }]
+  if (options.extraFullAction) subjectActions.push({
+    actionId: extraProgram.actionId, effect: 'reversible-write', dataLeaseId: 'LEASE-1', fencingToken: 1,
+    cleanupPlanDigest: digestCleanupPlanDefinition(extraCleanupPlan), transport: 'browser-local',
+    operation: 'full-playwright', programDigest: sourceDigest, cleanupProgramDigest: cleanupSourceDigest,
+    requests: [extraRequest],
+  })
+  receipt.executionSubjectSnapshot.actions = subjectActions
   Object.assign(receipt.executionSubjectSnapshot, {
     actionMapDigest: digestApprovalProjection('browser-action-map', actionMap),
     executionContractDigest: digestApprovalProjection('execution-contract', execution),

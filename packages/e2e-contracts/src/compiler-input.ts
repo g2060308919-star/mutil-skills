@@ -44,6 +44,7 @@ const FullPlaywrightCompilerActionObjectSchema = z.object({
   dataLeaseId: SafeIdSchema,
   cleanupPlanId: SafeIdSchema,
   timeoutMs: z.number().int().positive().max(3_600_000),
+  cleanupTimeoutMs: z.number().int().positive().max(3_600_000),
 }).strict()
 
 function refineFullPlaywrightCompilerAction(
@@ -110,6 +111,7 @@ const CompilerInputV1InternalSchema = z.object({
   approvalFreshnessReceipt: ApprovalFreshnessReceiptSchema,
   policyDigest: DigestSchema,
   playwrightVersion: SemverSchema,
+  nodeVersion: SemverSchema,
   executionProfile: z.enum([
     'trusted-read-only', 'trusted-reversible-write', 'production-isolated', 'full-playwright',
   ]).optional(),

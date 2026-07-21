@@ -127,7 +127,7 @@ describe('compileReadOnlyProject', () => {
     expect(spec).toContain("`todo-${state.seed ?? 'fixed'}`")
     expect(spec).toContain('async ({ page, context, request }, testInfo) =>')
     expect(spec).toContain('browser: context.browser()!')
-    expect(spec).toContain("cleanupResult !== 'verified-clean'")
+    expect(spec).toContain('executeFullPlaywrightAction({')
     expect(spec).not.toContain('safePage.reversibleWrite')
     expect(JSON.parse(await readFile(join(first, 'run-bundle.json'), 'utf8'))).toMatchObject({
       executionProfile: 'full-playwright', mode: 'full-playwright',
@@ -141,6 +141,66 @@ describe('compileReadOnlyProject', () => {
     })
     const listed = execFileSync(process.execPath, [playwrightCli, 'test', '--list'], { cwd: first, encoding: 'utf8' })
     expect(listed).toContain('CASE-WRITE-1 批准订单')
+  })
+
+  test.each([
+    ["}\ntest.afterEach(() => {})\nif (true) {", '直接闭合 wrapper'],
+    ["}/* close */\ntest.afterEach(() => {})\nif (true) {", 'comment trivia 闭合 wrapper'],
+    ["}\ntest.afterEach(() => {})\nconst injected = `", 'template literal 吞掉 wrapper'],
+    ["test.afterEach(() => {})", '函数体内注册 hook'],
+    ["const hook = test['afterEach']; hook(() => {})", 'computed hook alias'],
+    ["const suite = test; suite.afterEach(() => {})", 'test object alias'],
+  ])('full Playwright source/cleanup 不能逃逸 FunctionBody 或注册 hook：%s', async (source) => {
+    const outputDir = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-full-fragment-'))
+    createdDirectories.push(outputDir)
+    await expect(compileReadOnlyProject({ outputDir, compilerInput: projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts({ source }), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    }) })).rejects.toThrow('不是密封 FunctionBody')
+  })
+
+  test('full Playwright cleanup 也按 FunctionBody 严格验证', async () => {
+    const outputDir = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-full-cleanup-fragment-'))
+    createdDirectories.push(outputDir)
+    await expect(compileReadOnlyProject({ outputDir, compilerInput: projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts({
+        cleanupSource: "}\ntest.afterEach(() => {})\nif (true) {",
+      }), playwrightVersion: '1.61.1', ...compilerArtifactVerification,
+    }) })).rejects.toThrow('不是密封 FunctionBody')
+  })
+
+  test('同一冻结 Compiler Input 的输出不受宿主 process.version 影响', async () => {
+    const first = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-node-version-a-'))
+    const second = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-node-version-b-'))
+    createdDirectories.push(first, second)
+    const compilerInput = projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts(), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    })
+    const firstResult = await compileReadOnlyProject({ outputDir: first, compilerInput })
+    const descriptor = Object.getOwnPropertyDescriptor(process, 'version')!
+    let secondResult
+    try {
+      Object.defineProperty(process, 'version', { ...descriptor, value: 'v99.99.99' })
+      secondResult = await compileReadOnlyProject({ outputDir: second, compilerInput })
+    } finally {
+      Object.defineProperty(process, 'version', descriptor)
+    }
+    expect(secondResult!.sourceDigests).toEqual(firstResult.sourceDigests)
+    expect(await readFile(join(second, 'toolchain-manifest.json')))
+      .toEqual(await readFile(join(first, 'toolchain-manifest.json')))
+  })
+
+  test('full Playwright 项目包含独立可审计的 lifecycle runtime', async () => {
+    const outputDir = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-full-lifecycle-'))
+    createdDirectories.push(outputDir)
+    const result = await compileReadOnlyProject({ outputDir, compilerInput: projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts(), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    }) })
+    expect(result.generatedFiles).toContain('fixtures/full-playwright-runtime.ts')
+    expect(await readFile(join(outputDir, 'fixtures/full-playwright-runtime.ts'), 'utf8'))
+      .toContain('export async function executeFullPlaywrightAction')
   })
 
   test('blocked Case 只进入处置清单，不生成 skip/fixme 或 Playwright 测试', async () => {

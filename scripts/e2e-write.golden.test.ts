@@ -366,7 +366,7 @@ describe('PRD-driven reversible-write golden path', () => {
         readiness,
       })
       const compilerInput = projectCompilerInputFromArtifacts({
-        artifacts: compilerArtifacts, playwrightVersion: '1.61.1',
+        artifacts: compilerArtifacts, nodeVersion: process.versions.node, playwrightVersion: '1.61.1',
         trust: projectorTrust,
       })
       const regressionDiscovery = await discoveryAuthority.compileAndAttest({

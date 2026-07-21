@@ -17,7 +17,7 @@ describe('Artifact → Compiler Input Projector', () => {
 
   test('业务请求不能用普通对象伪造 Host 启动期信任根', () => {
     expect(() => projectCompilerInputFromArtifacts({
-      artifacts: approvedCompilerArtifacts(), playwrightVersion: '1.61.1', trust: {} as never,
+      artifacts: approvedCompilerArtifacts(), nodeVersion: '24.18.0', playwrightVersion: '1.61.1', trust: {} as never,
     })).toThrow('E2E_COMPILER_TRUST_INVALID')
   })
 
@@ -59,7 +59,7 @@ describe('Artifact → Compiler Input Projector', () => {
       sourceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       cleanupSource: FULL_PLAYWRIGHT_CLEANUP_SOURCE,
       cleanupSourceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
-      dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+      dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, cleanupTimeoutMs: 30_000,
     }])
   })
 
@@ -78,7 +78,14 @@ describe('Artifact → Compiler Input Projector', () => {
     expect(() => projectCompilerInputFromArtifacts({
       artifacts: approvedFullPlaywrightCompilerArtifacts({ sourceDigest: `sha256:${'0'.repeat(64)}` }),
       playwrightVersion: '1.61.1', ...compilerArtifactVerification,
-    })).toThrow(/E2E_COMPILER_(?:INPUT_INVALID|CODE_FIELD_REJECTED)/)
+    })).toThrow(/E2E_(?:COMPILER_(?:INPUT_INVALID|CODE_FIELD_REJECTED)|APPROVAL_PROJECTION_FULL_PLAYWRIGHT_PROGRAM_INVALID)/)
+  })
+
+  test('拒绝 active step 集之外但在 mapping/program/intent/cleanup/capability/approval 中自洽的 leftover Action', () => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts({ extraFullAction: true }),
+      playwrightVersion: '1.61.1', ...compilerArtifactVerification,
+    })).toThrow(/E2E_COMPILER_(?:INPUT_INVALID|APPROVAL_BINDING_INVALID)/)
   })
 
   test('拒绝不同 generation、额外 Artifact 类型和调用方代码字段', () => {

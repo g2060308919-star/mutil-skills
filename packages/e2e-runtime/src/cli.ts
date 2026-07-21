@@ -552,7 +552,7 @@ export async function runCli(
                 'requirement-model', 'coverage-universe', 'test-cases', 'browser-action-map',
                 'execution-contract', 'run-bundle', 'approval-grants',
               ].includes(artifact.artifactType)),
-              playwrightVersion: '1.61.1', trust,
+              nodeVersion: process.versions.node, playwrightVersion: '1.61.1', trust,
             })
           },
         })

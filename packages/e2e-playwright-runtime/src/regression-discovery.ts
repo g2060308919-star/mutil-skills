@@ -41,7 +41,7 @@ export const READ_ONLY_TEMPLATE_DIGEST = digestText('controlled-regression-templ
 }))
 export const FULL_PLAYWRIGHT_TEMPLATE_DIGEST = digestText('controlled-regression-template/full-playwright/v1', canonicalizeJson({
   version: TRUSTED_TEMPLATE_VERSION, files: ['README.md', 'package.json', 'package-lock.json', 'playwright.config.ts',
-    'tests/generated.spec.ts', 'run-bundle.json', 'safety-policy.json', 'network-policy.json',
+    'fixtures/full-playwright-runtime.ts', 'tests/generated.spec.ts', 'run-bundle.json', 'safety-policy.json', 'network-policy.json',
     'evidence-policy.json', 'toolchain-manifest.json', 'template-manifest.json', 'source-integrity.json'],
   executionProfile: 'full-playwright', actionKinds: ['fullPlaywright'],
   writeExecution: 'trusted-full-playwright-runtime',
@@ -114,6 +114,10 @@ export class LocalRegressionDiscoveryAuthority {
     let input
     try { input = inspectTrustedCompilerInput(candidate.compilerInput) } catch (cause) {
       throw discoveryError('E2E_REGRESSION_DISCOVERY_INPUT_INVALID', 'Discovery 只接受可信 Projector 产物', cause)
+    }
+    if (input.nodeVersion !== process.versions.node) {
+      throw discoveryError('E2E_REGRESSION_DISCOVERY_TOOLCHAIN_MISMATCH',
+        '冻结 Compiler Input 的 Node 版本与本地可信工具链不一致')
     }
     input.blockedCases.sort(byCaseId)
     await mkdir(candidate.tempParent, { recursive: true })

@@ -7,6 +7,7 @@ import {
   type CompilerInputV1,
 } from '@mutil-skills/e2e-contracts'
 import { inspectTrustedCompilerInput, type TrustedCompilerInput } from './compiler-input-projector.js'
+import { validateFullPlaywrightFunctionBody } from './full-playwright-source-validation.js'
 import { assertFreshOutputRoot } from './regression-source-set.js'
 
 type CompilerAction = CompilerInputV1['cases'][number]['actions'][number]
@@ -56,7 +57,9 @@ export async function compileReadOnlyProject(input: CompileReadOnlyProjectInput)
   ].join('\n'))
   const writeMode = compilerInput.cases.some((testCase) => testCase.actions.some((action) => action.kind === 'reversibleWrite'))
   const fullPlaywrightMode = compilerInput.executionProfile === 'full-playwright'
+  if (fullPlaywrightMode) assertFullPlaywrightFragments(compilerInput)
   if (!fullPlaywrightMode) files.set('fixtures/safe-page.ts', renderSafePageFixture(writeMode))
+  else files.set('fixtures/full-playwright-runtime.ts', renderFullPlaywrightRuntime())
   const generatedSpec = fullPlaywrightMode ? renderFullPlaywrightSpec(compilerInput) : renderSpec(compilerInput)
   if (findForbiddenRegressionTestDispositions(generatedSpec).length > 0) {
     throw compilerError('受信编译器不得生成 skip/fixme/fail/only/todo 测试')
@@ -87,7 +90,7 @@ export async function compileReadOnlyProject(input: CompileReadOnlyProjectInput)
     sanitizationRequired: true, rawEvidencePublication: 'forbidden',
   }))
   files.set('toolchain-manifest.json', prettyJson({
-    schemaVersion: '1.0.0', node: process.version, playwright: compilerInput.playwrightVersion,
+    schemaVersion: '1.0.0', node: `v${compilerInput.nodeVersion}`, playwright: compilerInput.playwrightVersion,
     packageManager: 'npm-lockfile-v3', installScripts: 'forbidden',
   }))
   files.set('template-manifest.json', prettyJson({
@@ -312,6 +315,7 @@ function renderSpec(input: CompilerInputV1): string {
 function renderFullPlaywrightSpec(input: CompilerInputV1): string {
   const lines = [
     "import { test, expect, type APIRequestContext, type Browser, type BrowserContext, type Page, type TestInfo } from '@playwright/test'",
+    "import { executeFullPlaywrightAction } from '../fixtures/full-playwright-runtime.js'",
     '',
     'interface FullPlaywrightBindings {',
     '  page: Page',
@@ -341,8 +345,8 @@ function renderFullPlaywrightSpec(input: CompilerInputV1): string {
     }
   }
   for (const testCase of input.cases) {
-    const timeoutMs = Math.max(...testCase.actions.map((action) =>
-      action.kind === 'fullPlaywright' ? action.timeoutMs : 0))
+    const timeoutMs = Math.min(2_147_483_647, 5_000 + testCase.actions.reduce((total, action) =>
+      total + (action.kind === 'fullPlaywright' ? action.timeoutMs + action.cleanupTimeoutMs : 0), 0))
     lines.push(`test(${literal(`${testCase.caseId} ${testCase.title}`)}, async ({ page, context, request }, testInfo) => {`)
     lines.push(`  test.setTimeout(${timeoutMs})`)
     lines.push('  testInfo.annotations.push(')
@@ -363,19 +367,108 @@ function renderFullPlaywrightSpec(input: CompilerInputV1): string {
       lines.push('  {')
       lines.push('    const state = Object.create(null) as Record<string, unknown>')
       lines.push('    const bindings = { page, context, browser: context.browser()!, request, expect, testInfo, state }')
-      lines.push('    let primaryError: unknown')
-      lines.push(`    try { await ${names.run}(bindings) } catch (error) { primaryError = error }`)
-      lines.push('    let cleanupResult: unknown')
-      lines.push('    let cleanupError: unknown')
-      lines.push(`    try { cleanupResult = await ${names.cleanup}(bindings) } catch (error) { cleanupError = error }`)
-      lines.push('    if (cleanupError !== undefined) throw cleanupError')
-      lines.push("    if (cleanupResult !== 'verified-clean') throw new Error('BIZTEST_FULL_PLAYWRIGHT_CLEANUP_NOT_VERIFIED')")
-      lines.push('    if (primaryError !== undefined) throw primaryError')
+      lines.push('    await executeFullPlaywrightAction({')
+      lines.push(`      run: () => ${names.run}(bindings),`)
+      lines.push(`      cleanup: () => ${names.cleanup}(bindings),`)
+      lines.push('      retire: async () => { await context.close() },')
+      lines.push(`      programTimeoutMs: ${action.timeoutMs}, cleanupTimeoutMs: ${action.cleanupTimeoutMs},`)
+      lines.push('    })')
       lines.push('  }')
     }
     lines.push('})', '')
   }
   return `${lines.join('\n')}\n`
+}
+
+function assertFullPlaywrightFragments(input: CompilerInputV1): void {
+  for (const testCase of input.cases) {
+    for (const action of testCase.actions) {
+      if (action.kind !== 'fullPlaywright') throw compilerError('full-playwright Project 不得混合 legacy action')
+      const sourceIssue = validateFullPlaywrightFunctionBody(action.source)
+      const cleanupIssue = validateFullPlaywrightFunctionBody(action.cleanupSource)
+      if (sourceIssue || cleanupIssue) throw compilerError(
+        `full Playwright Action ${action.actionId} 不是密封 FunctionBody：${sourceIssue ?? cleanupIssue}`)
+    }
+  }
+}
+
+function renderFullPlaywrightRuntime(): string {
+  return [
+    'interface FullPlaywrightExecutionInput {',
+    '  run(): Promise<unknown>',
+    '  cleanup(): Promise<unknown>',
+    '  retire(): Promise<void>',
+    '  programTimeoutMs: number',
+    '  cleanupTimeoutMs: number',
+    '}',
+    '',
+    "type DeadlineKind = 'program' | 'cleanup'",
+    '',
+    'function deadlineError(kind: DeadlineKind): Error & { biztestDeadline: DeadlineKind } {',
+    "  const error = new Error(kind === 'program'",
+    "    ? 'BIZTEST_FULL_PLAYWRIGHT_PROGRAM_TIMEOUT_OUTCOME_UNKNOWN'",
+    "    : 'BIZTEST_FULL_PLAYWRIGHT_CLEANUP_TIMEOUT_OUTCOME_UNKNOWN') as Error & { biztestDeadline: DeadlineKind }",
+    "  error.name = 'BizTestFullPlaywrightDeadlineError'",
+    '  error.biztestDeadline = kind',
+    '  return error',
+    '}',
+    '',
+    'async function withDeadline(operation: () => Promise<unknown>, timeoutMs: number, kind: DeadlineKind): Promise<unknown> {',
+    '  let timer: ReturnType<typeof setTimeout> | undefined',
+    '  const deadline = new Promise<never>((_resolve, reject) => {',
+    '    timer = setTimeout(() => reject(deadlineError(kind)), timeoutMs)',
+    '  })',
+    '  try { return await Promise.race([operation(), deadline]) }',
+    '  finally { if (timer !== undefined) clearTimeout(timer) }',
+    '}',
+    '',
+    'function isDeadline(error: unknown, kind: DeadlineKind): boolean {',
+    "  return typeof error === 'object' && error !== null && 'biztestDeadline' in error",
+    '    && error.biztestDeadline === kind',
+    '}',
+    '',
+    'export async function executeFullPlaywrightAction(input: FullPlaywrightExecutionInput): Promise<void> {',
+    '  let primaryCaught = false',
+    '  let primaryError: unknown',
+    '  let primaryTimedOut = false',
+    '  let cleanupCaught = false',
+    '  let cleanupError: unknown',
+    '  let cleanupResult: unknown',
+    '  let retireCaught = false',
+    '  let retireError: unknown',
+    '  try {',
+    "    try { await withDeadline(input.run, input.programTimeoutMs, 'program') }",
+    "    catch (error) { primaryCaught = true; primaryError = error; primaryTimedOut = isDeadline(error, 'program') }",
+    '  } finally {',
+    '    try {',
+    "      try { cleanupResult = await withDeadline(input.cleanup, input.cleanupTimeoutMs, 'cleanup') }",
+    '      catch (error) { cleanupCaught = true; cleanupError = error }',
+    '    } finally {',
+    "      if (primaryTimedOut || cleanupCaught || cleanupResult !== 'verified-clean') {",
+    '        try { await input.retire() } catch (error) { retireCaught = true; retireError = error }',
+    '      }',
+    '    }',
+    '  }',
+    '  let cleanupFailureCaught = cleanupCaught',
+    '  let cleanupFailure = cleanupError',
+    "  if (!cleanupCaught && cleanupResult !== 'verified-clean') {",
+    '    cleanupFailureCaught = true',
+    "    cleanupFailure = new Error('BIZTEST_FULL_PLAYWRIGHT_CLEANUP_NOT_VERIFIED')",
+    '  }',
+    '  if (retireCaught) {',
+    '    cleanupFailure = cleanupFailureCaught',
+    "      ? new AggregateError([cleanupFailure, retireError], 'BIZTEST_FULL_PLAYWRIGHT_CLEANUP_AND_RETIRE_FAILED')",
+    '      : retireError',
+    '    cleanupFailureCaught = true',
+    '  }',
+    '  if (primaryCaught && cleanupFailureCaught) {',
+    "    throw new AggregateError([primaryError, cleanupFailure], 'BIZTEST_FULL_PLAYWRIGHT_PROGRAM_AND_CLEANUP_FAILED')",
+    '  }',
+    '  if (cleanupFailureCaught) throw cleanupFailure',
+    '  if (primaryCaught) throw primaryError',
+    '}',
+    '',
+  ].join('\n')
 }
 
 function renderReadme(input: CompilerInputV1, writeMode: boolean, fullPlaywrightMode: boolean): string {

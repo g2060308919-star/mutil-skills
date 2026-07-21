@@ -75,4 +75,59 @@ describe('可信生成源码静态安全扫描', () => {
     }], 'full-playwright')
     expect(result.findings).toContainEqual(expect.objectContaining({ code }))
   })
+
+  test.each([
+    ["await import /* gap */ ('node:fs')", 'dynamic import with trivia'],
+    ["new/*a*/Function('return process')()", 'Function constructor with trivia'],
+    ["globalThis['eval']('process.exit()')", 'computed global eval'],
+    ["const execute = eval; execute('process.exit()')", 'aliased eval'],
+    ["const FunctionAlias = globalThis['Function']; new FunctionAlias('return process')", 'aliased Function'],
+    ["const escape = (() => {}).constructor; escape('return process')()", 'constructor chain'],
+    ["((execute: (source: string) => unknown) => execute('process.exit()'))(eval)", 'eval passed through parameter'],
+    ["setImmediate(() => page.goto('https://evil.example'))", 'Node-only host timer'],
+  ])('AST 审计拒绝正则 trivia/computed/alias 绕过：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: 'E2E_COMPILER_SOURCE_API_FORBIDDEN',
+    }))
+  })
+
+  test.each([
+    "fetch.call(globalThis, 'https://evil.example')",
+    "fetch.apply(globalThis, ['https://evil.example'])",
+    "globalThis['fetch']('https://evil.example')",
+    "const send = fetch; await send('https://evil.example')",
+    "const send = globalThis.fetch; await send.call(globalThis, 'https://evil.example')",
+    "let send; send = fetch; await send('https://evil.example')",
+    "await ((send: typeof fetch) => send('https://evil.example'))(fetch)",
+  ])('AST 审计拒绝宿主 fetch 的 direct/alias/call/apply 变体：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: 'E2E_COMPILER_SOURCE_NETWORK_FORBIDDEN', detail: 'fetch',
+    }))
+  })
+
+  test('AST 审计只在 Playwright 浏览器回调词法作用域允许 fetch', () => {
+    const source = `
+      import { test } from '@playwright/test'
+      test('browser callbacks', async ({ page, context }) => {
+        await page.evaluate(async () => {
+          const send = fetch
+          await send('/inside-page')
+          await globalThis['fetch'].call(globalThis, '/computed-page')
+        })
+        await context.addInitScript(() => {
+          const send = globalThis.fetch
+          void send('/inside-init-script')
+        })
+      })
+    `
+    expect(auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')).toEqual({ valid: true, findings: [] })
+  })
 })
