@@ -6,7 +6,7 @@ import {
   createRegressionDiscoveryVerifier,
   projectCompilerInputFromArtifacts,
 } from '../src/index.js'
-import { approvedCompilerArtifacts, approvedCompilerArtifactsWithBlockedCase,
+import { approvedCompilerArtifacts, approvedCompilerArtifactsWithBlockedCase, approvedFullPlaywrightCompilerArtifacts,
   compilerArtifactVerification } from './compiler-artifacts.fixture.js'
 
 const directories: string[] = []
@@ -45,6 +45,23 @@ describe('可信回归 discovery', () => {
       authority.verifierMaterial.publicKeyDigest)
     expect(verifier(result.attestation, result.subject)).toBe(true)
     expect(verifier({ ...result.attestation, discoveredCaseIds: ['CASE-FAKE'] }, result.subject)).toBe(false)
+  })
+
+  test('full Playwright profile 进入 Discovery subject 和完整 Source Set 证明', async () => {
+    const authority = LocalRegressionDiscoveryAuthority.create({ issuer: 'DISCOVERY', keyId: 'DISCOVERY-1' })
+    const result = await authority.compileAndAttest({
+      tempParent: join(process.cwd(), '.tmp'),
+      compilerInput: projectCompilerInputFromArtifacts({
+        artifacts: approvedFullPlaywrightCompilerArtifacts(), playwrightVersion: '1.61.1',
+        ...compilerArtifactVerification,
+      }),
+    })
+    directories.push(result.projectDir)
+    expect(result.subject.executionProfile).toBe('full-playwright')
+    expect(result.subject.sourceSetDigest).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(result.subject.sourceFiles.map((file) => file.relativePath)).toContain('regression/tests/generated.spec.ts')
+    expect(createRegressionDiscoveryVerifier(authority.verifierMaterial,
+      authority.verifierMaterial.publicKeyDigest)(result.attestation, result.subject)).toBe(true)
   })
 
   test('API 不接受 caller source bytes 或 playwrightCaseIds', async () => {

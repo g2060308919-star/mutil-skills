@@ -51,6 +51,8 @@ function actionMapProjection(content: unknown): unknown {
   if (!isRecord(content) || !Array.isArray(content.actions)) throw new Error('E2E_APPROVAL_PROJECTION_ACTION_MAP_INVALID')
   assertExactKeys(content, [
     'actionMapRevision', 'pageIdentities', 'actions', 'unmappedSteps', 'discoveredRisks',
+    ...(content.executionProfile === undefined ? [] : ['executionProfile']),
+    ...(content.fullPlaywrightPrograms === undefined ? [] : ['fullPlaywrightPrograms']),
   ], 'browser-action-map')
   return {
     actionMapRevision: content.actionMapRevision,
@@ -80,6 +82,9 @@ function actionMapProjection(content: unknown): unknown {
     }),
     unmappedSteps: content.unmappedSteps,
     discoveredRisks: content.discoveredRisks,
+    ...(content.executionProfile === undefined ? {} : { executionProfile: content.executionProfile }),
+    ...(content.fullPlaywrightPrograms === undefined
+      ? {} : { fullPlaywrightPrograms: content.fullPlaywrightPrograms }),
   }
 }
 

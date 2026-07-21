@@ -4,9 +4,10 @@ import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { afterEach, describe, expect, test } from 'vitest'
 import { projectCompilerInputFromArtifacts } from '../src/index.js'
-import { assertLegacyCompilerActionSupported, compileReadOnlyProject } from '../src/compiler.js'
+import { compileReadOnlyProject } from '../src/compiler.js'
 import { approvedCompilerArtifacts, approvedCompilerArtifactsWithBlockedCase,
-  compilerArtifactVerification } from './compiler-artifacts.fixture.js'
+  approvedFullPlaywrightCompilerArtifacts, compilerArtifactVerification,
+  FULL_PLAYWRIGHT_CLEANUP_SOURCE, FULL_PLAYWRIGHT_SOURCE } from './compiler-artifacts.fixture.js'
 
 const createdDirectories: string[] = []
 const require = createRequire(import.meta.url)
@@ -17,20 +18,6 @@ afterEach(async () => {
 })
 
 describe('compileReadOnlyProject', () => {
-  test('fullPlaywright action 在旧编译模板入口 fail-closed，不得落入 reversibleWrite', () => {
-    expect(() => assertLegacyCompilerActionSupported({
-      kind: 'fullPlaywright',
-      actionId: 'ACTION-FULL-1',
-      source: "test('full', async ({ page }) => { await page.goto('/') })",
-      sourceDigest: `sha256:${'0'.repeat(64)}`,
-      cleanupSource: "test('cleanup', async ({ page }) => { await page.goto('/cleanup') })",
-      cleanupSourceDigest: `sha256:${'1'.repeat(64)}`,
-      dataLeaseId: 'LEASE-1',
-      cleanupPlanId: 'CLEANUP-1',
-      timeoutMs: 30_000,
-    })).toThrow('E2E_COMPILER_FULL_PLAYWRIGHT_UNSUPPORTED')
-  })
-
   test('拒绝非空输出根，且不覆盖调用方已有文件', async () => {
     const outputDir = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-compiler-non-fresh-'))
     createdDirectories.push(outputDir)
@@ -119,6 +106,41 @@ describe('compileReadOnlyProject', () => {
     })
     expect(execution.status).not.toBe(0)
     expect(`${execution.stdout}${execution.stderr}`).toContain('BIZTEST_CONTROLLED_WRITE_BRIDGE_REQUIRED')
+  })
+
+  test('full Playwright 程序逐字进入确定性测试模板且相同输入 byte-identical', async () => {
+    const first = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-full-compiler-a-'))
+    const second = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-full-compiler-b-'))
+    createdDirectories.push(first, second)
+    const artifacts = approvedFullPlaywrightCompilerArtifacts()
+    const compile = (outputDir: string) => compileReadOnlyProject({ outputDir,
+      compilerInput: projectCompilerInputFromArtifacts({ artifacts, playwrightVersion: '1.61.1',
+        ...compilerArtifactVerification }) })
+    const [firstResult, secondResult] = await Promise.all([compile(first), compile(second)])
+    expect(firstResult.sourceDigests).toEqual(secondResult.sourceDigests)
+    for (const relativePath of firstResult.generatedFiles) {
+      expect(await readFile(join(first, relativePath))).toEqual(await readFile(join(second, relativePath)))
+    }
+    const spec = await readFile(join(first, 'tests/generated.spec.ts'), 'utf8')
+    expect(spec).toContain(FULL_PLAYWRIGHT_SOURCE)
+    expect(spec).toContain(FULL_PLAYWRIGHT_CLEANUP_SOURCE)
+    expect(spec).toContain("`todo-${state.seed ?? 'fixed'}`")
+    expect(spec).toContain('async ({ page, context, request }, testInfo) =>')
+    expect(spec).toContain('browser: context.browser()!')
+    expect(spec).toContain("cleanupResult !== 'verified-clean'")
+    expect(spec).not.toContain('safePage.reversibleWrite')
+    expect(JSON.parse(await readFile(join(first, 'run-bundle.json'), 'utf8'))).toMatchObject({
+      executionProfile: 'full-playwright', mode: 'full-playwright',
+    })
+    expect(JSON.parse(await readFile(join(first, 'safety-policy.json'), 'utf8'))).toMatchObject({
+      executionProfile: 'full-playwright',
+      executionOutcomeReceipt: 'independent-ed25519-verification-required',
+    })
+    expect(JSON.parse(await readFile(join(first, 'template-manifest.json'), 'utf8'))).toMatchObject({
+      executionProfile: 'full-playwright', actionKinds: ['fullPlaywright'],
+    })
+    const listed = execFileSync(process.execPath, [playwrightCli, 'test', '--list'], { cwd: first, encoding: 'utf8' })
+    expect(listed).toContain('CASE-WRITE-1 批准订单')
   })
 
   test('blocked Case 只进入处置清单，不生成 skip/fixme 或 Playwright 测试', async () => {

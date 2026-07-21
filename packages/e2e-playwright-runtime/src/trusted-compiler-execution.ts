@@ -328,6 +328,7 @@ function buildExecutionFact(
   })
   return TrustedCompilerExecutionFactSchema.parse({
     schemaVersion: '1.0.0', runId: record.binding.runId,
+    executionProfile: record.binding.executionProfile,
     compilerInputDigest: record.binding.compilerInputDigest,
     sourceSetDigest: record.binding.sourceSetDigest,
     approvalDigest: record.binding.approvalDigest,

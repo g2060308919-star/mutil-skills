@@ -10,7 +10,6 @@ import { inspectTrustedCompilerInput, type TrustedCompilerInput } from './compil
 import { assertFreshOutputRoot } from './regression-source-set.js'
 
 type CompilerAction = CompilerInputV1['cases'][number]['actions'][number]
-type LegacyCompilerAction = Exclude<CompilerAction, { kind: 'fullPlaywright' }>
 
 export interface CompileReadOnlyProjectInput {
   outputDir: string
@@ -20,14 +19,6 @@ export interface CompileReadOnlyProjectInput {
 export interface CompileReadOnlyProjectResult {
   generatedFiles: string[]
   sourceDigests: Record<string, string>
-}
-
-export function assertLegacyCompilerActionSupported(
-  action: CompilerAction,
-): asserts action is LegacyCompilerAction {
-  if (action.kind === 'fullPlaywright') {
-    throw compilerError('E2E_COMPILER_FULL_PLAYWRIGHT_UNSUPPORTED: 旧编译模板尚不支持 fullPlaywright action')
-  }
 }
 
 export async function compileReadOnlyProject(input: CompileReadOnlyProjectInput): Promise<CompileReadOnlyProjectResult> {
@@ -64,25 +55,32 @@ export async function compileReadOnlyProject(input: CompileReadOnlyProjectInput)
     '',
   ].join('\n'))
   const writeMode = compilerInput.cases.some((testCase) => testCase.actions.some((action) => action.kind === 'reversibleWrite'))
-  files.set('fixtures/safe-page.ts', renderSafePageFixture(writeMode))
-  const generatedSpec = renderSpec(compilerInput)
+  const fullPlaywrightMode = compilerInput.executionProfile === 'full-playwright'
+  if (!fullPlaywrightMode) files.set('fixtures/safe-page.ts', renderSafePageFixture(writeMode))
+  const generatedSpec = fullPlaywrightMode ? renderFullPlaywrightSpec(compilerInput) : renderSpec(compilerInput)
   if (findForbiddenRegressionTestDispositions(generatedSpec).length > 0) {
     throw compilerError('受信编译器不得生成 skip/fixme/fail/only/todo 测试')
   }
   files.set('tests/generated.spec.ts', generatedSpec)
-  files.set('README.md', renderReadme(compilerInput, writeMode))
+  files.set('README.md', renderReadme(compilerInput, writeMode, fullPlaywrightMode))
   files.set('safety-policy.json', prettyJson({
     schemaVersion: '1.0.0', failClosed: true, runGateRequired: true,
-    directBusinessPageAccess: false, nativeNetworkForbidden: true,
-    executionOutcomeReceipt: writeMode ? 'independent-ed25519-verification-required' : 'not-applicable',
-    readExecution: writeMode ? 'not-applicable' : 'loopback-controlled-runner-bridge',
-    writeExecution: writeMode ? 'loopback-controlled-runner-bridge' : 'not-applicable',
+    directBusinessPageAccess: fullPlaywrightMode, nativeNetworkForbidden: true,
+    executionOutcomeReceipt: fullPlaywrightMode || writeMode
+      ? 'independent-ed25519-verification-required' : 'not-applicable',
+    readExecution: fullPlaywrightMode ? 'not-applicable' : writeMode ? 'not-applicable' : 'loopback-controlled-runner-bridge',
+    writeExecution: fullPlaywrightMode ? 'trusted-full-playwright-runtime'
+      : writeMode ? 'loopback-controlled-runner-bridge' : 'not-applicable',
+    ...(fullPlaywrightMode ? { executionProfile: 'full-playwright' } : {}),
   }))
   files.set('network-policy.json', prettyJson({
     schemaVersion: '1.0.0', transport: 'external-safety-gateway',
-    browserDirectEgress: 'forbidden', allowedBridge: writeMode
+    browserDirectEgress: 'forbidden', allowedBridge: fullPlaywrightMode
+      ? { protocol: 'gateway-proxy', authorization: 'frozen-program-request-set' }
+      : writeMode
       ? { protocol: 'http:', hostname: '127.0.0.1', exactPath: '/v1/reversible-write' }
       : { protocol: 'http:', hostname: '127.0.0.1', exactPath: '/v1/read-assertion' },
+    ...(fullPlaywrightMode ? { executionProfile: 'full-playwright' } : {}),
   }))
   files.set('evidence-policy.json', prettyJson({
     schemaVersion: '1.0.0', required: ['screenshot', 'dom', 'gateway-audit'],
@@ -94,7 +92,8 @@ export async function compileReadOnlyProject(input: CompileReadOnlyProjectInput)
   }))
   files.set('template-manifest.json', prettyJson({
     schemaVersion: '1.0.0', template: 'mutil-skills-controlled-regression', templateVersion: '2.3.0',
-    actionKinds: writeMode ? ['reversibleWrite'] : ['assertText'],
+    actionKinds: fullPlaywrightMode ? ['fullPlaywright'] : writeMode ? ['reversibleWrite'] : ['assertText'],
+    ...(fullPlaywrightMode ? { executionProfile: 'full-playwright' } : {}),
   }))
   files.set('run-bundle.json', prettyJson({
     schemaVersion: '1.0.0',
@@ -107,7 +106,8 @@ export async function compileReadOnlyProject(input: CompileReadOnlyProjectInput)
     baseOrigin: compilerInput.baseOrigin,
     approvalDigest: compilerInput.approvalDigest,
     approvalFreshnessReceipt: compilerInput.approvalFreshnessReceipt,
-    mode: writeMode ? 'controlled-reversible-write' : 'read-only',
+    mode: fullPlaywrightMode ? 'full-playwright' : writeMode ? 'controlled-reversible-write' : 'read-only',
+    ...(fullPlaywrightMode ? { executionProfile: 'full-playwright' } : {}),
     runGateRequired: true,
     caseIds: compilerInput.cases.map((testCase) => testCase.caseId),
     blockedCases,
@@ -295,10 +295,9 @@ function renderSpec(input: CompilerInputV1): string {
     lines.push(`    { type: 'mode', description: ${literal(testCase.mode)} },`)
     lines.push('  )')
     for (const action of testCase.actions) {
-      assertLegacyCompilerActionSupported(action)
       if (action.kind === 'assertText') {
         lines.push(`  await safePage.assertText(${literal(action.actionId)}, ${literal(action.target)}, ${literal(action.expected)})`)
-      } else {
+      } else if (action.kind === 'reversibleWrite') {
         lines.push(`  await safePage.reversibleWrite(${JSON.stringify({ actionId: action.actionId,
           buttonName: action.buttonName, beforeText: action.beforeText, afterText: action.afterText,
           dataLeaseId: action.dataLeaseId, cleanupPlanId: action.cleanupPlanId })})`)
@@ -310,14 +309,84 @@ function renderSpec(input: CompilerInputV1): string {
   return `${lines.join('\n')}\n`
 }
 
-function renderReadme(input: CompilerInputV1, writeMode: boolean): string {
+function renderFullPlaywrightSpec(input: CompilerInputV1): string {
+  const lines = [
+    "import { test, expect, type APIRequestContext, type Browser, type BrowserContext, type Page, type TestInfo } from '@playwright/test'",
+    '',
+    'interface FullPlaywrightBindings {',
+    '  page: Page',
+    '  context: BrowserContext',
+    '  browser: Browser',
+    '  request: APIRequestContext',
+    '  expect: typeof expect',
+    '  testInfo: TestInfo',
+    '  state: Record<string, unknown>',
+    '}',
+    '',
+  ]
+  const functionNames = new Map<string, { run: string; cleanup: string }>()
+  let ordinal = 0
+  for (const testCase of input.cases) {
+    for (const action of testCase.actions) {
+      if (action.kind !== 'fullPlaywright') throw compilerError('full-playwright Project 不得混合 legacy action')
+      const names = { run: `runProgram${ordinal}`, cleanup: `runCleanup${ordinal}` }
+      ordinal += 1
+      functionNames.set(action.actionId, names)
+      lines.push(`async function ${names.run}({ page, context, browser, request, expect, testInfo, state }: FullPlaywrightBindings): Promise<unknown> {`)
+      lines.push(action.source)
+      lines.push('}', '')
+      lines.push(`async function ${names.cleanup}({ page, context, browser, request, expect, testInfo, state }: FullPlaywrightBindings): Promise<unknown> {`)
+      lines.push(action.cleanupSource)
+      lines.push('}', '')
+    }
+  }
+  for (const testCase of input.cases) {
+    const timeoutMs = Math.max(...testCase.actions.map((action) =>
+      action.kind === 'fullPlaywright' ? action.timeoutMs : 0))
+    lines.push(`test(${literal(`${testCase.caseId} ${testCase.title}`)}, async ({ page, context, request }, testInfo) => {`)
+    lines.push(`  test.setTimeout(${timeoutMs})`)
+    lines.push('  testInfo.annotations.push(')
+    lines.push(`    { type: 'assetId', description: ${literal(input.assetId)} },`)
+    lines.push(`    { type: 'prdRevision', description: ${literal(input.prdRevision)} },`)
+    lines.push(`    { type: 'caseId', description: ${literal(testCase.caseId)} },`)
+    for (const reqId of testCase.reqIds) lines.push(`    { type: 'reqId', description: ${literal(reqId)} },`)
+    for (const ruleId of testCase.ruleIds) lines.push(`    { type: 'ruleId', description: ${literal(ruleId)} },`)
+    for (const obligationId of testCase.obligationIds) {
+      lines.push(`    { type: 'obligationId', description: ${literal(obligationId)} },`)
+    }
+    lines.push(`    { type: 'mode', description: ${literal(testCase.mode)} },`)
+    lines.push("    { type: 'executionProfile', description: 'full-playwright' },")
+    lines.push('  )')
+    for (const action of testCase.actions) {
+      if (action.kind !== 'fullPlaywright') throw compilerError('full-playwright Project 不得混合 legacy action')
+      const names = functionNames.get(action.actionId)!
+      lines.push('  {')
+      lines.push('    const state = Object.create(null) as Record<string, unknown>')
+      lines.push('    const bindings = { page, context, browser: context.browser()!, request, expect, testInfo, state }')
+      lines.push('    let primaryError: unknown')
+      lines.push(`    try { await ${names.run}(bindings) } catch (error) { primaryError = error }`)
+      lines.push('    let cleanupResult: unknown')
+      lines.push('    let cleanupError: unknown')
+      lines.push(`    try { cleanupResult = await ${names.cleanup}(bindings) } catch (error) { cleanupError = error }`)
+      lines.push('    if (cleanupError !== undefined) throw cleanupError')
+      lines.push("    if (cleanupResult !== 'verified-clean') throw new Error('BIZTEST_FULL_PLAYWRIGHT_CLEANUP_NOT_VERIFIED')")
+      lines.push('    if (primaryError !== undefined) throw primaryError')
+      lines.push('  }')
+    }
+    lines.push('})', '')
+  }
+  return `${lines.join('\n')}\n`
+}
+
+function renderReadme(input: CompilerInputV1, writeMode: boolean, fullPlaywrightMode: boolean): string {
   return [
     '# 受控 E2E 回归项目',
     '',
     `- Asset：${input.assetId}`,
     `- Generation：${input.generationId}`,
     `- PRD Revision：${input.prdRevision}`,
-    `- 模式：${writeMode ? '可恢复写（必须经 fresh RunGate、loopback bridge 与独立 Ed25519 结果验签）' : '只读'}`,
+    `- 模式：${fullPlaywrightMode ? '完整 Playwright（冻结程序、Gateway、Lease 与 Cleanup）'
+      : writeMode ? '可恢复写（必须经 fresh RunGate、loopback bridge 与独立 Ed25519 结果验签）' : '只读'}`,
     '',
     '此目录由确定性编译器生成。不得手工修改源码、绕过 Safety Gateway、复用旧审批或在缺少受控 launcher 时执行写操作。',
     '',

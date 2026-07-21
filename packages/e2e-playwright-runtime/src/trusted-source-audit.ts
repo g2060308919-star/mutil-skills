@@ -11,7 +11,7 @@ const ENV_PATTERN = /process\.env\.([A-Z0-9_]+)/g
 
 export function auditTrustedRegressionSourceSet(
   files: TrustedRegressionSource[],
-  profile: 'trusted-read-only' | 'trusted-reversible-write',
+  profile: 'trusted-read-only' | 'trusted-reversible-write' | 'full-playwright',
 ): { valid: boolean; findings: TrustedSourceFinding[] } {
   const findings: TrustedSourceFinding[] = []
   for (const file of files.filter((item) => SOURCE_EXTENSION.test(item.relativePath))) {
@@ -25,8 +25,10 @@ export function auditTrustedRegressionSourceSet(
       [/\bnew\s+Function\b|\bFunction\s*\(/, 'function-constructor'],
       [/\bimport\s*\(/, 'dynamic-import'],
       [/\b(?:child_process|worker_threads|node:vm|node:fs|node:os|node:http|node:https|node:net|node:tls|node:dns)\b/, 'host-api'],
-      [/\bpage\s*\.\s*(?:evaluate|addInitScript)\s*\(/, 'browser-code-execution'],
       [/\b(?:npx|npm\s+(?:install|exec)|pnpm\s+dlx|yarn\s+dlx)\b/, 'dynamic-tooling'],
+      ...(profile === 'full-playwright' && !file.relativePath.endsWith('/playwright.config.ts')
+        ? [[/\bprocess\b/, 'host-process']] as const
+        : [[/\bpage\s*\.\s*(?:evaluate|addInitScript)\s*\(/, 'browser-code-execution']] as const),
     ] as const
     for (const [pattern, detail] of forbidden) if (pattern.test(source)) {
       add(file, 'E2E_COMPILER_SOURCE_API_FORBIDDEN', detail)
@@ -37,7 +39,8 @@ export function auditTrustedRegressionSourceSet(
     }
     if (/process\.env\s*\[/.test(source)) add(file, 'E2E_COMPILER_SOURCE_ENV_FORBIDDEN', 'computed-env')
     const tokens = tokenizeSource(source)
-    const fetchCalls = tokens.filter((token, index) => token === 'fetch' && tokens[index + 1] === '(')
+    const fetchCalls = tokens.filter((token, index) => token === 'fetch' && tokens[index + 1] === '('
+      && !(profile === 'full-playwright' && tokens[index - 1] === '.' && tokens[index - 2] === 'request'))
     const bridgePath = profile === 'trusted-reversible-write' ? '/v1/reversible-write' : '/v1/read-assertion'
     const bridgeError = profile === 'trusted-reversible-write'
       ? 'BIZTEST_CONTROLLED_WRITE_BRIDGE_INVALID' : 'BIZTEST_CONTROLLED_READ_BRIDGE_INVALID'
@@ -65,7 +68,8 @@ export function auditTrustedRegressionSourceSet(
 
 function importsFor(path: string, profile: string): Set<string> {
   if (path.endsWith('/playwright.config.ts')) return new Set(['@playwright/test'])
-  if (path.endsWith('/tests/generated.spec.ts')) return new Set(['../fixtures/safe-page.js'])
+  if (path.endsWith('/tests/generated.spec.ts')) return new Set(profile === 'full-playwright'
+    ? ['@playwright/test'] : ['../fixtures/safe-page.js'])
   if (path.endsWith('/fixtures/safe-page.ts')) {
     return new Set(profile === 'trusted-reversible-write'
       ? ['node:crypto', '@playwright/test'] : ['@playwright/test'])

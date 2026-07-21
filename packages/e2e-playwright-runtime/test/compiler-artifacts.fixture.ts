@@ -1,6 +1,7 @@
 import { generateKeyPairSync, sign } from 'node:crypto'
 import { canonicalizeJson, digestApprovalProjection, digestArtifactContent,
-  digestBytes, digestCanonicalGrantApprovalSubject, digestDecisionSubject, digestText, projectLineageDecisionSubject,
+  digestBytes, digestCanonicalGrantApprovalSubject, digestCleanupPlanDefinition, digestDecisionSubject, digestText,
+  computeFullPlaywrightCleanupSourceDigest, computeFullPlaywrightSourceDigest, projectLineageDecisionSubject,
   projectScopeDecisionSubject, type DecisionReceipt,
   type DecisionReceiptVerificationBinding } from '@mutil-skills/e2e-contracts'
 import { createTestOnlyApprovalFreshnessClient, LocalApprovalAuthority } from '@mutil-skills/e2e-authority'
@@ -298,6 +299,102 @@ export function approvedCompilerArtifactsWithBlockedCase(): unknown[] {
     artifacts[index] = seal(artifacts[index] as Record<string, unknown>)
   }
   return artifacts
+}
+
+export const FULL_PLAYWRIGHT_SOURCE = [
+  "await page.goto('https://example.test/todos')",
+  "await page.getByRole('textbox').fill(`todo-${state.seed ?? 'fixed'}`)",
+  "await page.getByRole('textbox').press('Enter')",
+  "await page.evaluate(() => document.body.setAttribute('data-full-playwright', 'enabled'))",
+  "await context.addInitScript(() => { window.localStorage.setItem('approved', 'true') })",
+  "await expect(page.getByText('todo-fixed')).toBeVisible()",
+].join('\n')
+
+export const FULL_PLAYWRIGHT_CLEANUP_SOURCE = [
+  "await page.getByText('todo-fixed').hover()",
+  "await page.getByRole('button', { name: 'Delete' }).click()",
+  "await expect(page.getByText('todo-fixed')).toHaveCount(0)",
+  "return 'verified-clean'",
+].join('\n')
+
+export function approvedFullPlaywrightCompilerArtifacts(options: {
+  source?: string
+  cleanupSource?: string
+  executionSource?: string
+  runBundleCapabilityId?: string
+  approvalRequestPath?: string
+  sourceDigest?: string
+} = {}): unknown[] {
+  const source = options.source ?? FULL_PLAYWRIGHT_SOURCE
+  const cleanupSource = options.cleanupSource ?? FULL_PLAYWRIGHT_CLEANUP_SOURCE
+  const sourceDigest = options.sourceDigest ?? computeFullPlaywrightSourceDigest(source)
+  const cleanupSourceDigest = computeFullPlaywrightCleanupSourceDigest(cleanupSource)
+  const request = {
+    intentId: 'INTENT-FULL-1', method: 'POST', canonicalOrigin: 'https://example.test', exactPath: '/todos', query: [],
+    payload: { kind: 'json', digest: digest('full-request-body') }, targetFingerprint: digest('full-target'),
+    maxRequests: 1, expectedOrder: 1,
+  }
+  const program = {
+    schemaVersion: 'full-playwright/v1', caseId: 'CASE-WRITE-1', stepId: 'STEP-WRITE-1',
+    actionId: 'ACTION-WRITE-1', source, sourceDigest, cleanupSource, cleanupSourceDigest,
+    dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, networkRequests: [request],
+  }
+  const executionSource = options.executionSource ?? source
+  const executionProgram = { ...program, source: executionSource,
+    sourceDigest: computeFullPlaywrightSourceDigest(executionSource) }
+  const cleanupPlan = {
+    schemaVersion: '2.0.0' as const, transport: 'browser-local' as const, cleanupPlanId: 'CLEANUP-1',
+    actionId: 'ACTION-WRITE-1', leaseId: 'LEASE-1', executorId: 'FULL-PLAYWRIGHT' as const,
+    cleanupProgramDigest: cleanupSourceDigest, cleanupRequestIntentIds: ['INTENT-FULL-1'],
+    verificationProbes: [{ probeId: 'PROBE-FULL-1', kind: 'browser-observation' as const,
+      expectedDigest: digest('full-clean') }], timeoutMs: 30_000,
+  }
+  const cleanupPlanDigest = digestCleanupPlanDefinition(cleanupPlan)
+  const capability = { capabilityId: 'CAP-FULL-1', actionId: 'ACTION-WRITE-1', operation: 'full-playwright',
+    effect: 'reversible-write', maxUses: 1, digest: digest('cap-full') }
+  const artifacts = approvedCompilerArtifacts({ effect: 'reversible-write' })
+  const content = (artifactType: string) => (artifacts.find((candidate) =>
+    (candidate as Record<string, unknown>).artifactType === artifactType) as { content: Record<string, any> }).content
+
+  const actionMap = content('browser-action-map')
+  actionMap.executionProfile = 'full-playwright'
+  actionMap.fullPlaywrightPrograms = [program]
+  actionMap.actions[0] = { ...actionMap.actions[0], playwrightAction: 'full-playwright/v1',
+    capabilities: [{ operation: 'full-playwright', capabilityId: capability.capabilityId }], requestIds: [] }
+
+  const execution = content('execution-contract')
+  execution.executionProfile = 'full-playwright'
+  execution.fullPlaywrightPrograms = [executionProgram]
+  execution.writeCleanupPlans = [cleanupPlan]
+  execution.actionIntents[0] = { ...execution.actionIntents[0], requestIds: [] }
+
+  const runBundle = content('run-bundle')
+  runBundle.signedCapabilities = [{ ...capability,
+    capabilityId: options.runBundleCapabilityId ?? capability.capabilityId }]
+  const approval = content('approval-grants')
+  const receipt = approval.grants[0]
+  receipt.capabilities = [capability]
+  receipt.capabilitySetDigest = digestText('approval-capability-set/v1', canonicalizeJson(receipt.capabilities))
+  receipt.executionSubjectSnapshot.actions = [{
+    actionId: 'ACTION-WRITE-1', effect: 'reversible-write', dataLeaseId: 'LEASE-1', fencingToken: 1,
+    cleanupPlanDigest, transport: 'browser-local', operation: 'full-playwright',
+    programDigest: sourceDigest, cleanupProgramDigest: cleanupSourceDigest,
+    requests: [{ ...request, exactPath: options.approvalRequestPath ?? request.exactPath }],
+  }]
+  Object.assign(receipt.executionSubjectSnapshot, {
+    actionMapDigest: digestApprovalProjection('browser-action-map', actionMap),
+    executionContractDigest: digestApprovalProjection('execution-contract', execution),
+    runBundleProjectionDigest: digestApprovalProjection('run-bundle', runBundle),
+  })
+  const runBundleEnvelope = artifacts.find((candidate) =>
+    (candidate as Record<string, unknown>).artifactType === 'run-bundle') as Record<string, unknown>
+  const sealedRunBundle = seal(runBundleEnvelope)
+  approval.runBundleDigest = sealedRunBundle.contentDigest
+  receipt.runBundleDigest = sealedRunBundle.contentDigest
+  receipt.subjectDigest = digestCanonicalGrantApprovalSubject('execution', receipt.executionSubjectSnapshot)
+  signFixtureFreshnessReceipt(receipt)
+
+  return artifacts.map((artifact) => seal(artifact as Record<string, unknown>))
 }
 
 function signFixtureFreshnessReceipt(receipt: Record<string, any>): void {

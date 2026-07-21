@@ -3,7 +3,9 @@ import { E2EError } from '@mutil-skills/e2e-contracts'
 import { createTrustedCompilerReadiness } from '@mutil-skills/e2e-engine'
 import { projectCompilerInputFromArtifacts } from '../src/index.js'
 import { inspectTrustedCompilerInput } from '../src/compiler-input-projector.js'
-import { approvedCompilerArtifacts, compilerArtifactVerification } from './compiler-artifacts.fixture.js'
+import { approvedCompilerArtifacts, approvedFullPlaywrightCompilerArtifacts,
+  compilerArtifactVerification, FULL_PLAYWRIGHT_CLEANUP_SOURCE,
+  FULL_PLAYWRIGHT_SOURCE } from './compiler-artifacts.fixture.js'
 
 describe('Artifact → Compiler Input Projector', () => {
   test('Engine readiness 缺少真实 PRD、scope、lineage Artifact 时 fail closed', () => {
@@ -44,6 +46,39 @@ describe('Artifact → Compiler Input Projector', () => {
       beforeText: '待审核', afterText: '已批准', dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1',
     })
     expect(JSON.stringify(input)).not.toContain('.click')
+  })
+
+  test('从同一冻结 Action Map 与 Execution Contract 唯一投影 full Playwright action', () => {
+    const input = inspectTrustedCompilerInput(projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts(), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    }))
+    expect(input.executionProfile).toBe('full-playwright')
+    expect(input.cases[0]?.actions).toEqual([{
+      kind: 'fullPlaywright', actionId: 'ACTION-WRITE-1', source: FULL_PLAYWRIGHT_SOURCE,
+      sourceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      cleanupSource: FULL_PLAYWRIGHT_CLEANUP_SOURCE,
+      cleanupSourceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+    }])
+  })
+
+  test.each([
+    ['program source', { executionSource: "await page.goto('https://drift.example')" }],
+    ['capability set', { runBundleCapabilityId: 'CAP-FULL-DRIFT' }],
+    ['request set', { approvalRequestPath: '/different' }],
+  ])('拒绝 full Playwright %s 在冻结资产之间漂移', (_name, drift) => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts(drift), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    })).toThrow(/E2E_COMPILER_(?:INPUT_INVALID|APPROVAL_BINDING_INVALID)/)
+  })
+
+  test('拒绝未绑定 source 的 full Playwright digest', () => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts({ sourceDigest: `sha256:${'0'.repeat(64)}` }),
+      playwrightVersion: '1.61.1', ...compilerArtifactVerification,
+    })).toThrow(/E2E_COMPILER_(?:INPUT_INVALID|CODE_FIELD_REJECTED)/)
   })
 
   test('拒绝不同 generation、额外 Artifact 类型和调用方代码字段', () => {

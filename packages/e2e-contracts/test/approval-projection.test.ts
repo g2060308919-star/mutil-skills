@@ -28,6 +28,22 @@ describe('approval projection digest', () => {
       .toThrow('E2E_APPROVAL_PROJECTION_KEYS_INVALID')
   })
 
+  test('full Playwright profile 与完整程序进入 action-map 审批投影', () => {
+    const legacy = {
+      actionMapRevision: 1, pageIdentities: [], actions: [], unmappedSteps: [], discoveredRisks: [],
+    }
+    const program = { schemaVersion: 'full-playwright/v1', caseId: 'CASE-1', stepId: 'STEP-1',
+      actionId: 'ACTION-1', source: 'await page.title()', sourceDigest: 'D1',
+      cleanupSource: "return 'verified-clean'", cleanupSourceDigest: 'D2', dataLeaseId: 'LEASE-1',
+      cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, networkRequests: [] }
+    const full = { ...legacy, executionProfile: 'full-playwright', fullPlaywrightPrograms: [program] }
+    expect(() => digestApprovalProjection('browser-action-map', full)).not.toThrow()
+    expect(digestApprovalProjection('browser-action-map', full)).not.toBe(
+      digestApprovalProjection('browser-action-map', { ...full,
+        fullPlaywrightPrograms: [{ ...program, source: 'await page.url()' }] }),
+    )
+  })
+
   test.each(['project-policy', 'acceptance-scope', 'requirement-model', 'coverage-universe', 'test-cases'] as const)(
     '%s 覆盖完整 content，任一字段变化都会改变摘要', (type) => {
       const content = { stable: true, nested: { value: 1 } }

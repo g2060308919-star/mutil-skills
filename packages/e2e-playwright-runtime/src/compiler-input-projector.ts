@@ -2,8 +2,10 @@ import {
   CompilerInputV1Schema,
   E2EError,
   ApprovalFreshnessReceiptSchema,
+  canonicalizeJson,
   digestApprovalProjection,
   digestArtifactContent,
+  digestCleanupPlanDefinition,
   parseArtifactDocument,
   type ArtifactDocument,
   type CompilerInputV1,
@@ -92,6 +94,18 @@ export function projectCompilerInputFromArtifacts(
   const casesContent = record(testCases.content)
   const actionMapContent = record(actionMap.content)
   const executionContent = record(executionContract.content)
+  const actionMapProfile = optionalText(actionMapContent.executionProfile)
+  const executionProfile = optionalText(executionContent.executionProfile)
+  if (actionMapProfile !== executionProfile) {
+    throw projectorError('E2E_COMPILER_INPUT_INVALID', 'Action Map 与 Execution Contract executionProfile 不一致')
+  }
+  const fullPlaywright = executionProfile === 'full-playwright'
+  const actionMapPrograms = optionalRecords(actionMapContent.fullPlaywrightPrograms)
+  const executionPrograms = optionalRecords(executionContent.fullPlaywrightPrograms)
+  if (fullPlaywright && (actionMapPrograms.length === 0
+    || canonicalizeJson(actionMapPrograms) !== canonicalizeJson(executionPrograms))) {
+    throw projectorError('E2E_COMPILER_INPUT_INVALID', 'full Playwright program 必须在 Action Map 与 Execution Contract 逐字闭合')
+  }
   const obligations = records(coverageContent.obligations)
   const activeCases = records(casesContent.cases)
     .filter((testCase) => testCase.status === 'active')
@@ -101,6 +115,10 @@ export function projectCompilerInputFromArtifacts(
   const queueIds = records(executionContent.caseQueue).map((item) => text(item.caseId))
   const intents = records(executionContent.actionIntents)
   const dataNeeds = records(executionContent.dataNeeds)
+  const cleanupPlans = optionalRecords(executionContent.writeCleanupPlans)
+  const runBundleContent = record(runBundle.content)
+  const schedules = records(runBundleContent.schedule)
+  const signedCapabilities = records(runBundleContent.signedCapabilities)
   const executableCases: DeclarativeExecutableCase[] = []
   const blockedCases: RegressionBlockedCase[] = []
 
@@ -108,6 +126,11 @@ export function projectCompilerInputFromArtifacts(
     || queueIds.length !== activeCases.length
     || activeCases.some((testCase) => !queueIds.includes(text(testCase.caseId)))) {
     throw projectorError('E2E_COMPILER_INPUT_INVALID', 'Execution Contract caseQueue 必须与 active Case 精确闭合')
+  }
+  if (fullPlaywright) {
+    assertRunScheduleClosure(activeCases, mappings, schedules)
+    assertFullPlaywrightApprovalClosure({ programs: executionPrograms, mappings, intents,
+      cleanupPlans, signedCapabilities, receipt: approvalFreshnessReceipt })
   }
 
   for (const testCase of activeCases) {
@@ -142,7 +165,26 @@ export function projectCompilerInputFromArtifacts(
       }
       const oracles = records(step.oracles)
       if (oracles.length === 0) throw projectorError('E2E_COMPILER_INPUT_INVALID', `Step ${stepId} 缺少 Oracle`)
-      if (effect === 'read') {
+      if (fullPlaywright) {
+        const program = executionPrograms.find((candidate) => text(candidate.actionId) === actionId)
+        const leaseIds = strings(testCase.dataNeedIds)
+        const cleanupPlanId = text(testCase.cleanupPlanId)
+        const mappingCapabilities = records(mapping.capabilities)
+        if (!program || text(program.caseId) !== caseId || text(program.stepId) !== stepId
+          || effect !== 'reversible-write' || leaseIds.length !== 1
+          || text(program.dataLeaseId) !== leaseIds[0] || text(program.cleanupPlanId) !== cleanupPlanId
+          || number(program.timeoutMs) !== number(testCase.timeoutMs)
+          || mappingCapabilities.length !== 1
+          || text(mappingCapabilities[0]!.operation) !== 'full-playwright'
+          || strings(mapping.requestIds).length !== 0 || strings(matchingIntents[0]!.requestIds).length !== 0) {
+          throw projectorError('E2E_COMPILER_INPUT_INVALID', `Action ${actionId} full Playwright 绑定不闭合`)
+        }
+        actions.push({ kind: 'fullPlaywright', actionId,
+          source: text(program.source), sourceDigest: text(program.sourceDigest),
+          cleanupSource: text(program.cleanupSource), cleanupSourceDigest: text(program.cleanupSourceDigest),
+          dataLeaseId: text(program.dataLeaseId), cleanupPlanId: text(program.cleanupPlanId),
+          timeoutMs: number(program.timeoutMs) })
+      } else if (effect === 'read') {
         actions.push({ kind: 'assertText', actionId, target: text(step.semanticTarget),
           expected: text(oracles[0]!.statement) })
       } else {
@@ -182,12 +224,79 @@ export function projectCompilerInputFromArtifacts(
     approvalFreshnessReceipt,
     policyDigest: projectPolicy.contentDigest,
     playwrightVersion: request.playwrightVersion,
+    ...(fullPlaywright ? { executionProfile: 'full-playwright' as const } : {}),
     cases: executableCases,
     blockedCases: blockedCases.sort(byId('caseId')),
   })
   const token = Object.freeze({})
   trustedInputs.set(token, structuredClone(input))
   return token
+}
+
+function assertFullPlaywrightApprovalClosure(input: {
+  programs: Record<string, unknown>[]
+  mappings: Record<string, unknown>[]
+  intents: Record<string, unknown>[]
+  cleanupPlans: Record<string, unknown>[]
+  signedCapabilities: Record<string, unknown>[]
+  receipt: ReturnType<typeof ApprovalFreshnessReceiptSchema.parse>
+}): void {
+  if (input.receipt.grantType !== 'reversible-write'
+    || input.programs.length !== input.mappings.length || input.programs.length !== input.intents.length
+    || input.programs.length !== input.cleanupPlans.length
+    || canonicalizeJson(sortRecords(input.signedCapabilities, 'actionId'))
+      !== canonicalizeJson(sortRecords(input.receipt.capabilities as unknown as Record<string, unknown>[], 'actionId'))) {
+    throw approvalError('full Playwright capability/program/cleanup 集不闭合')
+  }
+  const subjectActions = input.receipt.executionSubjectSnapshot.actions
+  for (const program of input.programs) {
+    const actionId = text(program.actionId)
+    const mapping = input.mappings.find((candidate) => text(candidate.actionId) === actionId)
+    const mappingCapability = mapping && records(mapping.capabilities)[0]
+    const receiptCapability = input.receipt.capabilities.find((candidate) => candidate.actionId === actionId)
+    const subjectAction = subjectActions.find((candidate) => candidate.actionId === actionId)
+    const cleanupPlan = input.cleanupPlans.find((candidate) => text(candidate.cleanupPlanId) === text(program.cleanupPlanId))
+    if (!mappingCapability || !receiptCapability || !subjectAction || !cleanupPlan
+      || text(mappingCapability.capabilityId) !== receiptCapability.capabilityId
+      || receiptCapability.operation !== 'full-playwright' || receiptCapability.effect !== 'reversible-write'
+      || !('transport' in subjectAction) || subjectAction.transport !== 'browser-local'
+      || subjectAction.operation !== 'full-playwright'
+      || subjectAction.programDigest !== text(program.sourceDigest)
+      || subjectAction.cleanupProgramDigest !== text(program.cleanupSourceDigest)
+      || subjectAction.dataLeaseId !== text(program.dataLeaseId)
+      || subjectAction.cleanupPlanDigest !== digestCleanupPlanDefinition(cleanupPlan as never)
+      || canonicalizeJson(subjectAction.requests) !== canonicalizeJson(records(program.networkRequests))) {
+      throw approvalError(`full Playwright Action ${actionId} 未与 approval/capability/cleanup/request 闭合`)
+    }
+  }
+}
+
+function assertRunScheduleClosure(
+  activeCases: Record<string, unknown>[],
+  mappings: Record<string, unknown>[],
+  schedules: Record<string, unknown>[],
+): void {
+  if (schedules.length !== activeCases.length) {
+    throw projectorError('E2E_COMPILER_INPUT_INVALID', 'Run Bundle schedule 必须与 active Case 闭合')
+  }
+  for (const testCase of activeCases) {
+    const caseId = text(testCase.caseId)
+    const schedule = schedules.find((candidate) => text(candidate.caseId) === caseId)
+    const stepIds = records(testCase.steps).sort((left, right) => number(left.ordinal) - number(right.ordinal))
+      .map((step) => text(step.stepId))
+    const actionIds = stepIds.map((stepId) => {
+      const matches = mappings.filter((mapping) => text(mapping.caseId) === caseId && text(mapping.stepId) === stepId)
+      return matches.length === 1 ? text(matches[0]!.actionId) : ''
+    })
+    if (!schedule || canonicalizeJson(strings(schedule.stepIds)) !== canonicalizeJson(stepIds)
+      || canonicalizeJson(strings(schedule.actionIds)) !== canonicalizeJson(actionIds)) {
+      throw projectorError('E2E_COMPILER_INPUT_INVALID', `Run Bundle schedule 未绑定 ${caseId} 的 step/action`)
+    }
+  }
+}
+
+function sortRecords(values: Record<string, unknown>[], key: string): Record<string, unknown>[] {
+  return [...values].sort(byId(key))
 }
 
 /** 仅供同包 Compiler/Discovery 消费；不会从 package root 导出。 */
@@ -362,6 +471,10 @@ function records(value: unknown): Record<string, unknown>[] {
   return value as Record<string, unknown>[]
 }
 
+function optionalRecords(value: unknown): Record<string, unknown>[] {
+  return value === undefined ? [] : records(value)
+}
+
 function strings(value: unknown): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
     throw projectorError('E2E_COMPILER_INPUT_INVALID', 'Compiler Artifact 字段必须是字符串数组')
@@ -374,6 +487,10 @@ function text(value: unknown): string {
     throw projectorError('E2E_COMPILER_INPUT_INVALID', 'Compiler Artifact 缺少非空字符串字段')
   }
   return value
+}
+
+function optionalText(value: unknown): string | undefined {
+  return value === undefined ? undefined : text(value)
 }
 
 function number(value: unknown): number {

@@ -39,6 +39,13 @@ export const READ_ONLY_TEMPLATE_DIGEST = digestText('controlled-regression-templ
     'source-integrity.json'],
   actionKinds: ['assertText', 'reversibleWrite'], writeExecution: 'loopback-controlled-runner-bridge',
 }))
+export const FULL_PLAYWRIGHT_TEMPLATE_DIGEST = digestText('controlled-regression-template/full-playwright/v1', canonicalizeJson({
+  version: TRUSTED_TEMPLATE_VERSION, files: ['README.md', 'package.json', 'package-lock.json', 'playwright.config.ts',
+    'tests/generated.spec.ts', 'run-bundle.json', 'safety-policy.json', 'network-policy.json',
+    'evidence-policy.json', 'toolchain-manifest.json', 'template-manifest.json', 'source-integrity.json'],
+  executionProfile: 'full-playwright', actionKinds: ['fullPlaywright'],
+  writeExecution: 'trusted-full-playwright-runtime',
+}))
 
 export interface CompileAndAttestRegressionInput {
   tempParent: string
@@ -118,8 +125,9 @@ export class LocalRegressionDiscoveryAuthority {
     const files = await readRegressionSourceSet(projectDir, SOURCE_ROOT)
     assertExpectedRegressionSourceSet(files, generatedPaths, SOURCE_ROOT)
     verifyTrustedCompilerOutput(compiled.sourceDigests, files, projectDir)
-    const executionProfile = input.cases[0]!.actions[0]!.kind === 'reversibleWrite'
-      ? 'trusted-reversible-write' : 'trusted-read-only'
+    const executionProfile = input.executionProfile === 'full-playwright' ? 'full-playwright'
+      : input.cases[0]!.actions[0]!.kind === 'reversibleWrite'
+        ? 'trusted-reversible-write' : 'trusted-read-only'
     const sourceAudit = auditTrustedRegressionSourceSet(files, executionProfile)
     if (!sourceAudit.valid) {
       throw discoveryError('E2E_REGRESSION_DISCOVERY_SOURCE_UNSAFE', sourceAudit.findings
@@ -202,7 +210,9 @@ export class LocalRegressionDiscoveryAuthority {
       prdRevision: input.prdRevision, compilerVersion: TRUSTED_COMPILER_VERSION,
       templateVersion: TRUSTED_TEMPLATE_VERSION, contractsVersion: input.contractsVersion,
       environmentId: input.environmentId, approvalDigest: input.approvalDigest, policyDigest: input.policyDigest,
-      templateDigest: READ_ONLY_TEMPLATE_DIGEST, compilerInputDigest,
+      templateDigest: executionProfile === 'full-playwright'
+        ? FULL_PLAYWRIGHT_TEMPLATE_DIGEST : READ_ONLY_TEMPLATE_DIGEST,
+      compilerInputDigest,
       sourceFiles, caseMappings,
       toolchain: { nodeVersion: process.versions.node, playwrightVersion: installedVersion,
         compilerDigest: READ_ONLY_COMPILER_DIGEST, playwrightCliDigest: digestBytes('playwright-cli/v1', cliBytes) },

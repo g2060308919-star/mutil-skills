@@ -45,4 +45,34 @@ describe('可信生成源码静态安全扫描', () => {
       code: 'E2E_COMPILER_SOURCE_NETWORK_FORBIDDEN', detail: 'fetch',
     }))
   })
+
+  test('full-playwright profile 允许 Playwright evaluate/addInitScript/request API', () => {
+    const source = `
+      import { test, expect } from '@playwright/test'
+      test('full', async ({ page, context, request }) => {
+        await page.evaluate(() => document.body.dataset.ready = 'true')
+        await context.addInitScript(() => window.localStorage.setItem('ready', 'true'))
+        await request.post('https://example.test/todos', { data: { title: 'todo' } })
+        await expect(page.locator('body')).toBeVisible()
+      })
+    `
+    expect(auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')).toEqual({ valid: true, findings: [] })
+  })
+
+  test.each([
+    ["import fs from 'node:fs'; await fs.readFile('/etc/passwd')", 'E2E_COMPILER_SOURCE_IMPORT_FORBIDDEN'],
+    ['process.env.HOME', 'E2E_COMPILER_SOURCE_API_FORBIDDEN'],
+    ["await import('arbitrary-tool')", 'E2E_COMPILER_SOURCE_API_FORBIDDEN'],
+    ["require('child_process').execSync('id')", 'E2E_COMPILER_SOURCE_API_FORBIDDEN'],
+    ["eval('page.goto(\\\"https://evil.example\\\")')", 'E2E_COMPILER_SOURCE_API_FORBIDDEN'],
+    ["new Function('return process')()", 'E2E_COMPILER_SOURCE_API_FORBIDDEN'],
+    ["await fetch('https://evil.example')", 'E2E_COMPILER_SOURCE_NETWORK_FORBIDDEN'],
+  ])('full-playwright profile 仍拒绝宿主或动态执行：%s', (source, code) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.findings).toContainEqual(expect.objectContaining({ code }))
+  })
 })
