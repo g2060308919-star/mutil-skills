@@ -125,4 +125,39 @@ describe('资产 JSON Schema 生成器', () => {
       ]))
     }
   })
+
+  test('Approval capability 合法组合下推为 Draft-07 结构化 union', () => {
+    const approval = generateArtifactJsonSchemas()['approval-grants'] as any
+    const grantBranches = approval.properties.content.properties.grants.items.anyOf
+    for (const grant of grantBranches) {
+      const capability = grant.properties.capabilities.items
+      expect(capability.anyOf).toHaveLength(3)
+      const accepts = (candidate: Record<string, unknown>) => capability.anyOf
+        .some((branch: any) => generatedObjectBranchAccepts(branch, candidate))
+      const base = { capabilityId: 'CAP-1', actionId: 'ACTION-1', digest: `sha256:${'0'.repeat(64)}` }
+      expect(accepts({ ...base, operation: 'dom-read', effect: 'read', maxUses: 2 })).toBe(true)
+      expect(accepts({ ...base, operation: 'http-request', effect: 'reversible-write', maxUses: 1 })).toBe(true)
+      expect(accepts({ ...base, operation: 'full-playwright', effect: 'reversible-write', maxUses: 1 })).toBe(true)
+      expect(accepts({ ...base, operation: 'full-playwright', effect: 'read', maxUses: 1 })).toBe(false)
+      expect(accepts({ ...base, operation: 'dom-read', effect: 'reversible-write', maxUses: 1 })).toBe(false)
+      expect(accepts({ ...base, operation: 'http-request', effect: 'reversible-write', maxUses: 2 })).toBe(false)
+    }
+  })
 })
+
+function generatedObjectBranchAccepts(schema: any, candidate: Record<string, unknown>): boolean {
+  if (schema.type !== 'object' || schema.additionalProperties !== false) return false
+  if (schema.required.some((key: string) => !(key in candidate))) return false
+  if (Object.keys(candidate).some((key) => !(key in schema.properties))) return false
+  return Object.entries(candidate).every(([key, value]) => {
+    const property = schema.properties[key]
+    if (property.const !== undefined && property.const !== value) return false
+    if (property.enum !== undefined && !property.enum.includes(value)) return false
+    if (property.type === 'integer' && !Number.isInteger(value)) return false
+    if (property.minimum !== undefined && (value as number) < property.minimum) return false
+    if (property.exclusiveMinimum !== undefined && (value as number) <= property.exclusiveMinimum) return false
+    if (property.maximum !== undefined && (value as number) > property.maximum) return false
+    if (property.pattern !== undefined && !new RegExp(property.pattern).test(value as string)) return false
+    return true
+  })
+}

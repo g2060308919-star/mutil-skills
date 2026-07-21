@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import { canonicalizeJson, digestText } from './common.js'
-import { WriteHttpIntentSchema } from './approval-freshness.js'
+import { WriteHttpIntentSetSchema } from './approval-freshness.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -8,8 +8,7 @@ const AttemptContextSchema = z.object({
   assetId: SafeIdSchema, generationId: SafeIdSchema, prdRevision: DigestSchema,
   runId: SafeIdSchema, caseId: SafeIdSchema,
 }).strict()
-// ExecutionOutcome 必须冻结与 SignedWriteGrant 完全相同的 intent；禁止复制一份易漂移的近似 schema。
-const HttpIntentSchema = WriteHttpIntentSchema
+// ExecutionOutcome 必须冻结与 SignedWriteGrant 完全相同的 intent set；禁止复制易漂移的近似 schema/上限。
 const HttpReversibleWriteCapabilitySnapshotSchema = z.object({
   capabilityId: SafeIdSchema,
   nonce: z.string().min(1).max(4096),
@@ -20,7 +19,7 @@ const HttpReversibleWriteCapabilitySnapshotSchema = z.object({
   dataLeaseId: SafeIdSchema,
   fencingToken: z.number().int().positive(),
   cleanupPlanDigest: DigestSchema,
-  requests: z.array(HttpIntentSchema).min(1).max(10_000),
+  requests: WriteHttpIntentSetSchema.min(1),
   maxUses: z.literal(1),
 }).strict()
 
@@ -36,7 +35,7 @@ const BrowserLocalReversibleWriteCapabilitySnapshotSchema = z.object({
   dataLeaseId: SafeIdSchema,
   fencingToken: z.number().int().positive(),
   cleanupPlanDigest: DigestSchema,
-  requests: z.array(HttpIntentSchema).max(10_000),
+  requests: WriteHttpIntentSetSchema,
   maxUses: z.literal(1),
 }).strict()
 

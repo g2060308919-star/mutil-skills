@@ -19,7 +19,7 @@ import { VerdictResultSchema } from './verdict.js'
 import {
   ApprovalCapabilityRecordSchema,
   ApprovalFreshnessReceiptSchema,
-  WriteHttpIntentSchema,
+  WriteHttpIntentSetSchema,
 } from './approval-freshness.js'
 import {
   CoverageDispositionDecisionReceiptSchema,
@@ -72,7 +72,7 @@ export const FullPlaywrightProgramSchema = z.object({
   dataLeaseId: SafeIdSchema,
   cleanupPlanId: SafeIdSchema,
   timeoutMs: z.number().int().positive().max(3_600_000),
-  networkRequests: z.array(WriteHttpIntentSchema).max(10_000),
+  networkRequests: WriteHttpIntentSetSchema,
 }).strict().superRefine((program, context) => {
   if (program.sourceDigest !== computeFullPlaywrightSourceDigest(program.source)) {
     context.addIssue({ code: 'custom', message: 'sourceDigest 未绑定 full Playwright source', path: ['sourceDigest'] })
@@ -110,6 +110,7 @@ function refineFullPlaywrightPrograms(input: {
   }>
   caseIds?: string[]
   writeLeaseIds?: string[]
+  cleanupPlans?: Array<{ cleanupPlanId: string; actionId: string; leaseId: string }>
 }, context: z.RefinementCtx): void {
   const usesFullPlaywright = input.programs.length > 0
   if (usesFullPlaywright !== (input.executionProfile === 'full-playwright')) {
@@ -143,6 +144,14 @@ function refineFullPlaywrightPrograms(input: {
   }
   const knownCases = input.caseIds === undefined ? undefined : new Set(input.caseIds)
   const knownWriteLeases = input.writeLeaseIds === undefined ? undefined : new Set(input.writeLeaseIds)
+  const cleanupPlans = input.cleanupPlans
+  const cleanupPlansById = cleanupPlans === undefined ? undefined
+    : new Map(cleanupPlans.map((plan) => [plan.cleanupPlanId, plan]))
+  if (cleanupPlans !== undefined && cleanupPlansById?.size !== cleanupPlans.length) {
+    context.addIssue({
+      code: 'custom', message: 'full Playwright cleanupPlanId 必须唯一', path: ['writeCleanupPlans'],
+    })
+  }
   input.programs.forEach((program, index) => {
     const action = refsByAction.get(program.actionId)
     if (action === undefined
@@ -167,6 +176,14 @@ function refineFullPlaywrightPrograms(input: {
       context.addIssue({
         code: 'custom', message: 'full Playwright dataLeaseId 必须存在于 write dataNeeds',
         path: ['fullPlaywrightPrograms', index, 'dataLeaseId'],
+      })
+    }
+    const cleanupPlan = cleanupPlansById?.get(program.cleanupPlanId)
+    if (cleanupPlansById !== undefined && (cleanupPlan === undefined
+      || cleanupPlan.actionId !== program.actionId || cleanupPlan.leaseId !== program.dataLeaseId)) {
+      context.addIssue({
+        code: 'custom', message: 'full Playwright cleanupPlanId 必须精确绑定同 action 与 lease 的 cleanup plan',
+        path: ['fullPlaywrightPrograms', index, 'cleanupPlanId'],
       })
     }
   })
@@ -496,6 +513,7 @@ export const ExecutionContractV11ContentSchema = ExecutionContractV10ContentSche
       runtimeHttpActionDigest: action.runtimeHttpActionDigest })),
     caseIds: content.caseQueue.map((item) => item.caseId),
     writeLeaseIds: content.dataNeeds.filter((item) => item.mode === 'write').map((item) => item.leaseId),
+    cleanupPlans,
   }, context)
 })
 

@@ -140,6 +140,9 @@ export const WriteHttpIntentSchema = z.object({
   ...WriteHttpIntentTailShape,
 }).strict()
 
+export const MAX_WRITE_HTTP_INTENTS = 1_000
+export const WriteHttpIntentSetSchema = z.array(WriteHttpIntentSchema).max(MAX_WRITE_HTTP_INTENTS)
+
 const WriteApprovalSubjectV2Shape = {
   schemaVersion: z.literal('2.0.0'), assetId: AssetIdSchema, prdRevision: DigestSchema,
   executionDigest: DigestSchema, scopeDigest: DigestSchema, requirementModelDigest: DigestSchema,
@@ -157,7 +160,7 @@ const WriteActionShape = {
 
 const HttpWriteApprovalActionSchema = z.object({
   ...WriteActionShape,
-  requests: z.array(WriteHttpIntentSchema).min(1).max(1_000),
+  requests: WriteHttpIntentSetSchema.min(1),
 }).strict()
 
 export const BrowserLocalWriteApprovalActionSchema = z.object({
@@ -166,7 +169,7 @@ export const BrowserLocalWriteApprovalActionSchema = z.object({
   operation: z.literal('full-playwright'),
   programDigest: DigestSchema,
   cleanupProgramDigest: DigestSchema,
-  requests: z.array(WriteHttpIntentSchema).max(1_000),
+  requests: WriteHttpIntentSetSchema,
 }).strict()
 
 /** Historical Write subject accepted by Authority snapshot 2.3 and earlier. */
@@ -174,7 +177,7 @@ export const LegacyWriteApprovalSubjectV23Schema = z.object({
   ...WriteApprovalSubjectV2Shape,
   actions: z.array(z.object({
     ...WriteActionShape,
-    requests: z.array(LegacyWriteHttpIntentV23Schema).min(1).max(1_000),
+    requests: z.array(LegacyWriteHttpIntentV23Schema).min(1).max(MAX_WRITE_HTTP_INTENTS),
   }).strict()).min(1).max(100_000),
 }).strict()
 
@@ -186,25 +189,38 @@ export const WriteApprovalSubjectV2Schema = z.object({
   ])).min(1).max(100_000),
 }).strict()
 
-const ApprovalCapabilityRecordObjectSchema = z.object({
+const ApprovalCapabilityRecordBaseShape = {
   capabilityId: SafeIdSchema,
   actionId: SafeIdSchema,
-  operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request', 'full-playwright']),
-  effect: z.enum(['read', 'reversible-write']),
-  maxUses: z.number().int().positive().max(100_000),
   digest: DigestSchema,
+}
+
+const ReadCapabilityRecordSchema = z.object({
+  ...ApprovalCapabilityRecordBaseShape,
+  operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request']),
+  effect: z.literal('read'),
+  maxUses: z.number().int().positive().max(100_000),
 }).strict()
 
-export const ApprovalCapabilityRecordSchema = ApprovalCapabilityRecordObjectSchema
-  .superRefine((record, context) => {
-    const writeOperation = record.operation === 'http-request' || record.operation === 'full-playwright'
-    if (record.effect === 'reversible-write' && (!writeOperation || record.maxUses !== 1)) {
-      context.addIssue({ code: 'custom', message: 'write capability record 必须使用写 operation 且 maxUses=1' })
-    }
-    if (record.effect === 'read' && record.operation === 'full-playwright') {
-      context.addIssue({ code: 'custom', message: 'read capability record 不得使用 full-playwright operation' })
-    }
-  })
+const HttpWriteCapabilityRecordSchema = z.object({
+  ...ApprovalCapabilityRecordBaseShape,
+  operation: z.literal('http-request'),
+  effect: z.literal('reversible-write'),
+  maxUses: z.literal(1),
+}).strict()
+
+const FullPlaywrightWriteCapabilityRecordSchema = z.object({
+  ...ApprovalCapabilityRecordBaseShape,
+  operation: z.literal('full-playwright'),
+  effect: z.literal('reversible-write'),
+  maxUses: z.literal(1),
+}).strict()
+
+export const ApprovalCapabilityRecordSchema = z.union([
+  ReadCapabilityRecordSchema,
+  HttpWriteCapabilityRecordSchema,
+  FullPlaywrightWriteCapabilityRecordSchema,
+])
 
 const CommonReceiptBody = {
   schemaVersion: z.literal('1.0.0'),

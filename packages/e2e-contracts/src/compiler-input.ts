@@ -146,22 +146,8 @@ export type AssertTextCompilerAction = z.infer<typeof AssertTextCompilerActionSc
 export type ReversibleWriteCompilerAction = z.infer<typeof ReversibleWriteCompilerActionSchema>
 export type FullPlaywrightCompilerAction = z.infer<typeof FullPlaywrightCompilerActionSchema>
 export type DeclarativeExecutableCase = z.infer<typeof DeclarativeExecutableCaseSchema>
-type ParsedCompilerInputV1 = z.infer<typeof CompilerInputV1InternalSchema>
-export type FullPlaywrightCompilerInputV1 = ParsedCompilerInputV1
-type CompilerConsumerCompatibleAction = CompilerAction & Record<string, any>
-type CompilerConsumerCompatibleCase = Omit<DeclarativeExecutableCase, 'actions'> & {
-  actions: CompilerConsumerCompatibleAction[]
-}
-/**
- * Task 3 will make the compiler exhaustively handle fullPlaywright. The index signature keeps that
- * existing consumer source-compatible without removing fullPlaywright from the static action union.
- * Runtime parsing remains strict, and CompilerAction retains the exact discriminated type.
- */
-export type CompilerInputV1 = Omit<ParsedCompilerInputV1, 'cases'> & {
-  cases: CompilerConsumerCompatibleCase[]
-}
-
-export const CompilerInputV1Schema = CompilerInputV1InternalSchema as z.ZodType<CompilerInputV1>
+export const CompilerInputV1Schema = CompilerInputV1InternalSchema
+export type CompilerInputV1 = z.infer<typeof CompilerInputV1Schema>
 
 export function computeCompilerInputDigest(input: CompilerInputV1): string {
   const parsed = CompilerInputV1Schema.parse(input)

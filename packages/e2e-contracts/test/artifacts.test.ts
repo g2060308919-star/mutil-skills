@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import {
+  ApprovalCapabilityRecordSchema,
   BrowserActionMapV21ContentSchema,
   ExecutionContractV11ContentSchema,
   FullPlaywrightProgramSchema,
@@ -34,6 +35,22 @@ function program() {
 }
 
 describe('FullPlaywrightProgram', () => {
+  test('capability record 只接受结构化 read、HTTP write 与 full-playwright write 分支', () => {
+    const base = { capabilityId: 'CAP-1', actionId: 'ACTION-1', digest: digest('0') }
+    for (const valid of [
+      { ...base, operation: 'dom-read', effect: 'read', maxUses: 2 },
+      { ...base, operation: 'http-request', effect: 'reversible-write', maxUses: 1 },
+      { ...base, operation: 'full-playwright', effect: 'reversible-write', maxUses: 1 },
+    ]) expect(ApprovalCapabilityRecordSchema.safeParse(valid).success, JSON.stringify(valid)).toBe(true)
+
+    for (const invalid of [
+      { ...base, operation: 'full-playwright', effect: 'read', maxUses: 1 },
+      { ...base, operation: 'dom-read', effect: 'reversible-write', maxUses: 1 },
+      { ...base, operation: 'http-request', effect: 'reversible-write', maxUses: 2 },
+      { ...base, operation: 'full-playwright', effect: 'reversible-write', maxUses: 2 },
+    ]) expect(ApprovalCapabilityRecordSchema.safeParse(invalid).success, JSON.stringify(invalid)).toBe(false)
+  })
+
   test('冻结 case/action/step、lease、cleanup、timeout 与请求闭包', () => {
     const value = program()
     expect(FullPlaywrightProgramSchema.parse(value)).toEqual(value)
@@ -46,6 +63,10 @@ describe('FullPlaywrightProgram', () => {
       ...value, networkRequests: [{ ...value.networkRequests[0], method: 'post' }],
     }).success)
       .toBe(false)
+    const tooManyRequests = Array.from({ length: 1_001 }, (_, index) => ({
+      ...value.networkRequests[0]!, intentId: `INTENT-${index}`, expectedOrder: index + 1,
+    }))
+    expect(FullPlaywrightProgramSchema.safeParse({ ...value, networkRequests: tooManyRequests }).success).toBe(false)
   })
 
   test('拒绝 source 或 cleanup digest 与冻结源码不一致', () => {
@@ -56,6 +77,18 @@ describe('FullPlaywrightProgram', () => {
 
   test('Execution Contract 与 Action Map 只在显式 full profile 下闭合投影', () => {
     const value = program()
+    const cleanupPlan = {
+      schemaVersion: '1.0.0' as const,
+      cleanupPlanId: value.cleanupPlanId,
+      actionId: value.actionId,
+      leaseId: value.dataLeaseId,
+      executorId: 'FULL-PLAYWRIGHT',
+      cleanupRequestIntentIds: ['CLEANUP-SOURCE-1'],
+      verificationProbes: [{
+        probeId: 'CLEANUP-PROBE-1', kind: 'browser-observation' as const, expectedDigest: digest('4'),
+      }],
+      timeoutMs: value.timeoutMs,
+    }
     const executionContract = {
       environment: 'TEST', baseOrigin: 'https://example.test', executionProfile: 'full-playwright' as const,
       browserMatrix: [{ browserId: 'CHROMIUM', channel: 'chromium', viewportId: 'DESKTOP' }],
@@ -64,7 +97,7 @@ describe('FullPlaywrightProgram', () => {
         intentDigest: digest('e'), requestIds: [] }],
       dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'TODOS', mode: 'write' as const }],
       manualProcedures: [], evidencePolicyDigest: digest('f'), runtimeIsolation: null,
-      unresolvedItems: [], readHttpRequests: [], fullPlaywrightPrograms: [value],
+      unresolvedItems: [], readHttpRequests: [], writeCleanupPlans: [cleanupPlan], fullPlaywrightPrograms: [value],
     }
     const actionMap = {
       actionMapRevision: 1, executionProfile: 'full-playwright' as const,
@@ -93,6 +126,17 @@ describe('FullPlaywrightProgram', () => {
     }).success).toBe(false)
     expect(ExecutionContractV11ContentSchema.safeParse({
       ...executionContract, dataNeeds: [],
+    }).success).toBe(false)
+    expect(ExecutionContractV11ContentSchema.safeParse({
+      ...executionContract, writeCleanupPlans: undefined,
+    }).success).toBe(false)
+    expect(ExecutionContractV11ContentSchema.safeParse({
+      ...executionContract,
+      writeCleanupPlans: [{ ...cleanupPlan, actionId: 'ACTION-OTHER' }],
+    }).success).toBe(false)
+    expect(ExecutionContractV11ContentSchema.safeParse({
+      ...executionContract,
+      writeCleanupPlans: [{ ...cleanupPlan, leaseId: 'LEASE-OTHER' }],
     }).success).toBe(false)
   })
 
@@ -125,6 +169,12 @@ describe('FullPlaywrightProgram', () => {
     }).success).toBe(false)
     expect(WriteApprovalSubjectV2Schema.safeParse({
       ...base, actions: [{ ...browserAction, operation: 'http-request' }],
+    }).success).toBe(false)
+    expect(WriteApprovalSubjectV2Schema.safeParse({
+      ...base,
+      actions: [{ ...browserAction, requests: Array.from({ length: 1_001 }, (_, index) => ({
+        ...value.networkRequests[0]!, intentId: `INTENT-${index}`, expectedOrder: index + 1,
+      })) }],
     }).success).toBe(false)
   })
 })

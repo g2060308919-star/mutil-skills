@@ -85,6 +85,22 @@ describe('ExecutionOutcomeReceipt 契约', () => {
       ...browserLocal,
       capability: { ...browserLocal.capability, cleanupProgramDigest: undefined },
     }).success).toBe(false)
+    const tooManyRequests = Array.from({ length: 1_001 }, (_, index) => ({
+      ...value.capability.requests[0]!, intentId: `INTENT-${index}`, expectedOrder: index + 1,
+    }))
+    const oversized = {
+      ...browserLocal,
+      capability: { ...browserLocal.capability, requests: tooManyRequests },
+      gateway: {
+        ...browserLocal.gateway,
+        approvedRequestSetDigest: digestText(
+          'execution-outcome-approved-request-set/v1', canonicalizeJson(tooManyRequests),
+        ),
+        received: 1,
+        forwarded: 1,
+      },
+    }
+    expect(ExecutionOutcomeBindingSchema.safeParse(oversized).success).toBe(false)
   })
 })
 

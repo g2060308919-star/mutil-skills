@@ -9,6 +9,9 @@ import {
 import { inspectTrustedCompilerInput, type TrustedCompilerInput } from './compiler-input-projector.js'
 import { assertFreshOutputRoot } from './regression-source-set.js'
 
+type CompilerAction = CompilerInputV1['cases'][number]['actions'][number]
+type LegacyCompilerAction = Exclude<CompilerAction, { kind: 'fullPlaywright' }>
+
 export interface CompileReadOnlyProjectInput {
   outputDir: string
   compilerInput: TrustedCompilerInput
@@ -17,6 +20,14 @@ export interface CompileReadOnlyProjectInput {
 export interface CompileReadOnlyProjectResult {
   generatedFiles: string[]
   sourceDigests: Record<string, string>
+}
+
+export function assertLegacyCompilerActionSupported(
+  action: CompilerAction,
+): asserts action is LegacyCompilerAction {
+  if (action.kind === 'fullPlaywright') {
+    throw compilerError('E2E_COMPILER_FULL_PLAYWRIGHT_UNSUPPORTED: 旧编译模板尚不支持 fullPlaywright action')
+  }
 }
 
 export async function compileReadOnlyProject(input: CompileReadOnlyProjectInput): Promise<CompileReadOnlyProjectResult> {
@@ -284,6 +295,7 @@ function renderSpec(input: CompilerInputV1): string {
     lines.push(`    { type: 'mode', description: ${literal(testCase.mode)} },`)
     lines.push('  )')
     for (const action of testCase.actions) {
+      assertLegacyCompilerActionSupported(action)
       if (action.kind === 'assertText') {
         lines.push(`  await safePage.assertText(${literal(action.actionId)}, ${literal(action.target)}, ${literal(action.expected)})`)
       } else {

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { afterEach, describe, expect, test } from 'vitest'
 import { projectCompilerInputFromArtifacts } from '../src/index.js'
-import { compileReadOnlyProject } from '../src/compiler.js'
+import { assertLegacyCompilerActionSupported, compileReadOnlyProject } from '../src/compiler.js'
 import { approvedCompilerArtifacts, approvedCompilerArtifactsWithBlockedCase,
   compilerArtifactVerification } from './compiler-artifacts.fixture.js'
 
@@ -17,6 +17,20 @@ afterEach(async () => {
 })
 
 describe('compileReadOnlyProject', () => {
+  test('fullPlaywright action 在旧编译模板入口 fail-closed，不得落入 reversibleWrite', () => {
+    expect(() => assertLegacyCompilerActionSupported({
+      kind: 'fullPlaywright',
+      actionId: 'ACTION-FULL-1',
+      source: "test('full', async ({ page }) => { await page.goto('/') })",
+      sourceDigest: `sha256:${'0'.repeat(64)}`,
+      cleanupSource: "test('cleanup', async ({ page }) => { await page.goto('/cleanup') })",
+      cleanupSourceDigest: `sha256:${'1'.repeat(64)}`,
+      dataLeaseId: 'LEASE-1',
+      cleanupPlanId: 'CLEANUP-1',
+      timeoutMs: 30_000,
+    })).toThrow('E2E_COMPILER_FULL_PLAYWRIGHT_UNSUPPORTED')
+  })
+
   test('拒绝非空输出根，且不覆盖调用方已有文件', async () => {
     const outputDir = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-compiler-non-fresh-'))
     createdDirectories.push(outputDir)
