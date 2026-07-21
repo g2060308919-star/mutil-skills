@@ -5,15 +5,57 @@ import {
 } from '@mutil-skills/e2e-contracts'
 import {
   auditFinalReportFactBinding, auditVerdictFactBinding, buildCompleteGeneration, validateGeneration,
-  createCompletePublicationAuditor, PatternPrivacyScanner,
+  auditRuntimeProvenanceBinding, createCompletePublicationAuditor, PatternPrivacyScanner,
   type BuildCompleteGenerationInput,
 } from '../src/index.js'
-import { bindFixtureExecutionOutcomeReceipt, completeGenerationFixture, rebindFixtureApprovalInputsOuterOnly,
+import { addFixtureInjectionResult, bindFixtureExecutionOutcomeReceipt, completeGenerationFixture, rebindFixtureApprovalInputsOuterOnly,
   rebindFixtureApprovalOuterOnly, refreshFixtureApproval,
   refreshFixtureAttemptFacts, resignFixtureGatewayAudit,
   setFixtureRegressionProfile } from './complete-generation.fixture.js'
 
 describe('完整 generation builder', () => {
+  test('同一 Case 的 real 与 injection 结果独立进入报告，且输入顺序不影响裁决与分区', () => {
+    const forwardInput = completeGenerationFixture()
+    addFixtureInjectionResult(forwardInput)
+    const forward = buildCompleteGeneration(forwardInput)
+
+    const reverseInput = completeGenerationFixture()
+    addFixtureInjectionResult(reverseInput)
+    ;(reverseInput.drafts['browser-results'].content as any).caseResults.reverse()
+    const reversed = buildCompleteGeneration(reverseInput)
+
+    expect(forward.terminalVerdict).toBe('accepted')
+    expect(forward.verdictInput).toEqual(reversed.verdictInput)
+    const report = forward.artifacts.find((item) => item.artifactType === 'final-report')!.content as any
+    expect(report.caseDetails).toHaveLength(2)
+    expect(report.realResults).toHaveLength(1)
+    expect(report.injectionResults).toHaveLength(1)
+    expect(report.realResults[0].id).not.toBe(report.injectionResults[0].id)
+    expect(report.advisoryFailures).toEqual([report.injectionResults[0].id])
+  })
+
+  test('injection attempt 不得指向 real Gateway session', () => {
+    const input = completeGenerationFixture()
+    addFixtureInjectionResult(input)
+    const sessions = (input.drafts['gateway-audit'].content as any).sessions
+    const realResultId = sessions[0].resultId
+    sessions[0].resultId = sessions[1].resultId
+    sessions[1].resultId = realResultId
+
+    expect(() => buildCompleteGeneration(input))
+      .toThrow(/E2E_ATTEMPT_GATEWAY_SESSION_BINDING_INVALID/)
+  })
+
+  test('injection session 交换为 real reservation 时 fail closed', () => {
+    const input = completeGenerationFixture()
+    addFixtureInjectionResult(input)
+    const sessions = (input.drafts['gateway-audit'].content as any).sessions
+    sessions[1].audit.capabilityReservations = structuredClone(sessions[0].audit.capabilityReservations)
+
+    expect(() => buildCompleteGeneration(input))
+      .toThrow(/E2E_ATTEMPT_GATEWAY_RESERVATION_BINDING_INVALID/)
+  })
+
   test('公共输入类型不允许调用方提供任何裁决事实', () => {
     type Forbidden = Extract<keyof BuildCompleteGenerationInput,
       'verdictInput' | 'terminalVerdict' | 'verdict' | 'metrics' | 'finalReport'>
@@ -190,6 +232,43 @@ describe('完整 generation builder', () => {
     }
   })
 
+  test('Builder 在 manifest root digest 前只渲染一份 Runtime provenance，独立审计拒绝 Host measurement 漂移', () => {
+    const input = completeGenerationFixture()
+    const built = buildCompleteGeneration(input)
+    const report = built.artifacts.find((artifact) => artifact.artifactType === 'final-report')!
+    const manifest = built.artifacts.find((artifact) => artifact.artifactType === 'generation-manifest')!
+
+    expect(report.schemaVersion).toBe('3.0.0')
+    expect(manifest.schemaVersion).toBe('2.0.0')
+    expect((report.content as any).runtimeProvenance).toEqual(input.provenance)
+    expect((manifest.content as any).runtimeProvenance).toEqual(input.provenance)
+    expect(auditRuntimeProvenanceBinding(built.artifacts, input.provenance)).toEqual({ valid: true, findings: [] })
+
+    const differentHostMeasurement = { ...input.provenance, chromiumDigest: digestText('host/v1', 'other') }
+    expect(auditRuntimeProvenanceBinding(built.artifacts, differentHostMeasurement).findings.map((finding) => finding.code))
+      .toContain('E2E_GENERATION_RUNTIME_PROVENANCE_HOST_MISMATCH')
+
+    report.prdRevision = digestText('prd-revision/v1', 'forged')
+    expect(auditRuntimeProvenanceBinding(built.artifacts, input.provenance).findings.map((finding) => finding.code))
+      .toContain('E2E_GENERATION_RUNTIME_PROVENANCE_SOURCE_REVISION_MISMATCH')
+  })
+
+  test('Authority state protection level 精确限制报告可声称的安全边界', () => {
+    const local = buildCompleteGeneration(completeGenerationFixture())
+    const localReport = local.artifacts.find((artifact) => artifact.artifactType === 'final-report')!.content as any
+    expect(localReport.cannotClaim).toContain(
+      '本地 Authority 状态保护不能证明抵抗已控制同一 OS 用户的整体回滚，也不构成组织级不可抵赖',
+    )
+
+    const trustedInput = completeGenerationFixture()
+    trustedInput.provenance.authorityStateProtectionLevel = 'trusted-monotonic'
+    const trusted = buildCompleteGeneration(trustedInput)
+    const trustedReport = trusted.artifacts.find((artifact) => artifact.artifactType === 'final-report')!.content as any
+    expect(trustedReport.cannotClaim).not.toContain(
+      '本地 Authority 状态保护不能证明抵抗已控制同一 OS 用户的整体回滚，也不构成组织级不可抵赖',
+    )
+  })
+
   test('FinalReport 独立重算 Scope subject digest，并记录 terminal DecisionReceipt digest', () => {
     const built = buildCompleteGeneration(completeGenerationFixture())
     const scope = built.artifacts.find((artifact) => artifact.artifactType === 'acceptance-scope')!.content as any
@@ -212,6 +291,9 @@ describe('完整 generation builder', () => {
     expect(report.approvals.map((approval: any) => approval.kind)).toEqual(['scope', 'lineage', 'execution'])
     expect(report.approvals[1]).toEqual({
       kind: 'lineage', status: 'approved',
+      approvalMode: 'webauthn',
+      identityVerified: true,
+      separationOfDutiesVerified: true,
       subjectDigest: diff.lineageReview.receipt.decisionSubjectDigest,
       grantDigests: [diff.lineageReview.receipt.signedDigest],
     })
@@ -650,6 +732,21 @@ describe('完整 generation builder', () => {
     expect(() => buildCompleteGeneration(input)).toThrow(/E2E_GENERATION_APPROVAL_SUBJECT_MISMATCH/)
   })
 
+  test('项目 Runtime policy 与会话 Gateway policy 可不同，但 Preflight 必须绑定实际会话', () => {
+    const input = completeGenerationFixture()
+    const projectPolicyDigest = (input.drafts['project-policy'].content as any).runtimePolicy.digest
+    const sessionGatewayPolicyDigest = digestText('test/v1', 'session-gateway-policy')
+    expect(sessionGatewayPolicyDigest).not.toBe(projectPolicyDigest)
+
+    ;(input.drafts['gateway-audit'].content as any).policyDigest = sessionGatewayPolicyDigest
+    ;(input.drafts['browser-preflight'].content as any).gatewayChecks[0].digest = sessionGatewayPolicyDigest
+    input.provenance.gatewayPolicyDigest = sessionGatewayPolicyDigest
+    resignFixtureGatewayAudit(input)
+    refreshFixtureApproval(input)
+
+    expect(buildCompleteGeneration(input).terminalVerdict).toBe('accepted')
+  })
+
   test.each([
     ['Case actor', (input: BuildCompleteGenerationInput) => { (input.drafts['test-cases'].content as any).cases[0].actor = 'ADMIN' }],
     ['obligation actor', (input: BuildCompleteGenerationInput) => { (input.drafts['coverage-universe'].content as any).obligations[0].actor = 'ADMIN' }],
@@ -817,6 +914,13 @@ describe('完整 generation builder', () => {
     ['scope approval', (report: any) => { report.approvals[0].status = 'rejected' }],
     ['lineage approval', (report: any) => { report.approvals[1].status = 'rejected' }],
     ['execution approval', (report: any) => { report.approvals[2].status = 'expired' }],
+    ['approval assurance', (report: any) => {
+      report.approvalAssurance = {
+        approvalMode: 'local-confirmation',
+        identityVerified: true,
+        separationOfDutiesVerified: true,
+      }
+    }],
     ['gateway status', (report: any) => { report.gatewayAudit.status = 'invalid' }],
     ['gateway counters', (report: any) => { report.gatewayAudit.forwarded += 1 }],
     ['noncanonical gateway counter', (report: any) => { report.gatewayAudit.forwarded = Number.NaN }],
@@ -833,6 +937,19 @@ describe('完整 generation builder', () => {
     const report: any = artifacts.find((artifact) => artifact.artifactType === 'final-report')!.content
     mutate(report)
     expect(auditFinalReportFactBinding(artifacts).valid).toBe(false)
+  })
+
+  test('本地确认报告不得伪造身份验证或职责分离保证', () => {
+    const built = buildCompleteGeneration(completeGenerationFixture())
+    const artifacts = structuredClone(built.artifacts)
+    const report: any = artifacts.find((artifact) => artifact.artifactType === 'final-report')!.content
+    report.approvalAssurance = {
+      approvalMode: 'local-confirmation',
+      identityVerified: true,
+      separationOfDutiesVerified: true,
+    }
+    expect(auditFinalReportFactBinding(artifacts).findings.map((finding) => finding.code))
+      .toContain('E2E_GENERATION_REPORT_APPROVAL_ASSURANCE_MISMATCH')
   })
 
   test('Gateway 关键事实被篡改但未由 Gateway 重签时 fail closed', () => {
@@ -881,6 +998,7 @@ function bindFixtureWriteGatewayReservation(input: BuildCompleteGenerationInput)
     isolationAuthorityPublicKeyDigest: digestText('test/v1', 'write-isolation-key'),
   }
   ;(input.drafts['execution-contract'].content as any).runtimeIsolation = runtimeIsolationPolicy
+  input.provenance.authorityPublicKeyDigest = runtimeIsolationPolicy.authorityRpcPublicKeyDigest
   ;(input.drafts['run-bundle'].content as any).runtimeIsolationPolicyDigest =
     digestRuntimeIsolationPolicy(runtimeIsolationPolicy)
   ;(input.drafts['gateway-audit'].content as any).capabilityReservations[0].attemptContext = {

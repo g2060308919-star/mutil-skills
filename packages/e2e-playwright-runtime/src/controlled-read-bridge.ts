@@ -87,7 +87,10 @@ export function createTrustedCompilerControlledReadLauncher(
     }
     const capture = new ReadEvidenceCapture(configuration.runnerInput.page)
     const result = await runReadOnlyCase({ ...configuration.runnerInput, page: capture })
-    const evidence = capture.take()
+    const evidence = result.status === 'input-blocked' || result.status === 'environment-blocked'
+      || result.status === 'safety-blocked'
+      ? capture.takeAvailable()
+      : capture.take()
     return { request: structuredClone(request), result, evidence }
   }
   launchers.set(launcher, session)
@@ -218,6 +221,13 @@ class ReadEvidenceCapture implements BrowserPageAdapter {
   take(): { screenshot: Uint8Array; dom: Uint8Array } {
     if (!this.#screenshot || !this.#dom) throw readBridgeError('E2E_CONTROLLED_READ_EVIDENCE_INCOMPLETE')
     return { screenshot: Uint8Array.from(this.#screenshot), dom: Uint8Array.from(this.#dom) }
+  }
+
+  takeAvailable(): { screenshot: Uint8Array; dom: Uint8Array } {
+    return {
+      screenshot: this.#screenshot ? Uint8Array.from(this.#screenshot) : new Uint8Array(),
+      dom: this.#dom ? Uint8Array.from(this.#dom) : new Uint8Array(),
+    }
   }
 }
 

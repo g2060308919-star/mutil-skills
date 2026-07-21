@@ -136,6 +136,11 @@ export class InjectionGateway {
     return this.#completedReservations.map((reservation) => ({ ...reservation }))
   }
 
+  /** Runtime transport Host 启动时用于把 projected rule 预绑定到签名 capability。 */
+  getApprovedCapabilities(): InjectionCapability[] {
+    return structuredClone(this.#capabilities)
+  }
+
   private decideRead(gateway: ReadOnlyGateway, raw: RawWriteHttpRequest, bootstrap: boolean): InjectionGatewayDecision {
     const decision = gateway.decide(raw)
     if (decision.decision === 'forward') {

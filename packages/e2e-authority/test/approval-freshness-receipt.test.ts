@@ -12,11 +12,14 @@ async function readyReadGrant(now: () => Date) {
   const authority = LocalApprovalAuthority.create({ issuer: 'AUTHORITY', keyId: 'KEY-1', now,
     manualIdentities: [{ subject: 'scope-alice', roles: ['scope-approver'] }] })
   const discoverySubject = {
-    schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
+    schemaVersion: '1.1.0' as const, assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
     environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'USER',
     expectedPageIdentity: { url: 'https://example.test/', title: 'Home', heading: 'Home', ariaSignals: ['main'] },
     bootstrapIntentsDigest: d('bootstrap'),
-    actions: [{ actionId: 'DISCOVERY-NAV', operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{
+      actionId: 'DISCOVERY-NAV', operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
+    }],
   }
   const discovery = await authority.issueDiscoveryGrant({ subject: discoverySubject,
     approver: { subject: 'alice', roles: ['e2e-approver'] }, ttlMs: 60_000 })
@@ -29,18 +32,27 @@ async function readyReadGrant(now: () => Date) {
       headings: ['Home'], role: 'USER', ariaSignals: ['main'] } } })
   const runBundle = { runId: 'RUN-1', allInputRefs: [{ artifactId: 'A', digest: d('input') }],
     schedule: [{ ordinal: 0, caseId: 'CASE-1', stepIds: ['STEP-1'], actionIds: ['ACTION-1'] }],
-    attemptPlans: [{ caseId: 'CASE-1', slots: 1 }], signedCapabilities: [{ capabilityId: 'PENDING',
-      actionId: 'ACTION-1', operation: 'dom-read', effect: 'read', maxUses: 1, digest: d('pending') }],
+    attemptPlans: [{ caseId: 'CASE-1', slots: 1 }], signedCapabilities: [
+      { capabilityId: 'PENDING-DOM', actionId: 'ACTION-1', operation: 'dom-read',
+        effect: 'read', maxUses: 1, digest: d('pending-dom') },
+      { capabilityId: 'PENDING-HTTP', actionId: 'ACTION-1', operation: 'http-request',
+        effect: 'read', maxUses: 1, digest: d('pending-http') },
+    ],
     secretRefs: ['SECRET-1'], runtimePolicyDigest: d('runtime'),
     runtimeIsolationPolicyDigest: 'not-applicable' }
   const subject: ReadApprovalSubject = {
-    schemaVersion: '2.0.0', assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
+    schemaVersion: '2.1.0', assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
     requirementModelDigest: d('model'), coveragePolicyDigest: d('coverage'), universeDigest: d('universe'),
     caseDigest: d('cases'), actionMapDigest: d('actions'), policyDigest: d('policy'),
     executionContractDigest: d('execution-contract'),
     runBundleProjectionDigest: digestApprovalProjection('run-bundle', runBundle), environment: 'test',
     baseOrigin: 'https://example.test', actor: 'USER', discoveryGrantId: discovery.grantId, preflightDigest,
-    actions: [{ actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1 }],
+    requests: [{ requestId: 'REQUEST-1', method: 'GET', url: 'https://example.test/api/orders',
+      headers: [], bodyDigest: d('empty-body'), redirectPolicy: { mode: 'deny' } }],
+    actions: [
+      { actionId: 'ACTION-1', operation: 'dom-read', maxUses: 1, requestIds: [] },
+      { actionId: 'ACTION-1', operation: 'http-request', maxUses: 1, requestIds: ['REQUEST-1'] },
+    ],
   }
   const grant = await authority.issueReadGrant({ subject,
     approver: { subject: 'alice', roles: ['e2e-approver'] }, ttlMs: 30_000 })
@@ -59,11 +71,14 @@ async function readyReadGrant(now: () => Date) {
 async function readyWriteGrant(now: () => Date) {
   const authority = LocalApprovalAuthority.create({ issuer: 'AUTHORITY', keyId: 'KEY-1', now })
   const discoverySubject = {
-    schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
+    schemaVersion: '1.1.0' as const, assetId: 'ASSET-1', prdRevision: d('prd'), scopeDigest: d('scope'),
     environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'OPERATOR',
     expectedPageIdentity: { url: 'https://example.test/orders/1', title: 'Order', heading: 'Order 1', ariaSignals: ['main'] },
     bootstrapIntentsDigest: d('bootstrap'),
-    actions: [{ actionId: 'DISCOVERY-NAV', operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{
+      actionId: 'DISCOVERY-NAV', operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
+    }],
   }
   const discovery = await authority.issueDiscoveryGrant({ subject: discoverySubject,
     approver: { subject: 'alice', roles: ['e2e-approver'] }, ttlMs: 60_000 })
@@ -141,6 +156,9 @@ describe('LocalApprovalAuthority approval freshness receipt', () => {
       currentSubject: fixture.subject, expectedCapabilities: fixture.capabilities,
       browserPreflight: fixture.browserPreflight, runBundle: fixture.runBundle })
     expect(valid()).toMatchObject({ authentic: true, current: true, allowed: true, status: 'valid' })
+    expect(receipt.capabilities).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: 'http-request', effect: 'read' }),
+    ]))
 
     expect(fixture.authority.verifyApprovalFreshnessReceipt({ receipt,
       currentSubject: { ...fixture.subject, actor: 'ADMIN' }, expectedCapabilities: fixture.capabilities,

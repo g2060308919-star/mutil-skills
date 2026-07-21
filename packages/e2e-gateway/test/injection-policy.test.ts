@@ -47,6 +47,10 @@ function grant(response: CanonicalInjectionResponse = baseResponse): SignedInjec
       baseOrigin: 'https://test.example.com', actions: [],
     },
     subjectDigest: digestText('test/v1', 'subject'), issuedAt: '2026-07-11T10:00:00.000Z',
+    approvalContext: { schemaVersion: '1.0.0', subject: 'os-user:qa', runId: 'RUN-1',
+      approvalType: 'execution', subjectDigest: digestText('test/v1', 'subject'),
+      installationDigest: digestText('test/v1', 'installation'), origin: 'http://127.0.0.1:43210',
+      issuedAt: '2026-07-11T10:00:00.000Z', expiresAt: '2026-07-11T10:10:00.000Z' },
     expiresAt: '2026-07-11T10:10:00.000Z', capabilities: [capability], revocationSequence: 0,
     signature: 'signature',
   }

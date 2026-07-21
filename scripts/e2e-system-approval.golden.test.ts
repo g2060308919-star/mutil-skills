@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { chromium } from 'playwright'
 import { resolveChromeExecutablePath } from './e2e-browser-runtime.js'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 import { digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, LocalLeaseAuthority } from '@mutil-skills/e2e-authority'
 import { LocalArtifactStore, computeVerdict } from '@mutil-skills/e2e-engine'
@@ -27,8 +28,9 @@ describe('Spec §29 审批边界系统 E2E', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'local-authority', keyId: 'approval-system-7', now,
       approvalIdentities: [{ subject: 'os-user:approval', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) =>
-        sessionRef === 'approval-session' ? 'os-user:approval' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'approval-session'
+        ? createGoldenApprovalReceipt('os-user:approval', 'RUN-SCENARIO-7', expected,
+          '2026-07-12T09:59:00.000Z') : undefined,
     })
     const leaseAuthority = new LocalLeaseAuthority({ now })
     const lease = await leaseAuthority.acquire({
@@ -76,7 +78,8 @@ describe('Spec §29 审批边界系统 E2E', () => {
           caseId: 'CASE-SCENARIO-7', actionId: 'ACTION-WRITE', url: 'http://fixture.test/orders/100',
           buttonName: '批准', beforeText: '待审核', afterText: '已批准',
           expectedIdentity: { title: '订单', heading: '订单 100' },
-          authorization: { grant, currentSubject, authority: authority.createWriteExecutionClient() },
+          authorization: { grant, currentSubject,
+            authority: authority.createWriteExecutionClient(grant.approvalContext) },
           lease: {
             leaseId: activeLease.leaseId, fencingToken: activeLease.fencingToken,
             targetFingerprint: digest('target-v1'), authority: leaseAuthority.createExecutionClient(),
@@ -112,8 +115,9 @@ describe('Spec §29 审批边界系统 E2E', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'local-authority', keyId: 'approval-system-8', now: () => new Date('2026-07-12T10:00:00.000Z'),
       approvalIdentities: [{ subject: 'os-user:blanket-consent', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) =>
-        sessionRef === 'blanket-session' ? 'os-user:blanket-consent' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'blanket-session'
+        ? createGoldenApprovalReceipt('os-user:blanket-consent', 'RUN-SCENARIO-8', expected,
+          '2026-07-12T09:59:00.000Z') : undefined,
     })
     const blanketApprover = { subject: 'os-user:blanket-consent', roles: ['e2e-approver'] }
     const base = legacyWriteSubject({
@@ -173,11 +177,12 @@ async function prepareWriteSubject(authority: LocalApprovalAuthority, input: {
 }): Promise<WriteApprovalSubject> {
   const scopeDigest = digest('scope')
   const discoverySubject = {
-    schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-APPROVAL', prdRevision: input.revision,
+    schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-APPROVAL', prdRevision: input.revision,
     scopeDigest, environment: input.environment, baseOrigin: 'http://fixture.test', actor: 'operator',
     expectedPageIdentity: { url: 'http://fixture.test/orders/100', title: '订单', heading: '订单 100', ariaSignals: ['main'] },
     bootstrapIntentsDigest: digest('bootstrap'),
-    actions: [{ actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-DISCOVERY', operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
   }
   const discovery = await authority.issueDiscoveryGrant({ subject: discoverySubject,
     approver: { subject: 'os-user:approval', roles: ['e2e-approver'] }, approvalSessionRef: 'approval-session', ttlMs: 60_000 })

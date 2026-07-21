@@ -7,7 +7,7 @@ describe('approval projection digest', () => {
       actionMapRevision: 1, pageIdentities: [{ pageId: 'PAGE-1', origin: 'https://example.test', assertionDigest: 'D' }],
       actions: [{ caseId: 'CASE-1', stepId: 'STEP-1', actionId: 'ACTION-1', pageIdentityId: 'PAGE-1',
         locatorCandidates: [{ strategy: 'role', value: 'main', confidence: 1 }], playwrightAction: 'page.goto',
-        waits: [], oracleIds: ['ORACLE-1'], effect: 'read',
+        waits: [], oracleIds: ['ORACLE-1'], effect: 'read', requestIds: [],
         capabilities: [{ operation: 'dom-read', capabilityId: 'CAP-1' }] }],
       unmappedSteps: [], discoveredRisks: [],
     }

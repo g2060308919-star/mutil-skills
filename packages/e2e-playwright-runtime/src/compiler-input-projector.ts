@@ -253,11 +253,19 @@ scopeDigest: string): ReturnType<typeof ApprovalFreshnessReceiptSchema.parse> {
   const grants = records(approval.grants)
   if (grants.length !== 1) throw approvalError('Compiler 只接受一个当前 Execution Approval receipt')
   const parsed = ApprovalFreshnessReceiptSchema.safeParse(grants[0])
-  if (!parsed.success || !verifyApprovalFreshness(parsed.data) || parsed.data.status !== 'valid'
-    || approval.runBundleDigest !== parsed.data.runBundleDigest
-    || input.runBundle.contentDigest !== parsed.data.runBundleDigest) {
-    throw approvalError('Approval freshness receipt 无效或未绑定 Run Bundle')
-  }
+  if (!parsed.success) throw projectorError(
+    'E2E_COMPILER_APPROVAL_RECEIPT_INVALID', 'Approval freshness receipt 不符合严格 Schema',
+  )
+  if (!verifyApprovalFreshness(parsed.data)) throw projectorError(
+    'E2E_COMPILER_APPROVAL_SIGNATURE_INVALID', 'Approval freshness receipt 签名无效',
+  )
+  if (parsed.data.status !== 'valid') throw projectorError(
+    'E2E_COMPILER_APPROVAL_NOT_CURRENT', 'Approval freshness receipt 已过期或撤销',
+  )
+  if (approval.runBundleDigest !== parsed.data.runBundleDigest
+    || input.runBundle.contentDigest !== parsed.data.runBundleDigest) throw projectorError(
+    'E2E_COMPILER_APPROVAL_RUN_BUNDLE_INVALID', 'Approval freshness receipt 未绑定 Run Bundle',
+  )
   const receipt = parsed.data
   const subject = receipt.executionSubjectSnapshot
   if (subject.scopeDigest !== scopeDigest) throw approvalError('Approval subject 未绑定 Host readiness scopeDigest')

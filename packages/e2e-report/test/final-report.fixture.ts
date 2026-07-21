@@ -1,12 +1,26 @@
+import { deriveExecutionResultId } from '@mutil-skills/e2e-contracts'
+
 const digest = (character: string) => `sha256:${character.repeat(64)}`
 const valueMetric = { status: 'value', numerator: 1, denominator: 2, percentage: 50 }
+const realResultId = deriveExecutionResultId('CASE-REAL-1', 'real-environment')
+const injectionResultId = deriveExecutionResultId('CASE-REAL-1', 'gateway-injection')
 
 export const finalReportFixture = {
-  artifactId: 'FINAL-REPORT-1', artifactType: 'final-report', schemaVersion: '2.0.0', engineVersion: '2.0.0',
+  artifactId: 'FINAL-REPORT-1', artifactType: 'final-report', schemaVersion: '3.0.0', engineVersion: '2.0.0',
   assetId: 'PRODUCT/PRD-1', prdRevision: digest('a'), generationId: 'GEN-1',
   createdAt: '2026-07-12T00:00:00.000Z', contentDigest: digest('b'), signatures: [], dependencies: [],
   graph: { defines: [], references: [] },
   content: {
+    approvalAssurance: { approvalMode: 'local-confirmation', identityVerified: false,
+      separationOfDutiesVerified: false },
+    runtimeProvenance: {
+      runtimeVersion: '0.0.0', runtimeInstallationDigest: digest('a'), protocolVersion: '1.0.0',
+      contractsVersion: '0.0.0', engineVersion: '2.0.0', playwrightVersion: '1.61.1',
+      chromiumDigest: digest('b'), gatewayPolicyDigest: digest('c'), authorityPublicKeyDigest: digest('d'),
+      authorityStateProtectionLevel: 'local-crash-integrity',
+      projectIdentityDigest: digest('e'), sourceRevisionDigest: digest('f'), sourceRepositoryIndependent: true,
+      isolationProofDigest: digest('0'),
+    },
     verdictRuleVersion: '2.0.0', verdictInputDigest: digest('c'), verdict: 'safety-blocked',
     reasonCodes: ['E2E_GATEWAY_AUDIT_INVALID'], cannotClaim: ['不能宣称全部必要 Case 已可靠执行'],
     businessFailuresObserved: [], advisoryFailures: [],
@@ -20,9 +34,10 @@ export const finalReportFixture = {
     },
     scope: [{ id: 'REQ-1', digest: digest('d') }],
     traceability: [{ fromId: 'REQ-1', toId: 'RULE-1', kind: 'defines' }],
-    realResults: [{ id: 'CASE-REAL-1', digest: digest('e') }],
-    injectionResults: [{ id: 'CASE-INJECT-1', digest: digest('f') }],
-    manualResults: [{ id: 'MANUAL-1', digest: digest('1') }],
+    realResults: [{ id: realResultId, digest: digest('e') }],
+    injectionResults: [{ id: injectionResultId, digest: digest('f') }],
+    manualResults: [{ id: 'MANUAL-1', digest: digest('1'), approvalMode: 'local-confirmation',
+      identityVerified: false, separationOfDutiesVerified: false }],
     risks: [{ code: 'RISK-GATEWAY', severity: 'high', ref: 'gateway-audit' }],
     regression: { manifestDigest: digest('2'), command: 'npm run e2e:regression' },
     title: '<script>alert(1)</script> 订单验收报告',
@@ -31,9 +46,12 @@ export const finalReportFixture = {
       approvalGrantDigests: [digest('5')], generationDigest: digest('6'),
     },
     approvals: [
-      { kind: 'scope', status: 'approved', subjectDigest: digest('3'), grantDigests: [digest('5')] },
-      { kind: 'lineage', status: 'approved', subjectDigest: digest('9'), grantDigests: [digest('a')] },
-      { kind: 'execution', status: 'approved', subjectDigest: digest('4'), grantDigests: [digest('5')] },
+      { kind: 'scope', status: 'approved', subjectDigest: digest('3'), grantDigests: [digest('5')],
+        approvalMode: 'local-confirmation', identityVerified: false, separationOfDutiesVerified: false },
+      { kind: 'lineage', status: 'approved', subjectDigest: digest('9'), grantDigests: [digest('a')],
+        approvalMode: 'local-confirmation', identityVerified: false, separationOfDutiesVerified: false },
+      { kind: 'execution', status: 'approved', subjectDigest: digest('4'), grantDigests: [digest('5')],
+        approvalMode: 'local-confirmation', identityVerified: false, separationOfDutiesVerified: false },
     ],
     environment: {
       environmentId: 'STAGING', origins: ['https://example.test'],
@@ -55,7 +73,8 @@ export const finalReportFixture = {
     }],
     caseDetails: [
       {
-        caseId: 'CASE-REAL-1', title: '真实列表', executionMode: 'real-environment', necessity: 'required', status: 'passed',
+        resultId: realResultId, caseId: 'CASE-REAL-1', title: '真实列表', executionMode: 'real-environment',
+        necessity: 'required', status: 'passed',
         preconditions: ['审核员已登录'],
         steps: [{
           stepId: 'STEP-1', action: '打开订单列表', expected: '显示订单', actual: '显示 1 条订单',
@@ -63,7 +82,8 @@ export const finalReportFixture = {
         }],
       },
       {
-        caseId: 'CASE-INJECT-1', title: '500 注入', executionMode: 'browser-injection', necessity: 'required', status: 'safety-blocked',
+        resultId: injectionResultId, baselineResultId: realResultId, caseId: 'CASE-REAL-1', title: '500 注入',
+        executionMode: 'browser-injection', necessity: 'required', status: 'safety-blocked',
         preconditions: ['Gateway policy 已安装'],
         steps: [{
           stepId: 'STEP-2', action: '注入 500', expected: '显示错误提示', actual: 'Gateway 计数缺失',
@@ -78,7 +98,8 @@ export const finalReportFixture = {
     },
     browserHealth: [{ code: 'CONSOLE-WARN', severity: 'low', ref: 'CASE-REAL-1' }],
     diagnostics: [{
-      caseId: 'CASE-INJECT-1', category: 'safety', selectedAttemptId: 'ATTEMPT-1', rationale: 'Gateway 计数无法闭合',
+      resultId: injectionResultId, caseId: 'CASE-REAL-1', category: 'safety', selectedAttemptId: 'ATTEMPT-1',
+      rationale: 'Gateway 计数无法闭合',
       attempts: [{
         attemptId: 'ATTEMPT-1', slot: 0, status: 'safety-blocked', mode: 'gateway-injection',
         effect: 'reversible-write', eventChainDigest: digest('f'), changeDigest: null,
@@ -92,7 +113,7 @@ export const finalReportFixture = {
     regressionDetails: {
       testDomain: 'prd-e2e-trusted-compiler', executionProfile: 'trusted-read-only',
       generationId: 'GEN-1', manifestDigest: digest('2'), command: 'npm run e2e:regression',
-      caseIds: ['CASE-REAL-1', 'CASE-INJECT-1'],
+      caseIds: ['CASE-REAL-1'],
       trustedCompiler: {
         compilerInputDigest: digest('1'), compilerVersion: '4.0.0', compilerDigest: digest('2'),
         templateVersion: '3.0.0', templateDigest: digest('3'), sourceSetDigest: digest('4'),

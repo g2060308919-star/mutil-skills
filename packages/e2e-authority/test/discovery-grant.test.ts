@@ -8,14 +8,15 @@ const digest = (value: string) => digestText('discovery-test/v1', value)
 
 function subject(): DiscoveryApprovalSubject {
   return {
-    schemaVersion: '1.0.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest('prd'), scopeDigest: digest('scope'),
+    schemaVersion: '1.1.0', assetId: 'PRODUCT-PRD-1', prdRevision: digest('prd'), scopeDigest: digest('scope'),
     environment: 'test', baseOrigin: 'https://test.example.com', actor: 'auditor',
     expectedPageIdentity: {
       url: 'https://test.example.com/orders', title: '订单', heading: '订单列表',
       ariaSignals: ['main:订单列表'],
     },
     bootstrapIntentsDigest: digest('bootstrap-intents'),
-    actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation', maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation', maxUses: 1, requestIds: [] }],
   }
 }
 
@@ -25,14 +26,15 @@ function readSubject(
   preflightDigest: string,
 ): ReadApprovalSubject {
   return {
-    schemaVersion: '2.0.0', assetId: discovery.assetId, prdRevision: discovery.prdRevision,
+    schemaVersion: '2.1.0', assetId: discovery.assetId, prdRevision: discovery.prdRevision,
     scopeDigest: discovery.scopeDigest, requirementModelDigest: digest('model'),
     coveragePolicyDigest: digest('coverage'), universeDigest: digest('universe'),
     caseDigest: digest('case'), actionMapDigest: digest('actions'), policyDigest: digest('policy'),
     executionContractDigest: digest('execution'), runBundleProjectionDigest: digest('run-bundle'),
     environment: discovery.environment, baseOrigin: discovery.baseOrigin, actor: discovery.actor,
     discoveryGrantId, preflightDigest,
-    actions: [{ actionId: 'ACTION-READ', operation: 'dom-read', maxUses: 1 }],
+    requests: [],
+    actions: [{ actionId: 'ACTION-READ', operation: 'dom-read', maxUses: 1, requestIds: [] }],
   }
 }
 
@@ -65,6 +67,18 @@ describe('LocalApprovalAuthority discovery grants', () => {
       actionId: 'ACTION-PREFLIGHT', attemptId: 'ATTEMPT-PREFLIGHT',
     })
     expect(reservation).toMatchObject({ status: 'reserved', actionId: 'ACTION-PREFLIGHT' })
+    await expect(authority.reserveForSubject({
+      grant, currentSubject: subject(), capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: 'ACTION-PREFLIGHT', attemptId: 'ATTEMPT-PREFLIGHT',
+    })).resolves.toEqual(reservation)
+    await expect(authority.reserveForSubject({
+      grant, currentSubject: subject(), capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: 'ACTION-CHANGED', attemptId: 'ATTEMPT-PREFLIGHT',
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_DISCOVERY_RESERVATION_REPLAY_MISMATCH' })
+    await expect(authority.reserveForSubject({
+      grant, currentSubject: subject(), capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: 'ACTION-PREFLIGHT', attemptId: 'ATTEMPT-NEW',
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_CAPABILITY_EXHAUSTED' })
   })
 
   test('签发入口只读取一次 subject，Getter 不能在校验后换 target', async () => {
@@ -89,7 +103,7 @@ describe('LocalApprovalAuthority discovery grants', () => {
     })
 
     expect(grant.subject.expectedPageIdentity.url).toBe('https://test.example.com/orders')
-    expect(grant.capabilities[0]!.targetUrl).toBe('https://test.example.com/orders')
+    expect(grant.capabilities[0]).toMatchObject({ targetUrl: 'https://test.example.com/orders' })
   })
 
   test('拒绝写操作、空 actor、跨 origin 页面和过长 TTL', async () => {
@@ -99,11 +113,14 @@ describe('LocalApprovalAuthority discovery grants', () => {
     const invalidSubjects = [
       { ...subject(), actor: '' },
       { ...subject(), expectedPageIdentity: { ...subject().expectedPageIdentity, url: 'https://evil.example.com/orders' } },
-      { ...subject(), actions: [{ actionId: 'ACTION-WRITE', operation: 'write' as 'local-navigation', maxUses: 1 }] },
+      { ...subject(), actions: [{
+        actionId: 'ACTION-WRITE', operation: 'write' as 'local-navigation', maxUses: 1 as const, requestIds: [],
+      }] },
     ]
     for (const candidate of invalidSubjects) {
       await expect(authority.issueDiscoveryGrant({
-        subject: candidate, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
+        subject: candidate as DiscoveryApprovalSubject,
+        approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
       })).rejects.toMatchObject({ code: 'E2E_APPROVAL_DISCOVERY_SCOPE_INVALID' })
     }
     await expect(authority.issueDiscoveryGrant({
@@ -161,6 +178,21 @@ describe('LocalApprovalAuthority discovery grants', () => {
         role: 'auditor', ariaSignals: ['main:订单列表'],
       } },
     })
+    await expect(authority.completeDiscoveryPreflight({
+      grant: readyGrant, currentSubject: discovery,
+      reservationId: readyReservation.reservationId,
+      capabilityId: readyCapability.capabilityId,
+      outcome: { status: 'ready', observedIdentity: {
+        url: discovery.expectedPageIdentity.url, title: '订单', headings: ['订单列表'],
+        role: 'auditor', ariaSignals: ['main:订单列表'],
+      } },
+    })).resolves.toBe(readyDigest)
+    await expect(authority.completeDiscoveryPreflight({
+      grant: readyGrant, currentSubject: discovery,
+      reservationId: readyReservation.reservationId,
+      capabilityId: readyCapability.capabilityId,
+      outcome: { status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH' },
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_PREFLIGHT_RESERVATION_INVALID' })
     await expect(authority.issueReadGrant({
       subject: { ...readSubject(discovery, readyGrant.grantId, readyDigest), prdRevision: digest('changed-prd') },
       approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
@@ -185,5 +217,32 @@ describe('LocalApprovalAuthority discovery grants', () => {
       subject: changingRead, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
     })
     expect(readGrant.subject.prdRevision).toBe(discovery.prdRevision)
+  })
+
+  test('已完成 preflight 的精确恢复不受随后 grant 过期影响', async () => {
+    let now = new Date('2026-07-12T10:00:00.000Z')
+    const authority = LocalApprovalAuthority.create({
+      issuer: 'local-authority', keyId: 'discovery-key', now: () => now,
+    })
+    const discovery = subject()
+    const grant = await authority.issueDiscoveryGrant({
+      subject: discovery, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
+    })
+    const capability = grant.capabilities[0]!
+    const reservation = await authority.reserveForSubject({
+      grant, currentSubject: discovery, capabilityId: capability.capabilityId,
+      actionId: capability.actionId, attemptId: 'ATTEMPT-EXPIRY-RECOVERY',
+    })
+    const input = {
+      grant, currentSubject: discovery, reservationId: reservation.reservationId,
+      capabilityId: capability.capabilityId,
+      outcome: { status: 'ready' as const, observedIdentity: {
+        url: discovery.expectedPageIdentity.url, title: '订单', headings: ['订单列表'],
+        role: 'auditor', ariaSignals: ['main:订单列表'],
+      } },
+    }
+    const digest = await authority.completeDiscoveryPreflight(input)
+    now = new Date('2026-07-12T10:02:00.000Z')
+    await expect(authority.completeDiscoveryPreflight(input)).resolves.toBe(digest)
   })
 })

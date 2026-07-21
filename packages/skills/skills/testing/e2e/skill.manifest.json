@@ -10,44 +10,18 @@
   },
   "requires": [
     {
-      "capability": "e2e.contracts",
-      "satisfiedBy": ["@mutil-skills/e2e-contracts"],
-      "whenMissing": { "action": "block", "terminalState": "environment-blocked", "reasonCode": "E2E_CONTRACTS_UNAVAILABLE" }
-    },
-    {
-      "capability": "e2e.engine",
-      "satisfiedBy": ["@mutil-skills/e2e-engine"],
-      "whenMissing": { "action": "block", "terminalState": "environment-blocked", "reasonCode": "E2E_ENGINE_UNAVAILABLE" }
-    },
-    {
-      "capability": "e2e.authority",
-      "satisfiedBy": ["@mutil-skills/e2e-authority", "independent Authority health + trusted key probe"],
-      "whenMissing": { "action": "block", "terminalState": "safety-blocked", "reasonCode": "E2E_AUTHORITY_UNAVAILABLE" }
-    },
-    {
-      "capability": "e2e.gateway",
-      "satisfiedBy": ["@mutil-skills/e2e-gateway", "independent Egress Guard health + enforcement probe"],
-      "whenMissing": { "action": "block", "terminalState": "safety-blocked", "reasonCode": "E2E_GATEWAY_UNAVAILABLE" }
-    },
-    {
-      "capability": "browser.chromium",
-      "satisfiedBy": ["@mutil-skills/e2e-playwright-runtime", "Chromium executable + sandbox probe"],
-      "whenMissing": { "action": "block", "terminalState": "environment-blocked", "reasonCode": "E2E_CHROMIUM_UNAVAILABLE" }
-    },
-    {
-      "capability": "e2e.report",
-      "satisfiedBy": ["@mutil-skills/e2e-report"],
-      "whenMissing": { "action": "block", "terminalState": "environment-blocked", "reasonCode": "E2E_REPORT_RENDERER_UNAVAILABLE" }
-    },
-    {
-      "capability": "e2e.sanitizer",
-      "satisfiedBy": ["@mutil-skills/e2e-engine", "PatternPrivacyScanner + sanitizer canary health probe"],
-      "whenMissing": { "action": "block", "terminalState": "safety-blocked", "reasonCode": "E2E_SANITIZER_UNAVAILABLE" }
-    },
-    {
-      "capability": "artifact.posix-local-fs",
-      "satisfiedBy": ["macOS/Linux local filesystem", "POSIX advisory lock", "dirfd O_NOFOLLOW", "directory fsync", "Python 3.9+"],
-      "whenMissing": { "action": "block", "terminalState": "artifact-blocked", "reasonCode": "E2E_ARTIFACT_RUNTIME_UNAVAILABLE" }
+      "capability": "e2e.runtime-host",
+      "satisfiedBy": [
+        "~/.mutil-skills/bin/repo-e2e doctor --json",
+        "verified installation manifest + protocol major + safety probes"
+      ],
+      "whenMissing": {
+        "action": "prompt-install",
+        "package": "@mutil-skills/e2e-runtime",
+        "version": "0.2.1",
+        "terminalState": "environment-blocked",
+        "reasonCode": "E2E_RUNTIME_HOST_UNAVAILABLE"
+      }
     }
   ]
 }

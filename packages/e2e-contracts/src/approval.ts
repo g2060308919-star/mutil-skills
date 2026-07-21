@@ -1,37 +1,35 @@
-export interface DiscoveryApprovalSubject {
-  schemaVersion: '1.0.0'
-  assetId: string
-  prdRevision: string
-  scopeDigest: string
-  environment: 'local' | 'test' | 'staging' | 'production'
-  baseOrigin: string
-  actor: string
-  expectedPageIdentity: {
-    url: string
-    title: string
-    heading: string
-    ariaSignals: string[]
-  }
-  bootstrapIntentsDigest: string
-  actions: Array<{
-    actionId: string
-    operation: 'dom-read' | 'screenshot' | 'local-navigation'
-    maxUses: number
-  }>
-}
+import type {
+  DiscoveryApprovalSubjectV11,
+  LegacyDiscoveryApprovalSubjectV10,
+} from './approval-subject.js'
+import type {
+  LegacyReadApprovalSubjectV20,
+  ReadApprovalSubjectV21,
+} from './approval-freshness.js'
+import type {
+  CanonicalDiscoveryCapability,
+  CanonicalReadCapability,
+} from './signed-grant.js'
 
-export interface DiscoveryCapability {
-  capabilityId: string
-  nonce: string
-  transport: 'browser-local'
-  effect: 'read'
-  actionId: string
-  operation: DiscoveryApprovalSubject['actions'][number]['operation']
-  targetUrl: string
-  actor: string
-  expectedPageIdentityDigest: string
-  bootstrapIntentsDigest: string
-  maxUses: number
+export type CanonicalDiscoveryApprovalSubject = DiscoveryApprovalSubjectV11
+/** 当前签发与执行协议只接受 canonical v1.1 subject。 */
+export type DiscoveryApprovalSubject = CanonicalDiscoveryApprovalSubject
+/** 仅供历史状态读取/迁移入口使用；迁移完成前不得进入签发、验签或执行接口。 */
+export type DiscoveryApprovalSubjectMigrationInput =
+  | LegacyDiscoveryApprovalSubjectV10
+  | CanonicalDiscoveryApprovalSubject
+export type DiscoveryCapability = CanonicalDiscoveryCapability
+
+export interface CanonicalApprovalContext {
+  schemaVersion: '1.0.0'
+  subject: string
+  runId: string
+  approvalType: 'discovery' | 'execution'
+  subjectDigest: string
+  installationDigest: string
+  origin: string
+  issuedAt: string
+  expiresAt: string
 }
 
 export interface SignedDiscoveryGrant {
@@ -39,7 +37,8 @@ export interface SignedDiscoveryGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
+  approvalContext: CanonicalApprovalContext
   subject: DiscoveryApprovalSubject
   subjectDigest: string
   issuedAt: string
@@ -61,44 +60,27 @@ export interface DiscoveryPreflightOutcome {
   }
 }
 
-export interface ReadApprovalSubject {
-  schemaVersion: '2.0.0'
-  assetId: string
-  prdRevision: string
-  scopeDigest: string
-  requirementModelDigest: string
-  coveragePolicyDigest: string
-  universeDigest: string
-  caseDigest: string
-  actionMapDigest: string
-  policyDigest: string
-  executionContractDigest: string
-  runBundleProjectionDigest: string
-  environment: 'local' | 'test' | 'staging' | 'production'
-  baseOrigin: string
-  actor: string
-  discoveryGrantId: string
-  preflightDigest: string
-  actions: Array<{
-    actionId: string
-    operation: 'dom-read' | 'screenshot' | 'local-navigation'
-    maxUses: number
-  }>
-}
+export type CanonicalReadApprovalSubject = ReadApprovalSubjectV21
+/** 当前签发与执行协议只接受 canonical v2.1 subject。 */
+export type ReadApprovalSubject = CanonicalReadApprovalSubject
+/** 仅供历史状态读取/迁移入口使用；迁移完成前不得进入签发、验签或执行接口。 */
+export type ReadApprovalSubjectMigrationInput = LegacyReadApprovalSubjectV20 | CanonicalReadApprovalSubject
+export type ReadCapability = CanonicalReadCapability
 
 export interface ApproverIdentity {
   subject: string
   roles: string[]
 }
 
-export interface ReadCapability {
-  capabilityId: string
-  nonce: string
-  transport: 'browser-local'
-  effect: 'read'
-  actionId: string
-  operation: ReadApprovalSubject['actions'][number]['operation']
-  maxUses: number
+/** 本地确认只证明当前 OS caller 明确确认，不代表已验证自然人身份。 */
+export interface LocalCallerApprover {
+  kind: 'local-caller'
+}
+
+export type ApprovalApprover = ApproverIdentity | LocalCallerApprover
+
+export function approvalApproverSubject(approver: ApprovalApprover): string {
+  return 'kind' in approver ? 'local-caller' : approver.subject
 }
 
 export interface SignedReadGrant {
@@ -106,7 +88,8 @@ export interface SignedReadGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
+  approvalContext: CanonicalApprovalContext
   subject: ReadApprovalSubject
   subjectDigest: string
   issuedAt: string
@@ -120,6 +103,7 @@ export type CanonicalPayload =
   | { kind: 'no-body' }
   | { kind: 'json'; digest: string }
   | { kind: 'binary'; digest: string }
+  | { kind: 'template'; templateDigest: string }
 
 export interface HttpIntent {
   intentId: string
@@ -128,6 +112,7 @@ export interface HttpIntent {
   exactPath: string
   query: Array<[string, string]>
   payload: CanonicalPayload
+  headers?: Array<{ name: string; value: string }>
   targetFingerprint: string
   maxRequests: number
   expectedOrder: number
@@ -181,7 +166,8 @@ export interface SignedWriteGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
+  approvalContext: CanonicalApprovalContext
   subject: WriteApprovalSubject
   subjectDigest: string
   issuedAt: string
@@ -252,7 +238,8 @@ export interface SignedInjectionGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
+  approvalContext: CanonicalApprovalContext
   subject: InjectionApprovalSubject
   subjectDigest: string
   issuedAt: string
@@ -296,7 +283,8 @@ export interface SignedWebSocketReadGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
+  approvalContext: CanonicalApprovalContext
   subject: WebSocketReadApprovalSubject
   subjectDigest: string
   issuedAt: string
@@ -340,7 +328,8 @@ export interface SignedSseReadGrant {
   issuer: string
   keyId: string
   proofScope: 'local-os-user'
-  approver: ApproverIdentity
+  approver: ApprovalApprover
+  approvalContext: CanonicalApprovalContext
   subject: SseReadApprovalSubject
   subjectDigest: string
   issuedAt: string

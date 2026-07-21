@@ -121,6 +121,12 @@ describe('Scope/Lineage DecisionReceipt contract', () => {
       ...scope, scopeDecision: { decisionId: 'SCOPE-1', status: 'approved', receipt: badReceipt },
     })).success).toBe(false)
     expect(DecisionReceiptSchema.safeParse({ ...approved, extra: true }).success).toBe(false)
+    expect(DecisionReceiptSchema.safeParse({
+      ...approved, approver: { kind: 'local-caller' },
+    }).success).toBe(true)
+    expect(DecisionReceiptSchema.safeParse({
+      ...approved, approver: { kind: 'local-caller', roles: ['scope-approver'] },
+    }).success).toBe(false)
   })
 
   it('prd-diff v2 同样使用严格判别联合', () => {

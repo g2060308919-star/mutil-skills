@@ -4,6 +4,7 @@ import type {
   ManualResultVerification,
   VerdictInput,
 } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, deriveExecutionResultId, digestText } from '@mutil-skills/e2e-contracts'
 import { computeVerdict, type VerdictDependencies } from '../src/index.js'
 
 const digest = (character: string) => `sha256:${character.repeat(64)}`
@@ -12,8 +13,11 @@ function caseResult(
   status: VerdictInput['caseResults'][number]['status'] = 'passed',
   overrides: Partial<VerdictInput['caseResults'][number]> = {},
 ): VerdictInput['caseResults'][number] {
+  const caseId = overrides.caseId ?? 'CASE-1'
+  const executionMode = overrides.executionMode ?? 'real-environment'
   return {
-    caseId: 'CASE-1', runId: 'RUN-1', obligationIds: ['COV-1'], status, executionMode: 'real-environment',
+    resultId: deriveExecutionResultId(caseId, executionMode),
+    caseId, runId: 'RUN-1', obligationIds: ['COV-1'], status, executionMode,
     attemptSelection: ['passed', 'failed'].includes(status)
       ? { status: 'valid', attemptId: 'ATTEMPT-1', eventChainDigest: digest('2') }
       : { status: 'not-started' },
@@ -21,9 +25,20 @@ function caseResult(
   }
 }
 
+function injectionResult(
+  status: VerdictInput['caseResults'][number]['status'] = 'failed',
+): VerdictInput['caseResults'][number] {
+  return caseResult(status, {
+    resultId: deriveExecutionResultId('CASE-1', 'gateway-injection'),
+    executionMode: 'gateway-injection',
+    baselineResultId: deriveExecutionResultId('CASE-1', 'real-environment'),
+    attemptSelection: { status: 'valid', attemptId: 'ATTEMPT-INJECTION', eventChainDigest: digest('3') },
+  })
+}
+
 function input(overrides: Partial<VerdictInput> = {}): VerdictInput {
   return {
-    schemaVersion: '2.0.0', assetId: 'ASSET-1', generationId: 'GEN-1',
+    schemaVersion: '2.1.0', assetId: 'ASSET-1', generationId: 'GEN-1',
     verdictRuleVersion: '2.0.0', policyDigest: digest('f'),
     universeDigest: digest('1'), prdRevision: digest('a'), requirementModelDigest: digest('b'),
     obligations: [{ obligationId: 'COV-1', necessity: 'required', disposition: 'automated', caseIds: ['CASE-1'] }],
@@ -42,10 +57,12 @@ function input(overrides: Partial<VerdictInput> = {}): VerdictInput {
 }
 
 function manualResult(overrides: Partial<ManualResult> = {}): ManualResult {
-  return {
+  const { authorityProof: proofOverride, ...draftOverrides } = overrides
+  const draft = {
     schemaVersion: '1.0.0', manualResultId: 'MANUAL-RESULT-1', assetId: 'ASSET-1',
+    runId: 'RUN-1', runtimeInstallationDigest: digest('0'),
     prdRevision: digest('a'), generationId: 'GEN-1', manualProcedureId: 'MANUAL-PROCEDURE-1',
-    obligationIds: ['COV-MANUAL-1'], requirementModelDigest: digest('b'),
+    caseIds: ['CASE-MANUAL-1'], obligationIds: ['COV-MANUAL-1'], requirementModelDigest: digest('b'),
     executor: { subject: 'executor:alice', roles: ['e2e-manual-executor'] },
     reviewer: { subject: 'reviewer:bob', roles: ['e2e-manual-reviewer'] },
     startedAt: '2026-07-11T10:00:00.000Z', finishedAt: '2026-07-11T10:05:00.000Z', outcome: 'passed',
@@ -54,11 +71,30 @@ function manualResult(overrides: Partial<ManualResult> = {}): ManualResult {
       evidenceDigests: [digest('d')],
     }],
     evidenceDigests: [digest('d')], expiresAt: '2026-07-12T10:05:00.000Z',
-    authorityProof: {
+    ...draftOverrides,
+  } as Omit<ManualResult, 'authorityProof'>
+  const draftDigest = digestText('manual-result-draft/v1', canonicalizeJson(draft))
+  const presenceBase = {
+    runId: draft.runId, installationDigest: draft.runtimeInstallationDigest, draftDigest,
+    origin: 'http://localhost:43117', issuedAt: '2026-07-11T10:05:00.000Z',
+    expiresAt: '2026-07-11T10:10:00.000Z',
+  }
+  return {
+    ...draft,
+    authorityProof: proofOverride ?? {
       issuer: 'local-authority', keyId: 'authority-key', proofScope: 'local-os-user', algorithm: 'Ed25519',
       signedDigest: digest('e'), signature: 'valid-signature',
+      approvalAssurance: { approvalMode: 'webauthn', identityVerified: true,
+        separationOfDutiesVerified: true },
+      executorPresence: {
+        ...presenceBase, role: 'executor', approvalType: 'manual-executor',
+        requiredRole: 'e2e-manual-executor', subject: draft.executor.subject, sessionId: 'SESSION-EXECUTOR',
+      },
+      reviewerPresence: {
+        ...presenceBase, role: 'reviewer', approvalType: 'manual-reviewer',
+        requiredRole: 'e2e-manual-reviewer', subject: draft.reviewer.subject, sessionId: 'SESSION-REVIEWER',
+      },
     },
-    ...overrides,
   }
 }
 
@@ -76,6 +112,22 @@ const dependencies: VerdictDependencies = {
 }
 
 describe('computeVerdict complete truth table', () => {
+  test('real passed + injection failed 仍接受业务验收，并且结果与输入顺序无关', () => {
+    const forward = computeVerdict(input({ caseResults: [caseResult(), injectionResult()] }), dependencies)
+    const reversed = computeVerdict(input({ caseResults: [injectionResult(), caseResult()] }), dependencies)
+
+    expect(forward).toEqual(reversed)
+    expect(forward).toMatchObject({
+      verdict: 'accepted',
+      businessFailuresObserved: [],
+      advisoryFailures: [deriveExecutionResultId('CASE-1', 'gateway-injection')],
+      metrics: {
+        realPassRate: { status: 'value', numerator: 1, denominator: 1, percentage: 100 },
+        injectionPassRate: { status: 'value', numerator: 0, denominator: 1, percentage: 0 },
+      },
+    })
+  })
+
   test('maps every Case status deterministically', () => {
     const statuses: Array<[VerdictInput['caseResults'][number]['status'], string]> = [
       ['passed', 'accepted'],
@@ -210,22 +262,27 @@ describe('computeVerdict complete truth table', () => {
   })
 
   test('keeps advisory failures out of the top-level verdict and uses not-applicable for zero denominators', () => {
+    const advisoryReal = caseResult('passed', {
+      caseId: 'CASE-A', obligationIds: ['COV-ADVISORY-1'],
+    })
+    const advisoryInjection = caseResult('failed', {
+      caseId: 'CASE-A', obligationIds: ['COV-ADVISORY-1'], executionMode: 'gateway-injection',
+      baselineResultId: advisoryReal.resultId,
+    })
     const result = computeVerdict(input({
       obligations: [
         { obligationId: 'COV-NA-1', necessity: 'required', disposition: 'not-applicable', notApplicableRationale: '无该能力' },
         { obligationId: 'COV-ADVISORY-1', necessity: 'advisory', disposition: 'automated', caseIds: ['CASE-A'] },
       ],
-      caseResults: [caseResult('failed', {
-        caseId: 'CASE-A', obligationIds: ['COV-ADVISORY-1'], executionMode: 'gateway-injection',
-      })],
+      caseResults: [advisoryReal, advisoryInjection],
       evidenceAudit: { status: 'complete', total: 0, complete: 0, reasonCodes: [] },
     }), dependencies)
 
     expect(result.verdict).toBe('accepted')
-    expect(result.advisoryFailures).toEqual(['CASE-A'])
+    expect(result.advisoryFailures).toEqual([advisoryInjection.resultId])
     expect(result.metrics.executionCoverage.status).toBe('not-applicable')
     expect(result.metrics.realPassRate.status).toBe('not-applicable')
-    expect(result.metrics.injectionPassRate.status).toBe('not-applicable')
+    expect(result.metrics.injectionPassRate).toMatchObject({ status: 'value', numerator: 0, denominator: 1 })
   })
 
   test('computes blocking rate by required obligation rather than by Case count', () => {

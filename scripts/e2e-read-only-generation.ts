@@ -154,12 +154,13 @@ function readOnlyApprovalContents(input: ReadOnlyApprovalFactsInput): Record<str
         { operation: 'local-navigation', capabilityId: 'PENDING-NAV' },
         { operation: 'dom-read', capabilityId: 'PENDING-DOM' },
         { operation: 'screenshot', capabilityId: 'PENDING-SCREENSHOT' },
-      ] }], unmappedSteps: [], discoveredRisks: [] }
+      ], requestIds: [] }], unmappedSteps: [], discoveredRisks: [] }
   const execution = { environment: 'TEST', baseOrigin: input.fixtureOrigin,
     browserMatrix: [{ browserId: 'CHROMIUM', channel: 'chrome', viewportId: 'DESKTOP' }],
     identities: [{ identityId: 'IDENTITY-AUDITOR', roleIds: ['auditor'], secretRef: 'SECRET-REF-LOCAL' }],
     caseQueue: [{ ordinal: 0, caseId: 'CASE-READ-1' }],
-    actionIntents: [{ actionId: 'ACTION-READ-1', effect: 'read', intentDigest: d('read-intent') }],
+    actionIntents: [{ actionId: 'ACTION-READ-1', effect: 'read', intentDigest: d('read-intent'), requestIds: [] }],
+    readHttpRequests: [],
     dataNeeds: [], manualProcedures, evidencePolicyDigest, runtimeIsolation: null, unresolvedItems: [] }
   if (input.blockedCase) {
     appendBlockedReadCase({ coverage, cases, actionMap, execution }, input.blockedCase,
@@ -287,13 +288,15 @@ function writeApprovalContents(input: {
     actions: [{ caseId: 'CASE-WRITE-1', stepId: 'STEP-WRITE-1', actionId: 'ACTION-APPROVE',
       pageIdentityId: 'PAGE-ORDERS', locatorCandidates: [{ strategy: 'role', value: 'button:批准订单', confidence: 1 }],
       playwrightAction: 'page.getByRole(button).click', waits: [], oracleIds: ['ORACLE-ORDER-APPROVED'],
-      effect: 'reversible-write', capabilities: [{ operation: 'http-request', capabilityId: 'PENDING-WRITE' }] }],
+      effect: 'reversible-write', capabilities: [{ operation: 'http-request', capabilityId: 'PENDING-WRITE' }],
+      requestIds: [] }],
     unmappedSteps: [], discoveredRisks: [] }
   const execution = { environment: 'TEST', baseOrigin: input.fixtureOrigin,
     browserMatrix: [{ browserId: 'CHROMIUM', channel: 'chrome', viewportId: 'DESKTOP' }],
     identities: [{ identityId: 'IDENTITY-OPERATOR', roleIds: ['operator'], secretRef: 'SECRET-REF-LOCAL' }],
     caseQueue: [{ ordinal: 0, caseId: 'CASE-WRITE-1' }],
-    actionIntents: [{ actionId: 'ACTION-APPROVE', effect: 'reversible-write', intentDigest: d('write-intent') }],
+    actionIntents: [{ actionId: 'ACTION-APPROVE', effect: 'reversible-write', intentDigest: d('write-intent'), requestIds: [] }],
+    readHttpRequests: [],
     dataNeeds: [{ leaseId: input.dataLeaseId, resourceKey: input.resourceKey, mode: 'write' }],
     manualProcedures: [], evidencePolicyDigest: input.evidencePolicyDigest,
     runtimeIsolation: null, unresolvedItems: [] }
@@ -375,7 +378,13 @@ async function createGoldenCompilerArtifacts(
   })
   const compilerContents: Record<string, unknown> = {
     ...contents,
-    'approval-grants': { runBundleDigest, grants: [receipt] },
+    'approval-grants': {
+      runBundleDigest,
+      approvalAssurance: {
+        approvalMode: 'webauthn', identityVerified: true, separationOfDutiesVerified: true,
+      },
+      grants: [receipt],
+    },
   }
   const requiredTypes = [
     'prd-manifest', 'prd-diff', 'acceptance-scope', 'project-policy', 'requirement-model',
@@ -567,11 +576,16 @@ export async function createReadOnlyGoldenGenerationInput(input: {
       browserMatrix: [{ browserId: 'CHROMIUM', channel: 'chrome', viewportId: 'DESKTOP' }],
       identities: [{ identityId: 'IDENTITY-AUDITOR', roleIds: ['auditor'], secretRef: 'SECRET-REF-LOCAL' }],
       caseQueue: [{ ordinal: 0, caseId: 'CASE-READ-1' }],
-      actionIntents: [{ actionId: 'ACTION-READ-1', effect: 'read', intentDigest: d('read-intent') }],
+      actionIntents: [{ actionId: 'ACTION-READ-1', effect: 'read', intentDigest: d('read-intent'), requestIds: [] }],
+      readHttpRequests: [],
       dataNeeds: [], manualProcedures, evidencePolicyDigest, runtimeIsolation: null, unresolvedItems: [],
     }),
     'approval-grants': draft('run/approval-grants.json', {
-      runBundleDigest: d('pending-run-bundle'), grants: [],
+      runBundleDigest: d('pending-run-bundle'),
+      approvalAssurance: {
+        approvalMode: 'webauthn', identityVerified: true, separationOfDutiesVerified: true,
+      },
+      grants: [],
     }),
     'manual-results': draft('run/manual-results.json', { results: [] }),
     'data-leases': draft('run/data-leases.json', { leases: [], allocatorEpoch: 1 }),
@@ -595,7 +609,7 @@ export async function createReadOnlyGoldenGenerationInput(input: {
         playwrightAction: 'page.goto', waits: [], oracleIds: ['ORACLE-ORDER-VISIBLE'], effect: 'read',
         capabilities: input.readGrant.capabilities.map((capability) => ({
           operation: capability.operation, capabilityId: capability.capabilityId,
-        })) }], unmappedSteps: [], discoveredRisks: [],
+        })), requestIds: [] }], unmappedSteps: [], discoveredRisks: [],
     }),
     'regression-manifest': draft('run/regression-manifest.json', {
       testDomain: input.regressionDiscovery.attestation.testDomain,
@@ -656,11 +670,34 @@ export async function createReadOnlyGoldenGenerationInput(input: {
     diagnosis: draft('run/diagnosis.json', { caseDiagnoses: [], healingAttempts: [], selectedAttemptExplanations: [] }),
     'cleanup-results': draft('run/cleanup-results.json', { leaseResults: [] }),
   }
-  const manualResults = await Promise.all((input.manualResultDrafts ?? []).map((manualDraft) =>
-    input.authority.issueManualResult({ draft: {
+  const manualResults: ManualResult[] = []
+  for (const manualDraft of input.manualResultDrafts ?? []) {
+    const candidate = {
       ...manualDraft,
       requirementModelDigest: predictedContentDigest(context, 'requirement-model', drafts['requirement-model']),
-    } })))
+    }
+    const prepareFinalizationId = `PREPARE-${candidate.manualResultId}`
+    const prepared = await input.authority.prepareManualResult({
+      draft: candidate,
+      finalizationId: prepareFinalizationId,
+      requestDigest: digestText('manual-result-request/v1', prepareFinalizationId),
+    })
+    for (const role of ['executor', 'reviewer'] as const) {
+      const finalizationId = `FINALIZE-${candidate.manualResultId}-${role}`
+      const finalized = await input.authority.finalizeManualResultRole({
+        manualResultId: candidate.manualResultId,
+        draftDigest: prepared.draftDigest,
+        role,
+        approvalSessionRef: `GOLDEN-MANUAL-${role.toUpperCase()}-${candidate.manualResultId}`,
+        finalizationId,
+        requestDigest: digestText('manual-result-request/v1', finalizationId),
+      })
+      if (role === 'reviewer') {
+        if (finalized.status !== 'issued') throw new Error('Golden ManualResult reviewer 未签发终态结果')
+        manualResults.push(finalized.result)
+      }
+    }
+  }
   drafts['manual-results'].content.results = manualResults
   if (!input.write) {
     const projected = readOnlyApprovalContents({
@@ -712,10 +749,34 @@ export async function createReadOnlyGoldenGenerationInput(input: {
       content: drafts['run-bundle'].content },
   })
   drafts['approval-grants'].content = {
-    runBundleDigest: predictedContentDigest(context, 'run-bundle', drafts['run-bundle']), grants: [receipt],
+    runBundleDigest: predictedContentDigest(context, 'run-bundle', drafts['run-bundle']),
+    approvalAssurance: {
+      approvalMode: 'webauthn', identityVerified: true, separationOfDutiesVerified: true,
+    },
+    grants: [receipt],
   }
   return {
-    context, drafts,
+    context,
+    provenance: {
+      runtimeVersion: '0.0.0',
+      runtimeInstallationDigest: d('golden-runtime-installation'),
+      protocolVersion: '1.0.0',
+      contractsVersion: input.regressionDiscovery.attestation.contractsVersion,
+      engineVersion: context.engineVersion,
+      playwrightVersion: input.regressionDiscovery.attestation.toolchain.playwrightVersion,
+      chromiumDigest: runtimeMeasurement.browserExecutableDigest,
+      gatewayPolicyDigest: input.gatewayAudit.policyDigest,
+      authorityPublicKeyDigest: input.write?.runtimeIsolationPolicy.authorityRpcPublicKeyDigest
+        ?? d('golden-authority-public-key'),
+      projectIdentityDigest: d('golden-project-identity'),
+      sourceRevisionDigest: context.prdRevision,
+      sourceRepositoryIndependent: true,
+      authorityStateProtectionLevel: 'local-crash-integrity',
+      isolationProofDigest: digestText('runtime-isolation-proof/v1', canonicalizeJson([
+        { id: 'TRUSTED-CHROME-EXECUTABLE', digest: runtimeMeasurement.browserExecutableDigest },
+      ])),
+    },
+    drafts,
     reportPresentation: {
       title: input.reportTitle
         ?? (input.write ? '订单审批可恢复写 E2E 验收报告' : '订单列表 E2E 验收报告'),
@@ -780,7 +841,7 @@ function appendBlockedReadCase(
     locatorCandidates: [{ strategy: 'semantic-canvas', value: '订单趋势画布', confidence: 1 }],
     playwrightAction: 'unsupported:canvas-semantic-assertion', waits: [],
     oracleIds: ['ORACLE-BLOCKED-CANVAS'], effect: 'read',
-    capabilities: [{ operation: 'screenshot', capabilityId: 'PENDING-BLOCKED-SCREENSHOT' }],
+    capabilities: [{ operation: 'screenshot', capabilityId: 'PENDING-BLOCKED-SCREENSHOT' }], requestIds: [],
   })
   contents.actionMap.unmappedSteps.push({
     caseId: blocked.caseId, stepId: blocked.stepId, reasonCode: blocked.reasonCode,
@@ -789,7 +850,7 @@ function appendBlockedReadCase(
     ordinal: contents.execution.caseQueue.length, caseId: blocked.caseId,
   })
   contents.execution.actionIntents.push({
-    actionId: blocked.actionId, effect: 'read', intentDigest: d('blocked-read-intent'),
+    actionId: blocked.actionId, effect: 'read', intentDigest: d('blocked-read-intent'), requestIds: [],
   })
 }
 
@@ -1015,6 +1076,8 @@ function predictedContentDigest(context: {
 }
 
 function artifactSchemaVersion(artifactType: string): string {
-  return ['approval-grants', 'browser-preflight', 'browser-action-map', 'run-bundle',
+  if (artifactType === 'browser-action-map') return '2.1.0'
+  if (artifactType === 'execution-contract') return '1.1.0'
+  return ['approval-grants', 'browser-preflight', 'run-bundle',
     'project-policy', 'browser-evidence', 'acceptance-scope', 'prd-diff'].includes(artifactType) ? '2.0.0' : '1.0.0'
 }

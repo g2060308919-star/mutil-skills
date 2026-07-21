@@ -1,10 +1,24 @@
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
-import { digestText, type WriteApprovalSubject } from '@mutil-skills/e2e-contracts'
-import { LocalApprovalAuthority, LocalLeaseAuthority } from '../src/index.js'
+import { createDecipheriv, createHmac, createPrivateKey, sign } from 'node:crypto'
+import {
+  canonicalGrantApprovalSubjectDigest,
+  canonicalizeJson,
+  digestCanonicalGrantApprovalSubject,
+  digestText,
+  type WriteApprovalSubjectV2,
+} from '@mutil-skills/e2e-contracts'
+import {
+  LocalApprovalAuthority,
+  LocalLeaseAuthority,
+  SqliteSnapshotStore,
+  type AuthorityStateAnchorPoint,
+  type TrustedMonotonicAuthorityStateAnchor,
+} from '../src/index.js'
+import { testApprovalReceipt } from './approval-authority.fixture.js'
 
 const directories: string[] = []
 const now = () => new Date('2026-07-13T00:00:00.000Z')
@@ -12,6 +26,154 @@ const approver = { subject: 'os-user:persistent', roles: ['e2e-approver'] }
 const digest = (value: string) => digestText('persistent-authority-test/v1', value)
 const stateEncryptionKey = Buffer.alloc(32, 7)
 const testWorkspaceRoots = [process.cwd()]
+const authenticatePersistentApprover = (
+  sessionRef: string,
+  expected: { approvalType: 'discovery' | 'execution'; subjectDigest: string },
+) => sessionRef === 'persistent-session' ? testApprovalReceipt(approver.subject, expected) : undefined
+
+class TestTrustedMonotonicAnchor implements TrustedMonotonicAuthorityStateAnchor {
+  readonly securityLevel = 'trusted-monotonic' as const
+  point: AuthorityStateAnchorPoint | undefined
+  closeCalls = 0
+  read(): AuthorityStateAnchorPoint | undefined {
+    return this.point === undefined ? undefined : { ...this.point }
+  }
+  initialize(initial: AuthorityStateAnchorPoint): void {
+    if (this.point !== undefined) throw new Error('test anchor already initialized')
+    this.point = { ...initial }
+  }
+  compareAndAdvance(expected: AuthorityStateAnchorPoint, next: AuthorityStateAnchorPoint): void {
+    if (this.point?.revision !== expected.revision || this.point.snapshotDigest !== expected.snapshotDigest
+      || next.revision !== expected.revision + 1) throw new Error('test anchor CAS mismatch')
+    this.point = { ...next }
+  }
+  close(): void { this.closeCalls += 1 }
+}
+
+function resignSnapshotState(snapshot: Record<string, any>, revision: number, key = stateEncryptionKey): void {
+  delete snapshot.stateRevision
+  delete snapshot.stateDigest
+  delete snapshot.stateMac
+  const stateDigest = digestText('authority-state-snapshot/v1', canonicalizeJson(snapshot))
+  snapshot.stateRevision = revision
+  snapshot.stateDigest = stateDigest
+  snapshot.stateMac = createHmac('sha256', key).update(canonicalizeJson({
+    purpose: 'authority-state-snapshot-proof/v1', revision, snapshotDigest: stateDigest,
+  })).digest('base64url')
+}
+
+async function removeAuthorityAnchors(directory: string): Promise<void> {
+  for (const name of await readdir(directory)) {
+    if (name.endsWith('.anchors')) await rm(join(directory, name), { recursive: true, force: true })
+  }
+}
+
+async function authorityAnchorDirectory(directory: string): Promise<string> {
+  const name = (await readdir(directory)).find((entry) => entry.endsWith('.anchors'))
+  if (!name) throw new Error('authority anchor directory missing')
+  return join(directory, name)
+}
+
+async function replaceLocalAuthorityAnchor(
+  directory: string,
+  snapshot: { stateRevision: number; stateDigest: string },
+  key = stateEncryptionKey,
+): Promise<void> {
+  const record = {
+    schemaVersion: '1.0.0', revision: snapshot.stateRevision, snapshotDigest: snapshot.stateDigest,
+    mac: createHmac('sha256', key).update(canonicalizeJson({
+      purpose: 'authority-state-monotonic-anchor/v1', schemaVersion: '1.0.0',
+      revision: snapshot.stateRevision, snapshotDigest: snapshot.stateDigest,
+    })).digest('base64url'),
+  }
+  await writeFile(join(await authorityAnchorDirectory(directory), 'current.anchor'), canonicalizeJson(record), {
+    mode: 0o600,
+  })
+}
+
+function stripSnapshotFieldsIntroducedAfter27(snapshot: Record<string, unknown>): void {
+  delete snapshot.stateRevision
+  delete snapshot.stateDigest
+  delete snapshot.stateMac
+  delete snapshot.pendingManualResults
+}
+
+function convertToRealLegacySnapshot(snapshot: Record<string, any>, encryptionKey: Buffer): void {
+  const encrypted = snapshot.privateKeys.primary
+  const decipher = createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(encrypted.iv, 'base64'))
+  decipher.setAAD(Buffer.from('e2e-authority-private-key/v1:primary'))
+  decipher.setAuthTag(Buffer.from(encrypted.authTag, 'base64'))
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(encrypted.ciphertext, 'base64')),
+    decipher.final(),
+  ])
+  try {
+    const privateKey = createPrivateKey({ key: plaintext, type: 'pkcs8', format: 'der' })
+    for (const [, grant] of snapshot.grants as Array<[string, Record<string, any>]>) {
+      delete grant.approvalContext
+      grant.subjectDigest = digestText('approval-subject/v1', canonicalizeJson(grant.subject))
+      const { signature: _signature, ...payload } = grant
+      grant.signature = sign(null, Buffer.from(canonicalizeJson(payload)), privateKey).toString('base64url')
+    }
+  } finally { plaintext.fill(0) }
+}
+
+function resignSnapshotGrant(
+  snapshot: Record<string, any>, encryptionKey: Buffer, grant: Record<string, any>,
+): void {
+  const encrypted = snapshot.privateKeys.primary
+  const decipher = createDecipheriv('aes-256-gcm', encryptionKey, Buffer.from(encrypted.iv, 'base64'))
+  decipher.setAAD(Buffer.from('e2e-authority-private-key/v1:primary'))
+  decipher.setAuthTag(Buffer.from(encrypted.authTag, 'base64'))
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(encrypted.ciphertext, 'base64')),
+    decipher.final(),
+  ])
+  try {
+    const privateKey = createPrivateKey({ key: plaintext, type: 'pkcs8', format: 'der' })
+    const { signature: _signature, ...payload } = grant
+    grant.signature = sign(null, Buffer.from(canonicalizeJson(payload)), privateKey).toString('base64url')
+  } finally { plaintext.fill(0) }
+}
+
+function convertWriteFinalizationToRealV23(
+  snapshot: Record<string, any>, encryptionKey: Buffer, finalizationId: string, method: string,
+): {
+  grantId: string
+  grant: Record<string, any>
+  subject: Record<string, any>
+  approvalBinding: Record<string, any>
+} {
+  const finalization = new Map(snapshot.grantFinalizations).get(finalizationId) as Record<string, any>
+  const grant = new Map(snapshot.grants).get(finalization.grantId) as Record<string, any>
+  grant.subject.actions[0].requests[0].method = method
+  grant.capabilities[0].requests[0].method = method
+  finalization.subject.actions[0].requests[0].method = method
+  const subjectDigest = digestCanonicalGrantApprovalSubject('execution', grant.subject)
+  grant.subjectDigest = subjectDigest
+  grant.approvalContext.subjectDigest = subjectDigest
+  finalization.approvalBinding.subjectDigest = subjectDigest
+  resignSnapshotGrant(snapshot, encryptionKey, grant)
+  return {
+    grantId: grant.grantId,
+    grant: structuredClone(grant),
+    subject: structuredClone(grant.subject),
+    approvalBinding: structuredClone(finalization.approvalBinding),
+  }
+}
+
+function convertWriteGrantToRealLegacy(
+  snapshot: Record<string, any>, encryptionKey: Buffer, grantId: string, method: string,
+): Record<string, any> {
+  const grant = new Map(snapshot.grants).get(grantId) as Record<string, any>
+  grant.subject.actions[0].requests[0].method = method
+  grant.capabilities[0].requests[0].method = method
+  const subjectDigest = digestCanonicalGrantApprovalSubject('execution', grant.subject)
+  grant.subjectDigest = subjectDigest
+  grant.approvalContext.subjectDigest = subjectDigest
+  resignSnapshotGrant(snapshot, encryptionKey, grant)
+  return structuredClone(grant)
+}
 
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })))
@@ -19,13 +181,16 @@ afterEach(async () => {
 
 async function writeSubject(
   authority: LocalApprovalAuthority, leaseId: string, fencingToken: number, suffix = leaseId,
-): Promise<WriteApprovalSubject> {
+): Promise<WriteApprovalSubjectV2> {
   const discoverySubject = {
-    schemaVersion: '1.0.0' as const, assetId: 'ASSET-1', prdRevision: digest('prd'), scopeDigest: digest('scope'),
+    schemaVersion: '1.1.0' as const, assetId: 'ASSET-1', prdRevision: digest('prd'), scopeDigest: digest('scope'),
     environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'operator',
     expectedPageIdentity: { url: 'https://example.test/orders/1', title: 'Order', heading: 'Order 1', ariaSignals: ['main'] },
     bootstrapIntentsDigest: digest('bootstrap'),
-    actions: [{ actionId: `DISCOVERY-${suffix}`, operation: 'local-navigation' as const, maxUses: 1 }],
+    requests: [],
+    actions: [{
+      actionId: `DISCOVERY-${suffix}`, operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
+    }],
   }
   const discovery = await authority.issueDiscoveryGrant({ subject: discoverySubject, approver,
     approvalSessionRef: 'persistent-session', ttlMs: 60_000 })
@@ -60,13 +225,734 @@ const attemptContext = {
 }
 
 describe('SQLite 持久 Authority 状态', () => {
+  test('current snapshot rejects a finalization outbox larger than the production cap', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-finalization-oversized-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const snapshot = JSON.parse(row.snapshot) as Record<string, any>
+    expect(snapshot.schemaVersion).toBe('2.8.0')
+    snapshot.grantFinalizations = Array.from({ length: 512 }, (_, index) => [`FINALIZE-${index}`, {}])
+    snapshot.acknowledgedFinalizations = Array.from(
+      { length: 513 }, (_, index) => [`ACKNOWLEDGED-${index}`, {}],
+    )
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(snapshot))
+    database.close()
+
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_CORRUPT',
+    })
+  })
+
+  test('a full finalization outbox rejects a new entry without committing its newly issued Grant', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-finalization-capacity-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const subject = {
+      schemaVersion: '1.1.0' as const, assetId: 'ASSET-CAPACITY', prdRevision: digest('capacity-prd'),
+      scopeDigest: digest('capacity-scope'), environment: 'test' as const,
+      baseOrigin: 'https://example.test', actor: 'operator',
+      expectedPageIdentity: {
+        url: 'https://example.test/orders', title: 'Orders', heading: 'Orders', ariaSignals: ['main'],
+      },
+      bootstrapIntentsDigest: digest('capacity-bootstrap'),
+      requests: [],
+      actions: [{
+        actionId: 'DISCOVERY-CAPACITY', operation: 'dom-read' as const, maxUses: 1 as const, requestIds: [],
+      }],
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const grant = await authority.issueDiscoveryGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    const snapshot = JSON.parse(row.snapshot) as Record<string, any>
+    const stored = {
+      requestDigest: digest('capacity-request'), subject,
+      approvalBinding: {
+        runId: grant.approvalContext.runId,
+        approvalType: grant.approvalContext.approvalType,
+        subjectDigest: grant.approvalContext.subjectDigest,
+        installationDigest: grant.approvalContext.installationDigest,
+      },
+      grantId: grant.grantId, approvalSessionRef: 'persistent-session',
+    }
+    snapshot.grantFinalizations = Array.from(
+      { length: 1_023 }, (_, index) => [`FINALIZE-CAPACITY-${index}`, stored],
+    )
+    snapshot.acknowledgedFinalizations = [[
+      'ACKNOWLEDGED-CAPACITY', {
+        requestDigest: stored.requestDigest,
+        grantId: stored.grantId,
+        approvalBinding: stored.approvalBinding,
+        expiresAt: grant.expiresAt,
+      },
+    ]]
+    resignSnapshotState(snapshot, row.revision)
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(snapshot))
+    database.close()
+    await replaceLocalAuthorityAnchor(directory, snapshot as { stateRevision: number; stateDigest: string })
+
+    const full = await LocalApprovalAuthority.open(options)
+    await expect(full.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+      finalizationId: 'FINALIZE-CAPACITY-NEW', requestDigest: digest('capacity-new-request'),
+      approvalBinding: stored.approvalBinding,
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_FINALIZATION_CAPACITY_EXCEEDED' })
+    full.close()
+    const after = new DatabaseSync(statePath)
+    const committed = after.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    expect(committed.revision).toBe(row.revision)
+    expect((JSON.parse(committed.snapshot) as Record<string, any>).grants).toHaveLength(1)
+    after.close()
+  })
+
+  test('an unacknowledged expired finalization is pruned and a new user-presence session can issue a new Grant', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-finalization-expiry-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    let current = now()
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now: () => current,
+      statePath, stateEncryptionKey, testWorkspaceRoots, approvalIdentities: [approver],
+      authenticateApproverSession: (_sessionRef: string, expected: {
+        approvalType: 'discovery' | 'execution'; subjectDigest: string
+      }) => testApprovalReceipt(approver.subject, expected),
+    }
+    const subject = {
+      schemaVersion: '1.1.0' as const, assetId: 'ASSET-EXPIRY', prdRevision: digest('expiry-prd'),
+      scopeDigest: digest('expiry-scope'), environment: 'test' as const,
+      baseOrigin: 'https://example.test', actor: 'operator',
+      expectedPageIdentity: {
+        url: 'https://example.test/orders', title: 'Orders', heading: 'Orders', ariaSignals: ['main'],
+      },
+      bootstrapIntentsDigest: digest('expiry-bootstrap'),
+      requests: [],
+      actions: [{
+        actionId: 'DISCOVERY-EXPIRY', operation: 'dom-read' as const, maxUses: 1 as const, requestIds: [],
+      }],
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const approvalBinding = {
+      runId: 'RUN-TEST', approvalType: 'discovery' as const,
+      subjectDigest: canonicalGrantApprovalSubjectDigest(subject),
+      installationDigest: `sha256:${'a'.repeat(64)}`,
+    }
+    const first = await authority.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'USER-PRESENCE-1', ttlMs: 1_000,
+      finalizationId: 'FINALIZE-EXPIRY-1', requestDigest: digest('expiry-request-1'), approvalBinding,
+    })
+    current = new Date(current.getTime() + 2_000)
+    await expect(authority.recoverFinalizedGrant({
+      finalizationId: 'FINALIZE-EXPIRY-1', requestDigest: digest('expiry-request-1'),
+      subject, approvalBinding,
+    })).resolves.toBeUndefined()
+    const second = await authority.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'USER-PRESENCE-2', ttlMs: 1_000,
+      finalizationId: 'FINALIZE-EXPIRY-2', requestDigest: digest('expiry-request-2'), approvalBinding,
+    })
+    expect(second.grantId).not.toBe(first.grantId)
+    authority.close()
+  })
+
+  test('持久 Grant 集合被数据库侧篡改时在激活前即拒绝整个 snapshot', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-stored-grant-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const subject = {
+      schemaVersion: '1.1.0' as const,
+      assetId: 'ASSET-STORED-GRANT', prdRevision: digest('stored-prd'), scopeDigest: digest('stored-scope'),
+      environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'operator',
+      expectedPageIdentity: {
+        url: 'https://example.test/orders', title: 'Orders', heading: 'Orders', ariaSignals: ['main'],
+      },
+      bootstrapIntentsDigest: digest('stored-bootstrap'),
+      requests: [],
+      actions: [{
+        actionId: 'DISCOVERY-STORED', operation: 'dom-read' as const, maxUses: 1 as const, requestIds: [],
+      }],
+    }
+    const grant = await authority.issueDiscoveryGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    authority.close()
+
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const snapshot = JSON.parse(row.snapshot) as Record<string, unknown>
+    snapshot.grants = []
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(snapshot))
+    database.close()
+
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_AUTHENTICATION_FAILED',
+    })
+  })
+
+  test.each(['2.0.0', '2.1.0'] as const)(
+    '将真实 %s snapshot 幂等迁移到 2.8.0，并对未知版本 fail closed', async (legacyVersion) => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-migration-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const first = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(first, 'LEASE-MIGRATION', 1)
+    const grant = await first.issueWriteGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    const verifierBefore = first.artifactVerifierMaterial
+    first.close()
+
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const legacy = JSON.parse(row.snapshot) as Record<string, unknown>
+    legacy.schemaVersion = legacyVersion
+    if (legacyVersion === '2.0.0') delete legacy.webAuthnCredentials
+    delete legacy.webAuthnReceipts
+    delete legacy.grantFinalizations
+    delete legacy.acknowledgedFinalizations
+    delete legacy.reservationRpcBindings
+    stripSnapshotFieldsIntroducedAfter27(legacy)
+    convertToRealLegacySnapshot(legacy, stateEncryptionKey)
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
+    database.close()
+    await removeAuthorityAnchors(directory)
+    await removeAuthorityAnchors(directory)
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    expect(migrated.artifactVerifierMaterial).toEqual(verifierBefore)
+    expect(await migrated.verify(grant)).toMatchObject({ allowed: false, code: 'E2E_APPROVAL_REVOKED' })
+    await expect(migrated.createWebAuthnCredentialRepository().list()).resolves.toEqual([])
+    migrated.close()
+
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const persisted = JSON.parse(migratedRow.snapshot) as Record<string, unknown>
+    expect(persisted.schemaVersion).toBe('2.8.0')
+    expect(persisted.webAuthnCredentials).toMatchObject({ algorithm: 'aes-256-gcm' })
+    expect(persisted).toMatchObject({ grants: [], uses: [], reservations: [], reservationRpcBindings: [],
+      completedPreflights: [], attemptLogs: [] })
+    persisted.schemaVersion = '9.9.9'
+    migratedDatabase.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(persisted))
+    migratedDatabase.close()
+
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_CORRUPT',
+    })
+    },
+  )
+
+  test('2.2.0 snapshot preserves a current-compatible uppercase Write Grant and adds finalization sets', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-22-migration-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const first = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(first, 'LEASE-MIGRATION-22', 1)
+    const grant = await first.issueWriteGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    first.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const old = JSON.parse(row.snapshot) as Record<string, unknown>
+    old.schemaVersion = '2.2.0'
+    delete old.grantFinalizations
+    delete old.acknowledgedFinalizations
+    delete old.reservationRpcBindings
+    stripSnapshotFieldsIntroducedAfter27(old)
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
+    database.close()
+    await removeAuthorityAnchors(directory)
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    await expect(migrated.verify(grant)).resolves.toEqual({ allowed: true })
+    migrated.close()
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({
+      schemaVersion: '2.8.0', grantFinalizations: [], acknowledgedFinalizations: [], reservationRpcBindings: [],
+    })
+    migratedDatabase.close()
+  })
+
+  test('2.2.0 migration verifies then revokes a real lowercase legacy Write Grant', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-22-write-migration-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(authority, 'LEASE-MIGRATION-LOWER-22', 1, 'MIGRATION-LOWER-22')
+    const grant = await authority.issueWriteGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    await authority.reserveForSubject({
+      grant, currentSubject: subject, capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: subject.actions[0]!.actionId, attemptId: 'ATTEMPT-WRITE-MIGRATION-22', attemptContext,
+    })
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const old = JSON.parse(row.snapshot) as Record<string, any>
+    old.schemaVersion = '2.2.0'
+    delete old.grantFinalizations
+    delete old.acknowledgedFinalizations
+    delete old.reservationRpcBindings
+    stripSnapshotFieldsIntroducedAfter27(old)
+    const legacyGrant = convertWriteGrantToRealLegacy(old, stateEncryptionKey, grant.grantId, 'post')
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
+    database.close()
+    await removeAuthorityAnchors(directory)
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    await expect(migrated.verify(legacyGrant as never)).resolves.toMatchObject({
+      allowed: false, code: 'E2E_APPROVAL_REVOKED',
+    })
+    migrated.close()
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const persisted = JSON.parse(migratedRow.snapshot) as Record<string, any>
+    expect(persisted).toMatchObject({
+      schemaVersion: '2.8.0',
+      grantFinalizations: [],
+      acknowledgedFinalizations: [],
+      reservationRpcBindings: [],
+      revoked: expect.arrayContaining([[grant.grantId, 'legacy-write-method-migration']]),
+    })
+    expect(persisted.uses.some(([key]: [string]) => key.startsWith(`${grant.grantId}:`))).toBe(false)
+    expect(persisted.reservations.some(([, value]: [string, { grantId: string }]) =>
+      value.grantId === grant.grantId)).toBe(false)
+    migratedDatabase.close()
+  })
+
+  test('2.4.0 活跃 reservation 迁移为 effect-unknown 终态，避免无 owner binding 永久卡死', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-24-active-migration-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const first = await LocalApprovalAuthority.open(options)
+    const grant = await first.issueWriteGrant({
+      subject: await writeSubject(first, 'LEASE-MIGRATION-24', 1), approver,
+      approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    const capability = grant.capabilities[0]!
+    const reservation = await first.reserveForSubject({
+      grant, currentSubject: grant.subject, capabilityId: capability.capabilityId,
+      actionId: capability.actionId, attemptId: 'ATTEMPT-MIGRATION-24', attemptContext,
+      rpcOwnerBinding: { clientId: 'legacy-runtime', approvalContext: grant.approvalContext },
+    })
+    first.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const legacy = JSON.parse(row.snapshot) as Record<string, any>
+    legacy.schemaVersion = '2.4.0'
+    delete legacy.reservationRpcBindings
+    stripSnapshotFieldsIntroducedAfter27(legacy)
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
+    database.close()
+    await removeAuthorityAnchors(directory)
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    expect(migrated.getReservation(reservation.reservationId)).toMatchObject({
+      status: 'unknown', observation: 'legacy-reservation-owner-migration-effect-unknown',
+    })
+    expect(migrated.getReservationRpcBinding(reservation.reservationId)).toBeUndefined()
+    await expect(migrated.complete(reservation.reservationId, digest('must-not-complete')))
+      .rejects.toMatchObject({ code: 'E2E_APPROVAL_RESERVATION_FINAL' })
+    migrated.close()
+  })
+
+  test('2.3.0 snapshot preserves a current-compatible uppercase Write outbox and adds empty acknowledgements', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-23-migration-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(authority, 'LEASE-MIGRATION-UPPER-23', 1, 'MIGRATION-UPPER-23')
+    const approvalBinding = {
+      runId: 'RUN-TEST', approvalType: 'execution' as const,
+      subjectDigest: canonicalGrantApprovalSubjectDigest(subject),
+      installationDigest: `sha256:${'a'.repeat(64)}`,
+    }
+    const grant = await authority.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+      finalizationId: 'FINALIZE-MIGRATION-23', requestDigest: digest('23-request'), approvalBinding,
+    })
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const old = JSON.parse(row.snapshot) as Record<string, any>
+    old.schemaVersion = '2.3.0'
+    delete old.acknowledgedFinalizations
+    delete old.reservationRpcBindings
+    stripSnapshotFieldsIntroducedAfter27(old)
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
+    database.close()
+    await removeAuthorityAnchors(directory)
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    await expect(migrated.recoverFinalizedGrant({
+      finalizationId: 'FINALIZE-MIGRATION-23', requestDigest: digest('23-request'), subject, approvalBinding,
+    })).resolves.toEqual({ grant, approvalSessionRef: 'persistent-session' })
+    migrated.close()
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({
+      schemaVersion: '2.8.0', acknowledgedFinalizations: [], reservationRpcBindings: [],
+    })
+    migratedDatabase.close()
+  })
+
+  test.each(['2.2.0', '2.3.0'] as const)(
+    '%s migration rejects an invalidly signed legacy Write snapshot without committing', async (legacyVersion) => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-legacy-write-signature-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(authority, 'LEASE-MIGRATION-SIGNATURE-23', 1, 'MIGRATION-SIGNATURE-23')
+    const approvalBinding = {
+      runId: 'RUN-TEST', approvalType: 'execution' as const,
+      subjectDigest: canonicalGrantApprovalSubjectDigest(subject), installationDigest: `sha256:${'a'.repeat(64)}`,
+    }
+    await authority.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+      finalizationId: 'FINALIZE-WRITE-SIGNATURE-23', requestDigest: digest('23-signature-request'), approvalBinding,
+    })
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    const old = JSON.parse(row.snapshot) as Record<string, any>
+    old.schemaVersion = legacyVersion
+    delete old.acknowledgedFinalizations
+    delete old.reservationRpcBindings
+    stripSnapshotFieldsIntroducedAfter27(old)
+    const legacy = convertWriteFinalizationToRealV23(
+      old, stateEncryptionKey, 'FINALIZE-WRITE-SIGNATURE-23', 'post',
+    )
+    const storedGrant = new Map(old.grants).get(legacy.grantId) as Record<string, any>
+    const invalidSignature = Buffer.from(storedGrant.signature, 'base64url')
+    invalidSignature[0] = invalidSignature[0]! ^ 1
+    storedGrant.signature = invalidSignature.toString('base64url')
+    if (legacyVersion === '2.2.0') delete old.grantFinalizations
+    const legacyBytes = JSON.stringify(old)
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(legacyBytes)
+    database.close()
+    await removeAuthorityAnchors(directory)
+
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_CORRUPT',
+    })
+    const after = new DatabaseSync(statePath)
+    expect(after.prepare('SELECT revision, snapshot FROM authority_snapshots').get()).toEqual({
+      revision: row.revision, snapshot: legacyBytes,
+    })
+    after.close()
+    },
+  )
+
+  test('2.3.0 migration enforces the legacy finalization capacity before filtering grants', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-23-capacity-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const old = JSON.parse(row.snapshot) as Record<string, any>
+    old.schemaVersion = '2.3.0'
+    delete old.acknowledgedFinalizations
+    delete old.reservationRpcBindings
+    stripSnapshotFieldsIntroducedAfter27(old)
+    old.grantFinalizations = Array.from({ length: 1_025 }, (_, index) => [`FINALIZE-23-${index}`, {}])
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
+    database.close()
+    await removeAuthorityAnchors(directory)
+
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_CORRUPT',
+    })
+  })
+
+  test('2.3.0 migration verifies a real lowercase Write Grant then revokes it and clears linked state', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-23-write-migration-')); directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const subject = await writeSubject(authority, 'LEASE-MIGRATION-23', 1, 'MIGRATION-23')
+    const approvalBinding = {
+      runId: 'RUN-TEST', approvalType: 'execution' as const,
+      subjectDigest: canonicalGrantApprovalSubjectDigest(subject),
+      installationDigest: `sha256:${'a'.repeat(64)}`,
+    }
+    const grant = await authority.finalizeApprovalGrant({
+      subject, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+      finalizationId: 'FINALIZE-WRITE-MIGRATION-23', requestDigest: digest('23-write-request'), approvalBinding,
+    })
+    await authority.reserveForSubject({
+      grant, currentSubject: subject, capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: subject.actions[0]!.actionId, attemptId: 'ATTEMPT-WRITE-MIGRATION-23', attemptContext,
+    })
+    authority.close()
+
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const old = JSON.parse(row.snapshot) as Record<string, any>
+    old.schemaVersion = '2.3.0'
+    delete old.acknowledgedFinalizations
+    delete old.reservationRpcBindings
+    stripSnapshotFieldsIntroducedAfter27(old)
+    const legacy = convertWriteFinalizationToRealV23(
+      old, stateEncryptionKey, 'FINALIZE-WRITE-MIGRATION-23', 'post',
+    )
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
+    database.close()
+    await removeAuthorityAnchors(directory)
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    await expect(migrated.recoverFinalizedGrant({
+      finalizationId: 'FINALIZE-WRITE-MIGRATION-23', requestDigest: digest('23-write-request'),
+      subject, approvalBinding,
+    })).resolves.toBeUndefined()
+    await expect(migrated.verify(legacy.grant as never)).resolves.toMatchObject({
+      allowed: false, code: 'E2E_APPROVAL_REVOKED',
+    })
+    migrated.close()
+
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const persisted = JSON.parse(migratedRow.snapshot) as Record<string, any>
+    expect(persisted).toMatchObject({
+      schemaVersion: '2.8.0', grantFinalizations: [], acknowledgedFinalizations: [], reservationRpcBindings: [],
+    })
+    expect(persisted.grants.some(([grantId]: [string]) => grantId === legacy.grantId)).toBe(false)
+    expect(persisted.uses.some(([key]: [string]) => key.startsWith(`${legacy.grantId}:`))).toBe(false)
+    expect(persisted.reservations.some(([, value]: [string, { grantId: string }]) =>
+      value.grantId === legacy.grantId)).toBe(false)
+    expect(persisted.revoked).toContainEqual([legacy.grantId, 'legacy-write-method-migration'])
+    migratedDatabase.close()
+  })
+
+  test('2.0.0 migration validates the supplied key before commit and wrong-key rollback preserves exact bytes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-wrong-key-migration-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    const legacy = JSON.parse(row.snapshot) as Record<string, unknown>
+    legacy.schemaVersion = '2.0.0'
+    delete legacy.webAuthnCredentials
+    delete legacy.webAuthnReceipts
+    delete legacy.grantFinalizations
+    delete legacy.acknowledgedFinalizations
+    delete legacy.reservationRpcBindings
+    stripSnapshotFieldsIntroducedAfter27(legacy)
+    const legacyBytes = JSON.stringify(legacy)
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(legacyBytes)
+    const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
+    database.close()
+    await removeAuthorityAnchors(directory)
+
+    const wrongKey = Buffer.alloc(32, 0x55)
+    await expect(LocalApprovalAuthority.open({ ...options, stateEncryptionKey: wrongKey }))
+      .rejects.toMatchObject({ code: 'E2E_AUTHORITY_STATE_DECRYPTION_FAILED' })
+    const afterWrongKeyDatabase = new DatabaseSync(statePath)
+    expect(afterWrongKeyDatabase.prepare('SELECT revision, snapshot FROM authority_snapshots').get()).toEqual(before)
+    afterWrongKeyDatabase.close()
+
+    const migrated = await LocalApprovalAuthority.open(options)
+    migrated.close()
+    const migratedDatabase = new DatabaseSync(statePath)
+    const migratedRow = migratedDatabase.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    expect(migratedRow.revision).toBe(row.revision + 1)
+    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({ schemaVersion: '2.8.0' })
+    migratedDatabase.close()
+  })
+
+  test('2.0.0 migration rejects malformed nested state and rolls back without committing', async () => {
+    const corruptions: Array<[string, (snapshot: Record<string, any>) => void]> = [
+      ['private encrypted blob', (snapshot) => { snapshot.privateKeys.primary.extra = true }],
+      ['grant tuple', (snapshot) => { snapshot.grants = [['GRANT-1', { grantId: 'GRANT-1' }]] }],
+      ['revocation tuple', (snapshot) => { snapshot.revoked = [['GRANT-1', 7]] }],
+      ['use tuple', (snapshot) => { snapshot.uses = [['GRANT-1:CAP-1', -1]] }],
+      ['reservation tuple', (snapshot) => { snapshot.reservations = [['RES-1', { reservationId: 'OTHER' }]] }],
+      ['preflight tuple', (snapshot) => { snapshot.completedPreflights = [['PREFLIGHT-1', { status: 'ready' }]] }],
+      ['manual result id', (snapshot) => { snapshot.manualResultIds = [7] }],
+      ['attempt log tuple', (snapshot) => { snapshot.attemptLogs = [['LOG-1', { events: [] }]] }],
+    ]
+    for (const [name, corrupt] of corruptions) {
+      const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-strict-legacy-'))
+      directories.push(directory)
+      const statePath = join(directory, 'authority.sqlite')
+      const options = {
+        issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+        approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+      }
+      const authority = await LocalApprovalAuthority.open(options)
+      authority.close()
+      const database = new DatabaseSync(statePath)
+      const current = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+        revision: number; snapshot: string
+      }
+      const legacy = JSON.parse(current.snapshot) as Record<string, any>
+      legacy.schemaVersion = '2.0.0'
+      delete legacy.webAuthnCredentials
+      delete legacy.webAuthnReceipts
+      delete legacy.grantFinalizations
+      delete legacy.acknowledgedFinalizations
+      delete legacy.reservationRpcBindings
+      stripSnapshotFieldsIntroducedAfter27(legacy)
+      corrupt(legacy)
+      database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(legacy))
+      const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
+      database.close()
+      await removeAuthorityAnchors(directory)
+
+      await expect(LocalApprovalAuthority.open(options), name).rejects.toMatchObject({
+        code: 'E2E_AUTHORITY_STATE_CORRUPT',
+      })
+      const afterDatabase = new DatabaseSync(statePath)
+      expect(afterDatabase.prepare('SELECT revision, snapshot FROM authority_snapshots').get(), name).toEqual(before)
+      afterDatabase.close()
+    }
+  })
+
+  test.each(['delete', 'reorder'] as const)(
+    '2.0.0 migration replays attempt logs and rejects %s tampering without commit',
+    async (mutation) => {
+      const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-attempt-replay-'))
+      directories.push(directory)
+      const statePath = join(directory, 'authority.sqlite')
+      const options = {
+        issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+        approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+      }
+      const authority = await LocalApprovalAuthority.open(options)
+      const initial = digestText('attempt-chain-initial/v2', canonicalizeJson(attemptContext))
+      const started = authority.appendAttemptEvent({ context: attemptContext, event: {
+        kind: 'started', sequence: 1, caseId: attemptContext.caseId, slot: 0,
+        attemptId: 'ATTEMPT-MIGRATION', mode: 'real-environment',
+        timestamp: '2026-07-13T00:00:00.000Z', previousChainDigest: initial,
+      } })
+      authority.appendAttemptEvent({ context: attemptContext, event: {
+        kind: 'terminal', sequence: 2, caseId: attemptContext.caseId, slot: 0,
+        attemptId: 'ATTEMPT-MIGRATION', timestamp: '2026-07-13T00:00:01.000Z',
+        previousChainDigest: started.eventChainDigest,
+        result: { status: 'automation-blocked', mode: 'real-environment', effect: 'read',
+          effectObservation: 'not-applicable', reservationSafeToVoid: true },
+      } })
+      authority.close()
+
+      const database = new DatabaseSync(statePath)
+      const row = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+        revision: number; snapshot: string
+      }
+      const legacy = JSON.parse(row.snapshot) as Record<string, any>
+      legacy.schemaVersion = '2.0.0'
+      delete legacy.webAuthnCredentials
+      delete legacy.webAuthnReceipts
+      delete legacy.grantFinalizations
+      delete legacy.acknowledgedFinalizations
+      delete legacy.reservationRpcBindings
+      stripSnapshotFieldsIntroducedAfter27(legacy)
+      const events = legacy.attemptLogs[0][1].events as unknown[]
+      if (mutation === 'delete') events.splice(0, 1)
+      else events.reverse()
+      const tampered = JSON.stringify(legacy)
+      database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(tampered)
+      const before = database.prepare('SELECT revision, snapshot FROM authority_snapshots').get()
+      database.close()
+      await removeAuthorityAnchors(directory)
+
+      await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+        code: 'E2E_AUTHORITY_STATE_CORRUPT',
+      })
+      const after = new DatabaseSync(statePath)
+      expect(after.prepare('SELECT revision, snapshot FROM authority_snapshots').get()).toEqual(before)
+      after.close()
+    },
+  )
+
+  test('拒绝 expected state directory 被同 pathname 的真实目录替换', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-state-parent-binding-'))
+    directories.push(directory)
+    const stateDirectory = join(directory, 'state')
+    await mkdir(stateDirectory, { mode: 0o700 })
+    const metadata = await stat(stateDirectory)
+    const expectedStateDirectory = {
+      realPath: await realpath(stateDirectory),
+      device: String(metadata.dev),
+      inode: String(metadata.ino),
+    }
+    await rename(stateDirectory, join(directory, 'state-original'))
+    await mkdir(stateDirectory, { mode: 0o700 })
+
+    expect(() => new SqliteSnapshotStore(
+      join(stateDirectory, 'authority.sqlite'),
+      'state-parent-binding-test',
+      { forbiddenRoots: ['/dev'], expectedStateDirectory },
+    )).toThrow('E2E_AUTHORITY_STATE_DIRECTORY_REBOUND')
+  })
+
   test('重启后保留 key、Grant、unknown reservation 和防重放计数', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-state-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')
     const first = await LocalApprovalAuthority.open({
       issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
       approvalIdentities: [approver],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'persistent-session' ? approver.subject : undefined,
+      authenticateApproverSession: authenticatePersistentApprover,
     })
     const grant = await first.issueWriteGrant({
       subject: await writeSubject(first, 'LEASE-1', 1), approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
@@ -83,7 +969,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const second = await LocalApprovalAuthority.open({
       issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
       approvalIdentities: [approver],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'persistent-session' ? approver.subject : undefined,
+      authenticateApproverSession: authenticatePersistentApprover,
     })
     expect(second.attemptEventVerifierMaterial).toEqual(material)
     expect(await second.verify(grant)).toEqual({ allowed: true })
@@ -93,6 +979,288 @@ describe('SQLite 持久 Authority 状态', () => {
       actionId: capability.actionId, attemptId: 'ATTEMPT-2', attemptContext,
     })).rejects.toMatchObject({ code: 'E2E_APPROVAL_CAPABILITY_EXHAUSTED' })
     second.close()
+  })
+
+  test.each(['completed', 'unknown'] as const)(
+    '%s reservation/uses 被数据库侧回滚为 reserved/0 时整份 snapshot 认证失败', async (terminal) => {
+      const directory = await mkdtemp(join(tmpdir(), `e2e-authority-${terminal}-rollback-`))
+      directories.push(directory)
+      const statePath = join(directory, 'authority.sqlite')
+      const options = { issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey,
+        testWorkspaceRoots, approvalIdentities: [approver],
+        authenticateApproverSession: authenticatePersistentApprover }
+      const authority = await LocalApprovalAuthority.open(options)
+      const grant = await authority.issueWriteGrant({
+        subject: await writeSubject(authority, `LEASE-${terminal.toUpperCase()}-ROLLBACK`, 1), approver,
+        approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+      })
+      const capability = grant.capabilities[0]!
+      const reservation = await authority.reserveForSubject({ grant, currentSubject: grant.subject,
+        capabilityId: capability.capabilityId, actionId: capability.actionId,
+        attemptId: `ATTEMPT-${terminal.toUpperCase()}-ROLLBACK`, attemptContext })
+      if (terminal === 'completed') await authority.complete(reservation.reservationId, digest('terminal'))
+      else await authority.markUnknown(reservation.reservationId, 'effect unknown')
+      authority.close()
+
+      const database = new DatabaseSync(statePath)
+      const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+      const snapshot = JSON.parse(row.snapshot) as Record<string, any>
+      const stored = new Map(snapshot.reservations).get(reservation.reservationId) as Record<string, any>
+      stored.status = 'reserved'
+      delete stored.outcomeDigest
+      delete stored.observation
+      snapshot.uses = [[`${grant.grantId}:${capability.capabilityId}`, 0]]
+      database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(snapshot))
+      database.close()
+
+      await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({ code: 'E2E_AUTHORITY_STATE_CORRUPT' })
+    },
+  )
+
+  test('重放旧的完整 authenticated snapshot 时被 SQLite 外单调高水位拒绝', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-old-snapshot-replay-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = { issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey,
+      testWorkspaceRoots, approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover }
+    const authority = await LocalApprovalAuthority.open(options)
+    const grant = await authority.issueWriteGrant({ subject: await writeSubject(authority, 'LEASE-REPLAY', 1),
+      approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000 })
+    const capability = grant.capabilities[0]!
+    const reservation = await authority.reserveForSubject({ grant, currentSubject: grant.subject,
+      capabilityId: capability.capabilityId, actionId: capability.actionId,
+      attemptId: 'ATTEMPT-REPLAY', attemptContext })
+    const beforeDatabase = new DatabaseSync(statePath)
+    const old = beforeDatabase.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    beforeDatabase.close()
+    await authority.complete(reservation.reservationId, digest('replay-terminal'))
+    authority.close()
+
+    const database = new DatabaseSync(statePath)
+    database.prepare('UPDATE authority_snapshots SET revision = ?, snapshot = ?').run(old.revision, old.snapshot)
+    database.close()
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_ROLLBACK_DETECTED',
+    })
+  })
+
+  test('独立 trusted-monotonic provider 在本地 DB/anchor 可同时回滚时仍拒绝旧 snapshot', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-trusted-anchor-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const trustedStateAnchor = new TestTrustedMonotonicAnchor()
+    const options = { issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey,
+      testWorkspaceRoots, approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+      trustedStateAnchor }
+    const authority = await LocalApprovalAuthority.open(options)
+    expect(authority.stateProtectionLevel).toBe('trusted-monotonic')
+    const databaseBefore = new DatabaseSync(statePath)
+    const old = databaseBefore.prepare('SELECT revision, snapshot FROM authority_snapshots').get() as {
+      revision: number; snapshot: string
+    }
+    databaseBefore.close()
+    await authority.issueWriteGrant({ subject: await writeSubject(authority, 'LEASE-TRUSTED-ANCHOR', 1),
+      approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000 })
+    authority.close()
+    authority.close()
+    expect(trustedStateAnchor.closeCalls).toBe(1)
+
+    const rolledBack = new DatabaseSync(statePath)
+    rolledBack.prepare('UPDATE authority_snapshots SET revision = ?, snapshot = ?').run(old.revision, old.snapshot)
+    rolledBack.close()
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_ROLLBACK_DETECTED',
+    })
+  })
+
+  test('anchor 缺失或篡改均 fail closed，不从已提交 DB 自动补齐', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-anchor-crash-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = { issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey,
+      testWorkspaceRoots, approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover }
+    const first = await LocalApprovalAuthority.open(options)
+    await first.issueDiscoveryGrant({ subject: {
+      schemaVersion: '1.1.0', assetId: 'ASSET-ANCHOR', prdRevision: digest('anchor-prd'),
+      scopeDigest: digest('anchor-scope'), environment: 'test', baseOrigin: 'https://example.test', actor: 'operator',
+      expectedPageIdentity: { url: 'https://example.test/', title: 'Anchor', heading: 'Anchor', ariaSignals: [] },
+      bootstrapIntentsDigest: digest('anchor-bootstrap'), requests: [],
+      actions: [{ actionId: 'ACTION-ANCHOR', operation: 'local-navigation', maxUses: 1, requestIds: [] }],
+    }, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000 })
+    first.close()
+    const anchorDirectory = await authorityAnchorDirectory(directory)
+    const anchors = (await readdir(anchorDirectory)).filter((name) => name.endsWith('.anchor')).sort()
+    expect(anchors).toEqual(['current.anchor'])
+    const anchorPath = join(anchorDirectory, anchors[0]!)
+    const anchorBytes = await readFile(anchorPath)
+    await rm(anchorPath)
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_ANCHOR_MISSING',
+    })
+    await writeFile(anchorPath, anchorBytes, { mode: 0o600 })
+    await writeFile(anchorPath, '{}')
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_ANCHOR_INVALID',
+    })
+  })
+
+  test.each(['symlink', 'hardlink', 'mode', 'pending', 'pending-symlink'] as const)(
+    '本地 anchor 拒绝 %s 路径替换，且不跟随或清理非本次临时文件',
+    async (attack) => {
+      const directory = await mkdtemp(join(tmpdir(), `e2e-authority-anchor-${attack}-`))
+      directories.push(directory)
+      const statePath = join(directory, 'authority.sqlite')
+      const options = { issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey,
+        testWorkspaceRoots, approvalIdentities: [approver],
+        authenticateApproverSession: authenticatePersistentApprover }
+      const authority = await LocalApprovalAuthority.open(options)
+      authority.close()
+      const anchorDirectory = await authorityAnchorDirectory(directory)
+      const anchorPath = join(anchorDirectory, 'current.anchor')
+      if (attack === 'symlink') {
+        const external = join(directory, 'attacker.anchor')
+        await writeFile(external, await readFile(anchorPath), { mode: 0o600 })
+        await rm(anchorPath)
+        await symlink(external, anchorPath)
+      } else if (attack === 'hardlink') {
+        await link(anchorPath, join(directory, 'anchor-hardlink'))
+      } else if (attack === 'mode') {
+        await chmod(anchorPath, 0o644)
+      } else if (attack === 'pending') {
+        await writeFile(join(anchorDirectory, '.pending.anchor'), 'untrusted pending', { mode: 0o600 })
+      } else {
+        await symlink(join(directory, 'missing-attacker-target'), join(anchorDirectory, '.pending.anchor'))
+      }
+      await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+        code: attack === 'pending' || attack === 'pending-symlink'
+          ? 'E2E_AUTHORITY_STATE_ANCHOR_RECOVERY_REQUIRED'
+          : 'E2E_AUTHORITY_STATE_ANCHOR_INVALID',
+      })
+    },
+  )
+
+  test('持久 RPC owner 支持重启恢复与终态精确幂等重试', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-rpc-owner-capacity-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const first = await LocalApprovalAuthority.open(options)
+    const grant = await first.issueWriteGrant({
+      subject: await writeSubject(first, 'LEASE-RPC-OWNER', 1), approver,
+      approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    const capability = grant.capabilities[0]!
+    const owner = { clientId: 'runtime-owner', approvalContext: grant.approvalContext }
+    const reservation = await first.reserveForSubject({
+      grant, currentSubject: grant.subject, capabilityId: capability.capabilityId,
+      actionId: capability.actionId, attemptId: 'ATTEMPT-RPC-OWNER', attemptContext,
+      rpcOwnerBinding: owner,
+    })
+    first.close()
+
+    const reopened = await LocalApprovalAuthority.open(options)
+    expect(reopened.getReservationRpcBinding(reservation.reservationId)).toMatchObject({
+      ...owner, signedDigest: expect.stringMatching(/^sha256:/), signature: expect.any(String),
+    })
+    const outcome = digest('rpc-owner-outcome')
+    const firstReceipt = await reopened.complete(reservation.reservationId, outcome)
+    await expect(reopened.complete(reservation.reservationId, outcome)).resolves.toBe(firstReceipt)
+    reopened.close()
+  })
+
+  test('持久 RPC owner 的 clientId substitution 即使 approvalContext 不变也会验签失败', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-rpc-owner-tamper-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const grant = await authority.issueWriteGrant({
+      subject: await writeSubject(authority, 'LEASE-RPC-TAMPER', 1), approver,
+      approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    const capability = grant.capabilities[0]!
+    const reservation = await authority.reserveForSubject({
+      grant, currentSubject: grant.subject, capabilityId: capability.capabilityId,
+      actionId: capability.actionId, attemptId: 'ATTEMPT-RPC-TAMPER', attemptContext,
+      rpcOwnerBinding: { clientId: 'runtime-owner', approvalContext: grant.approvalContext },
+    })
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const snapshot = JSON.parse(row.snapshot) as Record<string, any>
+    const binding = new Map<string, any>(snapshot.reservationRpcBindings).get(reservation.reservationId)
+    binding.clientId = 'substituted-owner'
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(snapshot))
+    database.close()
+
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({
+      code: 'E2E_AUTHORITY_STATE_CORRUPT',
+    })
+  })
+
+  test.each([
+    ['reserved with outcome', (reservation: Record<string, any>) => { reservation.outcomeDigest = digest('forged') }],
+    ['completed without outcome', (reservation: Record<string, any>) => { reservation.status = 'completed' }],
+    ['unknown with both terminal fields', (reservation: Record<string, any>) => {
+      reservation.status = 'unknown'; reservation.observation = 'unknown'; reservation.outcomeDigest = digest('forged')
+    }],
+  ] as const)('reservation snapshot 拒绝 %s', async (_name, corrupt) => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-reservation-tamper-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const grant = await authority.issueWriteGrant({ subject: await writeSubject(authority, 'LEASE-RES-TAMPER', 1),
+      approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000 })
+    const capability = grant.capabilities[0]!
+    const reservation = await authority.reserveForSubject({ grant, currentSubject: grant.subject,
+      capabilityId: capability.capabilityId, actionId: capability.actionId,
+      attemptId: 'ATTEMPT-RES-TAMPER', attemptContext })
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const snapshot = JSON.parse(row.snapshot) as Record<string, any>
+    corrupt(new Map<string, any>(snapshot.reservations).get(reservation.reservationId))
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(snapshot))
+    database.close()
+    await expect(LocalApprovalAuthority.open(options)).rejects.toMatchObject({ code: 'E2E_AUTHORITY_STATE_CORRUPT' })
+  })
+
+  test.each([
+    ['active owner missing', (snapshot: Record<string, any>) => { snapshot.resourceOwners = [] }],
+    ['owner points at another lease', (snapshot: Record<string, any>) => { snapshot.resourceOwners[0][1] = 'OTHER' }],
+    ['fencing token rolls back', (snapshot: Record<string, any>) => { snapshot.fencingTokens[0][1] = 0 }],
+    ['active lease forged cleanup terminal', (snapshot: Record<string, any>) => {
+      snapshot.leases[0][1].cleanupDigest = digest('forged-cleanup')
+    }],
+  ] as const)('Lease snapshot 拒绝 %s', async (_name, corrupt) => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-lease-tamper-'))
+    directories.push(directory)
+    const statePath = join(directory, 'lease.sqlite')
+    const authority = await LocalLeaseAuthority.open({ now, statePath, testWorkspaceRoots })
+    const tentative = await authority.acquire({ runId: 'RUN-1', resourceKey: 'order:tamper',
+      resourceFingerprint: digest('target'), exclusive: true, ttlMs: 60_000 })
+    await authority.activate(tentative.leaseId)
+    authority.close()
+    const database = new DatabaseSync(statePath)
+    const row = database.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
+    const snapshot = JSON.parse(row.snapshot) as Record<string, any>
+    corrupt(snapshot)
+    database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(snapshot))
+    database.close()
+    await expect(LocalLeaseAuthority.open({ now, statePath, testWorkspaceRoots }))
+      .rejects.toMatchObject({ code: 'E2E_LEASE_STATE_CORRUPT' })
   })
 
   test('Lease 重启后仍保持 exclusive owner 和单调 fencing token', async () => {
@@ -124,8 +1292,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const options = {
       issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
       approvalIdentities: [approver],
-      authenticateApproverSession: (sessionRef: string) =>
-        sessionRef === 'persistent-session' ? approver.subject : undefined,
+      authenticateApproverSession: authenticatePersistentApprover,
     }
     const first = await LocalApprovalAuthority.open(options)
     const second = await LocalApprovalAuthority.open(options)
@@ -179,7 +1346,7 @@ describe('SQLite 持久 Authority 状态', () => {
     const statePath = join(directory, 'authority.sqlite')
     const options = {
       issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
-      approvalIdentities: [approver], authenticateApproverSession: () => approver.subject,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
     }
     const authority = await LocalApprovalAuthority.open(options)
     authority.close()
@@ -211,5 +1378,17 @@ describe('SQLite 持久 Authority 状态', () => {
     await expect(LocalApprovalAuthority.open({
       ...options, statePath: linkedStatePath,
     })).rejects.toThrow('E2E_AUTHORITY_STATE_SYMLINK_FORBIDDEN')
+
+    const hardlinkDirectory = await mkdtemp(join(tmpdir(), 'e2e-authority-hardlink-'))
+    directories.push(hardlinkDirectory)
+    const hardlinkCanary = join(hardlinkDirectory, 'canary.sqlite')
+    const hardlinkedStatePath = join(hardlinkDirectory, 'authority.sqlite')
+    await writeFile(hardlinkCanary, 'CANARY', { mode: 0o600 })
+    await link(hardlinkCanary, hardlinkedStatePath)
+    await expect(LocalApprovalAuthority.open({
+      ...options, statePath: hardlinkedStatePath,
+    })).rejects.toThrow('E2E_AUTHORITY_STATE_LEAF_INVALID')
+    expect(await readFile(hardlinkCanary, 'utf8')).toBe('CANARY')
+    expect((await stat(hardlinkCanary)).mode & 0o777).toBe(0o600)
   })
 })

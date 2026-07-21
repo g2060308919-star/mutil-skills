@@ -73,6 +73,10 @@ export interface GatewayPublicationAuditRecorder {
     decision: 'forwarded' | 'blocked'
     request: CanonicalHttpRequest | { method: string; url: string }
   }): void
+  recordInjectionDecision(input: {
+    actionId: string
+    request: CanonicalHttpRequest | { method: string; url: string }
+  }): void
   recordCapabilityReservation(input: { reservation: CapabilityReservation; consumed: boolean }): void
   finalize(): GatewayPublicationAudit
 }
@@ -365,6 +369,20 @@ class InMemoryGatewayPublicationAuditRecorder implements GatewayPublicationAudit
       } : {}),
       decision: input.decision,
       digest,
+    })
+  }
+
+  recordInjectionDecision(input: {
+    actionId: string
+    request: CanonicalHttpRequest | { method: string; url: string }
+  }): void {
+    this.#assertOpen()
+    const snapshot = snapshotRequest(input.request)
+    this.#requestEvents.push({
+      sequence: this.#requestEvents.length,
+      actionId: snapshotText(input.actionId, 'actionId'),
+      decision: 'injected',
+      digest: digestText('gateway-canonical-request/v1', canonicalizeJson(snapshot)),
     })
   }
 

@@ -9,15 +9,39 @@ export {
 } from './trusted-approval-freshness.js'
 export * from './attempt-event-verifier.js'
 export * from './sqlite-state-store.js'
+export {
+  authoritySnapshotMac,
+  type AuthorityStateAnchorPoint,
+  type AuthorityStateAnchorRecord,
+  type TrustedMonotonicAuthorityStateAnchor,
+} from './authority-state-anchor.js'
 export * from './local-lease-authority.js'
 export * from './authenticated-rpc.js'
 export {
   getTrustedExecutionClientBinding,
   isTrustedLeaseClient,
   isTrustedWriteApprovalClient,
+  parseApprovalExecutionBinding,
   type TrustedExecutionClientBinding,
+  type ApprovalExecutionBinding,
   type TrustedLeaseClient,
   type TrustedWriteApprovalClient,
 } from './trusted-execution-clients.js'
 export * from './authority-execution-rpc.js'
 export * from './authority-execution-rpc-host.js'
+export {
+  WebAuthnUserPresenceAuthority,
+  createWebAuthnUserPresenceAuthority,
+  type StoredWebAuthnCredential,
+  type StoredWebAuthnApprovalReceipt,
+  type WebAuthnApprovalBinding,
+  type WebAuthnApprovalSession,
+  type WebAuthnApprovalType,
+  type WebAuthnCredentialRepository,
+  type WebAuthnEnrollmentSession,
+} from './webauthn-user-presence.js'
+export {
+  startWebAuthnApprovalServer,
+  type WebAuthnApprovalAssets,
+  type WebAuthnApprovalServerHandle,
+} from './webauthn-approval-server.js'

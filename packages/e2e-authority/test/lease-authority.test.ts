@@ -50,4 +50,28 @@ describe('LocalLeaseAuthority', () => {
       runId: 'RUN-2', resourceKey: 'order:100', resourceFingerprint: fingerprint, exclusive: true, ttlMs: 60_000,
     })).resolves.toMatchObject({ status: 'tentative' })
   })
+
+  test('维护操作严格绑定 fencing/target，并对完全相同的终态重试返回稳定回执', async () => {
+    const authority = new LocalLeaseAuthority({ now: () => new Date('2026-07-11T10:00:00.000Z') })
+    const tentative = await authority.acquire({
+      runId: 'RUN-1', resourceKey: 'order:100', resourceFingerprint: fingerprint, exclusive: true, ttlMs: 60_000,
+    })
+    const active = await authority.activate(tentative.leaseId)
+    const cleanupDigest = digestText('cleanup/v1', 'verified')
+
+    await expect(authority.releaseForTarget({ leaseId: active.leaseId, fencingToken: active.fencingToken,
+      targetFingerprint: digestText('resource/v1', 'wrong'), cleanupDigest }))
+      .rejects.toMatchObject({ code: 'E2E_LEASE_BINDING_MISMATCH' })
+    const first = await authority.releaseForTarget({ leaseId: active.leaseId, fencingToken: active.fencingToken,
+      targetFingerprint: fingerprint, cleanupDigest })
+    const retry = await authority.releaseForTarget({ leaseId: active.leaseId, fencingToken: active.fencingToken,
+      targetFingerprint: fingerprint, cleanupDigest })
+    expect(first).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(retry).toBe(first)
+    await expect(authority.releaseForTarget({ leaseId: active.leaseId, fencingToken: active.fencingToken,
+      targetFingerprint: fingerprint, cleanupDigest: digestText('cleanup/v1', 'different') }))
+      .rejects.toMatchObject({ code: 'E2E_LEASE_TERMINAL_MISMATCH' })
+    await expect(authority.getLeaseForTarget(active.leaseId, active.fencingToken, fingerprint))
+      .resolves.toMatchObject({ status: 'released', cleanupDigest })
+  })
 })

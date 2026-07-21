@@ -65,7 +65,7 @@ describe('资产 JSON Schema 生成器', () => {
       'coverage-universe': ['coveragePolicyDigest', 'pairwiseSeed', 'obligations', 'universeDigest'],
       'test-cases': ['cases', 'caseSetDigest'],
       'design-audit': ['inputDigests', 'metrics', 'findings', 'orphanIds', 'weakIds', 'status'],
-      'execution-contract': ['environment', 'baseOrigin', 'browserMatrix', 'identities', 'caseQueue', 'actionIntents', 'dataNeeds', 'manualProcedures', 'evidencePolicyDigest', 'runtimeIsolation', 'unresolvedItems'],
+      'execution-contract': ['environment', 'baseOrigin', 'browserMatrix', 'identities', 'caseQueue', 'actionIntents', 'dataNeeds', 'manualProcedures', 'evidencePolicyDigest', 'runtimeIsolation', 'unresolvedItems', 'readHttpRequests'],
       'approval-grants': ['runBundleDigest', 'grants'],
       'manual-results': ['results'],
       'data-leases': ['leases', 'allocatorEpoch'],
@@ -97,5 +97,32 @@ describe('资产 JSON Schema 生成器', () => {
     expect(schema['x-e2e-runtime-validation'].constraints).toEqual(expect.arrayContaining([
       expect.stringContaining('artifactId'), expect.stringContaining('rootDigest'),
     ]))
+  })
+
+  test('只读 HTTP 协议把可表达约束下推到 JSON Schema，并完整声明运行时 refinement', () => {
+    const schemas = generateArtifactJsonSchemas() as any
+    const execution = schemas['execution-contract']
+    const requests = execution.properties.content.properties.readHttpRequests
+    const request = requests.items
+    const header = request.properties.headers.items
+    const redirect = request.properties.redirectPolicy.anyOf.find(
+      (candidate: any) => candidate.properties.mode.const === 'follow-approved',
+    )
+    const actionMapRequestIds = schemas['browser-action-map'].properties.content
+      .properties.actions.items.properties.requestIds
+
+    expect(requests.uniqueItems).toBe(true)
+    expect(request.properties.url).toMatchObject({ format: 'uri', pattern: '^https?://' })
+    expect(request.properties.headers.uniqueItems).toBe(true)
+    expect(header.properties.name.not).toBeDefined()
+    expect(header.properties.value).toMatchObject({ maxLength: 8192 })
+    expect(redirect.properties.requestIds.uniqueItems).toBe(true)
+    expect(actionMapRequestIds.uniqueItems).toBe(true)
+    for (const artifactType of ['execution-contract', 'browser-action-map', 'approval-grants']) {
+      expect(schemas[artifactType]['x-e2e-runtime-validation'].constraints).toEqual(expect.arrayContaining([
+        expect.stringContaining('ReadHttpRequest'),
+        expect.stringContaining('requestId'),
+      ]))
+    }
   })
 })

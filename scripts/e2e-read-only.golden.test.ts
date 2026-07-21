@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { once } from 'node:events'
 import { afterEach, describe, expect, test } from 'vitest'
 import { chromium } from 'playwright'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 import {
   E2EError, canonicalizeJson, digestText, projectCoverageDispositionDecisionSubject,
 } from '@mutil-skills/e2e-contracts'
@@ -145,7 +146,23 @@ describe('PRD-driven read-only golden path', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'local-authority', keyId: 'local-key-1', now: () => new Date('2026-07-11T10:00:00.000Z'),
       approvalIdentities: [{ subject: 'os-user:golden', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'golden-session' ? 'os-user:golden' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'golden-session'
+        ? createGoldenApprovalReceipt('os-user:golden', 'RUN-READ-1', expected) : undefined,
+      authenticateManualApproverSession: (sessionRef, expected) => {
+        const subject = sessionRef.startsWith('GOLDEN-MANUAL-EXECUTOR-')
+          ? 'os-user:manual-executor'
+          : sessionRef.startsWith('GOLDEN-MANUAL-REVIEWER-')
+            ? 'os-user:manual-reviewer'
+            : undefined
+        if (subject === undefined) return undefined
+        return {
+          subject, ...expected,
+          origin: subject.endsWith('executor') ? 'http://localhost:31001' : 'http://localhost:31002',
+          issuedAt: subject.endsWith('executor')
+            ? '2026-07-11T09:59:10.000Z' : '2026-07-11T09:59:20.000Z',
+          expiresAt: '2026-07-11T10:04:00.000Z',
+        }
+      },
       manualIdentities: [
         { subject: 'os-user:privacy-golden', roles: ['privacy-approver'] },
         { subject: 'os-user:scope-golden', roles: ['scope-approver'] },
@@ -188,9 +205,12 @@ describe('PRD-driven read-only golden path', () => {
       })),
     } : baseUniverse
     const manualResultDraft = mixedDispositions ? {
-      schemaVersion: '1.0.0', manualResultId: 'MANUAL-RESULT-ORDER-A11Y', assetId: 'PRODUCT-PRD-1',
+      schemaVersion: '1.0.0', manualResultId: 'MANUAL-RESULT-ORDER-A11Y', runId: 'RUN-READ-1',
+      assetId: 'PRODUCT-PRD-1',
       prdRevision: modelDigest, generationId: 'GENERATION-1',
+      runtimeInstallationDigest: digestText('golden-fact/v1', 'golden-runtime-installation'),
       manualProcedureId: 'MANUAL-PROCEDURE-ORDER-A11Y', obligationIds: [manualObligationId],
+      caseIds: ['CASE-READ-1'],
       executor: { subject: 'os-user:manual-executor', roles: ['e2e-manual-executor'] },
       reviewer: { subject: 'os-user:manual-reviewer', roles: ['e2e-manual-reviewer'] },
       startedAt: '2026-07-11T09:58:00.000Z', finishedAt: '2026-07-11T09:59:00.000Z', outcome: 'passed',
@@ -231,13 +251,14 @@ describe('PRD-driven read-only golden path', () => {
         runtimePolicyDigest: gatewayPolicyDigest, decisions, blockedCase })
       if (decisions.lineageDecision.status !== 'approved') throw new Error('Golden lineage 未批准')
       const discoverySubject = {
-        schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
+        schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
         scopeDigest: approvalProjection.scopeDigest, environment: 'test' as const, baseOrigin: fixtureOrigin, actor: 'auditor',
         expectedPageIdentity: {
           url: `${fixtureOrigin}/orders`, title: '订单', heading: '订单列表', ariaSignals: ['main:订单列表'],
         },
         bootstrapIntentsDigest: modelDigest,
-        actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation' as const, maxUses: 1 }],
+        requests: [],
+        actions: [{ actionId: 'ACTION-PREFLIGHT', operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
       }
       const discoveryGrant = await authority.issueDiscoveryGrant({
         subject: discoverySubject, approver: { subject: 'os-user:golden', roles: ['e2e-approver'] },
@@ -251,14 +272,15 @@ describe('PRD-driven read-only golden path', () => {
       if (preflight.status !== 'ready' || !preflight.preflightDigest) throw new Error('Discovery preflight 未 ready')
       const grant = await authority.issueReadGrant({
         subject: {
-          schemaVersion: '2.0.0', assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
+          schemaVersion: '2.1.0', assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
           ...approvalProjection,
           environment: 'test', baseOrigin: fixtureOrigin, actor: 'auditor',
           discoveryGrantId: discoveryGrant.grantId, preflightDigest: preflight.preflightDigest,
+          requests: [],
           actions: [
-            { actionId: 'ACTION-READ-1', operation: 'local-navigation', maxUses: 1 },
-            { actionId: 'ACTION-READ-1', operation: 'dom-read', maxUses: 1 },
-            { actionId: 'ACTION-READ-1', operation: 'screenshot', maxUses: 1 },
+            { actionId: 'ACTION-READ-1', operation: 'local-navigation', maxUses: 1, requestIds: [] },
+            { actionId: 'ACTION-READ-1', operation: 'dom-read', maxUses: 1, requestIds: [] },
+            { actionId: 'ACTION-READ-1', operation: 'screenshot', maxUses: 1, requestIds: [] },
           ],
         },
         approver: { subject: 'os-user:golden', roles: ['e2e-approver'] },

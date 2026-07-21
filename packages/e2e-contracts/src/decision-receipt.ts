@@ -4,10 +4,13 @@ import { canonicalizeJson, digestText } from './common.js'
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const NonEmptyTextSchema = z.string().min(1).max(16 * 1024)
-const ApproverSchema = z.object({
-  subject: SafeIdSchema,
-  roles: z.array(SafeIdSchema).min(1).max(64),
-}).strict()
+const ApproverSchema = z.union([
+  z.object({
+    subject: SafeIdSchema,
+    roles: z.array(SafeIdSchema).min(1).max(64),
+  }).strict(),
+  z.object({ kind: z.literal('local-caller') }).strict(),
+])
 
 const IncludedRequirementSchema = z.object({
   reqId: SafeIdSchema,

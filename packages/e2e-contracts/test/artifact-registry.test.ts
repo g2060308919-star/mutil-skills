@@ -3,6 +3,7 @@ import {
   ARTIFACT_TYPES,
   ArtifactSchemaRegistry,
   ReportGatewayAuditSchema,
+  RuntimeProvenanceSchema,
   parseArtifactDocument,
 } from '../src/index.js'
 
@@ -88,5 +89,26 @@ describe('Artifact Schema registry', () => {
       ...valid, schemaVersion: '1.0.0',
       content: { leaseResults: [{ leaseId: 'LEASE-1', status: 'released', digest: digest('2') }] },
     })).toThrow()
+  })
+
+  test('Runtime provenance 是严格事实，且 final-report v3 / generation-manifest v2 拒绝旧版', () => {
+    const provenance = {
+      runtimeVersion: '0.1.0', runtimeInstallationDigest: digest('1'), protocolVersion: '1.0.0',
+      contractsVersion: '0.1.0', engineVersion: '0.1.0', playwrightVersion: '1.61.1',
+      chromiumDigest: digest('2'), gatewayPolicyDigest: digest('3'), authorityPublicKeyDigest: digest('4'),
+      authorityStateProtectionLevel: 'local-crash-integrity',
+      projectIdentityDigest: digest('5'), sourceRevisionDigest: digest('6'), sourceRepositoryIndependent: true,
+      isolationProofDigest: digest('7'),
+    }
+    expect(RuntimeProvenanceSchema.parse(provenance)).toEqual(provenance)
+    expect(RuntimeProvenanceSchema.safeParse({ ...provenance, sourceRepositoryIndependent: false }).success).toBe(false)
+    expect(RuntimeProvenanceSchema.safeParse({ ...provenance, projectRoot: '/private/project' }).success).toBe(false)
+
+    for (const [artifactType, schemaVersion] of [
+      ['final-report', '2.0.0'], ['generation-manifest', '1.0.0'],
+    ] as const) {
+      expect(() => parseArtifactDocument({ ...envelope(artifactType), schemaVersion, content: {} }))
+        .toThrowError(expect.objectContaining({ code: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED' }))
+    }
   })
 })

@@ -2,14 +2,16 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { randomBytes } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomBytes, sign, type KeyObject } from 'node:crypto'
 import { once } from 'node:events'
 import { afterEach, describe, expect, test } from 'vitest'
 import { chromium } from 'playwright'
+import { createGoldenApprovalReceipt } from './e2e-approval-receipt.js'
 import {
-  E2EError, canonicalizeJson, digestCleanupPlanDefinition, digestText,
-  type ExecutionOutcomeReceipt, type VerificationObservation,
+  E2EError, canonicalGrantApprovalSubjectDigest, canonicalizeJson, digestCleanupPlanDefinition, digestText,
+  type ExecutionOutcomeReceipt, type SignedWriteGrant, type VerificationObservation,
 } from '@mutil-skills/e2e-contracts'
+import { isoCBOR } from '@simplewebauthn/server/helpers'
 import {
   LocalApprovalAuthority,
   LocalLeaseAuthority,
@@ -118,8 +120,8 @@ describe('PRD-driven reversible-write golden path', () => {
         { subject: 'scope-golden', roles: ['scope-approver'] },
         { subject: 'lineage-golden', roles: ['lineage-approver'] },
       ],
-      authenticateApproverSession: (sessionRef: string) =>
-        sessionRef === 'golden-session' ? 'os-user:golden' : undefined,
+      authenticateApproverSession: (sessionRef: string, expected) => sessionRef === 'golden-session'
+        ? createGoldenApprovalReceipt('os-user:golden', 'RUN-WRITE-1', expected) : undefined,
       statePath: approvalStatePath, stateEncryptionKey: randomBytes(32), testWorkspaceRoots: [process.cwd()],
     }
     let approvalAuthority = await LocalApprovalAuthority.open(authorityOptions)
@@ -206,6 +208,7 @@ describe('PRD-driven reversible-write golden path', () => {
       issuer: 'golden-write-regression-discovery', keyId: 'golden-write-regression-key',
     })
     let authorityRpcHandle: AuthorityExecutionRpcProcessHandle | undefined
+    let destroyAuthorityRpcClients: (() => void) | undefined
     const browser = await chromium.launch({
       executablePath: resolveChromeExecutablePath(), headless: true,
       proxy: { server: `http://127.0.0.1:${proxyPort}` },
@@ -230,12 +233,13 @@ describe('PRD-driven reversible-write golden path', () => {
       })
       if (decisions.lineageDecision.status !== 'approved') throw new Error('Golden lineage 未批准')
       const discoverySubject = {
-        schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
+        schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
         scopeDigest: approvalProjection.scopeDigest, environment: 'test' as const, baseOrigin: fixtureOrigin,
         actor: 'operator', expectedPageIdentity: {
           url: `${fixtureOrigin}/orders/100`, title: '订单审批', heading: '订单 100', ariaSignals: ['main:订单 100'],
         }, bootstrapIntentsDigest: modelDigest,
-        actions: [{ actionId: 'ACTION-PREFLIGHT-WRITE', operation: 'local-navigation' as const, maxUses: 1 }],
+        requests: [],
+        actions: [{ actionId: 'ACTION-PREFLIGHT-WRITE', operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
       }
       const discoveryGrant = await approvalAuthority.issueDiscoveryGrant({
         subject: discoverySubject, approver: { subject: 'os-user:golden', roles: ['e2e-approver'] },
@@ -247,8 +251,7 @@ describe('PRD-driven reversible-write golden path', () => {
         page: capturingPage, actionId: 'ACTION-PREFLIGHT-WRITE', attemptId: 'ATTEMPT-PREFLIGHT-WRITE-1',
       })
       if (preflight.status !== 'ready' || !preflight.preflightDigest) throw new Error('Write Discovery preflight 未 ready')
-      const grant = await approvalAuthority.issueWriteGrant({
-        subject: {
+      const grantSubject = {
           schemaVersion: '2.0.0', assetId: 'PRODUCT-PRD-1', prdRevision: modelDigest,
           executionDigest: digestText('execution/v1', 'CASE-WRITE-1'), ...approvalProjection,
           environment: 'test', baseOrigin: fixtureOrigin, actor: 'operator',
@@ -264,9 +267,82 @@ describe('PRD-driven reversible-write golden path', () => {
                 payload: { kind: 'json', digest: digestJsonHttpPayload(cleanupPayload) },
                 targetFingerprint: resourceFingerprint, maxRequests: 1, expectedOrder: 2 },
             ] }],
+        } as const
+      const authenticator = createGoldenAuthenticatorCredential()
+      await approvalAuthority.createWebAuthnCredentialRepository().insert({
+        id: authenticator.id, publicKey: authenticator.publicKey, counter: 0,
+        transports: ['internal'], subject: 'os-user:golden',
+      })
+      approvalAuthority.close()
+      leaseAuthority.close()
+      const authorityRpcHostOptions: Parameters<typeof startAuthorityExecutionRpcHostProcess>[0] = {
+        rpc: { issuer: 'golden-authority-host', keyId: 'golden-authority-rpc-key-1',
+          clientId: 'golden-write-runner' },
+        approval: {
+          issuer: authorityOptions.issuer, keyId: authorityOptions.keyId,
+          statePath: approvalStatePath, stateEncryptionKey: authorityOptions.stateEncryptionKey,
+          testWorkspaceRoots: authorityOptions.testWorkspaceRoots,
+          approvalIdentities: authorityOptions.approvalIdentities,
+          manualIdentities: authorityOptions.manualIdentities,
         },
-        approver: { subject: 'os-user:golden', roles: ['e2e-approver'] },
-        approvalSessionRef: 'golden-session', ttlMs: 60_000,
+        lease: { statePath: leaseStatePath, testWorkspaceRoots: [process.cwd()] },
+        userPresence: {
+          installationDigest: digestText('golden-runtime-installation/v1', 'portable-e2e-runtime'),
+          assets: {
+            indexHtml: Buffer.from('<!doctype html>'), approvalJavaScript: Buffer.from('void 0'),
+            simpleWebAuthnBrowser: Buffer.from('void 0'),
+          },
+        },
+        clock: { kind: 'fixed-test-only', now: now().toISOString() },
+      }
+      authorityRpcHandle = await startAuthorityExecutionRpcHostProcess(authorityRpcHostOptions)
+      const grantSubjectDigest = canonicalGrantApprovalSubjectDigest(grantSubject)
+      const grantFinalization = {
+        finalizationId: 'GOLDEN-WRITE-FINALIZATION-1',
+        requestDigest: digestText('golden-write-finalization-request/v1', 'RUN-WRITE-1'),
+      }
+      const grantSession = await authorityRpcHandle.openApprovalSession({
+        runId: 'RUN-WRITE-1', approvalType: 'execution',
+        subjectDigest: grantSubjectDigest,
+        installationDigest: digestText('golden-runtime-installation/v1', 'portable-e2e-runtime'),
+      })
+      await expect(authorityRpcHandle.finalizeApproval({
+        sessionId: grantSession.sessionId, grantSubject, ...grantFinalization,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_INVALID' })
+      await completeGoldenWebAuthnApproval(grantSession, authenticator)
+      await authorityRpcHandle.waitForSession(grantSession.sessionId)
+      await expect(authorityRpcHandle.finalizeApproval({
+        sessionId: grantSession.sessionId,
+        ...grantFinalization,
+        grantSubject: {
+          ...grantSubject,
+          actions: [{ ...grantSubject.actions[0], cleanupPlanDigest: digestText('cleanup-plan/v1', 'rebound') }],
+        },
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_BINDING_MISMATCH' })
+      const finalized = await authorityRpcHandle.finalizeApproval({
+        sessionId: grantSession.sessionId, grantSubject, ...grantFinalization,
+      })
+      const grant = finalized.grant as SignedWriteGrant
+      expect(finalized.approvalBinding).toEqual({
+        runId: grant.approvalContext.runId,
+        installationDigest: grant.approvalContext.installationDigest,
+        approvalType: grant.approvalContext.approvalType,
+        subjectDigest: grant.approvalContext.subjectDigest,
+      })
+      await expect(authorityRpcHandle.finalizeApproval({
+        sessionId: grantSession.sessionId, grantSubject, ...grantFinalization,
+      })).rejects.toMatchObject({ code: 'E2E_APPROVAL_SESSION_INVALID' })
+      const host1SessionKey = authorityRpcHandle.credential.sessionKeyBase64Url
+      await authorityRpcHandle.close()
+      authorityRpcHandle = await startAuthorityExecutionRpcHostProcess(authorityRpcHostOptions)
+      expect(authorityRpcHandle.credential.sessionKeyBase64Url).not.toBe(host1SessionKey)
+      await authorityRpcHandle.activateGrant({
+        grant,
+        approvalBinding: finalized.approvalBinding,
+      })
+      approvalAuthority = await LocalApprovalAuthority.open(authorityOptions)
+      leaseAuthority = await LocalLeaseAuthority.open({
+        now, statePath: leaseStatePath, testWorkspaceRoots: [process.cwd()],
       })
       const compilerArtifacts = await createWriteGoldenCompilerArtifacts({
         modelDigest, universe, fixtureOrigin, runtimePolicyDigest: gatewayPolicyDigest,
@@ -305,27 +381,21 @@ describe('PRD-driven reversible-write golden path', () => {
       leaseAuthority.close()
       approvalAuthority = await LocalApprovalAuthority.open(authorityOptions)
       leaseAuthority = await LocalLeaseAuthority.open({ now, statePath: leaseStatePath, testWorkspaceRoots: [process.cwd()] })
-      authorityRpcHandle = await startAuthorityExecutionRpcHostProcess({
-        rpc: { issuer: 'golden-authority-host', keyId: 'golden-authority-rpc-key-1',
-          clientId: 'golden-write-runner' },
-        approval: {
-          issuer: authorityOptions.issuer, keyId: authorityOptions.keyId,
-          statePath: approvalStatePath, stateEncryptionKey: authorityOptions.stateEncryptionKey,
-          testWorkspaceRoots: authorityOptions.testWorkspaceRoots,
-          approvalIdentities: authorityOptions.approvalIdentities,
-          manualIdentities: authorityOptions.manualIdentities,
-        },
-        lease: { statePath: leaseStatePath, testWorkspaceRoots: [process.cwd()] },
-        clock: { kind: 'fixed-test-only', now: now().toISOString() },
-      })
       const authorityRpcMaterial = authorityRpcHandle.verifierMaterial
       const authorityRpcClients = createAuthorityExecutionRpcClients({
         credential: authorityRpcHandle.credential,
+        approvalBinding: {
+          runId: grant.approvalContext.runId,
+          installationDigest: grant.approvalContext.installationDigest,
+          approvalType: grant.approvalContext.approvalType,
+          subjectDigest: grant.approvalContext.subjectDigest,
+        },
         verifierMaterial: authorityRpcMaterial,
         expectedPublicKeyDigest: authorityRpcMaterial.publicKeyDigest,
         transport: createAuthenticatedRpcHttpTransport(authorityRpcHandle.endpoint),
         now,
       })
+      destroyAuthorityRpcClients = authorityRpcClients.destroy
       const executionTrust = await createTrustedCompilerExecutionTrust({
         discoveryAuthority: { material: discoveryAuthority.verifierMaterial,
           expectedPublicKeyDigest: discoveryAuthority.verifierMaterial.publicKeyDigest },
@@ -513,6 +583,7 @@ describe('PRD-driven reversible-write golden path', () => {
       })
     } finally {
       await browser.close()
+      destroyAuthorityRpcClients?.()
       await authorityRpcHandle?.close()
       approvalAuthority.close()
       leaseAuthority.close()
@@ -549,7 +620,8 @@ describe('PRD-driven reversible-write golden path', () => {
     const authority = LocalApprovalAuthority.create({
       issuer: 'unknown-authority', keyId: 'unknown-key', now,
       approvalIdentities: [{ subject: 'os-user:unknown', roles: ['e2e-approver'] }],
-      authenticateApproverSession: (sessionRef) => sessionRef === 'unknown-session' ? 'os-user:unknown' : undefined,
+      authenticateApproverSession: (sessionRef, expected) => sessionRef === 'unknown-session'
+        ? createGoldenApprovalReceipt('os-user:unknown', 'RUN-WRITE-UNKNOWN', expected) : undefined,
     })
     const leaseAuthority = new LocalLeaseAuthority({ now })
     const targetFingerprint = digestText('fixture-resource/v1', 'order:200')
@@ -616,12 +688,13 @@ describe('PRD-driven reversible-write golden path', () => {
       const adapter = new PlaywrightPageAdapter(page)
       const projectionDigest = (name: string) => digestText('unknown-write-projection/v1', name)
       const discoverySubject = {
-        schemaVersion: '1.0.0' as const, assetId: 'PRODUCT-PRD-UNKNOWN', prdRevision: targetFingerprint,
+        schemaVersion: '1.1.0' as const, assetId: 'PRODUCT-PRD-UNKNOWN', prdRevision: targetFingerprint,
         scopeDigest: projectionDigest('scope'), environment: 'test' as const, baseOrigin: fixtureOrigin,
         actor: 'operator', expectedPageIdentity: {
           url: `${fixtureOrigin}/orders/200`, title: '订单审批', heading: '订单 200', ariaSignals: ['main:订单 200'],
         }, bootstrapIntentsDigest: projectionDigest('bootstrap'),
-        actions: [{ actionId: 'ACTION-PREFLIGHT-UNKNOWN', operation: 'local-navigation' as const, maxUses: 1 }],
+        requests: [],
+        actions: [{ actionId: 'ACTION-PREFLIGHT-UNKNOWN', operation: 'local-navigation' as const, maxUses: 1, requestIds: [] }],
       }
       const discoveryGrant = await authority.issueDiscoveryGrant({
         subject: discoverySubject, approver: { subject: 'os-user:unknown', roles: ['e2e-approver'] },
@@ -662,7 +735,8 @@ describe('PRD-driven reversible-write golden path', () => {
         caseId: 'CASE-WRITE-UNKNOWN', actionId: 'ACTION-APPROVE-UNKNOWN',
         url: `${fixtureOrigin}/orders/200`, buttonName: '批准订单', beforeText: '待审核', afterText: '已批准',
         expectedIdentity: { title: '订单审批', heading: '订单 200' },
-        authorization: { grant, currentSubject: grant.subject, authority: authority.createWriteExecutionClient() },
+        authorization: { grant, currentSubject: grant.subject,
+          authority: authority.createWriteExecutionClient(grant.approvalContext) },
         lease: { leaseId: lease.leaseId, fencingToken: lease.fencingToken, targetFingerprint,
           authority: leaseAuthority.createExecutionClient() },
         runtime: createTestWriteRuntimeSession({ sandboxHealthy: true, gatewayConnected: true,
@@ -732,6 +806,66 @@ describe('PRD-driven reversible-write golden path', () => {
     }
   }, 30_000)
 })
+
+function createGoldenAuthenticatorCredential(): {
+  id: string
+  publicKey: string
+  privateKey: KeyObject
+} {
+  const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' })
+  const jwk = keys.publicKey.export({ format: 'jwk' })
+  const cose = isoCBOR.encode(new Map<number, number | Uint8Array>([
+    [1, 2], [3, -7], [-1, 1],
+    [-2, Buffer.from(jwk.x!, 'base64url')],
+    [-3, Buffer.from(jwk.y!, 'base64url')],
+  ]))
+  return {
+    id: randomBytes(16).toString('base64url'),
+    publicKey: Buffer.from(cose).toString('base64url'),
+    privateKey: keys.privateKey,
+  }
+}
+
+async function completeGoldenWebAuthnApproval(
+  session: { url: string; sessionId: string },
+  credential: ReturnType<typeof createGoldenAuthenticatorCredential>,
+): Promise<void> {
+  const url = new URL(session.url)
+  const bearer = url.hash.slice(1)
+  const sessionResponse = await fetch(`${url.origin}/session`, {
+    headers: { authorization: `Bearer ${bearer}` },
+  })
+  const approval = await sessionResponse.json() as { challenge: string; sessionId: string }
+  const clientData = Buffer.from(canonicalizeJson({
+    type: 'webauthn.get', challenge: approval.challenge, origin: url.origin,
+  }))
+  const authenticatorData = Buffer.alloc(37)
+  createHash('sha256').update('localhost').digest().copy(authenticatorData)
+  authenticatorData[32] = 0x05
+  authenticatorData.writeUInt32BE(1, 33)
+  const signature = sign('sha256', Buffer.concat([
+    authenticatorData,
+    createHash('sha256').update(clientData).digest(),
+  ]), credential.privateKey)
+  const response = await fetch(`${url.origin}/submit`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${bearer}`, origin: url.origin, 'content-type': 'application/json',
+    },
+    body: canonicalizeJson({
+      sessionId: approval.sessionId, challenge: approval.challenge, credentialId: credential.id,
+      response: {
+        id: credential.id, rawId: credential.id, type: 'public-key',
+        response: {
+          clientDataJSON: clientData.toString('base64url'),
+          authenticatorData: authenticatorData.toString('base64url'),
+          signature: signature.toString('base64url'), userHandle: null,
+        },
+      },
+    }),
+  })
+  expect(response.status, await response.text()).toBe(204)
+}
 
 function orderPage(): string {
   return `<!doctype html><html data-e2e-role="operator"><head><title>订单审批</title><link rel="icon" href="data:,"></head><body><main>

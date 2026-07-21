@@ -117,6 +117,16 @@ async function safetyPrecondition(input: RunReversibleWriteCaseInput): Promise<s
     || !isTrustedLeaseClient(input.lease.authority)) return 'E2E_RUNTIME_TRUSTED_AUTHORITY_CLIENT_REQUIRED'
   const writeBinding = getTrustedExecutionClientBinding(input.authorization.authority)
   const leaseBinding = getTrustedExecutionClientBinding(input.lease.authority)
+  const approvalBinding = writeBinding?.approvalBinding
+  const grantContext = input.authorization.grant.approvalContext
+  if (!approvalBinding
+    || approvalBinding.runId !== grantContext.runId
+    || approvalBinding.installationDigest !== grantContext.installationDigest
+    || approvalBinding.approvalType !== grantContext.approvalType
+    || approvalBinding.subjectDigest !== grantContext.subjectDigest
+    || ('runId' in runtime && runtime.runId !== approvalBinding.runId)) {
+    return 'E2E_RUNTIME_APPROVAL_CONTEXT_MISMATCH'
+  }
   if (runtime.authorityTransport === 'in-process-test') {
     if (writeBinding?.transport !== 'in-process-test' || leaseBinding?.transport !== 'in-process-test') {
       return 'E2E_RUNTIME_AUTHORITY_TRANSPORT_MISMATCH'

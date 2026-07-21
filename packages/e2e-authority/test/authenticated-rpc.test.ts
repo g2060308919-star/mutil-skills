@@ -29,6 +29,34 @@ function setup(input: { serverNow?: () => Date; clientNow?: () => Date; ttlMs?: 
 }
 
 describe('Authenticated Authority RPC', () => {
+  test('replay cache 同时限制每 client 与全局容量，并在 TTL 后精确回收计数', async () => {
+    let clock = NOW
+    const server = AuthenticatedRpcServer.create({
+      issuer: 'local-authority', keyId: 'authority-rpc-capacity', now: () => clock,
+    })
+    server.registerOperation('echo.capacity', async () => ({ ok: true }))
+    const material = server.verifierMaterial
+    const createClient = (clientId: string, fill: number) => {
+      const credential = server.registerClient(clientId, Buffer.alloc(32, fill))
+      return AuthenticatedRpcClient.create({ credential, verifierMaterial: material,
+        expectedPublicKeyDigest: material.publicKeyDigest,
+        transport: (request) => server.handle(request), now: () => clock, ttlMs: 5_000 })
+    }
+    const first = createClient('capacity-1', 1)
+    const second = createClient('capacity-2', 2)
+    const third = createClient('capacity-3', 3)
+
+    for (let index = 0; index < 1_024; index += 1) await first.call('echo.capacity', { index })
+    await expect(first.call('echo.capacity', { overflow: true }))
+      .rejects.toMatchObject({ code: 'E2E_RPC_REPLAY_CACHE_CAPACITY' })
+    for (let index = 0; index < 1_024; index += 1) await second.call('echo.capacity', { index })
+    await expect(third.call('echo.capacity', { globalOverflow: true }))
+      .rejects.toMatchObject({ code: 'E2E_RPC_REPLAY_CACHE_CAPACITY' })
+
+    clock = new Date(NOW.getTime() + 5_001)
+    await expect(third.call('echo.capacity', { afterExpiry: true })).resolves.toEqual({ ok: true })
+  }, 15_000)
+
   test('请求由独立会话密钥认证，响应由固定 Authority Ed25519 公钥认证', async () => {
     const { server, client, material } = setup()
     server.registerOperation('echo.read', async (payload) => ({ accepted: true, payload }))
@@ -38,6 +66,15 @@ describe('Authenticated Authority RPC', () => {
     })
     expect(client.authorityPublicKeyDigest).toBe(material.publicKeyDigest)
     expect(client.authorityIdentity).toEqual({ issuer: 'local-authority', keyId: 'authority-rpc-1' })
+  })
+
+  test('显式销毁 Server/Client 后拒绝继续使用长期会话密钥', async () => {
+    const { server, client } = setup()
+    server.registerOperation('echo.read', async (payload) => payload)
+    client.destroy()
+    await expect(client.call('echo.read', {})).rejects.toMatchObject({ code: 'E2E_RPC_DESTROYED' })
+    server.destroy()
+    await expect(server.handle({})).rejects.toMatchObject({ code: 'E2E_RPC_DESTROYED' })
   })
 
   test('拒绝未知客户端、payload 篡改、非法 nonce 与相同请求重放', async () => {

@@ -75,6 +75,7 @@ export class ReversibleWriteGateway {
   readonly #outcomeSigner?: LocalGatewayAuditSigner
   readonly #gatewayPolicyDigest?: string
   readonly #requests: ReversibleWriteCapability['requests']
+  readonly #resolvedTemplatePayloadDigests: Readonly<Record<string, string>>
   readonly #uses = new Map<string, number>()
   readonly #audit: GatewayAuditSummary = { received: 0, forwarded: 0, blocked: 0, byIntent: {} }
   #requestIndex = 0
@@ -91,9 +92,15 @@ export class ReversibleWriteGateway {
     leaseAuthority: LeaseTargetVerifier
     recorder: TrustedGatewayPublicationAuditRecorder
     outcomeSigner?: LocalGatewayAuditSigner
+    resolvedTemplatePayloadDigests?: Readonly<Record<string, string>>
   }) {
     if (!isTrustedGatewayPublicationAuditRecorder(input.recorder)) {
       throw gatewayError('E2E_GATEWAY_TRUSTED_AUDIT_RECORDER_REQUIRED', '可恢复写必须绑定 Gateway 签名发布审计 recorder')
+    }
+    if (input.attemptContext.runId !== input.grant.approvalContext.runId
+      || input.grant.approvalContext.approvalType !== 'execution') {
+      throw gatewayError('E2E_APPROVAL_CONTEXT_MISMATCH',
+        'Gateway AttemptContext 与签名 Grant 的审批执行上下文不一致')
     }
     if (input.outcomeSigner && !input.outcomeSigner.ownsRecorder(input.recorder)) {
       throw gatewayError(
@@ -108,6 +115,17 @@ export class ReversibleWriteGateway {
     const requests = [...input.capability.requests].sort((left, right) => left.expectedOrder - right.expectedOrder)
     if (requests.length === 0 || requests.some((request, index) => request.expectedOrder !== index + 1 || request.maxRequests < 1)) {
       throw gatewayError('E2E_GATEWAY_REQUEST_SEQUENCE_INVALID', 'Capability 请求序列必须从 1 开始连续且请求次数为正数')
+    }
+    const templateIntentIds = requests.filter((request) => request.payload.kind === 'template')
+      .map((request) => request.intentId).sort()
+    const resolvedDigests = input.resolvedTemplatePayloadDigests ?? {}
+    const resolvedIntentIds = Object.keys(resolvedDigests).sort()
+    if (canonicalizeJson(templateIntentIds) !== canonicalizeJson(resolvedIntentIds)
+      || Object.values(resolvedDigests).some((digest) => !/^sha256:[a-f0-9]{64}$/.test(digest))) {
+      throw gatewayError(
+        'E2E_GATEWAY_TEMPLATE_PAYLOAD_BINDING_INVALID',
+        '所有且仅有 template intent 必须绑定运行时解析后的 payload 摘要',
+      )
     }
     this.#grant = input.grant
     this.#currentSubject = structuredClone(input.currentSubject)
@@ -127,6 +145,7 @@ export class ReversibleWriteGateway {
     this.#outcomeSigner = input.outcomeSigner
     this.#gatewayPolicyDigest = input.outcomeSigner?.policyDigestFor(input.recorder)
     this.#requests = requests
+    this.#resolvedTemplatePayloadDigests = Object.freeze({ ...resolvedDigests })
   }
 
   async decide(raw: RawWriteHttpRequest): Promise<GatewayDecision> {
@@ -150,7 +169,13 @@ export class ReversibleWriteGateway {
       return this.block('E2E_GATEWAY_INTENT_NOT_FOUND', '请求不匹配当前已批准 intent', request)
     }
 
-    const payloadDecision = matchPayload(expected.payload, raw)
+    const payloadDecision = matchPayload(
+      expected.payload,
+      raw,
+      expected.payload.kind === 'template'
+        ? this.#resolvedTemplatePayloadDigests[expected.intentId]
+        : undefined,
+    )
     if (!payloadDecision.allowed) return this.block(payloadDecision.code, payloadDecision.reason, request)
 
     try {
@@ -278,6 +303,11 @@ export class ReversibleWriteGateway {
     return this.#reservation ? { ...this.#reservation } : undefined
   }
 
+  /** Transport Host 用于避免在多步已批准请求序列完成前开放 outcome finalization。 */
+  isRequestSequenceComplete(): boolean {
+    return this.#requestIndex === this.#requests.length
+  }
+
   private block(code: string, reason: string, request?: GatewayDecision extends { request?: infer T } ? T : never): GatewayDecision {
     this.#audit.blocked += 1
     if (request) this.#recorder.recordReadDecision({
@@ -301,6 +331,7 @@ export function requestMatchesMetadata(
 export function matchPayload(
   expected: HttpIntent['payload'],
   request: RawWriteHttpRequest,
+  resolvedTemplatePayloadDigest?: string,
 ): { allowed: true } | { allowed: false; code: string; reason: string } {
   const body = request.body ?? new Uint8Array()
   if (expected.kind === 'no-body') {
@@ -321,7 +352,8 @@ export function matchPayload(
   } else {
     actualDigest = digestBinaryHttpPayload(body)
   }
-  return actualDigest === expected.digest
+  const expectedDigest = expected.kind === 'template' ? resolvedTemplatePayloadDigest : expected.digest
+  return actualDigest === expectedDigest
     ? { allowed: true }
     : { allowed: false, code: 'E2E_GATEWAY_PAYLOAD_MISMATCH', reason: '请求体摘要与已批准 intent 不一致' }
 }

@@ -1,6 +1,6 @@
 import { generateKeyPairSync, sign } from 'node:crypto'
 import { canonicalizeJson, digestApprovalProjection, digestArtifactContent,
-  digestBytes, digestDecisionSubject, digestText, projectLineageDecisionSubject,
+  digestBytes, digestCanonicalGrantApprovalSubject, digestDecisionSubject, digestText, projectLineageDecisionSubject,
   projectScopeDecisionSubject, type DecisionReceipt,
   type DecisionReceiptVerificationBinding } from '@mutil-skills/e2e-contracts'
 import { createTestOnlyApprovalFreshnessClient, LocalApprovalAuthority } from '@mutil-skills/e2e-authority'
@@ -75,13 +75,16 @@ export function approvedCompilerArtifacts(options: {
       effect: 'reversible-write', maxUses: 1, digest: digest('cap-write') }]
   const capability = capabilities[0]!
   const approvalSubject = effect === 'read' ? {
-    schemaVersion: '2.0.0', ...approvalContext,
+    schemaVersion: '2.1.0', ...approvalContext,
     scopeDigest: digest('scope'), requirementModelDigest: digest('model'), coveragePolicyDigest: digest('coverage-policy'),
     universeDigest: digest('universe'), caseDigest: digest('cases'), actionMapDigest: digest('action-map'),
     policyDigest: digest('policy'), executionContractDigest: digest('execution'), runBundleProjectionDigest: digest('run-bundle'),
     environment: 'test', baseOrigin: 'https://example.test', actor: 'USER', discoveryGrantId: 'DISCOVERY-1',
     preflightDigest: digest('preflight'),
-    actions: actionIds.map((currentActionId) => ({ actionId: currentActionId, operation: 'dom-read', maxUses: 1 })),
+    requests: [],
+    actions: actionIds.map((currentActionId) => ({
+      actionId: currentActionId, operation: 'dom-read', maxUses: 1, requestIds: [],
+    })),
   } : {
     schemaVersion: '2.0.0', ...approvalContext,
     executionDigest: digest('execution-approval'), scopeDigest: digest('scope'), requirementModelDigest: digest('model'),
@@ -97,7 +100,7 @@ export function approvedCompilerArtifacts(options: {
   }
   const receiptBody = {
     schemaVersion: '1.0.0', grantType: effect === 'read' ? 'read' : 'reversible-write', grantId: 'GRANT-1',
-    subjectDigest: digestText('approval-subject/v1', canonicalizeJson(approvalSubject)),
+    subjectDigest: digestCanonicalGrantApprovalSubject('execution', approvalSubject),
     runBundleDigest: digest('run-bundle-artifact'), browserPreflightArtifactDigest: digest('browser-preflight-artifact'),
     capabilities, capabilitySetDigest: digestText('approval-capability-set/v1', canonicalizeJson(capabilities)),
     expiresAt: '2026-07-16T00:00:00.000Z', checkedAt: '2026-07-15T00:00:00.000Z',
@@ -169,6 +172,7 @@ export function approvedCompilerArtifacts(options: {
         oracleIds: ['ORACLE-1'], effect,
         capabilities: [{ operation: effect === 'read' ? 'dom-read' : 'http-request',
           capabilityId: capabilities[index]!.capabilityId }],
+        requestIds: [],
       })),
       unmappedSteps: [], discoveredRisks: [],
     },
@@ -177,8 +181,9 @@ export function approvedCompilerArtifacts(options: {
       browserMatrix: [{ browserId: 'CHROMIUM', channel: 'chromium', viewportId: 'DESKTOP' }],
       identities: [{ identityId: 'IDENTITY-1', roleIds: ['USER'], secretRef: 'SECRET-1' }],
       caseQueue: [{ ordinal: 0, caseId }], actionIntents: actionIds.map((currentActionId, index) => ({
-        actionId: currentActionId, effect, intentDigest: digest(`intent-${index + 1}`),
+      actionId: currentActionId, effect, intentDigest: digest(`intent-${index + 1}`), requestIds: [],
       })),
+      readHttpRequests: [],
       dataNeeds: effect === 'read' ? [] : [{ leaseId: 'LEASE-1', resourceKey: 'ORDER-1', mode: 'write' }],
       manualProcedures: [], evidencePolicyDigest: digest('evidence-policy'), runtimeIsolation: null, unresolvedItems: [],
     },
@@ -188,7 +193,13 @@ export function approvedCompilerArtifacts(options: {
       attemptPlans: [{ caseId, slots: 1 }], signedCapabilities: capabilities, secretRefs: ['SECRET-1'],
       runtimePolicyDigest: digest('runtime-policy'), runtimeIsolationPolicyDigest: 'not-applicable',
     },
-    'approval-grants': { runBundleDigest: digest('run-bundle-artifact'), grants: [approvalReceipt] },
+    'approval-grants': {
+      runBundleDigest: digest('run-bundle-artifact'),
+      approvalAssurance: {
+        approvalMode: 'webauthn', identityVerified: true, separationOfDutiesVerified: true,
+      },
+      grants: [approvalReceipt],
+    },
   }
   Object.assign(approvalSubject, {
     scopeDigest: digestApprovalProjection('acceptance-scope', contents['acceptance-scope']),
@@ -210,12 +221,12 @@ export function approvedCompilerArtifacts(options: {
   receiptBody.runBundleDigest = runBundleArtifact.contentDigest as string
   approvalReceipt.runBundleDigest = receiptBody.runBundleDigest
   ;(contents['approval-grants'] as Record<string, unknown>).runBundleDigest = receiptBody.runBundleDigest
-  receiptBody.subjectDigest = digestText('approval-subject/v1', canonicalizeJson(approvalSubject))
+  receiptBody.subjectDigest = digestCanonicalGrantApprovalSubject('execution', approvalSubject)
   approvalReceipt.subjectDigest = receiptBody.subjectDigest
   approvalReceipt.authorityProof.signedDigest = digestText('approval-freshness-receipt/v1', canonicalizeJson(receiptBody))
   if (options.mismatchedApprovalProjection) {
     approvalSubject.policyDigest = digest('mismatched-policy')
-    receiptBody.subjectDigest = digestText('approval-subject/v1', canonicalizeJson(approvalSubject))
+    receiptBody.subjectDigest = digestCanonicalGrantApprovalSubject('execution', approvalSubject)
     approvalReceipt.subjectDigest = receiptBody.subjectDigest
     approvalReceipt.authorityProof.signedDigest = digestText('approval-freshness-receipt/v1', canonicalizeJson(receiptBody))
   }
@@ -223,7 +234,7 @@ export function approvedCompilerArtifacts(options: {
   const schemaVersions: Record<string, string> = {
     'prd-manifest': '1.0.0', 'prd-diff': '2.0.0', 'acceptance-scope': '2.0.0',
     'project-policy': '2.0.0', 'requirement-model': '1.0.0', 'coverage-universe': '1.0.0',
-    'test-cases': '1.0.0', 'browser-action-map': '2.0.0', 'execution-contract': '2.0.0', 'approval-grants': '2.0.0',
+    'test-cases': '1.0.0', 'browser-action-map': '2.1.0', 'execution-contract': '1.1.0', 'approval-grants': '2.0.0',
     'run-bundle': '2.0.0',
   }
   return Object.entries(contents).map(([artifactType, content]) => seal({
@@ -279,7 +290,7 @@ export function approvedCompilerArtifactsWithBlockedCase(): unknown[] {
     actionMapDigest: digestApprovalProjection('browser-action-map', content('browser-action-map')),
     executionContractDigest: digestApprovalProjection('execution-contract', content('execution-contract')),
   })
-  receipt.subjectDigest = digestText('approval-subject/v1', canonicalizeJson(receipt.executionSubjectSnapshot))
+  receipt.subjectDigest = digestCanonicalGrantApprovalSubject('execution', receipt.executionSubjectSnapshot)
   const { authorityProof, ...receiptBody } = receipt
   authorityProof.signedDigest = digestText('approval-freshness-receipt/v1', canonicalizeJson(receiptBody))
   signFixtureFreshnessReceipt(receipt)

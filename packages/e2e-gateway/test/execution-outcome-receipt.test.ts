@@ -12,6 +12,7 @@ function binding(): ExecutionOutcomeBinding {
   const cleanupPlanDigest = digestText('test/v1', 'cleanup-plan')
   const requests = [{ intentId: 'intent-write', method: 'POST', canonicalOrigin: 'https://example.test',
     exactPath: '/api/write', query: [] as Array<[string, string]>,
+    headers: [{ name: 'x-e2e-scope', value: 'orders' }],
     payload: { kind: 'json' as const, digest: digestText('test/v1', 'payload') },
     targetFingerprint: digestText('test/v1', 'target'), maxRequests: 1, expectedOrder: 1 }]
   return {
