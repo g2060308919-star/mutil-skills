@@ -10,7 +10,7 @@ const AttemptContextSchema = z.object({
 }).strict()
 // ExecutionOutcome 必须冻结与 SignedWriteGrant 完全相同的 intent；禁止复制一份易漂移的近似 schema。
 const HttpIntentSchema = WriteHttpIntentSchema
-const ReversibleWriteCapabilitySnapshotSchema = z.object({
+const HttpReversibleWriteCapabilitySnapshotSchema = z.object({
   capabilityId: SafeIdSchema,
   nonce: z.string().min(1).max(4096),
   transport: z.literal('http'),
@@ -23,6 +23,27 @@ const ReversibleWriteCapabilitySnapshotSchema = z.object({
   requests: z.array(HttpIntentSchema).min(1).max(10_000),
   maxUses: z.literal(1),
 }).strict()
+
+const BrowserLocalReversibleWriteCapabilitySnapshotSchema = z.object({
+  capabilityId: SafeIdSchema,
+  nonce: z.string().min(1).max(4096),
+  transport: z.literal('browser-local'),
+  effect: z.literal('reversible-write'),
+  operation: z.literal('full-playwright'),
+  actionId: SafeIdSchema,
+  programDigest: DigestSchema,
+  cleanupProgramDigest: DigestSchema,
+  dataLeaseId: SafeIdSchema,
+  fencingToken: z.number().int().positive(),
+  cleanupPlanDigest: DigestSchema,
+  requests: z.array(HttpIntentSchema).max(10_000),
+  maxUses: z.literal(1),
+}).strict()
+
+export const ReversibleWriteCapabilitySnapshotSchema = z.discriminatedUnion('transport', [
+  HttpReversibleWriteCapabilitySnapshotSchema,
+  BrowserLocalReversibleWriteCapabilitySnapshotSchema,
+])
 
 const ExecutionOutcomeBindingBaseSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
@@ -76,8 +97,10 @@ function refineExecutionOutcome(value: z.infer<typeof ExecutionOutcomeBindingBas
     context.addIssue({ code: 'custom', message: 'Capability snapshot 与 outcome 顶层/cleanup binding 不一致',
       path: ['capability'] })
   }
+  const missingRequiredForward = (value.capability.transport === 'http' || value.capability.requests.length > 0)
+    && value.gateway.forwarded === 0
   if (value.status === 'passed' && (value.effectObservation !== 'applied'
-    || value.cleanup.status !== 'verified-clean' || value.gateway.forwarded === 0)) {
+    || value.cleanup.status !== 'verified-clean' || missingRequiredForward)) {
     context.addIssue({ code: 'custom', message: 'passed outcome 必须证明写已应用、Gateway 已转发且 cleanup verified-clean' })
   }
 }

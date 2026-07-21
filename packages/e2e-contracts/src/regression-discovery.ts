@@ -41,7 +41,9 @@ export const RegressionToolchainSchema = z.object({
 const RegressionDiscoverySubjectObjectSchema = z.object({
   schemaVersion: z.literal('2.0.0'),
   testDomain: z.literal('prd-e2e-trusted-compiler'),
-  executionProfile: z.enum(['trusted-read-only', 'trusted-reversible-write', 'production-isolated']),
+  executionProfile: z.enum([
+    'trusted-read-only', 'trusted-reversible-write', 'production-isolated', 'full-playwright',
+  ]),
   assetId: AssetIdSchema,
   generationId: SafeIdSchema,
   prdRevision: DigestSchema,

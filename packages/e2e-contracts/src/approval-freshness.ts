@@ -155,6 +155,20 @@ const WriteActionShape = {
   fencingToken: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), cleanupPlanDigest: DigestSchema,
 }
 
+const HttpWriteApprovalActionSchema = z.object({
+  ...WriteActionShape,
+  requests: z.array(WriteHttpIntentSchema).min(1).max(1_000),
+}).strict()
+
+export const BrowserLocalWriteApprovalActionSchema = z.object({
+  ...WriteActionShape,
+  transport: z.literal('browser-local'),
+  operation: z.literal('full-playwright'),
+  programDigest: DigestSchema,
+  cleanupProgramDigest: DigestSchema,
+  requests: z.array(WriteHttpIntentSchema).max(1_000),
+}).strict()
+
 /** Historical Write subject accepted by Authority snapshot 2.3 and earlier. */
 export const LegacyWriteApprovalSubjectV23Schema = z.object({
   ...WriteApprovalSubjectV2Shape,
@@ -166,29 +180,31 @@ export const LegacyWriteApprovalSubjectV23Schema = z.object({
 
 export const WriteApprovalSubjectV2Schema = z.object({
   ...WriteApprovalSubjectV2Shape,
-  actions: z.array(z.object({
-    ...WriteActionShape,
-    requests: z.array(WriteHttpIntentSchema).min(1).max(1_000),
-  }).strict()).min(1).max(100_000),
+  actions: z.array(z.union([
+    HttpWriteApprovalActionSchema,
+    BrowserLocalWriteApprovalActionSchema,
+  ])).min(1).max(100_000),
 }).strict()
 
-const ReadCapabilityRecordSchema = z.object({
+const ApprovalCapabilityRecordObjectSchema = z.object({
   capabilityId: SafeIdSchema,
   actionId: SafeIdSchema,
-  operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request']),
-  effect: z.literal('read'),
+  operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request', 'full-playwright']),
+  effect: z.enum(['read', 'reversible-write']),
   maxUses: z.number().int().positive().max(100_000),
   digest: DigestSchema,
 }).strict()
 
-const WriteCapabilityRecordSchema = z.object({
-  capabilityId: SafeIdSchema, actionId: SafeIdSchema, operation: z.literal('http-request'),
-  effect: z.literal('reversible-write'), maxUses: z.literal(1), digest: DigestSchema,
-}).strict()
-
-export const ApprovalCapabilityRecordSchema = z.discriminatedUnion('effect', [
-  ReadCapabilityRecordSchema, WriteCapabilityRecordSchema,
-])
+export const ApprovalCapabilityRecordSchema = ApprovalCapabilityRecordObjectSchema
+  .superRefine((record, context) => {
+    const writeOperation = record.operation === 'http-request' || record.operation === 'full-playwright'
+    if (record.effect === 'reversible-write' && (!writeOperation || record.maxUses !== 1)) {
+      context.addIssue({ code: 'custom', message: 'write capability record 必须使用写 operation 且 maxUses=1' })
+    }
+    if (record.effect === 'read' && record.operation === 'full-playwright') {
+      context.addIssue({ code: 'custom', message: 'read capability record 不得使用 full-playwright operation' })
+    }
+  })
 
 const CommonReceiptBody = {
   schemaVersion: z.literal('1.0.0'),

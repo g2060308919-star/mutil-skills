@@ -53,6 +53,39 @@ describe('ExecutionOutcomeReceipt 契约', () => {
     expect(() => ExecutionOutcomeReceiptSchema.parse({ ...receipt,
       cleanup: { ...receipt.cleanup, resultDigest: digest('forged') } })).toThrow(/signedDigest/)
   })
+
+  test('browser-local capability 可绑定 full playwright 程序且拒绝 HTTP 字段串用', () => {
+    const value = binding()
+    const browserLocal = {
+      ...value,
+      capability: {
+        capabilityId: 'CAP-1', nonce: 'nonce', transport: 'browser-local' as const,
+        effect: 'reversible-write' as const, operation: 'full-playwright' as const,
+        actionId: 'ACTION-1', programDigest: digest('program'), cleanupProgramDigest: digest('cleanup-program'),
+        dataLeaseId: 'LEASE-1', fencingToken: 1, cleanupPlanDigest: digest('cleanup-plan'),
+        requests: [], maxUses: 1 as const,
+      },
+      gateway: {
+        ...value.gateway,
+        approvedRequestSetDigest: digestText('execution-outcome-approved-request-set/v1', canonicalizeJson([])),
+        received: 0,
+        forwarded: 0,
+      },
+    }
+    expect(ExecutionOutcomeBindingSchema.parse(browserLocal)).toEqual(browserLocal)
+    expect(ExecutionOutcomeBindingSchema.safeParse({
+      ...browserLocal,
+      capability: { ...browserLocal.capability, operation: 'http-request' },
+    }).success).toBe(false)
+    expect(ExecutionOutcomeBindingSchema.safeParse({
+      ...binding(),
+      capability: { ...binding().capability, programDigest: digest('program') },
+    }).success).toBe(false)
+    expect(ExecutionOutcomeBindingSchema.safeParse({
+      ...browserLocal,
+      capability: { ...browserLocal.capability, cleanupProgramDigest: undefined },
+    }).success).toBe(false)
+  })
 })
 
 function digest(value: string): string {

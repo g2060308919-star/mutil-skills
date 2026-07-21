@@ -7,6 +7,15 @@ const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const SemverSchema = z.string().regex(/^\d+\.\d+\.\d+$/)
 const NonEmptyTextSchema = z.string().min(1).max(16 * 1024)
+const ProgramSourceSchema = z.string().min(1).max(1024 * 1024)
+
+export function computeFullPlaywrightSourceDigest(source: string): string {
+  return digestText('full-playwright-source/v1', source)
+}
+
+export function computeFullPlaywrightCleanupSourceDigest(source: string): string {
+  return digestText('full-playwright-cleanup-source/v1', source)
+}
 
 export const AssertTextCompilerActionSchema = z.object({
   kind: z.literal('assertText'),
@@ -25,10 +34,43 @@ export const ReversibleWriteCompilerActionSchema = z.object({
   cleanupPlanId: SafeIdSchema,
 }).strict()
 
+const FullPlaywrightCompilerActionObjectSchema = z.object({
+  kind: z.literal('fullPlaywright'),
+  actionId: SafeIdSchema,
+  source: ProgramSourceSchema,
+  sourceDigest: DigestSchema,
+  cleanupSource: ProgramSourceSchema,
+  cleanupSourceDigest: DigestSchema,
+  dataLeaseId: SafeIdSchema,
+  cleanupPlanId: SafeIdSchema,
+  timeoutMs: z.number().int().positive().max(3_600_000),
+}).strict()
+
+function refineFullPlaywrightCompilerAction(
+  action: z.infer<typeof FullPlaywrightCompilerActionObjectSchema>,
+  context: z.RefinementCtx,
+): void {
+  if (action.sourceDigest !== computeFullPlaywrightSourceDigest(action.source)) {
+    context.addIssue({ code: 'custom', message: 'sourceDigest 未绑定 full Playwright source', path: ['sourceDigest'] })
+  }
+  if (action.cleanupSourceDigest !== computeFullPlaywrightCleanupSourceDigest(action.cleanupSource)) {
+    context.addIssue({
+      code: 'custom', message: 'cleanupSourceDigest 未绑定 full Playwright cleanupSource',
+      path: ['cleanupSourceDigest'],
+    })
+  }
+}
+
+export const FullPlaywrightCompilerActionSchema = FullPlaywrightCompilerActionObjectSchema
+  .superRefine(refineFullPlaywrightCompilerAction)
+
 export const CompilerActionSchema = z.discriminatedUnion('kind', [
   AssertTextCompilerActionSchema,
   ReversibleWriteCompilerActionSchema,
-])
+  FullPlaywrightCompilerActionObjectSchema,
+]).superRefine((action, context) => {
+  if (action.kind === 'fullPlaywright') refineFullPlaywrightCompilerAction(action, context)
+})
 
 export const DeclarativeExecutableCaseSchema = z.object({
   caseId: SafeIdSchema,
@@ -53,7 +95,7 @@ export const DeclarativeExecutableCaseSchema = z.object({
   }
 })
 
-export const CompilerInputV1Schema = z.object({
+const CompilerInputV1InternalSchema = z.object({
   schemaVersion: z.literal('compiler-input/v1'),
   assetId: AssetIdSchema,
   generationId: SafeIdSchema,
@@ -68,6 +110,9 @@ export const CompilerInputV1Schema = z.object({
   approvalFreshnessReceipt: ApprovalFreshnessReceiptSchema,
   policyDigest: DigestSchema,
   playwrightVersion: SemverSchema,
+  executionProfile: z.enum([
+    'trusted-read-only', 'trusted-reversible-write', 'production-isolated', 'full-playwright',
+  ]).optional(),
   cases: z.array(DeclarativeExecutableCaseSchema).min(1).max(100_000),
   blockedCases: RegressionBlockedCasesSchema,
 }).strict().superRefine((input, context) => {
@@ -85,15 +130,38 @@ export const CompilerInputV1Schema = z.object({
   const actionKinds = new Set(input.cases.flatMap((testCase) =>
     testCase.actions.map((action) => action.kind)))
   if (actionKinds.size > 1) {
-    context.addIssue({ code: 'custom', message: '同一密封项目不得混合只读与可逆写模板', path: ['cases'] })
+    context.addIssue({ code: 'custom', message: '同一密封项目不得混合 Compiler Action kind', path: ['cases'] })
+  }
+  const usesFullPlaywright = actionKinds.has('fullPlaywright')
+  if (usesFullPlaywright !== (input.executionProfile === 'full-playwright')) {
+    context.addIssue({
+      code: 'custom', message: 'fullPlaywright action 必须且只能由显式 full-playwright Profile 使用',
+      path: ['executionProfile'],
+    })
   }
 })
 
 export type CompilerAction = z.infer<typeof CompilerActionSchema>
 export type AssertTextCompilerAction = z.infer<typeof AssertTextCompilerActionSchema>
 export type ReversibleWriteCompilerAction = z.infer<typeof ReversibleWriteCompilerActionSchema>
+export type FullPlaywrightCompilerAction = z.infer<typeof FullPlaywrightCompilerActionSchema>
 export type DeclarativeExecutableCase = z.infer<typeof DeclarativeExecutableCaseSchema>
-export type CompilerInputV1 = z.infer<typeof CompilerInputV1Schema>
+type ParsedCompilerInputV1 = z.infer<typeof CompilerInputV1InternalSchema>
+export type FullPlaywrightCompilerInputV1 = ParsedCompilerInputV1
+type CompilerConsumerCompatibleAction = CompilerAction & Record<string, any>
+type CompilerConsumerCompatibleCase = Omit<DeclarativeExecutableCase, 'actions'> & {
+  actions: CompilerConsumerCompatibleAction[]
+}
+/**
+ * Task 3 will make the compiler exhaustively handle fullPlaywright. The index signature keeps that
+ * existing consumer source-compatible without removing fullPlaywright from the static action union.
+ * Runtime parsing remains strict, and CompilerAction retains the exact discriminated type.
+ */
+export type CompilerInputV1 = Omit<ParsedCompilerInputV1, 'cases'> & {
+  cases: CompilerConsumerCompatibleCase[]
+}
+
+export const CompilerInputV1Schema = CompilerInputV1InternalSchema as z.ZodType<CompilerInputV1>
 
 export function computeCompilerInputDigest(input: CompilerInputV1): string {
   const parsed = CompilerInputV1Schema.parse(input)

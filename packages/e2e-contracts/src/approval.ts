@@ -118,6 +118,28 @@ export interface HttpIntent {
   expectedOrder: number
 }
 
+export interface HttpWriteApprovalAction {
+  actionId: string
+  effect: 'reversible-write'
+  dataLeaseId: string
+  fencingToken: number
+  cleanupPlanDigest: string
+  requests: HttpIntent[]
+}
+
+export interface BrowserLocalWriteApprovalAction {
+  actionId: string
+  transport: 'browser-local'
+  operation: 'full-playwright'
+  effect: 'reversible-write'
+  programDigest: string
+  cleanupProgramDigest: string
+  dataLeaseId: string
+  fencingToken: number
+  cleanupPlanDigest: string
+  requests: HttpIntent[]
+}
+
 export interface WriteApprovalSubject {
   schemaVersion: '1.0.0' | '2.0.0'
   assetId: string
@@ -137,17 +159,10 @@ export interface WriteApprovalSubject {
   preflightDigest?: string
   environment: 'local' | 'test' | 'staging'
   baseOrigin: string
-  actions: Array<{
-    actionId: string
-    effect: 'reversible-write'
-    dataLeaseId: string
-    fencingToken: number
-    cleanupPlanDigest: string
-    requests: HttpIntent[]
-  }>
+  actions: Array<HttpWriteApprovalAction | BrowserLocalWriteApprovalAction>
 }
 
-export interface ReversibleWriteCapability {
+export interface HttpReversibleWriteCapability {
   capabilityId: string
   nonce: string
   transport: 'http'
@@ -160,6 +175,26 @@ export interface ReversibleWriteCapability {
   requests: HttpIntent[]
   maxUses: 1
 }
+
+export interface BrowserLocalReversibleWriteCapability {
+  capabilityId: string
+  nonce: string
+  transport: 'browser-local'
+  effect: 'reversible-write'
+  operation: 'full-playwright'
+  actionId: string
+  programDigest: string
+  cleanupProgramDigest: string
+  dataLeaseId: string
+  fencingToken: number
+  cleanupPlanDigest: string
+  requests: HttpIntent[]
+  maxUses: 1
+}
+
+export type ReversibleWriteCapability =
+  | HttpReversibleWriteCapability
+  | BrowserLocalReversibleWriteCapability
 
 export interface SignedWriteGrant {
   grantId: string
