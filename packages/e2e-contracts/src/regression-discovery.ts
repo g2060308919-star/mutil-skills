@@ -34,6 +34,7 @@ export const RegressionBlockedCasesSchema = z.array(RegressionBlockedCaseSchema)
 export const RegressionToolchainSchema = z.object({
   nodeVersion: SemverSchema,
   playwrightVersion: SemverSchema,
+  typescriptVersion: SemverSchema,
   compilerDigest: DigestSchema,
   playwrightCliDigest: DigestSchema,
 }).strict()

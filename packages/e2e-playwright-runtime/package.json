@@ -18,6 +18,6 @@
     "@mutil-skills/e2e-contracts": "0.2.1",
     "@mutil-skills/e2e-engine": "0.2.1",
     "playwright": "1.61.1",
-    "typescript": "^5.8.0"
+    "typescript": "5.9.3"
   }
 }

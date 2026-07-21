@@ -16,6 +16,9 @@ import {
   getProjectorTrustBinding,
   type TrustedCompilerProjectorTrust,
 } from './trusted-compiler-trust.js'
+import ts from 'typescript'
+
+export const TRUSTED_TYPESCRIPT_VERSION = ts.version
 
 const REQUIRED_TYPES = [
   'prd-manifest',
@@ -39,6 +42,7 @@ export interface ProjectCompilerInputFromArtifactsRequest {
   artifacts: unknown[]
   playwrightVersion: string
   nodeVersion: string
+  typescriptVersion: string
   trust: TrustedCompilerProjectorTrust
 }
 
@@ -46,6 +50,10 @@ export function projectCompilerInputFromArtifacts(
   request: ProjectCompilerInputFromArtifactsRequest,
 ): TrustedCompilerInput {
   assertExactRequest(request)
+  if (request.typescriptVersion !== TRUSTED_TYPESCRIPT_VERSION) {
+    throw projectorError('E2E_COMPILER_TYPESCRIPT_VERSION_MISMATCH',
+      '请求的 TypeScript parser 版本与可信编译器实际 parser 不一致')
+  }
   const trust = getProjectorTrustBinding(request.trust)
   if (!trust) throw projectorError('E2E_COMPILER_TRUST_INVALID', 'Projector 缺少受信 Host 启动期固定的信任根')
   const verifyArtifactSignature = trust.verifyArtifact
@@ -311,8 +319,10 @@ function allUnique(values: string[]): boolean {
 }
 
 function sameUniqueStrings(left: string[], right: string[]): boolean {
-  return allUnique(left) && allUnique(right) && left.length === right.length
-    && [...left].sort().every((value, index) => value === [...right].sort()[index])
+  if (left.length !== right.length) return false
+  const leftValues = new Set(left)
+  if (leftValues.size !== left.length || new Set(right).size !== right.length) return false
+  return right.every((value) => leftValues.has(value))
 }
 
 function assertFullPlaywrightApprovalClosure(input: {
@@ -415,7 +425,7 @@ function parseCompilerArtifact(
 
 function assertExactRequest(request: ProjectCompilerInputFromArtifactsRequest): void {
   if (!request || typeof request !== 'object'
-    || Object.keys(request).sort().join('\0') !== ['artifacts', 'nodeVersion', 'playwrightVersion', 'trust'].join('\0')
+    || Object.keys(request).sort().join('\0') !== ['artifacts', 'nodeVersion', 'playwrightVersion', 'trust', 'typescriptVersion'].sort().join('\0')
     || !Array.isArray(request.artifacts)) {
     throw projectorError('E2E_COMPILER_INPUT_INVALID', 'Projector 只接受 artifacts 与固定 Node/Playwright 版本')
   }

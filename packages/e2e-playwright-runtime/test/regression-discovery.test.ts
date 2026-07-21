@@ -59,6 +59,7 @@ describe('可信回归 discovery', () => {
     })
     directories.push(result.projectDir)
     expect(result.subject.executionProfile).toBe('full-playwright')
+    expect(result.subject.toolchain.typescriptVersion).toBe('5.9.3')
     expect(result.subject.sourceSetDigest).toMatch(/^sha256:[a-f0-9]{64}$/)
     expect(result.subject.sourceFiles.map((file) => file.relativePath)).toEqual(expect.arrayContaining([
       'regression/fixtures/full-playwright-runtime.ts', 'regression/tests/generated.spec.ts',

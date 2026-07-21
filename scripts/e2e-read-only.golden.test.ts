@@ -308,6 +308,7 @@ describe('PRD-driven read-only golden path', () => {
       })
       const compilerInput = projectCompilerInputFromArtifacts({
         artifacts: compilerArtifacts, nodeVersion: process.versions.node, playwrightVersion: '1.61.1',
+        typescriptVersion: '5.9.3',
         trust: projectorTrust,
       })
       const regressionDiscovery = await discoveryAuthority.compileAndAttest({

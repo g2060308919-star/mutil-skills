@@ -1,4 +1,4 @@
-export { projectCompilerInputFromArtifacts } from './compiler-input-projector.js'
+export { projectCompilerInputFromArtifacts, TRUSTED_TYPESCRIPT_VERSION } from './compiler-input-projector.js'
 export type { ProjectCompilerInputFromArtifactsRequest, TrustedCompilerInput } from './compiler-input-projector.js'
 export * from './controlled-write-bridge.js'
 export * from './controlled-read-bridge.js'

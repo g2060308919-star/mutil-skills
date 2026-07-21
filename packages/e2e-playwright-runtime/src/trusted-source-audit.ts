@@ -11,7 +11,9 @@ const SOURCE_EXTENSION = /\.(?:[cm]?[jt]s|tsx)$/
 
 type Profile = 'trusted-read-only' | 'trusted-reversible-write' | 'full-playwright'
 type ReferenceKind = 'unknown' | 'host' | 'dynamic' | 'function-constructor'
-  | 'host-fetch' | 'browser-fetch' | 'browser-object' | 'playwright-request'
+  | 'host-fetch' | 'browser-fetch' | 'browser-object' | 'playwright-request' | 'reflection'
+  | 'object-primordial'
+  | 'sensitive-property'
 type Scope = Map<string, ReferenceKind>
 
 export function auditTrustedRegressionSourceSet(
@@ -37,6 +39,13 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
   const allowedImports = importsFor(file.relativePath, profile)
   const rootScope: Scope = new Map()
   let hostFetchReferences = 0
+  const namedCallbacks = collectNamedCallbacks(sourceFile)
+  const browserOnlyCallbacks = new Set([...namedCallbacks.entries()]
+    .filter(([name]) => {
+      const references = callbackReferences(sourceFile, name)
+      return references.length > 0 && references.every(isBrowserCallbackArgument)
+    })
+    .map(([name]) => name))
 
   visit(sourceFile, rootScope, false)
 
@@ -82,6 +91,10 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
       visit(node.expression, scope, browserScope)
       for (const argument of node.arguments) {
         if (browserCallback && isFunctionLike(argument)) visitFunction(argument, scope, true)
+        else if (browserCallback && ts.isIdentifier(unwrap(argument))
+          && browserOnlyCallbacks.has((unwrap(argument) as ts.Identifier).text)) {
+          visitFunction(namedCallbacks.get((unwrap(argument) as ts.Identifier).text)!, scope, true)
+        }
         else visit(argument, scope, browserScope)
       }
       return
@@ -89,11 +102,17 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
     if (ts.isNewExpression(node)) {
       flagInvocation(classify(node.expression, scope, browserScope))
     }
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
+      && classify(node, scope, browserScope) === 'reflection') {
+      add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-reflection')
+    }
     if (ts.isVariableDeclaration(node)) {
-      if (node.initializer) visit(node.initializer, scope, browserScope)
+      if (node.initializer && !(ts.isIdentifier(node.name) && browserOnlyCallbacks.has(node.name.text)
+        && isFunctionLike(node.initializer))) visit(node.initializer, scope, browserScope)
       declareBinding(node.name, node.initializer, scope, browserScope)
       return
     }
+    if (ts.isFunctionDeclaration(node) && node.name && browserOnlyCallbacks.has(node.name.text)) return
     if (isFunctionLike(node)) {
       visitFunction(node, scope, browserScope)
       return
@@ -104,6 +123,8 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
       else if (kind === 'dynamic') add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'dynamic-execution')
       else if (kind === 'function-constructor') {
         add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'function-constructor')
+      } else if (kind === 'reflection') {
+        add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-reflection')
       } else if (kind === 'host' && hostReferenceForbidden(node.text, browserScope)) {
         add('E2E_COMPILER_SOURCE_API_FORBIDDEN', `host-${node.text}`)
       }
@@ -128,6 +149,7 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
     if (kind === 'host-fetch') hostFetchReferences += 1
     else if (kind === 'dynamic') add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'dynamic-execution')
     else if (kind === 'function-constructor') add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'function-constructor')
+    else if (kind === 'reflection') add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-reflection')
     else if (kind === 'host' && !file.relativePath.endsWith('/fixtures/safe-page.ts')) {
       add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-api')
     }
@@ -143,12 +165,16 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
 
 function classify(expression: ts.Expression, scope: Scope, browserScope: boolean): ReferenceKind {
   const unwrapped = unwrap(expression)
+  if (ts.isStringLiteralLike(unwrapped)
+    && ['constructor', '__proto__', 'prototype'].includes(unwrapped.text)) return 'sensitive-property'
   if (ts.isIdentifier(unwrapped)) {
     const bound = scope.get(unwrapped.text)
     if (bound) return bound
     if (unwrapped.text === 'fetch') return browserScope ? 'browser-fetch' : 'host-fetch'
     if (['eval', 'require'].includes(unwrapped.text)) return 'dynamic'
     if (unwrapped.text === 'Function') return 'function-constructor'
+    if (['Reflect', 'Proxy'].includes(unwrapped.text)) return 'reflection'
+    if (unwrapped.text === 'Object') return 'object-primordial'
     if (['page', 'context', 'browser'].includes(unwrapped.text)) return 'browser-object'
     if (unwrapped.text === 'request') return 'playwright-request'
     if (['process', 'global', 'globalThis', 'module', 'exports', 'Buffer', '__dirname', '__filename',
@@ -159,7 +185,16 @@ function classify(expression: ts.Expression, scope: Scope, browserScope: boolean
   if (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped)) {
     const receiver = classify(unwrapped.expression, scope, browserScope)
     const property = memberName(unwrapped)
-    if (property === 'constructor') return 'function-constructor'
+    if (property === 'eval') return 'dynamic'
+    if (property === 'Function' || property === 'constructor') return 'function-constructor'
+    if (property === '__proto__' || property === 'prototype') return 'reflection'
+    if (ts.isElementAccessExpression(unwrapped) && property === undefined && unwrapped.argumentExpression
+      && classify(unwrapped.argumentExpression, scope, browserScope) === 'sensitive-property') return 'reflection'
+    const root = rootIdentifier(unwrapped.expression)
+    if (root === 'Reflect' || root === 'Proxy') return 'reflection'
+    if ((root === 'Object' || receiver === 'object-primordial') && !['freeze', 'keys'].includes(property ?? '')) {
+      return 'reflection'
+    }
     if (receiver === 'host' && property === 'fetch') return browserScope ? 'browser-fetch' : 'host-fetch'
     if (receiver === 'host' && property === 'env') return 'unknown'
     if (receiver === 'host' && property === 'eval') return 'dynamic'
@@ -230,6 +265,58 @@ function isReflectApply(expression: ts.Expression): boolean {
   const receiver = unwrap(unwrapped.expression)
   return ts.isIdentifier(receiver) && receiver.text === 'Reflect'
     && memberName(unwrapped) === 'apply'
+}
+
+function rootIdentifier(expression: ts.Expression): string | undefined {
+  const unwrapped = unwrap(expression)
+  if (ts.isIdentifier(unwrapped)) return unwrapped.text
+  if (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped)) {
+    return rootIdentifier(unwrapped.expression)
+  }
+  return undefined
+}
+
+function collectNamedCallbacks(sourceFile: ts.SourceFile): Map<string, ts.FunctionLikeDeclaration> {
+  const callbacks = new Map<string, ts.FunctionLikeDeclaration>()
+  const duplicates = new Set<string>()
+  walk(sourceFile)
+  return callbacks
+  function walk(node: ts.Node): void {
+    if (ts.isFunctionDeclaration(node) && node.name && node.body) add(node.name.text, node)
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
+      && isFunctionLike(node.initializer)) add(node.name.text, node.initializer)
+    ts.forEachChild(node, walk)
+  }
+  function add(name: string, node: ts.FunctionLikeDeclaration): void {
+    if (duplicates.has(name)) return
+    if (callbacks.has(name)) { callbacks.delete(name); duplicates.add(name); return }
+    callbacks.set(name, node)
+  }
+}
+
+function callbackReferences(sourceFile: ts.SourceFile, name: string): ts.Identifier[] {
+  const references: ts.Identifier[] = []
+  walk(sourceFile)
+  return references
+  function walk(node: ts.Node): void {
+    if (ts.isIdentifier(node) && node.text === name && isReferenceIdentifier(node)) references.push(node)
+    ts.forEachChild(node, walk)
+  }
+}
+
+function isBrowserCallbackArgument(identifier: ts.Identifier): boolean {
+  let current: ts.Expression = identifier
+  while (ts.isParenthesizedExpression(current.parent) || ts.isAsExpression(current.parent)
+    || ts.isTypeAssertionExpression(current.parent) || ts.isNonNullExpression(current.parent)) {
+    current = current.parent
+  }
+  const call = current.parent
+  if (!ts.isCallExpression(call) || !call.arguments.includes(current)) return false
+  const callee = unwrap(call.expression)
+  if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return false
+  const receiver = rootIdentifier(callee.expression)
+  return ['page', 'context'].includes(receiver ?? '')
+    && ['evaluate', 'evaluateHandle', 'addInitScript'].includes(memberName(callee) ?? '')
 }
 
 function isFunctionLike(node: ts.Node): node is ts.FunctionLikeDeclaration {

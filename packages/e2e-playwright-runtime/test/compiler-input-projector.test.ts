@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises'
 import { describe, expect, test } from 'vitest'
 import { E2EError } from '@mutil-skills/e2e-contracts'
 import { createTrustedCompilerReadiness } from '@mutil-skills/e2e-engine'
@@ -8,6 +9,19 @@ import { approvedCompilerArtifacts, approvedFullPlaywrightCompilerArtifacts,
   FULL_PLAYWRIGHT_SOURCE } from './compiler-artifacts.fixture.js'
 
 describe('Artifact → Compiler Input Projector', () => {
+  test('集合闭合比较为 Set membership 线性实现且不排序', async () => {
+    const source = await readFile(new URL('../src/compiler-input-projector.ts', import.meta.url), 'utf8')
+    const implementation = source.match(/function sameUniqueStrings[\s\S]*?\n}/)?.[0] ?? ''
+    expect(implementation).toContain('new Set')
+    expect(implementation).not.toContain('.sort(')
+  })
+
+  test('TypeScript parser 版本漂移 fail closed', () => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedCompilerArtifacts(), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification, typescriptVersion: '5.9.2',
+    })).toThrow('E2E_COMPILER_TYPESCRIPT_VERSION_MISMATCH')
+  })
   test('Engine readiness 缺少真实 PRD、scope、lineage Artifact 时 fail closed', () => {
     expect(() => createTrustedCompilerReadiness({
       artifacts: [], contractsVersion: '2.0.0', verifyArtifactSignature: () => true,
@@ -17,7 +31,8 @@ describe('Artifact → Compiler Input Projector', () => {
 
   test('业务请求不能用普通对象伪造 Host 启动期信任根', () => {
     expect(() => projectCompilerInputFromArtifacts({
-      artifacts: approvedCompilerArtifacts(), nodeVersion: '24.18.0', playwrightVersion: '1.61.1', trust: {} as never,
+      artifacts: approvedCompilerArtifacts(), nodeVersion: '24.18.0', playwrightVersion: '1.61.1',
+      typescriptVersion: '5.9.3', trust: {} as never,
     })).toThrow('E2E_COMPILER_TRUST_INVALID')
   })
 

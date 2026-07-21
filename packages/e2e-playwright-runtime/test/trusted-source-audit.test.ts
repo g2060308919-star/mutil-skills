@@ -85,6 +85,14 @@ describe('可信生成源码静态安全扫描', () => {
     ["const escape = (() => {}).constructor; escape('return process')()", 'constructor chain'],
     ["((execute: (source: string) => unknown) => execute('process.exit()'))(eval)", 'eval passed through parameter'],
     ["setImmediate(() => page.goto('https://evil.example'))", 'Node-only host timer'],
+    ["Reflect.get(Object, 'create')({}, null)", 'Reflect meta operation'],
+    ["Object.getOwnPropertyDescriptor(async () => {}, 'constructor')?.value", 'descriptor constructor escape'],
+    ["Object.getPrototypeOf(async function approved() {})", 'prototype reflection escape'],
+    ["Object['defineProperty']({}, 'x', { value: 1 })", 'computed Object reflection escape'],
+    ["const O = Object; O.getPrototypeOf(async () => {})", 'aliased Object reflection escape'],
+    ["({})['__proto__']", 'computed proto escape'],
+    ["({}).prototype", 'prototype property escape'],
+    ["const key = 'constructor'; ({})[key]", 'dynamic sensitive property escape'],
   ])('AST 审计拒绝正则 trivia/computed/alias 绕过：%s', (source) => {
     const result = auditTrustedRegressionSourceSet([{
       relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
@@ -129,5 +137,37 @@ describe('可信生成源码静态安全扫描', () => {
     expect(auditTrustedRegressionSourceSet([{
       relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
     }], 'full-playwright')).toEqual({ valid: true, findings: [] })
+  })
+
+  test.each([
+    "await page.evaluate(() => window['eval']('1 + 1'))",
+    "await context.addInitScript(() => new window['Function']('return 1')())",
+  ])('浏览器回调内也永远拒绝动态执行：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: 'E2E_COMPILER_SOURCE_API_FORBIDDEN',
+    }))
+  })
+
+  test('仅作为 Playwright 浏览器 callback 的命名函数按 browser scope 审计', () => {
+    const source = `
+      const load = async () => { const send = fetch; await send('/inside') }
+      await page.evaluate(load)
+    `
+    expect(auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')).toEqual({ valid: true, findings: [] })
+  })
+
+  test.each([
+    `const load = async () => fetch('/inside'); await page.evaluate(load); await load()`,
+    `const load = async () => fetch('/inside'); state.callback = load; await page.evaluate(load)`,
+  ])('命名 browser callback 同时 host 调用或逃逸时 fail closed：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.valid).toBe(false)
   })
 })

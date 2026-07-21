@@ -1759,7 +1759,7 @@ function regressionManifestCandidate(
     caseId: 'CASE-1', relativePath: sourceFiles[0]!.relativePath, testTitle: '订单列表',
   }]
   const toolchain = {
-    nodeVersion: '24.0.0', playwrightVersion: '1.61.1',
+    nodeVersion: '24.0.0', playwrightVersion: '1.61.1', typescriptVersion: '5.9.3',
     compilerDigest: digest('2'), playwrightCliDigest: digest('3'),
   }
   const attestation = {

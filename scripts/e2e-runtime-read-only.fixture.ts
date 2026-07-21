@@ -214,7 +214,7 @@ export function runtimeReadOnlyFixture(input: {
     caseId: 'CASE-ORDER-1', relativePath: sourceFiles[0]!.relativePath, testTitle: '订单列表',
   }]
   const toolchain = {
-    nodeVersion: '24.0.0', playwrightVersion: '1.61.1',
+    nodeVersion: '24.0.0', playwrightVersion: '1.61.1', typescriptVersion: '5.9.3',
     compilerDigest: d('compiler'), playwrightCliDigest: d('playwright-cli'),
   }
   const regressionManifest = artifact(input, 'regression-manifest', {

@@ -128,6 +128,10 @@ describe('compileReadOnlyProject', () => {
     expect(spec).toContain('async ({ page, context, request }, testInfo) =>')
     expect(spec).toContain('browser: context.browser()!')
     expect(spec).toContain('executeFullPlaywrightAction({')
+    expect(spec).toContain('const __biztestRun0 = async')
+    expect(spec).toContain('const __biztestCleanup0 = async')
+    expect(spec).toContain('const __biztestRetire = Object.freeze(context.close.bind(context))')
+    expect(spec).not.toContain('async function runProgram0')
     expect(spec).not.toContain('safePage.reversibleWrite')
     expect(JSON.parse(await readFile(join(first, 'run-bundle.json'), 'utf8'))).toMatchObject({
       executionProfile: 'full-playwright', mode: 'full-playwright',
@@ -135,7 +139,14 @@ describe('compileReadOnlyProject', () => {
     expect(JSON.parse(await readFile(join(first, 'safety-policy.json'), 'utf8'))).toMatchObject({
       executionProfile: 'full-playwright',
       executionOutcomeReceipt: 'independent-ed25519-verification-required',
+      programTimeoutOutcome: 'unknown',
+      programTimeoutContext: 'retired-before-cleanup',
+      sameContextCleanupAfterProgramTimeout: 'forbidden',
+      leaseAfterProgramTimeout: 'quarantine',
+      retryAfterProgramTimeout: 'forbidden',
+      independentCleanupSession: 'task4-required',
     })
+    expect(JSON.parse(await readFile(join(first, 'toolchain-manifest.json'), 'utf8')).typescriptVersion).toBe('5.9.3')
     expect(JSON.parse(await readFile(join(first, 'template-manifest.json'), 'utf8'))).toMatchObject({
       executionProfile: 'full-playwright', actionKinds: ['fullPlaywright'],
     })
@@ -150,6 +161,12 @@ describe('compileReadOnlyProject', () => {
     ["test.afterEach(() => {})", '函数体内注册 hook'],
     ["const hook = test['afterEach']; hook(() => {})", 'computed hook alias'],
     ["const suite = test; suite.afterEach(() => {})", 'test object alias'],
+    ["Reflect.get(Object, 'create')", 'Reflect meta operation'],
+    ["Object.getOwnPropertyDescriptor(async () => {}, 'constructor')", 'descriptor constructor escape'],
+    ["const key = 'constructor'; ({})[key]", 'computed sensitive property'],
+    ["globalThis['Object']['getPrototypeOf'](async () => {})", 'host Object property chain'],
+    ["globalThis['Promise'].race = async () => 'forged'", 'primordial property monkeypatch'],
+    ["__biztestCleanup0 = async () => 'verified-clean'", 'compiler-reserved binding'],
   ])('full Playwright source/cleanup 不能逃逸 FunctionBody 或注册 hook：%s', async (source) => {
     const outputDir = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-full-fragment-'))
     createdDirectories.push(outputDir)

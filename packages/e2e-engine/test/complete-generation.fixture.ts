@@ -158,7 +158,7 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
     environmentId: 'TEST', approvalDigest: d('approval'), policyDigest: d('policy'),
     sourceFiles: regressionSourceFiles,
     caseMappings: [{ caseId: 'CASE-1', relativePath: regressionPath, testTitle: '首页只读检查' }],
-    toolchain: { nodeVersion: '24.0.0', playwrightVersion: '1.0.0',
+    toolchain: { nodeVersion: '24.0.0', playwrightVersion: '1.0.0', typescriptVersion: '5.9.3',
       compilerDigest: d('compiler'), playwrightCliDigest: d('playwright-cli') },
     isolation: { command: ['node', '@playwright/test/cli', 'test', '--list', '--reporter=json'],
       exitCode: 0, stdoutDigest: d('playwright-list') },

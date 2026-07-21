@@ -18,7 +18,7 @@ const subject = {
   templateDigest: d, compilerInputDigest: d,
   sourceFiles,
   caseMappings: [{ caseId: 'CASE-1', relativePath: 'regression/tests/generated.spec.ts', testTitle: '首页可见' }],
-  toolchain: { nodeVersion: '24.18.0', playwrightVersion: '1.61.1', compilerDigest: d, playwrightCliDigest: d },
+  toolchain: { nodeVersion: '24.18.0', playwrightVersion: '1.61.1', typescriptVersion: '5.9.3', compilerDigest: d, playwrightCliDigest: d },
   isolation: {
     command: ['node', '@playwright/test/cli', 'test', '--list', '--reporter=json'],
     exitCode: 0, stdoutDigest: d,

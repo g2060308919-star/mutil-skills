@@ -19,6 +19,24 @@ export function validateFullPlaywrightFunctionBody(source: string): string | und
 
   function visit(node: ts.Node): void {
     if (hook) return
+    if (ts.isIdentifier(node) && (node.text.startsWith('__biztest')
+      || ['executeFullPlaywrightAction', 'FullPlaywrightBindings', 'Reflect', 'Proxy', 'Object',
+        'Promise', 'AggregateError', 'setTimeout', 'clearTimeout'].includes(node.text))) {
+      hook = `reserved-${node.text}`
+      return
+    }
+    if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))) {
+      const property = memberName(node)
+      if (['constructor', '__proto__', 'prototype', 'Object', 'Reflect', 'Proxy',
+        'getOwnPropertyDescriptor', 'getOwnPropertyDescriptors', 'getOwnPropertyNames',
+        'getOwnPropertySymbols', 'getPrototypeOf', 'setPrototypeOf', 'defineProperty',
+        'defineProperties', 'create', 'Promise', 'AggregateError', 'setTimeout', 'clearTimeout']
+        .includes(property ?? '')
+        || (ts.isElementAccessExpression(node) && property === undefined)) {
+        hook = `reflection-${property ?? 'computed'}`
+        return
+      }
+    }
     if (ts.isIdentifier(node) && ['test', 'beforeAll', 'beforeEach', 'afterAll', 'afterEach'].includes(node.text)) {
       hook = node.text
       return

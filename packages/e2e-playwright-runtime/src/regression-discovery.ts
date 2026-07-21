@@ -20,7 +20,8 @@ import {
   type RegressionDiscoveryVerifierMaterial,
 } from '@mutil-skills/e2e-contracts'
 import { compileReadOnlyProject } from './compiler.js'
-import { inspectTrustedCompilerInput, type TrustedCompilerInput } from './compiler-input-projector.js'
+import { inspectTrustedCompilerInput, TRUSTED_TYPESCRIPT_VERSION,
+  type TrustedCompilerInput } from './compiler-input-projector.js'
 import { assertExpectedRegressionSourceSet, readRegressionSourceSet } from './regression-source-set.js'
 import { auditTrustedRegressionSourceSet } from './trusted-source-audit.js'
 
@@ -219,6 +220,7 @@ export class LocalRegressionDiscoveryAuthority {
       compilerInputDigest,
       sourceFiles, caseMappings,
       toolchain: { nodeVersion: process.versions.node, playwrightVersion: installedVersion,
+        typescriptVersion: TRUSTED_TYPESCRIPT_VERSION,
         compilerDigest: READ_ONLY_COMPILER_DIGEST, playwrightCliDigest: digestBytes('playwright-cli/v1', cliBytes) },
       isolation: { command: DISCOVERY_COMMAND, exitCode: 0,
         stdoutDigest: digestBytes('playwright-list-stdout/v1', Buffer.from(stdout, 'utf8')) },

@@ -111,7 +111,7 @@ describe('generated full Playwright lifecycle runtime', () => {
     expect(result).toEqual({ status: 'rejected', error: undefined })
   })
 
-  test('program deadline 后仍执行独立 cleanup，再关闭 context 并报告 outcome unknown', async () => {
+  test('program deadline 立即退休 context、跳过同 context cleanup，并报告 unknown/quarantine/no-retry', async () => {
     const execute = (await runtime()).executeFullPlaywrightAction
     expect(execute).toBeTypeOf('function')
     const events: string[] = []
@@ -120,10 +120,63 @@ describe('generated full Playwright lifecycle runtime', () => {
       cleanup: async () => { events.push('cleanup'); return 'verified-clean' },
       retire: async () => { events.push('retire') }, programTimeoutMs: 10, cleanupTimeoutMs: 100,
     }))
-    expect(events).toEqual(['run', 'cleanup', 'retire'])
+    expect(events).toEqual(['run', 'retire'])
     expect(result).toEqual({ status: 'rejected', error: expect.objectContaining({
-      message: 'BIZTEST_FULL_PLAYWRIGHT_PROGRAM_TIMEOUT_OUTCOME_UNKNOWN',
+      message: 'BIZTEST_FULL_PLAYWRIGHT_PROGRAM_TIMEOUT_OUTCOME_UNKNOWN_CONTEXT_RETIRED_LEASE_QUARANTINED_NO_RETRY',
     }) })
+  })
+
+  test('program 不能通过 monkeypatch Promise.race 伪造 cleanup 成功', async () => {
+    const execute = (await runtime()).executeFullPlaywrightAction
+    expect(execute).toBeTypeOf('function')
+    const originalRace = Promise.race
+    const cleanup = new Error('cleanup')
+    let result
+    try {
+      const run = async () => { Promise.race = (async () => 'forged') as typeof Promise.race }
+      result = await capture(() => execute!({ run, cleanup: async () => { throw cleanup }, retire: async () => {},
+        programTimeoutMs: 100, cleanupTimeoutMs: 100 }))
+    } finally {
+      Promise.race = originalRace
+    }
+    expect(result).toEqual({ status: 'rejected', error: cleanup })
+  })
+
+  test('program 不能通过 monkeypatch AggregateError 改写 primary+cleanup 判定', async () => {
+    const execute = (await runtime()).executeFullPlaywrightAction
+    expect(execute).toBeTypeOf('function')
+    const OriginalAggregateError = AggregateError
+    const primary = new Error('primary')
+    const cleanup = new Error('cleanup')
+    let result
+    try {
+      const run = async () => {
+        globalThis.AggregateError = (function forged() { return new Error('forged') }) as unknown as AggregateErrorConstructor
+        throw primary
+      }
+      result = await capture(() => execute!({ run, cleanup: async () => { throw cleanup }, retire: async () => {},
+        programTimeoutMs: 100, cleanupTimeoutMs: 100 }))
+    } finally {
+      globalThis.AggregateError = OriginalAggregateError
+    }
+    expect(result?.status).toBe('rejected')
+    const error = (result as { status: 'rejected'; error: AggregateError }).error
+    expect(error).toBeInstanceOf(OriginalAggregateError)
+    expect(error.errors).toEqual([primary, cleanup])
+  })
+
+  test('program timeout 使用执行前绑定的 context.close，不受 program monkeypatch', async () => {
+    const execute = (await runtime()).executeFullPlaywrightAction
+    expect(execute).toBeTypeOf('function')
+    const events: string[] = []
+    const context = { async close() { events.push('original-close') } }
+    const retire = Object.freeze(context.close.bind(context))
+    const result = await capture(() => execute!({
+      run: () => new Promise(() => { context.close = async () => { events.push('forged-close') } }),
+      cleanup: async () => 'verified-clean', retire, programTimeoutMs: 10, cleanupTimeoutMs: 100,
+    }))
+    expect(events).toEqual(['original-close'])
+    expect(result.status).toBe('rejected')
   })
 
   test('cleanup 使用独立 deadline；超时后退休 context', async () => {
