@@ -78,14 +78,28 @@ describe('FullPlaywrightProgram', () => {
   test('Execution Contract 与 Action Map 只在显式 full profile 下闭合投影', () => {
     const value = program()
     const cleanupPlan = {
+      schemaVersion: '2.0.0' as const,
+      transport: 'browser-local' as const,
+      cleanupPlanId: value.cleanupPlanId,
+      actionId: value.actionId,
+      leaseId: value.dataLeaseId,
+      executorId: 'FULL-PLAYWRIGHT' as const,
+      cleanupProgramDigest: value.cleanupSourceDigest,
+      cleanupRequestIntentIds: [],
+      verificationProbes: [{
+        probeId: 'CLEANUP-PROBE-1', kind: 'browser-observation' as const, expectedDigest: digest('4'),
+      }],
+      timeoutMs: value.timeoutMs,
+    }
+    const legacyCleanupPlan = {
       schemaVersion: '1.0.0' as const,
       cleanupPlanId: value.cleanupPlanId,
       actionId: value.actionId,
       leaseId: value.dataLeaseId,
-      executorId: 'FULL-PLAYWRIGHT',
-      cleanupRequestIntentIds: ['CLEANUP-SOURCE-1'],
+      executorId: 'EXECUTOR-HTTP-CLEANUP',
+      cleanupRequestIntentIds: ['INTENT-1'],
       verificationProbes: [{
-        probeId: 'CLEANUP-PROBE-1', kind: 'browser-observation' as const, expectedDigest: digest('4'),
+        probeId: 'CLEANUP-PROBE-HTTP-1', kind: 'resource-state' as const, expectedDigest: digest('4'),
       }],
       timeoutMs: value.timeoutMs,
     }
@@ -112,6 +126,10 @@ describe('FullPlaywrightProgram', () => {
     }
 
     expect(ExecutionContractV11ContentSchema.parse(executionContract)).toEqual(executionContract)
+    expect(ExecutionContractV11ContentSchema.safeParse({
+      ...executionContract,
+      writeCleanupPlans: [{ ...cleanupPlan, cleanupRequestIntentIds: ['INTENT-1'] }],
+    }).success).toBe(true)
     expect(BrowserActionMapV21ContentSchema.parse(actionMap)).toEqual(actionMap)
     expect(ExecutionContractV11ContentSchema.safeParse({
       ...executionContract, executionProfile: 'trusted-reversible-write',
@@ -137,6 +155,21 @@ describe('FullPlaywrightProgram', () => {
     expect(ExecutionContractV11ContentSchema.safeParse({
       ...executionContract,
       writeCleanupPlans: [{ ...cleanupPlan, leaseId: 'LEASE-OTHER' }],
+    }).success).toBe(false)
+    expect(ExecutionContractV11ContentSchema.safeParse({
+      ...executionContract, writeCleanupPlans: [legacyCleanupPlan],
+    }).success).toBe(false)
+    expect(ExecutionContractV11ContentSchema.safeParse({
+      ...executionContract,
+      writeCleanupPlans: [{ ...cleanupPlan, executorId: 'EXECUTOR-OTHER' }],
+    }).success).toBe(false)
+    expect(ExecutionContractV11ContentSchema.safeParse({
+      ...executionContract,
+      writeCleanupPlans: [{ ...cleanupPlan, cleanupProgramDigest: digest('9') }],
+    }).success).toBe(false)
+    expect(ExecutionContractV11ContentSchema.safeParse({
+      ...executionContract,
+      writeCleanupPlans: [{ ...cleanupPlan, cleanupRequestIntentIds: ['INTENT-UNKNOWN'] }],
     }).success).toBe(false)
   })
 

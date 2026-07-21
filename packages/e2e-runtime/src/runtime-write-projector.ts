@@ -21,6 +21,11 @@ import {
 } from '@mutil-skills/e2e-contracts'
 import type { RuntimeRunSnapshot } from './run-store.js'
 
+type LegacyCleanupPlanDefinition = Extract<CleanupPlanDefinition, { schemaVersion: '1.0.0' }>
+type RuntimeHttpCleanupPlan = LegacyCleanupPlanDefinition & {
+  runtimeHttpCleanup: NonNullable<LegacyCleanupPlanDefinition['runtimeHttpCleanup']>
+}
+
 export interface RuntimeWriteProjection {
   caseId: string
   stepId: string
@@ -28,7 +33,7 @@ export interface RuntimeWriteProjection {
   grant: SignedWriteGrant
   capability: ReversibleWriteCapability
   action: RuntimeWriteHttpAction
-  cleanupPlan: CleanupPlanDefinition & { runtimeHttpCleanup: NonNullable<CleanupPlanDefinition['runtimeHttpCleanup']> }
+  cleanupPlan: RuntimeHttpCleanupPlan
   secretRefs: string[]
 }
 
@@ -45,7 +50,8 @@ export function projectRuntimeWriteSnapshot(snapshot: RuntimeRunSnapshot): Runti
   }
   const action = RuntimeWriteHttpActionSchema.parse(actions[0])
   const cleanup = CleanupPlanDefinitionSchema.parse(cleanups[0])
-  if (cleanup.runtimeHttpCleanup === undefined || cleanup.cleanupPlanId !== action.cleanupPlanId
+  if (cleanup.schemaVersion !== '1.0.0' || cleanup.runtimeHttpCleanup === undefined
+    || cleanup.cleanupPlanId !== action.cleanupPlanId
     || cleanup.actionId !== action.actionId || cleanup.executorId !== 'runtime-http-cleanup.v1') {
     throw projectionError('E2E_RUNTIME_WRITE_CLEANUP_BINDING_MISMATCH', '固定 cleanup 定义未与 write action 闭合')
   }
@@ -147,7 +153,7 @@ export function projectRuntimeWriteSnapshot(snapshot: RuntimeRunSnapshot): Runti
 function assertRequestSequence(
   intents: HttpIntent[],
   action: RuntimeWriteHttpAction,
-  cleanup: NonNullable<CleanupPlanDefinition['runtimeHttpCleanup']>,
+  cleanup: RuntimeHttpCleanupPlan['runtimeHttpCleanup'],
 ): void {
   const definitions: Array<RuntimeFixedHttpRequest | RuntimeHttpReadProbe> = [
     action.writeRequest, action.effectProbe, cleanup.request, cleanup.verificationProbe,

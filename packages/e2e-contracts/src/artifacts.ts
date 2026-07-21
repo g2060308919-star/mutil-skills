@@ -29,7 +29,7 @@ import {
 } from './decision-receipt.js'
 import { WorkflowEventsV2ContentSchema } from './attempt.js'
 import { ExecutionOutcomeReceiptSchema } from './execution-outcome.js'
-import { CleanupPlanDefinitionSchema } from './cleanup-plan.js'
+import { CleanupPlanDefinitionSchema, type CleanupPlanDefinition } from './cleanup-plan.js'
 import { RuntimeIsolationPolicySchema } from './runtime-isolation.js'
 import { TrustedCompilerExecutionFactSchema } from './trusted-compiler-execution.js'
 import { DiscoveryApprovalSubjectSchema } from './approval-subject.js'
@@ -110,7 +110,7 @@ function refineFullPlaywrightPrograms(input: {
   }>
   caseIds?: string[]
   writeLeaseIds?: string[]
-  cleanupPlans?: Array<{ cleanupPlanId: string; actionId: string; leaseId: string }>
+  cleanupPlans?: CleanupPlanDefinition[]
 }, context: z.RefinementCtx): void {
   const usesFullPlaywright = input.programs.length > 0
   if (usesFullPlaywright !== (input.executionProfile === 'full-playwright')) {
@@ -180,10 +180,23 @@ function refineFullPlaywrightPrograms(input: {
     }
     const cleanupPlan = cleanupPlansById?.get(program.cleanupPlanId)
     if (cleanupPlansById !== undefined && (cleanupPlan === undefined
-      || cleanupPlan.actionId !== program.actionId || cleanupPlan.leaseId !== program.dataLeaseId)) {
+      || cleanupPlan.schemaVersion !== '2.0.0'
+      || cleanupPlan.actionId !== program.actionId || cleanupPlan.leaseId !== program.dataLeaseId
+      || cleanupPlan.cleanupProgramDigest !== program.cleanupSourceDigest)) {
       context.addIssue({
-        code: 'custom', message: 'full Playwright cleanupPlanId 必须精确绑定同 action 与 lease 的 cleanup plan',
+        code: 'custom', message: 'full Playwright cleanup plan 必须精确绑定 action、lease 与 cleanup program digest',
         path: ['fullPlaywrightPrograms', index, 'cleanupPlanId'],
+      })
+    }
+    if (cleanupPlan?.schemaVersion === '2.0.0') {
+      const networkIntentIds = new Set(program.networkRequests.map((request) => request.intentId))
+      cleanupPlan.cleanupRequestIntentIds.forEach((intentId, intentIndex) => {
+        if (!networkIntentIds.has(intentId)) {
+          context.addIssue({
+            code: 'custom', message: 'full Playwright cleanup request intent 必须属于 program networkRequests',
+            path: ['fullPlaywrightPrograms', index, 'cleanupPlanId', 'cleanupRequestIntentIds', intentIndex],
+          })
+        }
       })
     }
   })
@@ -499,9 +512,9 @@ export const ExecutionContractV11ContentSchema = ExecutionContractV10ContentSche
   }
   for (const [index, action] of writeActions.entries()) {
     const cleanup = cleanupById.get(action.cleanupPlanId)
-    if (cleanup !== undefined && cleanup.actionId !== action.actionId) {
+    if (cleanup !== undefined && (cleanup.schemaVersion !== '1.0.0' || cleanup.actionId !== action.actionId)) {
       context.addIssue({
-        code: 'custom', message: 'write action 与 cleanup plan 的 actionId 不闭合',
+        code: 'custom', message: 'HTTP write action 必须与 legacy cleanup plan 的 actionId 闭合',
         path: ['writeHttpActions', index, 'cleanupPlanId'],
       })
     }
