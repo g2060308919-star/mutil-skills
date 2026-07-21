@@ -326,6 +326,10 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   sourceDigest?: string
   extraFullAction?: boolean
   stepOrdinal?: number
+  extraUnmapped?: boolean
+  duplicateUnmapped?: boolean
+  extraObligation?: boolean
+  duplicateObligationCaseBinding?: boolean
 } = {}): unknown[] {
   const source = options.source ?? FULL_PLAYWRIGHT_SOURCE
   const cleanupSource = options.cleanupSource ?? FULL_PLAYWRIGHT_CLEANUP_SOURCE
@@ -371,6 +375,10 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   actionMap.fullPlaywrightPrograms = [program]
   actionMap.actions[0] = { ...actionMap.actions[0], playwrightAction: 'full-playwright/v1',
     capabilities: [{ operation: 'full-playwright', capabilityId: capability.capabilityId }], requestIds: [] }
+  const ghostUnmapped = { caseId: 'CASE-GHOST', stepId: 'STEP-GHOST',
+    reasonCode: 'E2E_COMPILER_ACTION_UNSUPPORTED' }
+  if (options.extraUnmapped) actionMap.unmappedSteps.push(ghostUnmapped)
+  if (options.duplicateUnmapped) actionMap.unmappedSteps.push(ghostUnmapped, { ...ghostUnmapped })
   if (options.extraFullAction) {
     actionMap.fullPlaywrightPrograms.push(extraProgram)
     actionMap.actions.push({ ...actionMap.actions[0], stepId: extraProgram.stepId, actionId: extraProgram.actionId,
@@ -410,6 +418,14 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
     requests: [extraRequest],
   })
   receipt.executionSubjectSnapshot.actions = subjectActions
+  const coverage = content('coverage-universe')
+  if (options.extraObligation) coverage.obligations.push({
+    ...coverage.obligations[0], obligationId: 'COV-GHOST', nodeIds: ['NODE-GHOST'],
+    scenario: 'ghost', disposition: { kind: 'automated', caseIds: ['CASE-GHOST'] },
+  })
+  if (options.duplicateObligationCaseBinding) {
+    coverage.obligations[0].disposition.caseIds.push(coverage.obligations[0].disposition.caseIds[0])
+  }
   Object.assign(receipt.executionSubjectSnapshot, {
     caseDigest: digestApprovalProjection('test-cases', content('test-cases')),
     actionMapDigest: digestApprovalProjection('browser-action-map', actionMap),

@@ -50,6 +50,7 @@ export async function compileTrustedProject(input: CompileTrustedProjectInput): 
   }))
   files.set('playwright.config.ts', [
     "import { defineConfig } from '@playwright/test'",
+    "import process from 'node:process'",
     '',
     "const executablePath = process.env.BIZTEST_CHROME_EXECUTABLE",
     "const proxyServer = process.env.BIZTEST_BROWSER_PROXY",
@@ -149,6 +150,9 @@ export const compileReadOnlyProject = compileTrustedProject
 function renderSafePageFixture(writeMode: boolean): string {
   return [
     ...(writeMode ? ["import { createHash, createPublicKey, verify } from 'node:crypto'"] : []),
+    ...(writeMode ? ["import { Buffer } from 'node:buffer'"] : []),
+    "import process from 'node:process'",
+    "import { URL } from 'node:url'",
     "import { test as base } from '@playwright/test'",
     '',
     'interface SafePage {',
@@ -241,7 +245,8 @@ function renderExecutionOutcomeVerifier(): string[] {
     "  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value)",
     "  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`",
     "  if (!isRecord(value)) throw new Error('BIZTEST_EXECUTION_OUTCOME_JSON_INVALID')",
-    '  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(\',\')}}`',
+    '  const entries = Object.entries(value).sort(([left], [right]) => left.localeCompare(right))',
+    '  return `{${entries.map(([key, nested]) => `${JSON.stringify(key)}:${canonicalJson(nested)}`).join(\',\')}}`',
     '}',
     '',
     'function domainDigest(domain: string, text: string): string {',
@@ -262,8 +267,8 @@ function renderExecutionOutcomeVerifier(): string[] {
     '      || candidate.keyId !== material.keyId || typeof candidate.signature !== \'string\'',
     "      || typeof candidate.signedDigest !== 'string' || typeof material.publicKeySpkiBase64 !== 'string'",
     "      || typeof material.publicKeyDigest !== 'string') return false",
-    '    const binding = { ...candidate }',
-    "    for (const key of ['issuer', 'keyId', 'purpose', 'algorithm', 'signedDigest', 'signature']) delete binding[key]",
+    '    const { issuer: _issuer, keyId: _keyId, purpose: _purpose, algorithm: _algorithm,',
+    '      signedDigest: _signedDigest, signature: _signature, ...binding } = candidate',
     "    const expectedDigest = domainDigest('execution-outcome-receipt-binding/v1', canonicalJson(binding))",
     '    if (candidate.signedDigest !== expectedDigest) return false',
     "    const publicKeyBytes = Buffer.from(material.publicKeySpkiBase64, 'base64url')",
@@ -287,6 +292,7 @@ function renderSpec(input: CompilerInputV1): string {
   const lines = ["import { test } from '../fixtures/safe-page.js'", '']
   const writeMode = input.cases.some((testCase) => testCase.actions.some((action) => action.kind === 'reversibleWrite'))
   if (writeMode) {
+    lines.splice(1, 0, "import process from 'node:process'")
     lines.push('test.beforeAll(() => {')
     lines.push("  if (!process.env.BIZTEST_CONTROLLED_WRITE_BRIDGE || !process.env.BIZTEST_RUN_GATE) {")
     lines.push("    throw new Error('BIZTEST_CONTROLLED_WRITE_BRIDGE_REQUIRED')")
@@ -396,7 +402,7 @@ function assertFullPlaywrightFragments(input: CompilerInputV1): void {
 function trustedFragment(relativePath: string, source: string, kind: 'Run' | 'Cleanup'):
 { relativePath: string; bytes: Uint8Array } {
   const wrapped = [
-    "import { test } from '@playwright/test'",
+    "import { test, expect } from '@playwright/test'",
     "test('trusted fragment', async ({ page, context, browser, request }, testInfo) => {",
     '  const state = {} as Record<string, unknown>',
     `  const __biztest${kind}0 = async () => {`, source, '  }',
@@ -408,10 +414,12 @@ function trustedFragment(relativePath: string, source: string, kind: 'Run' | 'Cl
 
 function renderFullPlaywrightRuntime(): string {
   return [
+    "import { clearTimeout as __biztestHostClearTimeout, setTimeout as __biztestHostSetTimeout } from 'node:timers'",
+    '',
     'const __biztestPromise = Promise',
     'const __biztestPromiseRace = Promise.race.bind(Promise)',
-    'const __biztestSetTimeout = setTimeout',
-    'const __biztestClearTimeout = clearTimeout',
+    'const __biztestSetTimeout = __biztestHostSetTimeout',
+    'const __biztestClearTimeout = __biztestHostClearTimeout',
     'const __biztestError = Error',
     'const __biztestAggregateError = AggregateError',
     'const __biztestProgramDeadlines = new WeakSet<object>()',
@@ -441,7 +449,7 @@ function renderFullPlaywrightRuntime(): string {
     '}',
     '',
     'async function withDeadline(operation: () => Promise<unknown>, timeoutMs: number, kind: DeadlineKind): Promise<unknown> {',
-    '  let timer: ReturnType<typeof setTimeout> | undefined',
+    '  let timer: ReturnType<typeof __biztestSetTimeout> | undefined',
     '  const deadline = new __biztestPromise<never>((_resolve, reject) => {',
     '    timer = __biztestSetTimeout(() => reject(deadlineError(kind)), timeoutMs)',
     '  })',

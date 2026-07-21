@@ -10,13 +10,30 @@ export interface TrustedSourceFinding { relativePath: string; code: string; deta
 const SOURCE_EXTENSION = /\.(?:[cm]?[jt]s|tsx)$/
 
 type Profile = 'trusted-read-only' | 'trusted-reversible-write' | 'full-playwright'
-type ReferenceKind = 'unknown' | 'host' | 'dynamic' | 'function-constructor'
+type ReferenceKind = 'unknown' | 'intrinsic' | 'host' | 'dynamic' | 'function-constructor'
   | 'host-fetch' | 'browser-fetch' | 'browser-object' | 'playwright-request' | 'reflection'
   | 'object-primordial'
   | 'sensitive-property'
 interface BindingState { kind: ReferenceKind }
 type Scope = Map<string, BindingState>
 type BindingIdentity = ts.Symbol | ts.Identifier
+
+const PURE_ECMASCRIPT_INTRINSICS = new Set([
+  'undefined', 'NaN', 'Infinity', 'Array', 'ArrayBuffer', 'BigInt', 'Boolean', 'Error',
+  'AggregateError', 'JSON', 'Map', 'Math', 'Number', 'Promise', 'RegExp', 'Set', 'String',
+  'Symbol', 'Uint8Array', 'WeakMap', 'WeakSet', 'decodeURI',
+  'decodeURIComponent', 'encodeURI', 'encodeURIComponent', 'isFinite', 'isNaN', 'parseFloat',
+  'parseInt',
+])
+const BROWSER_GLOBALS = new Set([
+  'globalThis', 'window', 'document', 'navigator', 'location', 'URL', 'URLSearchParams',
+])
+const PURE_INTRINSIC_MEMBERS = new Set([
+  'from', 'isArray', 'stringify', 'parse', 'max', 'min', 'abs', 'ceil', 'floor', 'round',
+  'trunc', 'pow', 'sqrt', 'sign', 'imul', 'clz32', 'fround', 'hypot', 'isFinite',
+  'isInteger', 'isNaN', 'isSafeInteger', 'parseFloat', 'parseInt', 'resolve', 'reject', 'all',
+  'allSettled', 'any', 'race', 'fromCharCode', 'fromCodePoint', 'raw',
+])
 
 export function auditTrustedRegressionSourceSet(
   files: TrustedRegressionSource[],
@@ -41,9 +58,18 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
   const rootScope: Scope = new Map()
   let hostFetchReferences = 0
   const trustedPlaywrightBindings = new Set<BindingIdentity>()
-  markCompilerProvidedBindings(sourceFile, checker, trustedPlaywrightBindings)
+  const protectedDeclarationIdentifiers = new Set<ts.Identifier>()
+  markCompilerProvidedBindings(sourceFile, checker, trustedPlaywrightBindings,
+    protectedDeclarationIdentifiers)
   const identity = (identifier: ts.Identifier): BindingIdentity =>
-    checker.getSymbolAtLocation(identifier) ?? identifier
+    (ts.isShorthandPropertyAssignment(identifier.parent)
+      ? checker.getShorthandAssignmentValueSymbol(identifier.parent) : undefined)
+      ?? checker.getSymbolAtLocation(identifier) ?? identifier
+  const trustedProcessBindings = collectTrustedProcessBindings(sourceFile, identity,
+    file.relativePath, profile)
+  if (trustedProcessBindings.size > 0) rootScope.set('process', { kind: 'host' })
+  const protectedBindings = collectProtectedBindings(sourceFile, identity, protectedDeclarationIdentifiers)
+  for (const binding of trustedPlaywrightBindings) protectedBindings.add(binding)
   const namedCallbacks = collectNamedCallbacks(sourceFile, identity)
   const browserOnlyCallbacks = new Set([...namedCallbacks.entries()]
     .filter(([binding]) => {
@@ -93,46 +119,50 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
     }
     if (ts.isForStatement(node) || ts.isForInStatement(node) || ts.isForOfStatement(node)) {
       const loopScope = new Map(scope)
+      if ((ts.isForInStatement(node) || ts.isForOfStatement(node))
+        && !ts.isVariableDeclarationList(node.initializer)) {
+        invalidateWriteTarget(node.initializer, loopScope, browserScope)
+      }
       ts.forEachChild(node, (child) => visit(child, loopScope, browserScope))
       return
     }
     if (ts.isCatchClause(node)) {
       const catchScope = new Map(scope)
-      if (node.variableDeclaration) declareBinding(node.variableDeclaration.name, undefined, catchScope, browserScope)
+      if (node.variableDeclaration) {
+        declareBinding(node.variableDeclaration.name, undefined, catchScope, browserScope, checker)
+      }
       visit(node.block, catchScope, browserScope)
       return
     }
     visitDecorators(node, scope, browserScope, visit)
     visitComputedMemberName(node, scope, browserScope, visit)
+    if (ts.isMetaProperty(node)) add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-meta')
+    if (ts.isImportEqualsDeclaration(node)) {
+      add('E2E_COMPILER_SOURCE_IMPORT_FORBIDDEN', 'import-equals')
+    }
     if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
-      forEachAssignmentIdentifier(node.left, (identifier) => {
-        const binding = identity(identifier)
-        if (trustedPlaywrightBindings.delete(binding)) {
-          add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'trusted-binding-write')
-        }
-      })
+      invalidateWriteTarget(node.left, scope, browserScope)
     }
     if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node))
-      && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)
-      && ts.isIdentifier(node.operand)) {
-      const binding = identity(node.operand)
-      if (trustedPlaywrightBindings.delete(binding)) {
-        add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'trusted-binding-write')
-      }
+      && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)) {
+      invalidateWriteTarget(node.operand, scope, browserScope)
     }
+    if (ts.isDeleteExpression(node)) invalidateWriteTarget(node.expression, scope, browserScope)
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
       const specifier = node.moduleSpecifier
-      if (specifier && ts.isStringLiteralLike(specifier) && !allowedImports.has(specifier.text)) {
-        add('E2E_COMPILER_SOURCE_IMPORT_FORBIDDEN', specifier.text)
+      if (specifier && ts.isStringLiteralLike(specifier)
+        && (!allowedImports.has(specifier.text) || !ts.isImportDeclaration(node)
+          || !importShapeAllowed(node, file.relativePath, profile))) {
+        add('E2E_COMPILER_SOURCE_IMPORT_FORBIDDEN', `${specifier.text}:binding`)
       }
     }
     if (ts.isCallExpression(node)) {
       if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
         add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'dynamic-import')
       }
-      const calleeKind = classify(node.expression, scope, browserScope)
+      const calleeKind = classify(node.expression, scope, browserScope, checker)
       flagInvocation(calleeKind)
-      if (isReflectApply(node.expression)) flagInvocation(classify(node.arguments[0]!, scope, browserScope))
+      if (isReflectApply(node.expression)) flagInvocation(classify(node.arguments[0]!, scope, browserScope, checker))
       const browserCallback = isBrowserCallbackCall(node.expression, trustedPlaywrightBindings, identity)
       visit(node.expression, scope, browserScope)
       for (const argument of node.arguments) {
@@ -146,19 +176,24 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
       return
     }
     if (ts.isNewExpression(node)) {
-      flagInvocation(classify(node.expression, scope, browserScope))
+      flagInvocation(classify(node.expression, scope, browserScope, checker))
     }
     if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node))
-      && classify(node, scope, browserScope) === 'reflection') {
+      && classify(node, scope, browserScope, checker) === 'reflection') {
       add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-reflection')
     }
     if (ts.isVariableDeclaration(node)) {
-      declareBinding(node.name, undefined, scope, browserScope)
+      invalidateDeclaredBinding(node.name)
+      if (isAmbientDeclaration(node)) add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'ambient-binding')
+      declareBinding(node.name, undefined, scope, browserScope, checker)
       visitBindingRuntimeChildren(node.name, scope, browserScope, visit)
       if (node.initializer && !(ts.isIdentifier(node.name) && browserOnlyCallbacks.has(identity(node.name))
         && isFunctionLike(node.initializer))) visit(node.initializer, scope, browserScope)
-      inferBinding(node.name, node.initializer, scope, browserScope)
+      inferBinding(node.name, node.initializer, scope, browserScope, checker)
       return
+    }
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+      invalidateDeclaredIdentifier(node.name)
     }
     if (ts.isFunctionDeclaration(node) && node.name && browserOnlyCallbacks.has(identity(node.name))) return
     if (isFunctionLike(node)) {
@@ -166,14 +201,14 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
       return
     }
     if (ts.isIdentifier(node) && isReferenceIdentifier(node)) {
-      const kind = classify(node, scope, browserScope)
+      const kind = classify(node, scope, browserScope, checker)
       if (kind === 'host-fetch' && !isCallCalleeReference(node)) hostFetchReferences += 1
       else if (kind === 'dynamic') add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'dynamic-execution')
       else if (kind === 'function-constructor') {
         add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'function-constructor')
       } else if (kind === 'reflection') {
         add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-reflection')
-      } else if (kind === 'host' && hostReferenceForbidden(node.text, browserScope)) {
+      } else if (kind === 'host' && !isAllowedProcessEnvironmentRoot(node)) {
         add('E2E_COMPILER_SOURCE_API_FORBIDDEN', `host-${node.text}`)
       }
     }
@@ -189,7 +224,7 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
 
   function visitFunction(node: ts.FunctionLikeDeclaration, parentScope: Scope, browserScope: boolean): void {
     const scope = new Map(parentScope)
-    for (const parameter of node.parameters) declareBinding(parameter.name, undefined, scope, browserScope)
+    for (const parameter of node.parameters) declareBinding(parameter.name, undefined, scope, browserScope, checker)
     seedCompilerProvidedParameterKinds(node, checker, scope)
     for (const parameter of node.parameters) {
       visitDecorators(parameter, scope, browserScope, visit)
@@ -204,52 +239,87 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
     else if (kind === 'dynamic') add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'dynamic-execution')
     else if (kind === 'function-constructor') add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'function-constructor')
     else if (kind === 'reflection') add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-reflection')
-    else if (kind === 'host' && !file.relativePath.endsWith('/fixtures/safe-page.ts')) {
-      add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-api')
+    else if (kind === 'host') add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-api')
+  }
+
+  function invalidateWriteTarget(target: ts.Expression, scope: Scope, browserScope: boolean): void {
+    const unwrapped = unwrap(target)
+    const root = assignmentRootIdentifier(target)
+    if (root) invalidateWrittenIdentifier(root)
+    if (root && (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped))
+      && ['intrinsic', 'object-primordial'].includes(classify(root, scope, browserScope, checker))) {
+      add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'global-binding-write')
+    }
+    forEachAssignmentIdentifier(target, (identifier) => {
+      invalidateWrittenIdentifier(identifier)
+    })
+  }
+
+  function invalidateDeclaredBinding(name: ts.BindingName): void {
+    forEachBindingIdentifier(name, invalidateDeclaredIdentifier)
+  }
+
+  function invalidateDeclaredIdentifier(identifier: ts.Identifier): void {
+    if (!protectedDeclarationIdentifiers.has(identifier)) invalidateWrittenIdentifier(identifier)
+  }
+
+  function invalidateWrittenIdentifier(identifier: ts.Identifier): void {
+    const binding = identity(identifier)
+    if (protectedBindings.has(binding)) {
+      trustedPlaywrightBindings.delete(binding)
+      add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'trusted-binding-write')
+    }
+    if ((PURE_ECMASCRIPT_INTRINSICS.has(identifier.text) || identifier.text === 'Object')
+      && !hasRuntimeLexicalBinding(identifier, checker)) {
+      add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'global-binding-write')
     }
   }
 
-  function hostReferenceForbidden(name: string, browserScope: boolean): boolean {
-    if (browserScope && ['globalThis', 'window', 'document', 'navigator', 'location'].includes(name)) return false
-    if (file.relativePath.endsWith('/playwright.config.ts') && name === 'process') return false
-    if (file.relativePath.endsWith('/fixtures/safe-page.ts') && ['process', 'Buffer'].includes(name)) return false
-    return profile === 'full-playwright' || ['globalThis', 'global', 'module', 'exports', '__dirname', '__filename'].includes(name)
+  function isAllowedProcessEnvironmentRoot(identifier: ts.Identifier): boolean {
+    if (!trustedProcessBindings.has(identity(identifier))) return false
+    const environment = identifier.parent
+    if ((!ts.isPropertyAccessExpression(environment) && !ts.isElementAccessExpression(environment))
+      || environment.expression !== identifier || memberName(environment) !== 'env') return false
+    const access = environment.parent
+    if ((!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access))
+      || access.expression !== environment) return false
+    const name = environmentProperty(access)
+    return name !== undefined && environmentFor(file.relativePath, profile).has(name)
   }
 }
 
-function classify(expression: ts.Expression, scope: Scope, browserScope: boolean): ReferenceKind {
+function classify(expression: ts.Expression, scope: Scope, browserScope: boolean,
+  checker: ts.TypeChecker): ReferenceKind {
   const unwrapped = unwrap(expression)
   if (ts.isStringLiteralLike(unwrapped)
     && ['constructor', '__proto__', 'prototype'].includes(unwrapped.text)) return 'sensitive-property'
   if (ts.isIdentifier(unwrapped)) {
     const bound = scope.get(unwrapped.text)
     if (bound) return bound.kind
+    if (hasRuntimeLexicalBinding(unwrapped, checker)) return 'unknown'
     if (unwrapped.text === 'fetch') return browserScope ? 'browser-fetch' : 'host-fetch'
     if (['eval', 'require'].includes(unwrapped.text)) return 'dynamic'
     if (unwrapped.text === 'Function') return 'function-constructor'
     if (['Reflect', 'Proxy'].includes(unwrapped.text)) return 'reflection'
     if (unwrapped.text === 'Object') return 'object-primordial'
-    if (['page', 'context', 'browser'].includes(unwrapped.text)) return 'browser-object'
-    if (unwrapped.text === 'request') return 'playwright-request'
-    if (['process', 'global', 'globalThis', 'module', 'exports', 'Buffer', '__dirname', '__filename',
-      'Bun', 'Deno', 'setImmediate', 'clearImmediate']
-      .includes(unwrapped.text)) return 'host'
-    return 'unknown'
+    if (BROWSER_GLOBALS.has(unwrapped.text)) return browserScope ? 'browser-object' : 'host'
+    if (PURE_ECMASCRIPT_INTRINSICS.has(unwrapped.text)) return 'intrinsic'
+    return 'host'
   }
   if (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped)) {
-    const receiver = classify(unwrapped.expression, scope, browserScope)
+    const receiver = classify(unwrapped.expression, scope, browserScope, checker)
     const property = memberName(unwrapped)
     if (property === 'eval') return 'dynamic'
     if (property === 'Function' || property === 'constructor') return 'function-constructor'
     if (property === '__proto__' || property === 'prototype') return 'reflection'
-    if (ts.isElementAccessExpression(unwrapped) && property === undefined && unwrapped.argumentExpression
-      && classify(unwrapped.argumentExpression, scope, browserScope) === 'sensitive-property') return 'reflection'
-    const root = rootIdentifier(unwrapped.expression)
-    if (root === 'Reflect' || root === 'Proxy') return 'reflection'
-    if ((root === 'Object' || receiver === 'object-primordial') && !['freeze', 'keys'].includes(property ?? '')) {
+    if (ts.isElementAccessExpression(unwrapped) && property === undefined) return 'reflection'
+    if (receiver === 'object-primordial'
+      && !['freeze', 'keys', 'entries'].includes(property ?? '')) {
       return 'reflection'
     }
-    if (receiver === 'host' && property === 'fetch') return browserScope ? 'browser-fetch' : 'host-fetch'
+    if ((receiver === 'host' || receiver === 'browser-object') && property === 'fetch') {
+      return browserScope ? 'browser-fetch' : 'host-fetch'
+    }
     if (receiver === 'host' && property === 'env') return 'unknown'
     if (receiver === 'host' && property === 'eval') return 'dynamic'
     if (receiver === 'host' && property === 'Function') return 'function-constructor'
@@ -257,19 +327,21 @@ function classify(expression: ts.Expression, scope: Scope, browserScope: boolean
       && ['host-fetch', 'browser-fetch', 'dynamic', 'function-constructor'].includes(receiver)) return receiver
     if (receiver === 'playwright-request') return 'unknown'
     if (receiver === 'host') return 'host'
-    return receiver === 'browser-object' ? 'browser-object' : 'unknown'
+    if (receiver === 'browser-object') return 'browser-object'
+    if (receiver === 'intrinsic') return PURE_INTRINSIC_MEMBERS.has(property ?? '') ? 'unknown' : 'host'
+    return 'unknown'
   }
   if (ts.isBinaryExpression(unwrapped) && unwrapped.operatorToken.kind === ts.SyntaxKind.CommaToken) {
-    return classify(unwrapped.right, scope, browserScope)
+    return classify(unwrapped.right, scope, browserScope, checker)
   }
   if (ts.isFunctionExpression(unwrapped) || ts.isArrowFunction(unwrapped)) return 'unknown'
   return 'unknown'
 }
 
 function declareBinding(name: ts.BindingName, initializer: ts.Expression | undefined,
-  scope: Scope, browserScope: boolean): void {
+  scope: Scope, browserScope: boolean, checker: ts.TypeChecker): void {
   if (ts.isIdentifier(name)) {
-    scope.set(name.text, { kind: initializer ? classify(initializer, scope, browserScope) : 'unknown' })
+    scope.set(name.text, { kind: initializer ? classify(initializer, scope, browserScope, checker) : 'unknown' })
     return
   }
   for (const element of name.elements) {
@@ -282,16 +354,16 @@ function declareBinding(name: ts.BindingName, initializer: ts.Expression | undef
     else if (property === 'eval' || property === 'require') inferred = 'dynamic'
     else if (property === 'Function') inferred = 'function-constructor'
     if (ts.isIdentifier(element.name)) scope.set(element.name.text, { kind: inferred })
-    else declareBinding(element.name, undefined, scope, browserScope)
+    else declareBinding(element.name, undefined, scope, browserScope, checker)
   }
 }
 
 function inferBinding(name: ts.BindingName, initializer: ts.Expression | undefined,
-  scope: Scope, browserScope: boolean): void {
+  scope: Scope, browserScope: boolean, checker: ts.TypeChecker): void {
   if (!initializer) return
   if (ts.isIdentifier(name)) {
     const binding = scope.get(name.text)
-    if (binding) binding.kind = classify(initializer, scope, browserScope)
+    if (binding) binding.kind = classify(initializer, scope, browserScope, checker)
     return
   }
   for (const element of name.elements) {
@@ -306,7 +378,7 @@ function inferBinding(name: ts.BindingName, initializer: ts.Expression | undefin
     if (ts.isIdentifier(element.name)) {
       const binding = scope.get(element.name.text)
       if (binding) binding.kind = kind
-    } else inferBinding(element.name, initializer, scope, browserScope)
+    } else inferBinding(element.name, initializer, scope, browserScope, checker)
   }
 }
 
@@ -318,10 +390,51 @@ function unwrap(expression: ts.Expression): ts.Expression {
   return current
 }
 
+function hasRuntimeLexicalBinding(identifier: ts.Identifier, checker: ts.TypeChecker): boolean {
+  const symbol = checker.getSymbolAtLocation(identifier)
+  return symbol?.declarations?.some((declaration) => declaration.getSourceFile() === identifier.getSourceFile()
+    && !isAmbientDeclaration(declaration)
+    && (isRuntimeImportBinding(declaration) || (symbol.flags & ts.SymbolFlags.Value) !== 0)) ?? false
+}
+
+function isRuntimeImportBinding(declaration: ts.Declaration): boolean {
+  if (ts.isImportClause(declaration)) return !declaration.isTypeOnly
+  if (ts.isImportSpecifier(declaration)) {
+    const clause = declaration.parent.parent
+    return !declaration.isTypeOnly && ts.isImportClause(clause) && !clause.isTypeOnly
+  }
+  if (ts.isNamespaceImport(declaration)) {
+    const clause = declaration.parent
+    return ts.isImportClause(clause) && !clause.isTypeOnly
+  }
+  return false
+}
+
+function isAmbientDeclaration(node: ts.Node): boolean {
+  let current: ts.Node | undefined = node
+  while (current) {
+    if (ts.isSourceFile(current)) return current.isDeclarationFile
+    if (ts.canHaveModifiers(current)
+      && ts.getModifiers(current)?.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)) return true
+    current = current.parent
+  }
+  return false
+}
+
+function assignmentRootIdentifier(expression: ts.Expression): ts.Identifier | undefined {
+  const unwrapped = unwrap(expression)
+  if (ts.isIdentifier(unwrapped)) return unwrapped
+  if (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped)) {
+    return assignmentRootIdentifier(unwrapped.expression)
+  }
+  return undefined
+}
+
 function memberName(expression: ts.PropertyAccessExpression | ts.ElementAccessExpression): string | undefined {
   if (ts.isPropertyAccessExpression(expression)) return expression.name.text
   const argument = expression.argumentExpression && unwrap(expression.argumentExpression)
-  return argument && ts.isStringLiteralLike(argument) ? argument.text : undefined
+  return argument && (ts.isStringLiteralLike(argument) || ts.isNumericLiteral(argument))
+    ? argument.text : undefined
 }
 
 function isBrowserCallbackCall(expression: ts.Expression, trustedBindings: Set<BindingIdentity>,
@@ -339,15 +452,6 @@ function isReflectApply(expression: ts.Expression): boolean {
   const receiver = unwrap(unwrapped.expression)
   return ts.isIdentifier(receiver) && receiver.text === 'Reflect'
     && memberName(unwrapped) === 'apply'
-}
-
-function rootIdentifier(expression: ts.Expression): string | undefined {
-  const unwrapped = unwrap(expression)
-  if (ts.isIdentifier(unwrapped)) return unwrapped.text
-  if (ts.isPropertyAccessExpression(unwrapped) || ts.isElementAccessExpression(unwrapped)) {
-    return rootIdentifier(unwrapped.expression)
-  }
-  return undefined
 }
 
 function collectNamedCallbacks(sourceFile: ts.SourceFile,
@@ -423,14 +527,13 @@ function createAuditProgram(relativePath: string, source: string): { sourceFile:
 }
 
 function markCompilerProvidedBindings(sourceFile: ts.SourceFile, checker: ts.TypeChecker,
-  trustedBindings: Set<BindingIdentity>): void {
+  trustedBindings: Set<BindingIdentity>, protectedDeclarations: Set<ts.Identifier>): void {
   walk(sourceFile)
   function walk(node: ts.Node): void {
     if (isFunctionLike(node) && isCompilerProvidedFunction(node, checker)) {
-      for (const parameter of node.parameters) forEachBindingIdentifier(parameter.name, (identifier) => {
-        if (['page', 'context', 'browser', 'request'].includes(identifier.text)) {
-          trustedBindings.add(checker.getSymbolAtLocation(identifier) ?? identifier)
-        }
+      forEachPlaywrightFixtureBinding(node, (identifier) => {
+        trustedBindings.add(checker.getSymbolAtLocation(identifier) ?? identifier)
+        protectedDeclarations.add(identifier)
       })
     }
     ts.forEachChild(node, walk)
@@ -440,12 +543,28 @@ function markCompilerProvidedBindings(sourceFile: ts.SourceFile, checker: ts.Typ
 function seedCompilerProvidedParameterKinds(node: ts.FunctionLikeDeclaration, checker: ts.TypeChecker,
   scope: Scope): void {
   if (!isCompilerProvidedFunction(node, checker)) return
-  for (const parameter of node.parameters) forEachBindingIdentifier(parameter.name, (identifier) => {
+  forEachPlaywrightFixtureBinding(node, (identifier, fixture) => {
     const binding = scope.get(identifier.text)
     if (!binding) return
-    if (['page', 'context', 'browser'].includes(identifier.text)) binding.kind = 'browser-object'
-    else if (identifier.text === 'request') binding.kind = 'playwright-request'
+    if (['page', 'context', 'browser'].includes(fixture)) binding.kind = 'browser-object'
+    else if (fixture === 'request') binding.kind = 'playwright-request'
   })
+}
+
+function forEachPlaywrightFixtureBinding(node: ts.FunctionLikeDeclaration,
+  callback: (identifier: ts.Identifier, fixture: string) => void): void {
+  const first = node.parameters[0]?.name
+  if (!first || !ts.isObjectBindingPattern(first)) return
+  for (const element of first.elements) {
+    if (element.dotDotDotToken || !ts.isIdentifier(element.name)) continue
+    const fixture = element.propertyName
+      ? ts.isIdentifier(element.propertyName) || ts.isStringLiteralLike(element.propertyName)
+        ? element.propertyName.text : undefined
+      : element.name.text
+    if (fixture && ['page', 'context', 'browser', 'request'].includes(fixture)) {
+      callback(element.name, fixture)
+    }
+  }
 }
 
 function isCompilerProvidedFunction(node: ts.FunctionLikeDeclaration, checker: ts.TypeChecker): boolean {
@@ -476,11 +595,17 @@ function forEachAssignmentIdentifier(expression: ts.Expression,
   callback: (identifier: ts.Identifier) => void): void {
   const unwrapped = unwrap(expression)
   if (ts.isIdentifier(unwrapped)) { callback(unwrapped); return }
+  if (ts.isSpreadElement(unwrapped)) {
+    forEachAssignmentIdentifier(unwrapped.expression, callback)
+    return
+  }
+  if (ts.isBinaryExpression(unwrapped) && unwrapped.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+    forEachAssignmentIdentifier(unwrapped.left, callback)
+    return
+  }
   if (ts.isArrayLiteralExpression(unwrapped)) {
     for (const element of unwrapped.elements) {
-      if (!ts.isOmittedExpression(element) && !ts.isSpreadElement(element)) {
-        forEachAssignmentIdentifier(element, callback)
-      }
+      if (!ts.isOmittedExpression(element)) forEachAssignmentIdentifier(element, callback)
     }
     return
   }
@@ -488,7 +613,36 @@ function forEachAssignmentIdentifier(expression: ts.Expression,
     for (const property of unwrapped.properties) {
       if (ts.isShorthandPropertyAssignment(property)) callback(property.name)
       else if (ts.isPropertyAssignment(property)) forEachAssignmentIdentifier(property.initializer, callback)
+      else if (ts.isSpreadAssignment(property)) forEachAssignmentIdentifier(property.expression, callback)
     }
+  }
+}
+
+function collectProtectedBindings(sourceFile: ts.SourceFile,
+  identity: (identifier: ts.Identifier) => BindingIdentity,
+  protectedDeclarations: Set<ts.Identifier>): Set<BindingIdentity> {
+  const bindings = new Set<BindingIdentity>()
+  walk(sourceFile)
+  return bindings
+
+  function protect(identifier: ts.Identifier): void {
+    const binding = identity(identifier)
+    if (!bindings.has(binding)) protectedDeclarations.add(identifier)
+    bindings.add(binding)
+  }
+  function protectReserved(name: ts.BindingName): void {
+    forEachBindingIdentifier(name, (identifier) => {
+      if (identifier.text.startsWith('__biztest')) protect(identifier)
+    })
+  }
+  function walk(node: ts.Node): void {
+    if (ts.isImportClause(node) && node.name) protect(node.name)
+    if (ts.isNamespaceImport(node)) protect(node.name)
+    if (ts.isImportSpecifier(node)) protect(node.name)
+    if (ts.isVariableDeclaration(node) || ts.isParameter(node)) protectReserved(node.name)
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name
+      && node.name.text.startsWith('__biztest')) protect(node.name)
+    ts.forEachChild(node, walk)
   }
 }
 
@@ -539,6 +693,7 @@ function isReferenceIdentifier(node: ts.Identifier): boolean {
     || ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent) || ts.isImportClause(parent)
     || ts.isNamespaceImport(parent) || ts.isBindingElement(parent) || ts.isVariableDeclaration(parent)
     || ts.isParameter(parent) || ts.isFunctionDeclaration(parent) || ts.isInterfaceDeclaration(parent)
+    || ts.isTypeAliasDeclaration(parent) || ts.isTypeParameterDeclaration(parent)
     || ts.isTypeReferenceNode(parent) || ts.isPropertySignature(parent)) return false
   return true
 }
@@ -568,15 +723,87 @@ function environmentProperty(node: ts.PropertyAccessExpression | ts.ElementAcces
 }
 
 function importsFor(path: string, profile: Profile): Set<string> {
-  if (path.endsWith('/playwright.config.ts')) return new Set(['@playwright/test'])
+  if (path.endsWith('/playwright.config.ts')) return new Set(['@playwright/test', 'node:process'])
   if (path.endsWith('/tests/generated.spec.ts')) return new Set(profile === 'full-playwright'
-    ? ['@playwright/test', '../fixtures/full-playwright-runtime.js'] : ['../fixtures/safe-page.js'])
+    ? ['@playwright/test', '../fixtures/full-playwright-runtime.js']
+    : ['../fixtures/safe-page.js', 'node:process'])
   if (path.endsWith('/fixtures/safe-page.ts')) {
     return new Set(profile === 'trusted-reversible-write'
-      ? ['node:crypto', '@playwright/test'] : ['@playwright/test'])
+      ? ['node:crypto', 'node:buffer', 'node:process', 'node:url', '@playwright/test']
+      : ['node:process', 'node:url', '@playwright/test'])
   }
+  if (path.endsWith('/fixtures/full-playwright-runtime.ts')) return new Set(['node:timers'])
   if (path.includes('/fragments/')) return new Set(['@playwright/test'])
   return new Set()
+}
+
+function importShapeAllowed(declaration: ts.ImportDeclaration, path: string, profile: Profile): boolean {
+  if (!ts.isStringLiteralLike(declaration.moduleSpecifier)) return false
+  const actual = importShape(declaration)
+  const allowed = allowedImportShapes(path, profile).get(declaration.moduleSpecifier.text)
+  return actual !== undefined && allowed !== undefined
+    && actual.split('|').every((binding) => allowed.split('|').includes(binding))
+}
+
+function importShape(declaration: ts.ImportDeclaration): string | undefined {
+  const clause = declaration.importClause
+  if (!clause || clause.isTypeOnly || declaration.attributes) return undefined
+  const bindings: string[] = []
+  if (clause.name) bindings.push(`default:${clause.name.text}`)
+  if (clause.namedBindings) {
+    if (ts.isNamespaceImport(clause.namedBindings)) {
+      bindings.push(`namespace:${clause.namedBindings.name.text}`)
+    } else {
+      for (const specifier of clause.namedBindings.elements) {
+        if (specifier.isTypeOnly) return undefined
+        bindings.push(`named:${specifier.propertyName?.text ?? specifier.name.text}:${specifier.name.text}`)
+      }
+    }
+  }
+  return bindings.sort().join('|') || undefined
+}
+
+function allowedImportShapes(path: string, profile: Profile): Map<string, string> {
+  if (path.endsWith('/playwright.config.ts')) return new Map([
+    ['@playwright/test', 'named:defineConfig:defineConfig'],
+    ['node:process', 'default:process'],
+  ])
+  if (path.endsWith('/tests/generated.spec.ts')) return new Map(profile === 'full-playwright' ? [
+    ['@playwright/test', 'named:expect:expect|named:test:test'],
+    ['../fixtures/full-playwright-runtime.js', 'named:executeFullPlaywrightAction:executeFullPlaywrightAction'],
+  ] : [
+    ['../fixtures/safe-page.js', 'named:test:test'],
+    ['node:process', 'default:process'],
+  ])
+  if (path.endsWith('/fixtures/safe-page.ts')) return new Map(profile === 'trusted-reversible-write' ? [
+    ['node:crypto', 'named:createHash:createHash|named:createPublicKey:createPublicKey|named:verify:verify'],
+    ['node:buffer', 'named:Buffer:Buffer'],
+    ['node:process', 'default:process'],
+    ['node:url', 'named:URL:URL'],
+    ['@playwright/test', 'named:test:base'],
+  ] : [
+    ['node:process', 'default:process'],
+    ['node:url', 'named:URL:URL'],
+    ['@playwright/test', 'named:test:base'],
+  ])
+  if (path.endsWith('/fixtures/full-playwright-runtime.ts')) return new Map([
+    ['node:timers', 'named:clearTimeout:__biztestHostClearTimeout|named:setTimeout:__biztestHostSetTimeout'],
+  ])
+  if (path.includes('/fragments/')) return new Map([
+    ['@playwright/test', 'named:expect:expect|named:test:test'],
+  ])
+  return new Map()
+}
+
+function collectTrustedProcessBindings(sourceFile: ts.SourceFile,
+  identity: (identifier: ts.Identifier) => BindingIdentity, path: string, profile: Profile): Set<BindingIdentity> {
+  const bindings = new Set<BindingIdentity>()
+  for (const statement of sourceFile.statements) {
+    if (ts.isImportDeclaration(statement) && ts.isStringLiteralLike(statement.moduleSpecifier)
+      && statement.moduleSpecifier.text === 'node:process' && importShapeAllowed(statement, path, profile)
+      && statement.importClause?.name) bindings.add(identity(statement.importClause.name))
+  }
+  return bindings
 }
 
 function environmentFor(path: string, profile: Profile): Set<string> {

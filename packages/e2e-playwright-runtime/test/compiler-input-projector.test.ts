@@ -20,7 +20,7 @@ describe('Artifact → Compiler Input Projector', () => {
     expect(source).toContain('const index = new Map')
     expect(implementation).toContain('.delete(')
     expect(implementation).not.toMatch(/\.(?:find|filter|some|sort)\(/)
-    expect(source).toContain('fullIndexes.unmappedByCase.get(caseId)')
+    expect(source).toContain('consumeOptionalIndex(fullIndexes.unmappedByPair')
     expect(source).not.toContain('records(testCase.steps).sort(')
     const traceStart = source.indexOf('function projectFullPlaywrightRequirementTrace')
     const traceEnd = source.indexOf('\nfunction projectRequirementTrace', traceStart)
@@ -120,6 +120,18 @@ describe('Artifact → Compiler Input Projector', () => {
     expect(() => projectCompilerInputFromArtifacts({
       artifacts: approvedFullPlaywrightCompilerArtifacts({ extraFullAction: true }),
       playwrightVersion: '1.61.1', ...compilerArtifactVerification,
+    })).toThrow(/E2E_COMPILER_(?:INPUT_INVALID|APPROVAL_BINDING_INVALID)/)
+  })
+
+  test.each([
+    ['额外 unmapped pair', { extraUnmapped: true }],
+    ['重复 unmapped pair', { duplicateUnmapped: true }],
+    ['额外 coverage obligation', { extraObligation: true }],
+    ['重复 obligation/case binding', { duplicateObligationCaseBinding: true }],
+  ])('full Playwright 拒绝未逐项唯一消费的%s', (_name, drift) => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts(drift), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
     })).toThrow(/E2E_COMPILER_(?:INPUT_INVALID|APPROVAL_BINDING_INVALID)/)
   })
 

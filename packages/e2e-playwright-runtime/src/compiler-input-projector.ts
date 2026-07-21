@@ -151,8 +151,16 @@ export function projectCompilerInputFromArtifacts(
     const effect = text(testCase.effect)
     const steps = records(testCase.steps)
     if (!fullPlaywright) steps.sort((left, right) => number(left.ordinal) - number(right.ordinal))
-    const unmapped = fullIndexes ? fullIndexes.unmappedByCase.get(caseId)
-      : unmappedSteps.find((item) => text(item.caseId) === caseId)
+    let unmapped: Record<string, unknown> | undefined
+    if (fullIndexes) {
+      for (const step of steps) {
+        const candidate = consumeOptionalIndex(fullIndexes.unmappedByPair,
+          `${caseId}\0${text(step.stepId)}`)
+        if (candidate && !unmapped) unmapped = candidate
+      }
+    } else {
+      unmapped = unmappedSteps.find((item) => text(item.caseId) === caseId)
+    }
     if (effect === 'irreversible' || effect === 'unknown') {
       blockedCases.push({ caseId, reasonCode: 'E2E_COMPILER_EFFECT_NOT_ALLOWED' })
       continue
@@ -272,9 +280,10 @@ interface FullPlaywrightConsumptionIndexes {
   receiptCapabilitiesByAction: Map<string, Record<string, unknown>>
   subjectActionsByAction: Map<string, Record<string, unknown>>
   scheduleTuples: Set<string>
-  unmappedByCase: Map<string, Record<string, unknown>>
+  unmappedByPair: Map<string, Record<string, unknown>>
   obligationsById: Map<string, Record<string, unknown>>
   obligationCases: Set<string>
+  obligationRemainingCases: Map<string, number>
 }
 
 function createFullPlaywrightConsumptionIndexes(input: {
@@ -303,16 +312,24 @@ function createFullPlaywrightConsumptionIndexes(input: {
     subjectActionsByAction: indexUnique(input.receipt.executionSubjectSnapshot.actions as unknown as Record<string, unknown>[],
       (action) => text(action.actionId), 'full Playwright subject action 重复'),
     scheduleTuples: new Set<string>(),
-    unmappedByCase: indexFirst(input.unmappedSteps, (step) => text(step.caseId)),
+    unmappedByPair: indexUnique(input.unmappedSteps,
+      (step) => `${text(step.caseId)}\0${text(step.stepId)}`, 'unmapped step pair 重复'),
     obligationsById: indexUnique(input.obligations, (obligation) => text(obligation.obligationId),
       'coverage obligation 重复'),
     obligationCases: new Set<string>(),
+    obligationRemainingCases: new Map<string, number>(),
   }
   for (const obligation of input.obligations) {
+    const obligationId = text(obligation.obligationId)
     const disposition = record(obligation.disposition)
     if (disposition.kind !== 'automated') continue
-    for (const caseId of strings(disposition.caseIds)) {
-      indexes.obligationCases.add(`${text(obligation.obligationId)}\0${caseId}`)
+    const caseIds = strings(disposition.caseIds)
+    indexes.obligationRemainingCases.set(obligationId, caseIds.length)
+    for (const caseId of caseIds) {
+      const binding = `${obligationId}\0${caseId}`
+      if (indexes.obligationCases.has(binding)) throw projectorError(
+        'E2E_COMPILER_INPUT_INVALID', 'coverage obligation/case binding 重复')
+      indexes.obligationCases.add(binding)
     }
   }
   const schedulesByCase = indexUnique(input.schedules, (schedule) => text(schedule.caseId),
@@ -369,7 +386,9 @@ function assertFullPlaywrightIndexesConsumed(indexes: FullPlaywrightConsumptionI
   if (indexes.mappingsByPair.size !== 0 || indexes.programsByAction.size !== 0
     || indexes.intentsByAction.size !== 0 || indexes.cleanupByAction.size !== 0
     || indexes.signedCapabilitiesByAction.size !== 0 || indexes.receiptCapabilitiesByAction.size !== 0
-    || indexes.subjectActionsByAction.size !== 0 || indexes.scheduleTuples.size !== 0) {
+    || indexes.subjectActionsByAction.size !== 0 || indexes.scheduleTuples.size !== 0
+    || indexes.unmappedByPair.size !== 0 || indexes.obligationsById.size !== 0
+    || indexes.obligationCases.size !== 0 || indexes.obligationRemainingCases.size !== 0) {
     throw approvalError('full Playwright 索引存在未消费 leftover')
   }
 }
@@ -385,18 +404,18 @@ function indexUnique(values: Record<string, unknown>[], key: (value: Record<stri
   return index
 }
 
-function indexFirst(values: Record<string, unknown>[], key: (value: Record<string, unknown>) => string):
-Map<string, Record<string, unknown>> {
-  const index = new Map<string, Record<string, unknown>>()
-  for (const value of values) if (!index.has(key(value))) index.set(key(value), value)
-  return index
-}
-
 function consumeIndex(index: Map<string, Record<string, unknown>>, key: string,
   message: string): Record<string, unknown> {
   const value = index.get(key)
   if (!value) throw projectorError('E2E_COMPILER_INPUT_INVALID', message)
   index.delete(key)
+  return value
+}
+
+function consumeOptionalIndex(index: Map<string, Record<string, unknown>>,
+  key: string): Record<string, unknown> | undefined {
+  const value = index.get(key)
+  if (value) index.delete(key)
   return value
 }
 
@@ -576,8 +595,18 @@ function projectFullPlaywrightRequirementTrace(caseId: string, obligationIds: st
     if (!obligation) throw projectorError(
       'E2E_COMPILER_INPUT_INVALID', `Case ${caseId} 引用了不存在的 obligation`)
     const disposition = record(obligation.disposition)
-    if (disposition.kind !== 'automated' || !indexes.obligationCases.has(`${obligationId}\0${caseId}`)) {
+    const binding = `${obligationId}\0${caseId}`
+    if (disposition.kind !== 'automated' || !indexes.obligationCases.delete(binding)) {
       throw projectorError('E2E_COMPILER_INPUT_INVALID', `Case ${caseId} 与 obligation 自动化处置不闭合`)
+    }
+    const remaining = indexes.obligationRemainingCases.get(obligationId)
+    if (remaining === undefined || remaining < 1) throw projectorError(
+      'E2E_COMPILER_INPUT_INVALID', `obligation ${obligationId} 消费计数无效`)
+    if (remaining === 1) {
+      indexes.obligationRemainingCases.delete(obligationId)
+      indexes.obligationsById.delete(obligationId)
+    } else {
+      indexes.obligationRemainingCases.set(obligationId, remaining - 1)
     }
     reqIds.add(text(obligation.reqId))
     for (const ruleId of strings(obligation.ruleIds)) ruleIds.add(ruleId)

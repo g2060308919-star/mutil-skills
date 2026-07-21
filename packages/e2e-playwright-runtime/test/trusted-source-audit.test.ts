@@ -61,6 +61,27 @@ describe('可信生成源码静态安全扫描', () => {
     }], 'full-playwright')).toEqual({ valid: true, findings: [] })
   })
 
+  test('full-playwright 允许真实 compiler fragment 中的 Playwright bindings', () => {
+    const source = `
+      import { test, expect } from '@playwright/test'
+      test('trusted fragment', async ({ page, context, browser, request }, testInfo) => {
+        const state = {} as Record<string, unknown>
+        const __biztestRun0 = async () => {
+          await page.goto('https://example.test/todos')
+          await page.getByRole('textbox').fill(\`todo-\${state.seed ?? 'fixed'}\`)
+          await page.getByRole('textbox').press('Enter')
+          await page.evaluate(() => document.body.setAttribute('data-full-playwright', 'enabled'))
+          await context.addInitScript(() => { window.localStorage.setItem('approved', 'true') })
+          await expect(page.getByText('todo-fixed')).toBeVisible()
+        }
+        await __biztestRun0()
+      })
+    `
+    expect(auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/fragments/ACTION-WRITE-1:source.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')).toEqual({ valid: true, findings: [] })
+  })
+
   test.each([
     ["import fs from 'node:fs'; await fs.readFile('/etc/passwd')", 'E2E_COMPILER_SOURCE_IMPORT_FORBIDDEN'],
     ['process.env.HOME', 'E2E_COMPILER_SOURCE_API_FORBIDDEN'],
@@ -74,6 +95,158 @@ describe('可信生成源码静态安全扫描', () => {
       relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
     }], 'full-playwright')
     expect(result.findings).toContainEqual(expect.objectContaining({ code }))
+  })
+
+  test.each([
+    'mysteryHost',
+    'mysteryHost()',
+    'mysteryHost.read',
+    'new MysteryHost()',
+  ])('full-playwright 对任意未解析宿主标识符 fail closed：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: 'E2E_COMPILER_SOURCE_API_FORBIDDEN',
+    }))
+  })
+
+  test.each([
+    ['regression/tests/generated.spec.ts', 'full-playwright' as const,
+      "import { chromium } from '@playwright/test'; await chromium.launch()"],
+    ['regression/playwright.config.ts', 'full-playwright' as const,
+      "import { exit } from 'node:process'; exit()"],
+    ['regression/fixtures/safe-page.ts', 'trusted-reversible-write' as const,
+      "import { randomBytes } from 'node:crypto'; randomBytes(32)"],
+  ])('只信任编译器审计过的精确 import binding：%s', (relativePath, profile, source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath, bytes: Buffer.from(source),
+    }], profile)
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: 'E2E_COMPILER_SOURCE_IMPORT_FORBIDDEN',
+    }))
+  })
+
+  test.each([
+    "declare const mysteryRuntime: any; mysteryRuntime()",
+    "declare const fetch: any; fetch('https://evil.example')",
+    'interface MysteryRuntime {}; MysteryRuntime()',
+    "import fs = require('node:fs'); fs.readFileSync('/etc/passwd')",
+  ])('类型擦除、ambient 与 ImportEquals 不能伪造运行时词法绑定：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.valid).toBe(false)
+  })
+
+  test('full-playwright 允许经过审计的无副作用 ECMAScript intrinsic', async () => {
+    const source = `
+      const values = Array.from(new Set([3, 1]))
+      const encoded = JSON.stringify({ max: Math.max(...values), finite: Number.isFinite(1) })
+      const parsed = Number.parseInt('42', 10)
+      await Promise.resolve(String(encoded + parsed))
+    `
+    expect(auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')).toEqual({ valid: true, findings: [] })
+  })
+
+  test.each([
+    'Array = [] as any',
+    'Array.from = (() => []) as any',
+    'const A = Array; A.from = (() => []) as any',
+    'const O = Object; O.freeze = (() => undefined) as any',
+    "Symbol.for('shared-registry')",
+    'Math.random()',
+  ])('ECMAScript intrinsic 仅开放审计过的纯读取/调用且不可全局投毒：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.valid).toBe(false)
+  })
+
+  test.each([
+    'const Array = class {}; Array.extra = 1',
+    'const Object = class {}; Object.extra = 1',
+    'const Reflect = { custom: () => 1 }; Reflect.custom()',
+  ])('同名 lexical shadow 不是全局 primordial，允许本地使用：%s', (source) => {
+    expect(auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')).toEqual({ valid: true, findings: [] })
+  })
+
+  test.each([
+    'for (page of []) {}',
+    'for ({ fixture: page } of []) {}',
+    '[...page] = []',
+    '({ fixture: { page } } = { fixture: { page: null } })',
+    'page += 1 as any',
+    '++page',
+    'expect = (() => undefined) as any',
+    '__biztestRun0 = async () => undefined',
+    'page.evaluate = async (callback: () => unknown) => callback()',
+  ])('统一 assignment target 遍历拒绝覆盖可信或编译器保留绑定：%s', (write) => {
+    const source = `
+      import { test, expect } from '@playwright/test'
+      const __biztestRun0 = async () => undefined
+      test('writes', async ({ page }) => { ${write} })
+    `
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: 'E2E_COMPILER_SOURCE_API_FORBIDDEN', detail: 'trusted-binding-write',
+    }))
+  })
+
+  test('compiler 保留绑定只豁免唯一原始声明，拒绝同 symbol 的 var 重声明', () => {
+    const source = 'var __biztestRun0 = 1; var __biztestRun0 = 2'
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: 'E2E_COMPILER_SOURCE_API_FORBIDDEN', detail: 'trusted-binding-write',
+    }))
+  })
+
+  test.each([
+    `import { test } from '@playwright/test'; test('fake', async (page) => {
+      await (page as any).evaluate(() => fetch('/host'))
+    })`,
+    `import { test } from '@playwright/test'; test('fake', async ({ page }) => {
+      var page = { evaluate: async (callback: () => unknown) => callback() } as any
+      await page.evaluate(() => fetch('/host'))
+    })`,
+    `import { test } from '@playwright/test'; test('fake', async ({ page }) => {
+      for (var page of []) {}
+      await page.evaluate(() => fetch('/host'))
+    })`,
+  ])('只有首参数对象 fixture property 且未重声明的绑定获得 Playwright provenance：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.valid).toBe(false)
+  })
+
+  test('Playwright fixture property 可以安全别名且保持精确 provenance', () => {
+    const source = `import { test } from '@playwright/test'; test('alias', async ({ page: browserPage }) => {
+      await browserPage.evaluate(() => fetch('/inside'))
+    })`
+    expect(auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')).toEqual({ valid: true, findings: [] })
+  })
+
+  test.each([
+    'import.meta.url',
+    'function construct() { return new.target }',
+  ])('full-playwright 拒绝宿主 meta construct：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: 'E2E_COMPILER_SOURCE_API_FORBIDDEN', detail: 'host-meta',
+    }))
   })
 
   test.each([
@@ -93,6 +266,8 @@ describe('可信生成源码静态安全扫描', () => {
     ["({})['__proto__']", 'computed proto escape'],
     ["({}).prototype", 'prototype property escape'],
     ["const key = 'constructor'; ({})[key]", 'dynamic sensitive property escape'],
+    ["({})['con' + 'structor']('return process')()", 'computed constructor concatenation'],
+    ["({})[String('constructor')]('return process')()", 'computed constructor coercion'],
   ])('AST 审计拒绝正则 trivia/computed/alias 绕过：%s', (source) => {
     const result = auditTrustedRegressionSourceSet([{
       relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
