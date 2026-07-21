@@ -218,6 +218,28 @@ function writeGrant(): { grant: SignedWriteGrant; subject: WriteApprovalSubject 
   } }
 }
 
+function browserLocalWriteGrant(): { grant: SignedWriteGrant; subject: WriteApprovalSubject } {
+  const source = writeGrant()
+  const action = {
+    ...source.subject.actions[0]!, transport: 'browser-local' as const, operation: 'full-playwright' as const,
+    programDigest: digestText('authority-execution-rpc-test/v1', 'program'),
+    cleanupProgramDigest: digestText('authority-execution-rpc-test/v1', 'cleanup-program'),
+  }
+  const subject = { ...source.subject, actions: [action] }
+  const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+  return { subject, grant: {
+    ...source.grant, grantId: 'GRANT-BROWSER-1', subject, subjectDigest,
+    approvalContext: { ...source.grant.approvalContext, subjectDigest },
+    capabilities: [{
+      capabilityId: 'CAP-BROWSER-1', nonce: 'browser-nonce', transport: 'browser-local',
+      effect: 'reversible-write', operation: 'full-playwright', actionId: action.actionId,
+      programDigest: action.programDigest, cleanupProgramDigest: action.cleanupProgramDigest,
+      dataLeaseId: action.dataLeaseId, fencingToken: action.fencingToken,
+      cleanupPlanDigest: action.cleanupPlanDigest, requests: action.requests, maxUses: 1,
+    }],
+  } }
+}
+
 function readGrant(): { grant: SignedReadGrant; subject: ReadApprovalSubject } {
   const subject: ReadApprovalSubject = {
     schemaVersion: '2.1.0', assetId: 'ASSET-1', prdRevision: digest, scopeDigest: digest,
@@ -356,6 +378,82 @@ test('read complete 必须使用创建 reservation 时完全相同的已认证�
 })
 
 describe('Authority execution RPC clients', () => {
+  test('browser-local write 使用独立认证 RPC reservation，并保持一次性 complete/unknown 语义', async () => {
+    const { rpc, credential, verifierMaterial } = setup()
+    const { grant, subject } = browserLocalWriteGrant()
+    rpc.updateClientRegistration('runner-process', { approvalContext: grant.approvalContext })
+    const uses = new Set<string>()
+    const reservations = new Map<string, 'reserved' | 'completed' | 'unknown'>()
+    registerAuthorityExecutionRpcOperations(rpc, {
+      writeAuthority: {
+        async verifyForSubject() { return { allowed: true } },
+        async reserveForSubject(input) {
+          const key = `${input.grant.grantId}:${input.capabilityId}`
+          if (uses.has(key)) throw new Error('already consumed')
+          uses.add(key)
+          const reservationId = `RESERVATION-${input.attemptId}`
+          reservations.set(reservationId, 'reserved')
+          return { reservationId, grantId: input.grant.grantId, capabilityId: input.capabilityId,
+            actionId: input.actionId, attemptId: input.attemptId,
+            ...(input.attemptContext ? { attemptContext: input.attemptContext } : {}),
+            status: 'reserved' as const, reservedAt: NOW.toISOString() }
+        },
+        async complete(reservationId) { reservations.set(reservationId, 'completed'); return digest },
+        async markUnknown(reservationId) { reservations.set(reservationId, 'unknown'); return digest },
+      },
+      leaseAuthority: { async verifyTarget() { return true } },
+    })
+    const clients = createAuthorityExecutionRpcClients({ credential, verifierMaterial,
+      approvalBinding: binding(grant.approvalContext), expectedPublicKeyDigest: verifierMaterial.publicKeyDigest,
+      transport: (request) => rpc.handle(request), now: () => NOW })
+    const attemptContext = { assetId: 'ASSET-1', generationId: 'GEN-1', prdRevision: digest,
+      runId: 'RUN-1', caseId: 'CASE-1' }
+
+    const capability = grant.capabilities[0]!
+    const changedGrants = [
+      { ...grant, capabilities: [{ ...capability, programDigest: digestText('test/v1', 'changed-program') }] },
+      { ...grant, capabilities: [{ ...capability,
+        cleanupProgramDigest: digestText('test/v1', 'changed-cleanup-program') }] },
+      { ...grant, capabilities: [{ ...capability, transport: 'http', operation: 'http-request' }] },
+      { ...grant, capabilities: [{ ...capability, dataLeaseId: 'LEASE-OTHER' }] },
+      { ...grant, capabilities: [{ ...capability, fencingToken: 2 }] },
+      { ...grant, capabilities: [{ ...capability, cleanupPlanDigest: digestText('test/v1', 'changed-plan') }] },
+      { ...grant, capabilities: [{ ...capability,
+        requests: [{ ...capability.requests[0]!, exactPath: '/other' }] }] },
+    ] as unknown as SignedWriteGrant[]
+    for (const [index, changedGrant] of changedGrants.entries()) {
+      await expect(clients.writeApproval.reserveForSubject({
+        grant: changedGrant, currentSubject: subject, capabilityId: 'CAP-BROWSER-1', actionId: 'ACTION-1',
+        attemptId: `MISMATCH-${index}`, attemptContext,
+      })).rejects.toMatchObject({ code: 'E2E_RPC_WRITE_RESERVE_INPUT_INVALID' })
+    }
+
+    const completed = await clients.writeApproval.reserveForSubject({
+      grant, currentSubject: subject, capabilityId: 'CAP-BROWSER-1', actionId: 'ACTION-1',
+      attemptId: 'BROWSER-1', attemptContext,
+    })
+    await clients.writeApproval.complete(completed.reservationId, digest)
+    expect(reservations.get(completed.reservationId)).toBe('completed')
+    await expect(clients.writeApproval.reserveForSubject({
+      grant, currentSubject: subject, capabilityId: 'CAP-BROWSER-1', actionId: 'ACTION-1',
+      attemptId: 'BROWSER-REPLAY', attemptContext,
+    })).rejects.toMatchObject({ code: 'E2E_RPC_OPERATION_FAILED' })
+
+    const another = browserLocalWriteGrant()
+    another.grant.grantId = 'GRANT-BROWSER-2'
+    const unknown = await clients.writeApproval.reserveForSubject({
+      grant: another.grant, currentSubject: another.subject, capabilityId: 'CAP-BROWSER-1', actionId: 'ACTION-1',
+      attemptId: 'BROWSER-2', attemptContext,
+    })
+    await clients.writeApproval.markUnknown(unknown.reservationId, 'browser state ambiguous')
+    expect(reservations.get(unknown.reservationId)).toBe('unknown')
+
+    await expect(clients.gatewayAuthority.reserveForSubject({
+      grant, currentSubject: subject, capabilityId: 'CAP-BROWSER-1', actionId: 'ACTION-1',
+      attemptId: 'WRONG-TRANSPORT', attemptContext,
+    })).rejects.toMatchObject({ code: 'E2E_RPC_GATEWAY_RESERVE_INPUT_INVALID' })
+  })
+
   test('只暴露固定的 Write/Lease operation，并登记为绑定公钥摘要的跨进程可信客户端', async () => {
     const { rpc, credential, verifierMaterial, approvalContext } = setup()
     const calls: string[] = []

@@ -10,6 +10,7 @@ import {
   SignedGrantSchema,
   WebSocketReadApprovalSubjectSchema,
   WriteApprovalSubjectV2Schema,
+  WriteHttpIntentSetSchema,
   type AttemptExecutionContext,
   type CapabilityReservation,
   type GrantDecision,
@@ -23,6 +24,7 @@ import {
   type DiscoveryApprovalSubject,
   type DiscoveryPreflightOutcome,
   type ReadApprovalSubject,
+  type ReversibleWriteCapability,
   type InjectionApprovalSubject,
   type SseReadApprovalSubject,
   type WebSocketReadApprovalSubject,
@@ -48,6 +50,9 @@ import {
 } from './trusted-execution-clients.js'
 
 const WRITE_VERIFY_OPERATION = 'write.verifyForSubject.v1'
+const WRITE_RESERVE_OPERATION = 'write.reserveForSubject.v1'
+const WRITE_COMPLETE_OPERATION = 'write.complete.v1'
+const WRITE_UNKNOWN_OPERATION = 'write.markUnknown.v1'
 const LEASE_VERIFY_OPERATION = 'lease.verifyTarget.v1'
 const GATEWAY_VERIFY_OPERATION = 'gateway.write.verifyForSubject.v2'
 const GATEWAY_RESERVE_OPERATION = 'gateway.write.reserveForSubject.v1'
@@ -79,6 +84,13 @@ const DIGEST = /^sha256:[a-f0-9]{64}$/
 export interface AuthorityExecutionRpcHostDependencies {
   writeAuthority: {
     verifyForSubject(grant: SignedWriteGrant, currentSubject: WriteApprovalSubject): Promise<GrantDecision>
+    reserveForSubject?(input: {
+      grant: SignedWriteGrant; currentSubject: WriteApprovalSubject; capabilityId: string; actionId: string
+      attemptId: string; attemptContext?: AttemptExecutionContext; rpcOwnerBinding?: RpcReservationOwnerBinding
+    }): Promise<CapabilityReservation>
+    complete?(reservationId: string, outcomeDigest: string): Promise<string>
+    markUnknown?(reservationId: string, observation: string): Promise<string>
+    getReservationRpcBinding?(reservationId: string): RpcReservationOwnerBinding | undefined
   }
   leaseAuthority: {
     verifyTarget(leaseId: string, fencingToken: number, targetFingerprint: string): Promise<boolean>
@@ -198,6 +210,40 @@ export function registerAuthorityExecutionRpcOperations(
     if (contextDecision) return contextDecision
     return parseGrantDecision(await dependencies.writeAuthority.verifyForSubject(input.grant, input.currentSubject))
   })
+  if (dependencies.writeAuthority.reserveForSubject && dependencies.writeAuthority.complete
+    && dependencies.writeAuthority.markUnknown) {
+    const writeAuthority = dependencies.writeAuthority as GatewayWriteAuthorityRpcHost
+    rpc.registerOperation(WRITE_RESERVE_OPERATION, async (payload, rpcContext) => {
+      const input = parseBrowserLocalWriteReserveInput(payload)
+      const contextDecision = verifyRegisteredApprovalContext(input.grant, rpcContext)
+      if (contextDecision) throw executionRpcError(contextDecision.code)
+      const owner = rpcReservationOwner(rpcContext, input.grant.approvalContext)
+      const slot = reserveReservationOwnerCapacity(writeAuthority, reservationContexts)
+      try {
+        const reservation = parseCapabilityReservation(await writeAuthority.reserveForSubject({
+          ...input, rpcOwnerBinding: owner,
+        }), input)
+        recordReservationOwner(writeAuthority, reservation.reservationId, owner, reservationContexts, slot)
+        return reservation
+      } catch (error) { slot?.release(); throw error }
+    })
+    rpc.registerOperation(WRITE_COMPLETE_OPERATION, async (payload, rpcContext) => {
+      const input = parseWriteCompleteInput(payload)
+      requireReservationOwner(writeAuthority, reservationContexts, input.reservationId, rpcContext)
+      await writeAuthority.complete(input.reservationId, input.outcomeDigest)
+      finalizeReservationOwner(writeAuthority, reservationContexts, input.reservationId, rpcContext, 'completed',
+        digestText('authority-rpc-terminal-tombstone/v1', canonicalizeJson(input)))
+      return { completed: true }
+    })
+    rpc.registerOperation(WRITE_UNKNOWN_OPERATION, async (payload, rpcContext) => {
+      const input = parseWriteUnknownInput(payload)
+      requireReservationOwner(writeAuthority, reservationContexts, input.reservationId, rpcContext)
+      await writeAuthority.markUnknown(input.reservationId, input.observation)
+      finalizeReservationOwner(writeAuthority, reservationContexts, input.reservationId, rpcContext, 'unknown',
+        digestText('authority-rpc-terminal-tombstone/v1', canonicalizeJson(input)))
+      return { markedUnknown: true }
+    })
+  }
   rpc.registerOperation(LEASE_VERIFY_OPERATION, async (payload, rpcContext) => {
     const input = parseLeaseVerifyInput(payload)
     const runId = registeredApprovalContext(rpcContext, 'execution').runId
@@ -593,6 +639,21 @@ export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRp
   const writeApproval = trustWriteApprovalClient(Object.freeze({
     async verifyForSubject(grant: SignedWriteGrant, currentSubject: WriteApprovalSubject): Promise<GrantDecision> {
       return parseGrantDecision(await rpc.call(WRITE_VERIFY_OPERATION, { grant, currentSubject }))
+    },
+    async reserveForSubject(input: {
+      grant: SignedWriteGrant; currentSubject: WriteApprovalSubject; capabilityId: string
+      actionId: string; attemptId: string; attemptContext?: AttemptExecutionContext
+    }) {
+      const parsed = parseBrowserLocalWriteReserveInput(input)
+      return parseCapabilityReservation(await rpc.call(WRITE_RESERVE_OPERATION, parsed), parsed)
+    },
+    async complete(reservationId: string, outcomeDigest: string) {
+      const input = parseWriteCompleteInput({ reservationId, outcomeDigest })
+      parseAck(await rpc.call(WRITE_COMPLETE_OPERATION, input), 'completed', 'E2E_RPC_WRITE_COMPLETE_RESULT_INVALID')
+    },
+    async markUnknown(reservationId: string, observation: string) {
+      const input = parseWriteUnknownInput({ reservationId, observation })
+      parseAck(await rpc.call(WRITE_UNKNOWN_OPERATION, input), 'markedUnknown', 'E2E_RPC_WRITE_UNKNOWN_RESULT_INVALID')
     },
   }), binding)
   const lease = trustLeaseClient(Object.freeze({
@@ -1068,6 +1129,9 @@ function parseSignedWriteGrant(value: unknown): SignedWriteGrant | undefined {
     || typeof value.revocationSequence !== 'number' || !Number.isSafeInteger(value.revocationSequence)
     || value.revocationSequence < 0 || typeof value.signature !== 'string' || value.signature.length < 1
     || value.signature.length > 16 * 1024) return undefined
+  if (!writeCapabilitiesMatchSubject(
+    value.capabilities as ReversibleWriteCapability[], subject.data,
+  )) return undefined
   return structuredClone(value) as unknown as SignedWriteGrant
 }
 
@@ -1078,18 +1142,52 @@ function isApprover(value: unknown): boolean {
     && value.roles.every((role) => typeof role === 'string' && SAFE_ID.test(role))
 }
 
-function isWriteCapability(value: unknown): boolean {
-  return isPlainObject(value) && hasExactKeys(value, ['actionId', 'capabilityId', 'cleanupPlanDigest', 'dataLeaseId',
-    'effect', 'fencingToken', 'maxUses', 'nonce', 'operation', 'requests', 'transport'])
+function isWriteCapability(value: unknown): value is ReversibleWriteCapability {
+  if (!isPlainObject(value)) return false
+  const browserLocal = value.transport === 'browser-local'
+  const keys = ['actionId', 'capabilityId', 'cleanupPlanDigest', 'dataLeaseId', 'effect', 'fencingToken', 'maxUses',
+    'nonce', 'operation', ...(browserLocal ? ['cleanupProgramDigest', 'programDigest'] : []), 'requests', 'transport']
+  return hasExactKeys(value, keys)
     && typeof value.actionId === 'string' && SAFE_ID.test(value.actionId)
     && typeof value.capabilityId === 'string' && SAFE_ID.test(value.capabilityId)
     && typeof value.dataLeaseId === 'string' && SAFE_ID.test(value.dataLeaseId)
     && typeof value.nonce === 'string' && value.nonce.length >= 1 && value.nonce.length <= 16 * 1024
-    && value.transport === 'http' && value.effect === 'reversible-write' && value.operation === 'http-request'
+    && value.effect === 'reversible-write'
+    && ((value.transport === 'http' && value.operation === 'http-request')
+      || (browserLocal && value.operation === 'full-playwright'
+        && typeof value.programDigest === 'string' && DIGEST.test(value.programDigest)
+        && typeof value.cleanupProgramDigest === 'string' && DIGEST.test(value.cleanupProgramDigest)))
     && typeof value.fencingToken === 'number' && Number.isSafeInteger(value.fencingToken) && value.fencingToken > 0
     && typeof value.cleanupPlanDigest === 'string' && DIGEST.test(value.cleanupPlanDigest)
-    && Array.isArray(value.requests) && value.requests.length >= 1 && value.requests.length <= 1_000
+    && WriteHttpIntentSetSchema.safeParse(value.requests).success
+    && (browserLocal || (Array.isArray(value.requests) && value.requests.length >= 1))
     && value.maxUses === 1
+}
+
+function writeCapabilitiesMatchSubject(
+  capabilities: ReversibleWriteCapability[],
+  subject: WriteApprovalSubject,
+): boolean {
+  if (capabilities.length !== subject.actions.length) return false
+  const matchedActions = new Set<number>()
+  for (const capability of capabilities) {
+    const matches = subject.actions.flatMap((action, index) =>
+      action.actionId === capability.actionId ? [{ action, index }] : [])
+    if (matches.length !== 1 || matchedActions.has(matches[0]!.index)) return false
+    const { action, index } = matches[0]!
+    if (capability.effect !== action.effect
+      || capability.dataLeaseId !== action.dataLeaseId
+      || capability.fencingToken !== action.fencingToken
+      || capability.cleanupPlanDigest !== action.cleanupPlanDigest
+      || canonicalizeJson(capability.requests) !== canonicalizeJson(action.requests)) return false
+    if ('transport' in action) {
+      if (capability.transport !== action.transport || capability.operation !== action.operation
+        || capability.programDigest !== action.programDigest
+        || capability.cleanupProgramDigest !== action.cleanupProgramDigest) return false
+    } else if (capability.transport !== 'http' || capability.operation !== 'http-request') return false
+    matchedActions.add(index)
+  }
+  return matchedActions.size === subject.actions.length
 }
 
 function parseLeaseVerifyInput(value: unknown): {
@@ -1356,20 +1454,46 @@ function parseGatewayReserveInput(value: unknown): {
   attemptId: string
   attemptContext?: AttemptExecutionContext
 } {
-  if (!isPlainObject(value)) throw executionRpcError('E2E_RPC_GATEWAY_RESERVE_INPUT_INVALID')
+  return parseWriteReserveInput(value, 'http', 'E2E_RPC_GATEWAY_RESERVE_INPUT_INVALID')
+}
+
+function parseBrowserLocalWriteReserveInput(value: unknown): ReturnType<typeof parseGatewayReserveInput> {
+  return parseWriteReserveInput(value, 'browser-local', 'E2E_RPC_WRITE_RESERVE_INPUT_INVALID')
+}
+
+function parseWriteReserveInput(
+  value: unknown,
+  expectedTransport: 'http' | 'browser-local',
+  errorCode: string,
+): ReturnType<typeof parseGatewayReserveInput> {
+  if (!isPlainObject(value)) throw executionRpcError(errorCode)
   const hasContext = Object.hasOwn(value, 'attemptContext')
   const keys = ['actionId', 'attemptId', 'capabilityId', 'currentSubject', 'grant',
     ...(hasContext ? ['attemptContext'] : [])]
   const grant = parseSignedWriteGrant(value.grant)
   const subject = WriteApprovalSubjectV2Schema.safeParse(value.currentSubject)
   const context = hasContext ? parseAttemptContext(value.attemptContext) : undefined
+  const selected = grant?.capabilities.find((capability) => capability.capabilityId === value.capabilityId
+    && capability.actionId === value.actionId)
   if (!hasExactKeys(value, keys) || !grant || !subject.success
     || typeof value.capabilityId !== 'string' || !SAFE_ID.test(value.capabilityId)
     || typeof value.actionId !== 'string' || !SAFE_ID.test(value.actionId)
     || typeof value.attemptId !== 'string' || !SAFE_ID.test(value.attemptId)
-    || (hasContext && !context)) throw executionRpcError('E2E_RPC_GATEWAY_RESERVE_INPUT_INVALID')
+    || selected?.transport !== expectedTransport
+    || selected.operation !== (expectedTransport === 'http' ? 'http-request' : 'full-playwright')
+    || (hasContext && !context)) throw executionRpcError(errorCode)
   return { grant, currentSubject: subject.data, capabilityId: value.capabilityId,
     actionId: value.actionId, attemptId: value.attemptId, ...(context ? { attemptContext: context } : {}) }
+}
+
+function parseWriteCompleteInput(value: unknown): { reservationId: string; outcomeDigest: string } {
+  try { return parseGatewayCompleteInput(value) }
+  catch { throw executionRpcError('E2E_RPC_WRITE_COMPLETE_INPUT_INVALID') }
+}
+
+function parseWriteUnknownInput(value: unknown): { reservationId: string; observation: string } {
+  try { return parseGatewayUnknownInput(value) }
+  catch { throw executionRpcError('E2E_RPC_WRITE_UNKNOWN_INPUT_INVALID') }
 }
 
 function parseGatewayCompleteInput(value: unknown): { reservationId: string; outcomeDigest: string } {

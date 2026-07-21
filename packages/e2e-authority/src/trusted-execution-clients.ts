@@ -2,6 +2,8 @@ import {
   ApprovalExecutionBindingSchema,
   E2EError,
   type ApprovalExecutionBinding,
+  type AttemptExecutionContext,
+  type CapabilityReservation,
   type GrantDecision,
   type SignedWriteGrant,
   type WriteApprovalSubject,
@@ -11,6 +13,16 @@ export type { ApprovalExecutionBinding } from '@mutil-skills/e2e-contracts'
 
 export interface TrustedWriteApprovalClient {
   verifyForSubject(grant: SignedWriteGrant, currentSubject: WriteApprovalSubject): Promise<GrantDecision>
+  reserveForSubject(input: {
+    grant: SignedWriteGrant
+    currentSubject: WriteApprovalSubject
+    capabilityId: string
+    actionId: string
+    attemptId: string
+    attemptContext?: AttemptExecutionContext
+  }): Promise<CapabilityReservation>
+  complete(reservationId: string, outcomeDigest: string): Promise<void>
+  markUnknown(reservationId: string, observation: string): Promise<void>
 }
 
 export interface TrustedLeaseClient {
