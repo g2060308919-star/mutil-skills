@@ -18,7 +18,7 @@ import {
   type RegressionDiscoveryAttestation,
   type RegressionDiscoverySubject,
 } from '@mutil-skills/e2e-contracts'
-import { READ_ONLY_COMPILER_DIGEST, READ_ONLY_TEMPLATE_DIGEST,
+import { FULL_PLAYWRIGHT_TEMPLATE_DIGEST, READ_ONLY_TEMPLATE_DIGEST, TRUSTED_COMPILER_DIGEST,
   TRUSTED_COMPILER_VERSION, TRUSTED_TEMPLATE_VERSION } from './regression-discovery.js'
 import { TRUSTED_TYPESCRIPT_VERSION } from './compiler-input-projector.js'
 import { assertExpectedRegressionSourceSet, readRegressionSourceSet } from './regression-source-set.js'
@@ -376,10 +376,13 @@ async function assertTrustedToolchain(
   try { installedVersion = (JSON.parse(packageText) as { version?: string }).version ?? '' } catch {}
   if (subject.compilerVersion !== TRUSTED_COMPILER_VERSION
     || subject.templateVersion !== TRUSTED_TEMPLATE_VERSION
-    || subject.templateDigest !== READ_ONLY_TEMPLATE_DIGEST
-    || subject.toolchain.compilerDigest !== READ_ONLY_COMPILER_DIGEST
+    || subject.templateDigest !== (subject.executionProfile === 'full-playwright'
+      ? FULL_PLAYWRIGHT_TEMPLATE_DIGEST : READ_ONLY_TEMPLATE_DIGEST)
+    || subject.toolchain.compilerDigest !== TRUSTED_COMPILER_DIGEST
     || subject.toolchain.nodeVersion !== process.versions.node
-    || subject.toolchain.typescriptVersion !== TRUSTED_TYPESCRIPT_VERSION
+    || (subject.schemaVersion === '2.1.0'
+      ? subject.toolchain.typescriptVersion !== TRUSTED_TYPESCRIPT_VERSION
+      : subject.executionProfile === 'full-playwright')
     || subject.toolchain.playwrightVersion !== installedVersion
     || subject.toolchain.playwrightCliDigest !== digestBytes('playwright-cli/v1', cliBytes)
     || trust.browserExecutableDigest !== digestBytes('trusted-browser-executable/v1', browserBytes)) {

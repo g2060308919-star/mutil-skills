@@ -179,6 +179,52 @@ describe('generated full Playwright lifecycle runtime', () => {
     expect(result.status).toBe('rejected')
   })
 
+  test('带抛错 getter 的普通 primary error 不触发结构探测且仍执行 cleanup', async () => {
+    const execute = (await runtime()).executeFullPlaywrightAction
+    expect(execute).toBeTypeOf('function')
+    const events: string[] = []
+    const primary = Object.defineProperty({}, 'biztestDeadline', {
+      get() { events.push('getter'); throw new Error('getter-must-not-run') },
+    })
+    const result = await capture(() => execute!({
+      run: async () => { events.push('run'); throw primary },
+      cleanup: async () => { events.push('cleanup'); return 'verified-clean' },
+      retire: async () => { events.push('retire') }, programTimeoutMs: 100, cleanupTimeoutMs: 100,
+    }))
+    expect(events).toEqual(['run', 'cleanup'])
+    expect(result.status).toBe('rejected')
+    expect((result as { status: 'rejected'; error: unknown }).error).toBe(primary)
+  })
+
+  test('形似 deadline 的普通对象不被判为 timeout，不退休 context', async () => {
+    const execute = (await runtime()).executeFullPlaywrightAction
+    expect(execute).toBeTypeOf('function')
+    const events: string[] = []
+    const primary = { biztestDeadline: 'program' }
+    const result = await capture(() => execute!({
+      run: async () => { events.push('run'); throw primary },
+      cleanup: async () => { events.push('cleanup'); return 'verified-clean' },
+      retire: async () => { events.push('retire') }, programTimeoutMs: 100, cleanupTimeoutMs: 100,
+    }))
+    expect(events).toEqual(['run', 'cleanup'])
+    expect(result).toEqual({ status: 'rejected', error: primary })
+  })
+
+  test('Proxy has trap 不参与 deadline identity 分类', async () => {
+    const execute = (await runtime()).executeFullPlaywrightAction
+    expect(execute).toBeTypeOf('function')
+    const events: string[] = []
+    const primary = new Proxy({}, { has() { events.push('has-trap'); throw new Error('trap') } })
+    const result = await capture(() => execute!({
+      run: async () => { events.push('run'); throw primary },
+      cleanup: async () => { events.push('cleanup'); return 'verified-clean' },
+      retire: async () => { events.push('retire') }, programTimeoutMs: 100, cleanupTimeoutMs: 100,
+    }))
+    expect(events).toEqual(['run', 'cleanup'])
+    expect(result.status).toBe('rejected')
+    expect((result as { status: 'rejected'; error: unknown }).error).toBe(primary)
+  })
+
   test('cleanup 使用独立 deadline；超时后退休 context', async () => {
     const execute = (await runtime()).executeFullPlaywrightAction
     expect(execute).toBeTypeOf('function')

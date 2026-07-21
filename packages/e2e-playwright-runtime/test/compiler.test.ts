@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { createRequire } from 'node:module'
 import { afterEach, describe, expect, test } from 'vitest'
 import { projectCompilerInputFromArtifacts } from '../src/index.js'
-import { compileReadOnlyProject } from '../src/compiler.js'
+import { compileReadOnlyProject, compileTrustedProject } from '../src/compiler.js'
 import { approvedCompilerArtifacts, approvedCompilerArtifactsWithBlockedCase,
   approvedFullPlaywrightCompilerArtifacts, compilerArtifactVerification,
   FULL_PLAYWRIGHT_CLEANUP_SOURCE, FULL_PLAYWRIGHT_SOURCE } from './compiler-artifacts.fixture.js'
@@ -18,6 +18,10 @@ afterEach(async () => {
 })
 
 describe('compileReadOnlyProject', () => {
+  test('中性 compiler API 保留历史 read-only 兼容别名', () => {
+    expect(compileReadOnlyProject).toBe(compileTrustedProject)
+  })
+
   test('拒绝非空输出根，且不覆盖调用方已有文件', async () => {
     const outputDir = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-compiler-non-fresh-'))
     createdDirectories.push(outputDir)
@@ -125,8 +129,8 @@ describe('compileReadOnlyProject', () => {
     expect(spec).toContain(FULL_PLAYWRIGHT_SOURCE)
     expect(spec).toContain(FULL_PLAYWRIGHT_CLEANUP_SOURCE)
     expect(spec).toContain("`todo-${state.seed ?? 'fixed'}`")
-    expect(spec).toContain('async ({ page, context, request }, testInfo) =>')
-    expect(spec).toContain('browser: context.browser()!')
+    expect(spec).toContain('async ({ page, context, browser, request }, testInfo) =>')
+    expect(spec).not.toContain('browser: context.browser()!')
     expect(spec).toContain('executeFullPlaywrightAction({')
     expect(spec).toContain('const __biztestRun0 = async')
     expect(spec).toContain('const __biztestCleanup0 = async')
@@ -166,6 +170,7 @@ describe('compileReadOnlyProject', () => {
     ["const key = 'constructor'; ({})[key]", 'computed sensitive property'],
     ["globalThis['Object']['getPrototypeOf'](async () => {})", 'host Object property chain'],
     ["globalThis['Promise'].race = async () => 'forged'", 'primordial property monkeypatch'],
+    ["const nested = (value = eval('host-code')) => value", 'nested parameter default'],
     ["__biztestCleanup0 = async () => 'verified-clean'", 'compiler-reserved binding'],
   ])('full Playwright source/cleanup 不能逃逸 FunctionBody 或注册 hook：%s', async (source) => {
     const outputDir = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-full-fragment-'))

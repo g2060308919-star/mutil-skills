@@ -14,7 +14,9 @@ type ReferenceKind = 'unknown' | 'host' | 'dynamic' | 'function-constructor'
   | 'host-fetch' | 'browser-fetch' | 'browser-object' | 'playwright-request' | 'reflection'
   | 'object-primordial'
   | 'sensitive-property'
-type Scope = Map<string, ReferenceKind>
+interface BindingState { kind: ReferenceKind }
+type Scope = Map<string, BindingState>
+type BindingIdentity = ts.Symbol | ts.Identifier
 
 export function auditTrustedRegressionSourceSet(
   files: TrustedRegressionSource[],
@@ -31,21 +33,25 @@ export function auditTrustedRegressionSourceSet(
 
 function auditFile(file: TrustedRegressionSource, profile: Profile, findings: TrustedSourceFinding[]): void {
   const source = Buffer.from(file.bytes).toString('utf8')
-  const sourceFile = ts.createSourceFile(file.relativePath, source, ts.ScriptTarget.Latest, true,
-    file.relativePath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+  const { sourceFile, checker } = createAuditProgram(file.relativePath, source)
   const diagnostics = (sourceFile as ts.SourceFile & { parseDiagnostics?: readonly ts.Diagnostic[] }).parseDiagnostics ?? []
   if (diagnostics.length > 0) add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'syntax-invalid')
 
   const allowedImports = importsFor(file.relativePath, profile)
   const rootScope: Scope = new Map()
   let hostFetchReferences = 0
-  const namedCallbacks = collectNamedCallbacks(sourceFile)
+  const trustedPlaywrightBindings = new Set<BindingIdentity>()
+  markCompilerProvidedBindings(sourceFile, checker, trustedPlaywrightBindings)
+  const identity = (identifier: ts.Identifier): BindingIdentity =>
+    checker.getSymbolAtLocation(identifier) ?? identifier
+  const namedCallbacks = collectNamedCallbacks(sourceFile, identity)
   const browserOnlyCallbacks = new Set([...namedCallbacks.entries()]
-    .filter(([name]) => {
-      const references = callbackReferences(sourceFile, name)
-      return references.length > 0 && references.every(isBrowserCallbackArgument)
+    .filter(([binding]) => {
+      const references = callbackReferences(sourceFile, binding, identity)
+      return references.length > 0 && references.every((reference) =>
+        isBrowserCallbackArgument(reference, trustedPlaywrightBindings, identity))
     })
-    .map(([name]) => name))
+    .map(([binding]) => binding))
 
   visit(sourceFile, rootScope, false)
 
@@ -74,6 +80,46 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
   }
 
   function visit(node: ts.Node, scope: Scope, browserScope: boolean): void {
+    if (ts.isBlock(node)) {
+      const blockScope = new Map(scope)
+      visitDecorators(node, blockScope, browserScope, visit)
+      for (const statement of node.statements) visit(statement, blockScope, browserScope)
+      return
+    }
+    if (ts.isCaseBlock(node)) {
+      const blockScope = new Map(scope)
+      for (const clause of node.clauses) visit(clause, blockScope, browserScope)
+      return
+    }
+    if (ts.isForStatement(node) || ts.isForInStatement(node) || ts.isForOfStatement(node)) {
+      const loopScope = new Map(scope)
+      ts.forEachChild(node, (child) => visit(child, loopScope, browserScope))
+      return
+    }
+    if (ts.isCatchClause(node)) {
+      const catchScope = new Map(scope)
+      if (node.variableDeclaration) declareBinding(node.variableDeclaration.name, undefined, catchScope, browserScope)
+      visit(node.block, catchScope, browserScope)
+      return
+    }
+    visitDecorators(node, scope, browserScope, visit)
+    visitComputedMemberName(node, scope, browserScope, visit)
+    if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
+      forEachAssignmentIdentifier(node.left, (identifier) => {
+        const binding = identity(identifier)
+        if (trustedPlaywrightBindings.delete(binding)) {
+          add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'trusted-binding-write')
+        }
+      })
+    }
+    if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node))
+      && (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)
+      && ts.isIdentifier(node.operand)) {
+      const binding = identity(node.operand)
+      if (trustedPlaywrightBindings.delete(binding)) {
+        add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'trusted-binding-write')
+      }
+    }
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
       const specifier = node.moduleSpecifier
       if (specifier && ts.isStringLiteralLike(specifier) && !allowedImports.has(specifier.text)) {
@@ -87,13 +133,13 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
       const calleeKind = classify(node.expression, scope, browserScope)
       flagInvocation(calleeKind)
       if (isReflectApply(node.expression)) flagInvocation(classify(node.arguments[0]!, scope, browserScope))
-      const browserCallback = isBrowserCallbackCall(node.expression, scope, browserScope)
+      const browserCallback = isBrowserCallbackCall(node.expression, trustedPlaywrightBindings, identity)
       visit(node.expression, scope, browserScope)
       for (const argument of node.arguments) {
         if (browserCallback && isFunctionLike(argument)) visitFunction(argument, scope, true)
         else if (browserCallback && ts.isIdentifier(unwrap(argument))
-          && browserOnlyCallbacks.has((unwrap(argument) as ts.Identifier).text)) {
-          visitFunction(namedCallbacks.get((unwrap(argument) as ts.Identifier).text)!, scope, true)
+          && browserOnlyCallbacks.has(identity(unwrap(argument) as ts.Identifier))) {
+          visitFunction(namedCallbacks.get(identity(unwrap(argument) as ts.Identifier))!, scope, true)
         }
         else visit(argument, scope, browserScope)
       }
@@ -107,12 +153,14 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
       add('E2E_COMPILER_SOURCE_API_FORBIDDEN', 'host-reflection')
     }
     if (ts.isVariableDeclaration(node)) {
-      if (node.initializer && !(ts.isIdentifier(node.name) && browserOnlyCallbacks.has(node.name.text)
+      declareBinding(node.name, undefined, scope, browserScope)
+      visitBindingRuntimeChildren(node.name, scope, browserScope, visit)
+      if (node.initializer && !(ts.isIdentifier(node.name) && browserOnlyCallbacks.has(identity(node.name))
         && isFunctionLike(node.initializer))) visit(node.initializer, scope, browserScope)
-      declareBinding(node.name, node.initializer, scope, browserScope)
+      inferBinding(node.name, node.initializer, scope, browserScope)
       return
     }
-    if (ts.isFunctionDeclaration(node) && node.name && browserOnlyCallbacks.has(node.name.text)) return
+    if (ts.isFunctionDeclaration(node) && node.name && browserOnlyCallbacks.has(identity(node.name))) return
     if (isFunctionLike(node)) {
       visitFunction(node, scope, browserScope)
       return
@@ -142,6 +190,12 @@ function auditFile(file: TrustedRegressionSource, profile: Profile, findings: Tr
   function visitFunction(node: ts.FunctionLikeDeclaration, parentScope: Scope, browserScope: boolean): void {
     const scope = new Map(parentScope)
     for (const parameter of node.parameters) declareBinding(parameter.name, undefined, scope, browserScope)
+    seedCompilerProvidedParameterKinds(node, checker, scope)
+    for (const parameter of node.parameters) {
+      visitDecorators(parameter, scope, browserScope, visit)
+      visitBindingRuntimeChildren(parameter.name, scope, browserScope, visit)
+      if (parameter.initializer) visit(parameter.initializer, scope, browserScope)
+    }
     if (node.body) visit(node.body, scope, browserScope)
   }
 
@@ -169,7 +223,7 @@ function classify(expression: ts.Expression, scope: Scope, browserScope: boolean
     && ['constructor', '__proto__', 'prototype'].includes(unwrapped.text)) return 'sensitive-property'
   if (ts.isIdentifier(unwrapped)) {
     const bound = scope.get(unwrapped.text)
-    if (bound) return bound
+    if (bound) return bound.kind
     if (unwrapped.text === 'fetch') return browserScope ? 'browser-fetch' : 'host-fetch'
     if (['eval', 'require'].includes(unwrapped.text)) return 'dynamic'
     if (unwrapped.text === 'Function') return 'function-constructor'
@@ -215,10 +269,7 @@ function classify(expression: ts.Expression, scope: Scope, browserScope: boolean
 function declareBinding(name: ts.BindingName, initializer: ts.Expression | undefined,
   scope: Scope, browserScope: boolean): void {
   if (ts.isIdentifier(name)) {
-    const inferred = initializer ? classify(initializer, scope, browserScope)
-      : ['page', 'context', 'browser'].includes(name.text) ? 'browser-object'
-        : name.text === 'request' ? 'playwright-request' : 'unknown'
-    scope.set(name.text, inferred)
+    scope.set(name.text, { kind: initializer ? classify(initializer, scope, browserScope) : 'unknown' })
     return
   }
   for (const element of name.elements) {
@@ -230,10 +281,32 @@ function declareBinding(name: ts.BindingName, initializer: ts.Expression | undef
     if (property === 'fetch') inferred = browserScope ? 'browser-fetch' : 'host-fetch'
     else if (property === 'eval' || property === 'require') inferred = 'dynamic'
     else if (property === 'Function') inferred = 'function-constructor'
-    else if (['page', 'context', 'browser'].includes(property ?? '')) inferred = 'browser-object'
-    else if (property === 'request') inferred = 'playwright-request'
-    if (ts.isIdentifier(element.name)) scope.set(element.name.text, inferred)
+    if (ts.isIdentifier(element.name)) scope.set(element.name.text, { kind: inferred })
     else declareBinding(element.name, undefined, scope, browserScope)
+  }
+}
+
+function inferBinding(name: ts.BindingName, initializer: ts.Expression | undefined,
+  scope: Scope, browserScope: boolean): void {
+  if (!initializer) return
+  if (ts.isIdentifier(name)) {
+    const binding = scope.get(name.text)
+    if (binding) binding.kind = classify(initializer, scope, browserScope)
+    return
+  }
+  for (const element of name.elements) {
+    if (ts.isOmittedExpression(element)) continue
+    const property = element.propertyName && (ts.isIdentifier(element.propertyName)
+      || ts.isStringLiteralLike(element.propertyName)) ? element.propertyName.text
+      : ts.isIdentifier(element.name) ? element.name.text : undefined
+    let kind: ReferenceKind = 'unknown'
+    if (property === 'fetch') kind = browserScope ? 'browser-fetch' : 'host-fetch'
+    else if (property === 'eval' || property === 'require') kind = 'dynamic'
+    else if (property === 'Function') kind = 'function-constructor'
+    if (ts.isIdentifier(element.name)) {
+      const binding = scope.get(element.name.text)
+      if (binding) binding.kind = kind
+    } else inferBinding(element.name, initializer, scope, browserScope)
   }
 }
 
@@ -251,12 +324,13 @@ function memberName(expression: ts.PropertyAccessExpression | ts.ElementAccessEx
   return argument && ts.isStringLiteralLike(argument) ? argument.text : undefined
 }
 
-function isBrowserCallbackCall(expression: ts.Expression, scope: Scope, browserScope: boolean): boolean {
+function isBrowserCallbackCall(expression: ts.Expression, trustedBindings: Set<BindingIdentity>,
+  identity: (identifier: ts.Identifier) => BindingIdentity): boolean {
   const unwrapped = unwrap(expression)
   if (!ts.isPropertyAccessExpression(unwrapped) && !ts.isElementAccessExpression(unwrapped)) return false
   const property = memberName(unwrapped)
   return ['evaluate', 'evaluateHandle', 'addInitScript'].includes(property ?? '')
-    && classify(unwrapped.expression, scope, browserScope) === 'browser-object'
+    && expressionHasTrustedPlaywrightRoot(unwrapped.expression, trustedBindings, identity)
 }
 
 function isReflectApply(expression: ts.Expression): boolean {
@@ -276,35 +350,38 @@ function rootIdentifier(expression: ts.Expression): string | undefined {
   return undefined
 }
 
-function collectNamedCallbacks(sourceFile: ts.SourceFile): Map<string, ts.FunctionLikeDeclaration> {
-  const callbacks = new Map<string, ts.FunctionLikeDeclaration>()
-  const duplicates = new Set<string>()
+function collectNamedCallbacks(sourceFile: ts.SourceFile,
+  identity: (identifier: ts.Identifier) => BindingIdentity): Map<BindingIdentity, ts.FunctionLikeDeclaration> {
+  const callbacks = new Map<BindingIdentity, ts.FunctionLikeDeclaration>()
+  const duplicates = new Set<BindingIdentity>()
   walk(sourceFile)
   return callbacks
   function walk(node: ts.Node): void {
-    if (ts.isFunctionDeclaration(node) && node.name && node.body) add(node.name.text, node)
+    if (ts.isFunctionDeclaration(node) && node.name && node.body) add(identity(node.name), node)
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer
-      && isFunctionLike(node.initializer)) add(node.name.text, node.initializer)
+      && isFunctionLike(node.initializer)) add(identity(node.name), node.initializer)
     ts.forEachChild(node, walk)
   }
-  function add(name: string, node: ts.FunctionLikeDeclaration): void {
-    if (duplicates.has(name)) return
-    if (callbacks.has(name)) { callbacks.delete(name); duplicates.add(name); return }
-    callbacks.set(name, node)
+  function add(binding: BindingIdentity, node: ts.FunctionLikeDeclaration): void {
+    if (duplicates.has(binding)) return
+    if (callbacks.has(binding)) { callbacks.delete(binding); duplicates.add(binding); return }
+    callbacks.set(binding, node)
   }
 }
 
-function callbackReferences(sourceFile: ts.SourceFile, name: string): ts.Identifier[] {
+function callbackReferences(sourceFile: ts.SourceFile, binding: BindingIdentity,
+  identity: (identifier: ts.Identifier) => BindingIdentity): ts.Identifier[] {
   const references: ts.Identifier[] = []
   walk(sourceFile)
   return references
   function walk(node: ts.Node): void {
-    if (ts.isIdentifier(node) && node.text === name && isReferenceIdentifier(node)) references.push(node)
+    if (ts.isIdentifier(node) && identity(node) === binding && isReferenceIdentifier(node)) references.push(node)
     ts.forEachChild(node, walk)
   }
 }
 
-function isBrowserCallbackArgument(identifier: ts.Identifier): boolean {
+function isBrowserCallbackArgument(identifier: ts.Identifier, trustedBindings: Set<BindingIdentity>,
+  identity: (identifier: ts.Identifier) => BindingIdentity): boolean {
   let current: ts.Expression = identifier
   while (ts.isParenthesizedExpression(current.parent) || ts.isAsExpression(current.parent)
     || ts.isTypeAssertionExpression(current.parent) || ts.isNonNullExpression(current.parent)) {
@@ -314,9 +391,139 @@ function isBrowserCallbackArgument(identifier: ts.Identifier): boolean {
   if (!ts.isCallExpression(call) || !call.arguments.includes(current)) return false
   const callee = unwrap(call.expression)
   if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return false
-  const receiver = rootIdentifier(callee.expression)
-  return ['page', 'context'].includes(receiver ?? '')
-    && ['evaluate', 'evaluateHandle', 'addInitScript'].includes(memberName(callee) ?? '')
+  return ['evaluate', 'evaluateHandle', 'addInitScript'].includes(memberName(callee) ?? '')
+    && expressionHasTrustedPlaywrightRoot(callee.expression, trustedBindings, identity)
+}
+
+function expressionHasTrustedPlaywrightRoot(expression: ts.Expression,
+  trustedBindings: Set<BindingIdentity>, identity: (identifier: ts.Identifier) => BindingIdentity): boolean {
+  const unwrapped = unwrap(expression)
+  return ts.isIdentifier(unwrapped) && trustedBindings.has(identity(unwrapped))
+}
+
+function createAuditProgram(relativePath: string, source: string): { sourceFile: ts.SourceFile; checker: ts.TypeChecker } {
+  const options: ts.CompilerOptions = { target: ts.ScriptTarget.Latest, module: ts.ModuleKind.ESNext,
+    noLib: true, noResolve: true, allowJs: true }
+  const sourceFile = ts.createSourceFile(relativePath, source, ts.ScriptTarget.Latest, true,
+    relativePath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+  const host: ts.CompilerHost = {
+    fileExists: (name) => name === relativePath,
+    readFile: (name) => name === relativePath ? source : undefined,
+    getSourceFile: (name) => name === relativePath ? sourceFile : undefined,
+    getDefaultLibFileName: () => 'lib.d.ts',
+    writeFile: () => undefined,
+    getCurrentDirectory: () => '',
+    getDirectories: () => [],
+    getCanonicalFileName: (name) => name,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => '\n',
+  }
+  const program = ts.createProgram([relativePath], options, host)
+  return { sourceFile: program.getSourceFile(relativePath) ?? sourceFile, checker: program.getTypeChecker() }
+}
+
+function markCompilerProvidedBindings(sourceFile: ts.SourceFile, checker: ts.TypeChecker,
+  trustedBindings: Set<BindingIdentity>): void {
+  walk(sourceFile)
+  function walk(node: ts.Node): void {
+    if (isFunctionLike(node) && isCompilerProvidedFunction(node, checker)) {
+      for (const parameter of node.parameters) forEachBindingIdentifier(parameter.name, (identifier) => {
+        if (['page', 'context', 'browser', 'request'].includes(identifier.text)) {
+          trustedBindings.add(checker.getSymbolAtLocation(identifier) ?? identifier)
+        }
+      })
+    }
+    ts.forEachChild(node, walk)
+  }
+}
+
+function seedCompilerProvidedParameterKinds(node: ts.FunctionLikeDeclaration, checker: ts.TypeChecker,
+  scope: Scope): void {
+  if (!isCompilerProvidedFunction(node, checker)) return
+  for (const parameter of node.parameters) forEachBindingIdentifier(parameter.name, (identifier) => {
+    const binding = scope.get(identifier.text)
+    if (!binding) return
+    if (['page', 'context', 'browser'].includes(identifier.text)) binding.kind = 'browser-object'
+    else if (identifier.text === 'request') binding.kind = 'playwright-request'
+  })
+}
+
+function isCompilerProvidedFunction(node: ts.FunctionLikeDeclaration, checker: ts.TypeChecker): boolean {
+  return isImportedPlaywrightTestCallback(node, checker)
+}
+
+function isImportedPlaywrightTestCallback(node: ts.FunctionLikeDeclaration, checker: ts.TypeChecker): boolean {
+  const parent = node.parent
+  if (!ts.isCallExpression(parent) || !parent.arguments.includes(node as ts.Expression)) return false
+  const callee = unwrap(parent.expression)
+  if (!ts.isIdentifier(callee) || callee.text !== 'test') return false
+  const symbol = checker.getSymbolAtLocation(callee)
+  return symbol?.declarations?.some((declaration) => {
+    if (!ts.isImportSpecifier(declaration)) return false
+    const importDeclaration = declaration.parent.parent.parent
+    const importedName = declaration.propertyName?.text ?? declaration.name.text
+    return importedName === 'test' && ts.isImportDeclaration(importDeclaration)
+      && ts.isStringLiteralLike(importDeclaration.moduleSpecifier)
+      && importDeclaration.moduleSpecifier.text === '@playwright/test'
+  }) ?? false
+}
+
+function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
+  return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment
+}
+
+function forEachAssignmentIdentifier(expression: ts.Expression,
+  callback: (identifier: ts.Identifier) => void): void {
+  const unwrapped = unwrap(expression)
+  if (ts.isIdentifier(unwrapped)) { callback(unwrapped); return }
+  if (ts.isArrayLiteralExpression(unwrapped)) {
+    for (const element of unwrapped.elements) {
+      if (!ts.isOmittedExpression(element) && !ts.isSpreadElement(element)) {
+        forEachAssignmentIdentifier(element, callback)
+      }
+    }
+    return
+  }
+  if (ts.isObjectLiteralExpression(unwrapped)) {
+    for (const property of unwrapped.properties) {
+      if (ts.isShorthandPropertyAssignment(property)) callback(property.name)
+      else if (ts.isPropertyAssignment(property)) forEachAssignmentIdentifier(property.initializer, callback)
+    }
+  }
+}
+
+function forEachBindingIdentifier(name: ts.BindingName, callback: (identifier: ts.Identifier) => void): void {
+  if (ts.isIdentifier(name)) { callback(name); return }
+  for (const element of name.elements) if (!ts.isOmittedExpression(element)) {
+    forEachBindingIdentifier(element.name, callback)
+  }
+}
+
+function visitBindingRuntimeChildren(name: ts.BindingName, scope: Scope, browserScope: boolean,
+  visit: (node: ts.Node, scope: Scope, browserScope: boolean) => void): void {
+  if (ts.isIdentifier(name)) return
+  for (const element of name.elements) {
+    if (ts.isOmittedExpression(element)) continue
+    if (element.propertyName && ts.isComputedPropertyName(element.propertyName)) {
+      visit(element.propertyName.expression, scope, browserScope)
+    }
+    visitBindingRuntimeChildren(element.name, scope, browserScope, visit)
+    if (element.initializer) visit(element.initializer, scope, browserScope)
+  }
+}
+
+function visitDecorators(node: ts.Node, scope: Scope, browserScope: boolean,
+  visit: (node: ts.Node, scope: Scope, browserScope: boolean) => void): void {
+  if (!ts.canHaveDecorators(node)) return
+  for (const decorator of ts.getDecorators(node) ?? []) visit(decorator.expression, scope, browserScope)
+}
+
+function visitComputedMemberName(node: ts.Node, scope: Scope, browserScope: boolean,
+  visit: (node: ts.Node, scope: Scope, browserScope: boolean) => void): void {
+  if ((ts.isMethodDeclaration(node) || ts.isGetAccessorDeclaration(node) || ts.isSetAccessorDeclaration(node)
+    || ts.isPropertyDeclaration(node)) && ts.isComputedPropertyName(node.name)) {
+    visit(node.name.expression, scope, browserScope)
+  }
 }
 
 function isFunctionLike(node: ts.Node): node is ts.FunctionLikeDeclaration {
@@ -368,6 +575,7 @@ function importsFor(path: string, profile: Profile): Set<string> {
     return new Set(profile === 'trusted-reversible-write'
       ? ['node:crypto', '@playwright/test'] : ['@playwright/test'])
   }
+  if (path.includes('/fragments/')) return new Set(['@playwright/test'])
   return new Set()
 }
 

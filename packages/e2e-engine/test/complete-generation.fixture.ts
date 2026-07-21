@@ -151,7 +151,7 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
     digest: digestBytes(`generation-file:${regressionPath}`, regressionBytes), byteLength: regressionBytes.byteLength,
     mediaType: 'text/typescript' as const }]
   const regressionSubject: RegressionDiscoverySubject = {
-    schemaVersion: '2.0.0', testDomain: 'prd-e2e-trusted-compiler', executionProfile: 'trusted-read-only',
+    schemaVersion: '2.1.0', testDomain: 'prd-e2e-trusted-compiler', executionProfile: 'trusted-read-only',
     assetId: context.assetId, generationId: context.generationId,
     prdRevision: context.prdRevision, templateDigest: d('template'), compilerInputDigest: d('compiler-input'),
     compilerVersion: '4.0.0', templateVersion: '3.0.0', contractsVersion: '2.0.0',

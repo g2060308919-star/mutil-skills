@@ -122,9 +122,8 @@ export function projectCompilerInputFromArtifacts(
     throw projectorError('E2E_COMPILER_INPUT_INVALID', 'full Playwright program 必须在 Action Map 与 Execution Contract 逐字闭合')
   }
   const obligations = records(coverageContent.obligations)
-  const activeCases = records(casesContent.cases)
-    .filter((testCase) => testCase.status === 'active')
-    .sort(byId('caseId'))
+  const activeCases = records(casesContent.cases).filter((testCase) => testCase.status === 'active')
+  if (!fullPlaywright) activeCases.sort(byId('caseId'))
   const mappings = records(actionMapContent.actions)
   const unmappedSteps = records(actionMapContent.unmappedSteps)
   const queueIds = records(executionContent.caseQueue).map((item) => text(item.caseId))
@@ -136,71 +135,83 @@ export function projectCompilerInputFromArtifacts(
   const signedCapabilities = records(runBundleContent.signedCapabilities)
   const executableCases: DeclarativeExecutableCase[] = []
   const blockedCases: RegressionBlockedCase[] = []
+  const queueIdSet = new Set(queueIds)
 
   if (new Set(queueIds).size !== queueIds.length
     || queueIds.length !== activeCases.length
-    || activeCases.some((testCase) => !queueIds.includes(text(testCase.caseId)))) {
+    || activeCases.some((testCase) => !queueIdSet.has(text(testCase.caseId)))) {
     throw projectorError('E2E_COMPILER_INPUT_INVALID', 'Execution Contract caseQueue 必须与 active Case 精确闭合')
   }
-  if (fullPlaywright) {
-    assertExactFullPlaywrightConsumption({ activeCases, mappings, programs: executionPrograms, intents,
-      cleanupPlans, signedCapabilities, schedules, receipt: approvalFreshnessReceipt })
-    assertRunScheduleClosure(activeCases, mappings, schedules)
-    assertFullPlaywrightApprovalClosure({ programs: executionPrograms, mappings, intents,
-      cleanupPlans, signedCapabilities, receipt: approvalFreshnessReceipt })
-  }
+  const fullIndexes = fullPlaywright ? createFullPlaywrightConsumptionIndexes({ activeCases, mappings,
+    programs: executionPrograms, intents, cleanupPlans, signedCapabilities, schedules, obligations, unmappedSteps,
+    receipt: approvalFreshnessReceipt }) : undefined
 
   for (const testCase of activeCases) {
     const caseId = text(testCase.caseId)
     const effect = text(testCase.effect)
-    const steps = records(testCase.steps).sort((left, right) => number(left.ordinal) - number(right.ordinal))
-    const unmapped = unmappedSteps.filter((item) => text(item.caseId) === caseId)
+    const steps = records(testCase.steps)
+    if (!fullPlaywright) steps.sort((left, right) => number(left.ordinal) - number(right.ordinal))
+    const unmapped = fullIndexes ? fullIndexes.unmappedByCase.get(caseId)
+      : unmappedSteps.find((item) => text(item.caseId) === caseId)
     if (effect === 'irreversible' || effect === 'unknown') {
       blockedCases.push({ caseId, reasonCode: 'E2E_COMPILER_EFFECT_NOT_ALLOWED' })
       continue
     }
-    if (unmapped.length > 0) {
-      blockedCases.push({ caseId, reasonCode: text(unmapped[0]!.reasonCode) })
+    if (unmapped) {
+      blockedCases.push({ caseId, reasonCode: text(unmapped.reasonCode) })
       continue
     }
     const obligationIds = strings(testCase.obligationIds)
-    const trace = projectRequirementTrace(caseId, obligationIds, obligations)
+    const trace = fullIndexes ? projectFullPlaywrightRequirementTrace(caseId, obligationIds, fullIndexes)
+      : projectRequirementTrace(caseId, obligationIds, obligations)
     const actions = [] as DeclarativeExecutableCase['actions']
     for (const step of steps) {
       const stepId = text(step.stepId)
-      const matches = mappings.filter((mapping) =>
-        text(mapping.caseId) === caseId && text(mapping.stepId) === stepId)
-      if (matches.length !== 1) {
-        throw projectorError('E2E_COMPILER_INPUT_INVALID', `Case ${caseId} Step ${stepId} 必须有且只有一个 Action mapping`)
-      }
-      const mapping = matches[0]!
+      const mapping = fullIndexes
+        ? consumeIndex(fullIndexes.mappingsByPair, `${caseId}\0${stepId}`,
+          `Case ${caseId} Step ${stepId} 必须有且只有一个 Action mapping`)
+        : uniqueMatch(mappings, (candidate) => text(candidate.caseId) === caseId && text(candidate.stepId) === stepId,
+          `Case ${caseId} Step ${stepId} 必须有且只有一个 Action mapping`)
       const actionId = text(mapping.actionId)
-      const matchingIntents = intents.filter((intent) => text(intent.actionId) === actionId)
-      if (text(mapping.effect) !== effect || matchingIntents.length !== 1
-        || text(matchingIntents[0]!.effect) !== effect) {
+      const intent = fullIndexes ? consumeIndex(fullIndexes.intentsByAction, actionId,
+        `Action ${actionId} intent 未唯一闭合`) : uniqueMatch(intents,
+        (candidate) => text(candidate.actionId) === actionId, `Action ${actionId} intent 未唯一闭合`)
+      if (text(mapping.effect) !== effect || text(intent.effect) !== effect) {
         throw projectorError('E2E_COMPILER_INPUT_INVALID', `Action ${actionId} effect 与 Execution Contract 不一致`)
       }
       const oracles = records(step.oracles)
       if (oracles.length === 0) throw projectorError('E2E_COMPILER_INPUT_INVALID', `Step ${stepId} 缺少 Oracle`)
       if (fullPlaywright) {
-        const program = executionPrograms.find((candidate) => text(candidate.actionId) === actionId)
+        const indexes = fullIndexes!
+        const program = consumeIndex(indexes.programsByAction, actionId, `Action ${actionId} program 未唯一闭合`)
+        const cleanupPlan = consumeIndex(indexes.cleanupByAction, actionId, `Action ${actionId} cleanup 未唯一闭合`)
+        const signedCapability = consumeIndex(indexes.signedCapabilitiesByAction, actionId,
+          `Action ${actionId} signed capability 未唯一闭合`)
+        const receiptCapability = consumeIndex(indexes.receiptCapabilitiesByAction, actionId,
+          `Action ${actionId} receipt capability 未唯一闭合`)
+        const subjectAction = consumeIndex(indexes.subjectActionsByAction, actionId,
+          `Action ${actionId} approval subject 未唯一闭合`)
+        if (!indexes.scheduleTuples.delete(tupleKey(mapping))) throw projectorError(
+          'E2E_COMPILER_INPUT_INVALID', `Action ${actionId} schedule tuple 未唯一闭合`)
         const leaseIds = strings(testCase.dataNeedIds)
         const cleanupPlanId = text(testCase.cleanupPlanId)
         const mappingCapabilities = records(mapping.capabilities)
-        if (!program || text(program.caseId) !== caseId || text(program.stepId) !== stepId
+        if (text(program.caseId) !== caseId || text(program.stepId) !== stepId
           || effect !== 'reversible-write' || leaseIds.length !== 1
           || text(program.dataLeaseId) !== leaseIds[0] || text(program.cleanupPlanId) !== cleanupPlanId
           || number(program.timeoutMs) !== number(testCase.timeoutMs)
           || mappingCapabilities.length !== 1
           || text(mappingCapabilities[0]!.operation) !== 'full-playwright'
-          || strings(mapping.requestIds).length !== 0 || strings(matchingIntents[0]!.requestIds).length !== 0) {
+          || strings(mapping.requestIds).length !== 0 || strings(intent.requestIds).length !== 0) {
           throw projectorError('E2E_COMPILER_INPUT_INVALID', `Action ${actionId} full Playwright 绑定不闭合`)
         }
+        assertConsumedApprovalBinding({ actionId, program, mappingCapability: mappingCapabilities[0]!,
+          cleanupPlan, signedCapability, receiptCapability, subjectAction })
         actions.push({ kind: 'fullPlaywright', actionId,
           source: text(program.source), sourceDigest: text(program.sourceDigest),
           cleanupSource: text(program.cleanupSource), cleanupSourceDigest: text(program.cleanupSourceDigest),
           dataLeaseId: text(program.dataLeaseId), cleanupPlanId: text(program.cleanupPlanId),
-          timeoutMs: number(program.timeoutMs), cleanupTimeoutMs: number(cleanupPlanFor(program, cleanupPlans).timeoutMs) })
+          timeoutMs: number(program.timeoutMs), cleanupTimeoutMs: number(cleanupPlan.timeoutMs) })
       } else if (effect === 'read') {
         actions.push({ kind: 'assertText', actionId, target: text(step.semanticTarget),
           expected: text(oracles[0]!.statement) })
@@ -222,9 +233,10 @@ export function projectCompilerInputFromArtifacts(
       }
     }
     executableCases.push({ caseId, title: text(testCase.title), reqIds: trace.reqIds,
-      ruleIds: trace.ruleIds, obligationIds: [...obligationIds].sort(),
+      ruleIds: trace.ruleIds, obligationIds: fullPlaywright ? [...obligationIds] : [...obligationIds].sort(),
       mode: testCase.mode === 'fault-injection' ? 'fault-injection' : 'real-environment', actions })
   }
+  if (fullIndexes) assertFullPlaywrightIndexesConsumed(fullIndexes)
 
   const input = CompilerInputV1Schema.parse({
     schemaVersion: 'compiler-input/v1',
@@ -244,14 +256,28 @@ export function projectCompilerInputFromArtifacts(
     nodeVersion: request.nodeVersion,
     ...(fullPlaywright ? { executionProfile: 'full-playwright' as const } : {}),
     cases: executableCases,
-    blockedCases: blockedCases.sort(byId('caseId')),
+    blockedCases: fullPlaywright ? blockedCases : blockedCases.sort(byId('caseId')),
   })
   const token = Object.freeze({})
   trustedInputs.set(token, structuredClone(input))
   return token
 }
 
-function assertExactFullPlaywrightConsumption(input: {
+interface FullPlaywrightConsumptionIndexes {
+  mappingsByPair: Map<string, Record<string, unknown>>
+  programsByAction: Map<string, Record<string, unknown>>
+  intentsByAction: Map<string, Record<string, unknown>>
+  cleanupByAction: Map<string, Record<string, unknown>>
+  signedCapabilitiesByAction: Map<string, Record<string, unknown>>
+  receiptCapabilitiesByAction: Map<string, Record<string, unknown>>
+  subjectActionsByAction: Map<string, Record<string, unknown>>
+  scheduleTuples: Set<string>
+  unmappedByCase: Map<string, Record<string, unknown>>
+  obligationsById: Map<string, Record<string, unknown>>
+  obligationCases: Set<string>
+}
+
+function createFullPlaywrightConsumptionIndexes(input: {
   activeCases: Record<string, unknown>[]
   mappings: Record<string, unknown>[]
   programs: Record<string, unknown>[]
@@ -259,54 +285,125 @@ function assertExactFullPlaywrightConsumption(input: {
   cleanupPlans: Record<string, unknown>[]
   signedCapabilities: Record<string, unknown>[]
   schedules: Record<string, unknown>[]
+  obligations: Record<string, unknown>[]
+  unmappedSteps: Record<string, unknown>[]
   receipt: ReturnType<typeof ApprovalFreshnessReceiptSchema.parse>
-}): void {
-  const activePairs = input.activeCases.flatMap((testCase) => records(testCase.steps).map((step) =>
-    `${text(testCase.caseId)}\0${text(step.stepId)}`))
-  const mappingPairs = input.mappings.map((mapping) => `${text(mapping.caseId)}\0${text(mapping.stepId)}`)
-  if (!sameUniqueStrings(activePairs, mappingPairs)) throw projectorError(
-    'E2E_COMPILER_INPUT_INVALID', 'full Playwright mapping 未与 active case/step 全量一一闭合')
-
-  const expectedTuples = input.mappings.map(tupleKey)
-  const programTuples = input.programs.map(tupleKey)
-  const scheduleTuples = input.schedules.flatMap((schedule) => {
+}): FullPlaywrightConsumptionIndexes {
+  assertCanonicalFullPlaywrightOrder(input.activeCases)
+  const indexes: FullPlaywrightConsumptionIndexes = {
+    mappingsByPair: indexUnique(input.mappings, (mapping) => `${text(mapping.caseId)}\0${text(mapping.stepId)}`,
+      'full Playwright mapping 重复'),
+    programsByAction: indexUnique(input.programs, (program) => text(program.actionId), 'full Playwright program 重复'),
+    intentsByAction: indexUnique(input.intents, (intent) => text(intent.actionId), 'full Playwright intent 重复'),
+    cleanupByAction: indexUnique(input.cleanupPlans, (plan) => text(plan.actionId), 'full Playwright cleanup 重复'),
+    signedCapabilitiesByAction: indexUnique(input.signedCapabilities, (capability) => text(capability.actionId),
+      'full Playwright signed capability 重复'),
+    receiptCapabilitiesByAction: indexUnique(input.receipt.capabilities as unknown as Record<string, unknown>[],
+      (capability) => text(capability.actionId), 'full Playwright receipt capability 重复'),
+    subjectActionsByAction: indexUnique(input.receipt.executionSubjectSnapshot.actions as unknown as Record<string, unknown>[],
+      (action) => text(action.actionId), 'full Playwright subject action 重复'),
+    scheduleTuples: new Set<string>(),
+    unmappedByCase: indexFirst(input.unmappedSteps, (step) => text(step.caseId)),
+    obligationsById: indexUnique(input.obligations, (obligation) => text(obligation.obligationId),
+      'coverage obligation 重复'),
+    obligationCases: new Set<string>(),
+  }
+  for (const obligation of input.obligations) {
+    const disposition = record(obligation.disposition)
+    if (disposition.kind !== 'automated') continue
+    for (const caseId of strings(disposition.caseIds)) {
+      indexes.obligationCases.add(`${text(obligation.obligationId)}\0${caseId}`)
+    }
+  }
+  const schedulesByCase = indexUnique(input.schedules, (schedule) => text(schedule.caseId),
+    'full Playwright schedule Case 重复')
+  let expectedActions = 0
+  for (const testCase of input.activeCases) {
+    const caseId = text(testCase.caseId)
+    const steps = records(testCase.steps)
+    const expectedStepIds: string[] = []
+    const expectedActionIds: string[] = []
+    for (const step of steps) {
+      const stepId = text(step.stepId)
+      const mapping = indexes.mappingsByPair.get(`${caseId}\0${stepId}`)
+      if (!mapping) throw projectorError('E2E_COMPILER_INPUT_INVALID',
+        'full Playwright mapping 未与 active case/step 全量一一闭合')
+      const actionId = text(mapping.actionId)
+      expectedStepIds.push(stepId)
+      expectedActionIds.push(actionId)
+      expectedActions += 1
+      const program = indexes.programsByAction.get(actionId)
+      if (!program || tupleKey(program) !== tupleKey(mapping)) throw projectorError('E2E_COMPILER_INPUT_INVALID',
+        'full Playwright program 未按 (caseId,stepId,actionId) 全量一一消费')
+    }
+    const schedule = schedulesByCase.get(caseId)
+    if (!schedule || canonicalizeJson(strings(schedule.stepIds)) !== canonicalizeJson(expectedStepIds)
+      || canonicalizeJson(strings(schedule.actionIds)) !== canonicalizeJson(expectedActionIds)) {
+      throw projectorError('E2E_COMPILER_INPUT_INVALID', `Run Bundle schedule 未绑定 ${caseId} 的 step/action`)
+    }
+    schedulesByCase.delete(caseId)
+  }
+  for (const schedule of input.schedules) {
     const stepIds = strings(schedule.stepIds)
     const actionIds = strings(schedule.actionIds)
-    if (stepIds.length !== actionIds.length) return ['__schedule-cardinality-invalid__']
-    return stepIds.map((stepId, index) => `${text(schedule.caseId)}\0${stepId}\0${actionIds[index]}`)
-  })
-  if (!sameUniqueStrings(expectedTuples, programTuples) || !sameUniqueStrings(expectedTuples, scheduleTuples)) {
-    throw projectorError('E2E_COMPILER_INPUT_INVALID',
-      'full Playwright program/schedule 未按 (caseId,stepId,actionId) 全量一一消费')
-  }
-
-  const expectedActionIds = input.mappings.map((mapping) => text(mapping.actionId))
-  const actionSets = [
-    input.intents.map((intent) => text(intent.actionId)),
-    input.cleanupPlans.map((plan) => text(plan.actionId)),
-    input.signedCapabilities.map((capability) => text(capability.actionId)),
-    input.receipt.capabilities.map((capability) => capability.actionId),
-    input.receipt.executionSubjectSnapshot.actions.map((action) => action.actionId),
-  ]
-  if (!allUnique(expectedActionIds) || actionSets.some((ids) => !sameUniqueStrings(expectedActionIds, ids))) {
-    throw approvalError('full Playwright intent/cleanup/capability/approval Action 集未全量一一消费')
-  }
-  for (const program of input.programs) {
-    const actionId = text(program.actionId)
-    const plan = input.cleanupPlans.find((candidate) => text(candidate.actionId) === actionId)
-    const mapping = input.mappings.find((candidate) => text(candidate.actionId) === actionId)
-    if (!plan || text(plan.cleanupPlanId) !== text(program.cleanupPlanId)
-      || records(mapping?.capabilities).length !== 1) {
-      throw projectorError('E2E_COMPILER_INPUT_INVALID', `full Playwright Action ${actionId} 未唯一消费 cleanup/capability`)
+    if (stepIds.length !== actionIds.length) throw projectorError('E2E_COMPILER_INPUT_INVALID',
+      'full Playwright schedule step/action 数量不一致')
+    for (let index = 0; index < stepIds.length; index += 1) {
+      const tuple = `${text(schedule.caseId)}\0${stepIds[index]}\0${actionIds[index]}`
+      if (indexes.scheduleTuples.has(tuple)) throw projectorError('E2E_COMPILER_INPUT_INVALID',
+        'full Playwright schedule tuple 重复')
+      indexes.scheduleTuples.add(tuple)
     }
+  }
+  if (schedulesByCase.size !== 0 || indexes.mappingsByPair.size !== expectedActions
+    || indexes.programsByAction.size !== expectedActions || indexes.intentsByAction.size !== expectedActions
+    || indexes.cleanupByAction.size !== expectedActions || indexes.signedCapabilitiesByAction.size !== expectedActions
+    || indexes.receiptCapabilitiesByAction.size !== expectedActions || indexes.subjectActionsByAction.size !== expectedActions
+    || indexes.scheduleTuples.size !== expectedActions || input.receipt.grantType !== 'reversible-write') {
+    throw approvalError('full Playwright mapping/program/intent/cleanup/capability/approval/schedule 集未全量闭合')
+  }
+  return indexes
+}
+
+function assertFullPlaywrightIndexesConsumed(indexes: FullPlaywrightConsumptionIndexes): void {
+  if (indexes.mappingsByPair.size !== 0 || indexes.programsByAction.size !== 0
+    || indexes.intentsByAction.size !== 0 || indexes.cleanupByAction.size !== 0
+    || indexes.signedCapabilitiesByAction.size !== 0 || indexes.receiptCapabilitiesByAction.size !== 0
+    || indexes.subjectActionsByAction.size !== 0 || indexes.scheduleTuples.size !== 0) {
+    throw approvalError('full Playwright 索引存在未消费 leftover')
   }
 }
 
-function cleanupPlanFor(program: Record<string, unknown>, cleanupPlans: Record<string, unknown>[]): Record<string, unknown> {
-  const matches = cleanupPlans.filter((candidate) => text(candidate.actionId) === text(program.actionId)
-    && text(candidate.cleanupPlanId) === text(program.cleanupPlanId))
-  if (matches.length !== 1) throw projectorError(
-    'E2E_COMPILER_INPUT_INVALID', `full Playwright Action ${text(program.actionId)} cleanup budget 未唯一绑定`)
+function indexUnique(values: Record<string, unknown>[], key: (value: Record<string, unknown>) => string,
+  message: string): Map<string, Record<string, unknown>> {
+  const index = new Map<string, Record<string, unknown>>()
+  for (const value of values) {
+    const identity = key(value)
+    if (index.has(identity)) throw projectorError('E2E_COMPILER_INPUT_INVALID', message)
+    index.set(identity, value)
+  }
+  return index
+}
+
+function indexFirst(values: Record<string, unknown>[], key: (value: Record<string, unknown>) => string):
+Map<string, Record<string, unknown>> {
+  const index = new Map<string, Record<string, unknown>>()
+  for (const value of values) if (!index.has(key(value))) index.set(key(value), value)
+  return index
+}
+
+function consumeIndex(index: Map<string, Record<string, unknown>>, key: string,
+  message: string): Record<string, unknown> {
+  const value = index.get(key)
+  if (!value) throw projectorError('E2E_COMPILER_INPUT_INVALID', message)
+  index.delete(key)
+  return value
+}
+
+function uniqueMatch(values: Record<string, unknown>[], predicate: (value: Record<string, unknown>) => boolean,
+  message: string): Record<string, unknown> {
+  const matches = values.filter(predicate)
+  if (matches.length !== 1) throw projectorError('E2E_COMPILER_INPUT_INVALID', message)
   return matches[0]!
 }
 
@@ -314,81 +411,30 @@ function tupleKey(value: Record<string, unknown>): string {
   return `${text(value.caseId)}\0${text(value.stepId)}\0${text(value.actionId)}`
 }
 
-function allUnique(values: string[]): boolean {
-  return new Set(values).size === values.length
-}
-
-function sameUniqueStrings(left: string[], right: string[]): boolean {
-  if (left.length !== right.length) return false
-  const leftValues = new Set(left)
-  if (leftValues.size !== left.length || new Set(right).size !== right.length) return false
-  return right.every((value) => leftValues.has(value))
-}
-
-function assertFullPlaywrightApprovalClosure(input: {
-  programs: Record<string, unknown>[]
-  mappings: Record<string, unknown>[]
-  intents: Record<string, unknown>[]
-  cleanupPlans: Record<string, unknown>[]
-  signedCapabilities: Record<string, unknown>[]
-  receipt: ReturnType<typeof ApprovalFreshnessReceiptSchema.parse>
+function assertConsumedApprovalBinding(input: {
+  actionId: string
+  program: Record<string, unknown>
+  mappingCapability: Record<string, unknown>
+  cleanupPlan: Record<string, unknown>
+  signedCapability: Record<string, unknown>
+  receiptCapability: Record<string, unknown>
+  subjectAction: Record<string, unknown>
 }): void {
-  if (input.receipt.grantType !== 'reversible-write'
-    || input.programs.length !== input.mappings.length || input.programs.length !== input.intents.length
-    || input.programs.length !== input.cleanupPlans.length
-    || canonicalizeJson(sortRecords(input.signedCapabilities, 'actionId'))
-      !== canonicalizeJson(sortRecords(input.receipt.capabilities as unknown as Record<string, unknown>[], 'actionId'))) {
-    throw approvalError('full Playwright capability/program/cleanup 集不闭合')
+  if (canonicalizeJson(input.signedCapability) !== canonicalizeJson(input.receiptCapability)
+    || text(input.cleanupPlan.actionId) !== input.actionId
+    || text(input.cleanupPlan.cleanupPlanId) !== text(input.program.cleanupPlanId)
+    || text(input.mappingCapability.capabilityId) !== text(input.receiptCapability.capabilityId)
+    || text(input.receiptCapability.operation) !== 'full-playwright'
+    || text(input.receiptCapability.effect) !== 'reversible-write'
+    || text(input.subjectAction.transport) !== 'browser-local'
+    || text(input.subjectAction.operation) !== 'full-playwright'
+    || text(input.subjectAction.programDigest) !== text(input.program.sourceDigest)
+    || text(input.subjectAction.cleanupProgramDigest) !== text(input.program.cleanupSourceDigest)
+    || text(input.subjectAction.dataLeaseId) !== text(input.program.dataLeaseId)
+    || text(input.subjectAction.cleanupPlanDigest) !== digestCleanupPlanDefinition(input.cleanupPlan as never)
+    || canonicalizeJson(records(input.subjectAction.requests)) !== canonicalizeJson(records(input.program.networkRequests))) {
+    throw approvalError(`full Playwright Action ${input.actionId} 未与 approval/capability/cleanup/request 闭合`)
   }
-  const subjectActions = input.receipt.executionSubjectSnapshot.actions
-  for (const program of input.programs) {
-    const actionId = text(program.actionId)
-    const mapping = input.mappings.find((candidate) => text(candidate.actionId) === actionId)
-    const mappingCapability = mapping && records(mapping.capabilities)[0]
-    const receiptCapability = input.receipt.capabilities.find((candidate) => candidate.actionId === actionId)
-    const subjectAction = subjectActions.find((candidate) => candidate.actionId === actionId)
-    const cleanupPlan = input.cleanupPlans.find((candidate) => text(candidate.cleanupPlanId) === text(program.cleanupPlanId))
-    if (!mappingCapability || !receiptCapability || !subjectAction || !cleanupPlan
-      || text(mappingCapability.capabilityId) !== receiptCapability.capabilityId
-      || receiptCapability.operation !== 'full-playwright' || receiptCapability.effect !== 'reversible-write'
-      || !('transport' in subjectAction) || subjectAction.transport !== 'browser-local'
-      || subjectAction.operation !== 'full-playwright'
-      || subjectAction.programDigest !== text(program.sourceDigest)
-      || subjectAction.cleanupProgramDigest !== text(program.cleanupSourceDigest)
-      || subjectAction.dataLeaseId !== text(program.dataLeaseId)
-      || subjectAction.cleanupPlanDigest !== digestCleanupPlanDefinition(cleanupPlan as never)
-      || canonicalizeJson(subjectAction.requests) !== canonicalizeJson(records(program.networkRequests))) {
-      throw approvalError(`full Playwright Action ${actionId} 未与 approval/capability/cleanup/request 闭合`)
-    }
-  }
-}
-
-function assertRunScheduleClosure(
-  activeCases: Record<string, unknown>[],
-  mappings: Record<string, unknown>[],
-  schedules: Record<string, unknown>[],
-): void {
-  if (schedules.length !== activeCases.length) {
-    throw projectorError('E2E_COMPILER_INPUT_INVALID', 'Run Bundle schedule 必须与 active Case 闭合')
-  }
-  for (const testCase of activeCases) {
-    const caseId = text(testCase.caseId)
-    const schedule = schedules.find((candidate) => text(candidate.caseId) === caseId)
-    const stepIds = records(testCase.steps).sort((left, right) => number(left.ordinal) - number(right.ordinal))
-      .map((step) => text(step.stepId))
-    const actionIds = stepIds.map((stepId) => {
-      const matches = mappings.filter((mapping) => text(mapping.caseId) === caseId && text(mapping.stepId) === stepId)
-      return matches.length === 1 ? text(matches[0]!.actionId) : ''
-    })
-    if (!schedule || canonicalizeJson(strings(schedule.stepIds)) !== canonicalizeJson(stepIds)
-      || canonicalizeJson(strings(schedule.actionIds)) !== canonicalizeJson(actionIds)) {
-      throw projectorError('E2E_COMPILER_INPUT_INVALID', `Run Bundle schedule 未绑定 ${caseId} 的 step/action`)
-    }
-  }
-}
-
-function sortRecords(values: Record<string, unknown>[], key: string): Record<string, unknown>[] {
-  return [...values].sort(byId(key))
 }
 
 /** 仅供同包 Compiler/Discovery 消费；不会从 package root 导出。 */
@@ -519,6 +565,48 @@ function sameSet(left: Set<string>, right: Set<string>): boolean {
 
 function approvalError(message: string): E2EError {
   return projectorError('E2E_COMPILER_APPROVAL_BINDING_INVALID', message)
+}
+
+function projectFullPlaywrightRequirementTrace(caseId: string, obligationIds: string[],
+  indexes: FullPlaywrightConsumptionIndexes): { reqIds: string[]; ruleIds: string[] } {
+  const reqIds = new Set<string>()
+  const ruleIds = new Set<string>()
+  for (const obligationId of obligationIds) {
+    const obligation = indexes.obligationsById.get(obligationId)
+    if (!obligation) throw projectorError(
+      'E2E_COMPILER_INPUT_INVALID', `Case ${caseId} 引用了不存在的 obligation`)
+    const disposition = record(obligation.disposition)
+    if (disposition.kind !== 'automated' || !indexes.obligationCases.has(`${obligationId}\0${caseId}`)) {
+      throw projectorError('E2E_COMPILER_INPUT_INVALID', `Case ${caseId} 与 obligation 自动化处置不闭合`)
+    }
+    reqIds.add(text(obligation.reqId))
+    for (const ruleId of strings(obligation.ruleIds)) ruleIds.add(ruleId)
+  }
+  const trace = { reqIds: [...reqIds], ruleIds: [...ruleIds] }
+  assertCanonicalStrings(trace.reqIds, `Case ${caseId} reqIds`)
+  assertCanonicalStrings(trace.ruleIds, `Case ${caseId} ruleIds`)
+  return trace
+}
+
+function assertCanonicalFullPlaywrightOrder(activeCases: Record<string, unknown>[]): void {
+  assertCanonicalStrings(activeCases.map((testCase) => text(testCase.caseId)), 'full Playwright active cases')
+  for (const testCase of activeCases) {
+    const caseId = text(testCase.caseId)
+    const obligationIds = strings(testCase.obligationIds)
+    assertCanonicalStrings(obligationIds, `Case ${caseId} obligationIds`)
+    const steps = records(testCase.steps)
+    for (let index = 0; index < steps.length; index += 1) {
+      if (number(steps[index]!.ordinal) !== index) throw projectorError(
+        'E2E_COMPILER_INPUT_INVALID', `Case ${caseId} steps 必须按连续 ordinal canonical 排列`)
+    }
+  }
+}
+
+function assertCanonicalStrings(values: string[], subject: string): void {
+  for (let index = 1; index < values.length; index += 1) {
+    if (values[index - 1]! >= values[index]!) throw projectorError(
+      'E2E_COMPILER_INPUT_INVALID', `${subject} 必须严格递增且不得重复`)
+  }
 }
 
 function projectRequirementTrace(caseId: string, obligationIds: string[], obligations: Record<string, unknown>[]): {

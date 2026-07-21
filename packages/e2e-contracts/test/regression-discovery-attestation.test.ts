@@ -18,7 +18,7 @@ const subject = {
   templateDigest: d, compilerInputDigest: d,
   sourceFiles,
   caseMappings: [{ caseId: 'CASE-1', relativePath: 'regression/tests/generated.spec.ts', testTitle: '首页可见' }],
-  toolchain: { nodeVersion: '24.18.0', playwrightVersion: '1.61.1', typescriptVersion: '5.9.3', compilerDigest: d, playwrightCliDigest: d },
+  toolchain: { nodeVersion: '24.18.0', playwrightVersion: '1.61.1', compilerDigest: d, playwrightCliDigest: d },
   isolation: {
     command: ['node', '@playwright/test/cli', 'test', '--list', '--reporter=json'],
     exitCode: 0, stdoutDigest: d,
@@ -33,6 +33,19 @@ describe('RegressionDiscoveryAttestation 严格契约', () => {
     expect(RegressionDiscoverySubjectSchema.safeParse({ ...subject, callerCaseIds: ['CASE-FAKE'] }).success).toBe(false)
     expect(RegressionDiscoverySubjectSchema.safeParse({ ...subject,
       blockedCases: [{ caseId: 'CASE-1', reasonCode: 'E2E_BLOCKED' }] }).success).toBe(false)
+  })
+
+  it('严格区分历史 2.0 与含 parser binding 的 2.1，full profile 只能使用 2.1', () => {
+    const current = { ...subject, schemaVersion: '2.1.0',
+      toolchain: { ...subject.toolchain, typescriptVersion: '5.9.3' } }
+    expect(RegressionDiscoverySubjectSchema.parse(subject)).toEqual(subject)
+    expect(RegressionDiscoverySubjectSchema.parse(current)).toEqual(current)
+    expect(RegressionDiscoverySubjectSchema.safeParse({ ...subject,
+      toolchain: { ...subject.toolchain, typescriptVersion: '5.9.3' } }).success).toBe(false)
+    expect(RegressionDiscoverySubjectSchema.safeParse({ ...current,
+      toolchain: subject.toolchain }).success).toBe(false)
+    expect(RegressionDiscoverySubjectSchema.safeParse({ ...subject,
+      executionProfile: 'full-playwright' }).success).toBe(false)
   })
 
   it('专用 purpose 不能由通用 Artifact 签名替代', () => {

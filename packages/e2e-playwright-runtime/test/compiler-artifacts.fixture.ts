@@ -325,6 +325,7 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   approvalRequestPath?: string
   sourceDigest?: string
   extraFullAction?: boolean
+  stepOrdinal?: number
 } = {}): unknown[] {
   const source = options.source ?? FULL_PLAYWRIGHT_SOURCE
   const cleanupSource = options.cleanupSource ?? FULL_PLAYWRIGHT_CLEANUP_SOURCE
@@ -365,6 +366,7 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
     (candidate as Record<string, unknown>).artifactType === artifactType) as { content: Record<string, any> }).content
 
   const actionMap = content('browser-action-map')
+  if (options.stepOrdinal !== undefined) content('test-cases').cases[0].steps[0].ordinal = options.stepOrdinal
   actionMap.executionProfile = 'full-playwright'
   actionMap.fullPlaywrightPrograms = [program]
   actionMap.actions[0] = { ...actionMap.actions[0], playwrightAction: 'full-playwright/v1',
@@ -409,6 +411,7 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   })
   receipt.executionSubjectSnapshot.actions = subjectActions
   Object.assign(receipt.executionSubjectSnapshot, {
+    caseDigest: digestApprovalProjection('test-cases', content('test-cases')),
     actionMapDigest: digestApprovalProjection('browser-action-map', actionMap),
     executionContractDigest: digestApprovalProjection('execution-contract', execution),
     runBundleProjectionDigest: digestApprovalProjection('run-bundle', runBundle),

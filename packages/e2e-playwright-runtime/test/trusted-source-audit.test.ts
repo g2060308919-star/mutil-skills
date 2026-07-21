@@ -153,8 +153,11 @@ describe('可信生成源码静态安全扫描', () => {
 
   test('仅作为 Playwright 浏览器 callback 的命名函数按 browser scope 审计', () => {
     const source = `
-      const load = async () => { const send = fetch; await send('/inside') }
-      await page.evaluate(load)
+      import { test } from '@playwright/test'
+      test('trusted callback', async ({ page }) => {
+        const load = async () => { const send = fetch; await send('/inside') }
+        await page.evaluate(load)
+      })
     `
     expect(auditTrustedRegressionSourceSet([{
       relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
@@ -165,6 +168,61 @@ describe('可信生成源码静态安全扫描', () => {
     `const load = async () => fetch('/inside'); await page.evaluate(load); await load()`,
     `const load = async () => fetch('/inside'); state.callback = load; await page.evaluate(load)`,
   ])('命名 browser callback 同时 host 调用或逃逸时 fail closed：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.valid).toBe(false)
+  })
+
+  test.each([
+    `const load = () => fetch('/host'); await page.evaluate(load)`,
+    `const __biztestRun0 = async ({ page }: any) => page.evaluate(() => fetch('/host')); await __biztestRun0({ page })`,
+    `import { expect as test } from '@playwright/test'; test('fake', async ({ page }: any) => page.evaluate(() => fetch('/host')))`,
+    `import { test } from '@playwright/test'; test('fake', async ({ page }) => {
+      page = { evaluate: async (callback: () => unknown) => callback() } as any
+      await page.evaluate(() => fetch('/host'))
+    })`,
+    `import { test } from '@playwright/test'; test('fake', async ({ page }) => {
+      await page.fake.evaluate(() => fetch('/host'))
+    })`,
+    `import { test } from '@playwright/test'; test('fake', async () => {
+      const __biztestRun0 = async ({ page }: any) => page.evaluate(() => fetch('/host'))
+      await __biztestRun0({ page: { evaluate: async (callback: () => unknown) => callback() } })
+    })`,
+    `async function fake(page: any) { await page.evaluate(() => fetch('/host')) }`,
+    `let context; await context.addInitScript(() => fetch('/host'))`,
+    `const { page } = fakeFixtures; await page.evaluate(() => fetch('/host'))`,
+    `const load = () => fetch('/host'); async function fake(page: any) { await page.evaluate(load) }`,
+  ])('局部声明、参数或解构 shadow 不能按标识符文本获得 browser provenance：%s', (source) => {
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: 'E2E_COMPILER_SOURCE_NETWORK_FORBIDDEN', detail: 'fetch',
+    }))
+  })
+
+  test('块内 shadow 不得污染块后的宿主 fetch 分类', () => {
+    const source = `{ const fetch = () => undefined }
+      await fetch('https://evil.example')`
+    const result = auditTrustedRegressionSourceSet([{
+      relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
+    }], 'full-playwright')
+    expect(result.findings).toContainEqual(expect.objectContaining({
+      code: 'E2E_COMPILER_SOURCE_NETWORK_FORBIDDEN', detail: 'fetch',
+    }))
+  })
+
+  test.each([
+    `async function f(value = eval('process.exit()')) { return value }`,
+    `const { value = eval('process.exit()') } = input`,
+    `const [value = fetch('https://evil.example')] = input`,
+    `const { [eval('process.exit()')]: value } = input`,
+    `async function f({ value = new Function('return process')() } = {}) { return value }`,
+    `class Runner { @decorate(eval('process.exit()')) async run() {} }`,
+    `class Runner { [process.exit()]() {} }`,
+    `class Runner { get [eval('process.exit()')]() { return 1 } }`,
+  ])('AST 审计遍历所有 runtime-evaluated parameter/binding children：%s', (source) => {
     const result = auditTrustedRegressionSourceSet([{
       relativePath: 'regression/tests/generated.spec.ts', bytes: Buffer.from(source),
     }], 'full-playwright')

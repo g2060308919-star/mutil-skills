@@ -1763,7 +1763,7 @@ function regressionManifestCandidate(
     compilerDigest: digest('2'), playwrightCliDigest: digest('3'),
   }
   const attestation = {
-    schemaVersion: '2.0.0', testDomain: 'prd-e2e-trusted-compiler',
+    schemaVersion: '2.1.0', testDomain: 'prd-e2e-trusted-compiler',
     executionProfile: 'trusted-read-only', ...binding,
     compilerVersion: '0.1.0', templateVersion: '0.1.0', contractsVersion: '2.0.0',
     environmentId: 'TEST', approvalDigest: digest('4'), policyDigest: digest('5'),

@@ -1,9 +1,19 @@
+import { generateKeyPairSync, sign } from 'node:crypto'
 import { mkdir, readFile, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { canonicalizeJson, digestText } from '@mutil-skills/e2e-contracts'
+import {
+  RegressionDiscoveryAttestationSchema,
+  RegressionDiscoverySubjectSchema,
+  RegressionDiscoveryVerifierMaterialSchema,
+  canonicalizeJson,
+  digestBytes,
+  digestText,
+} from '@mutil-skills/e2e-contracts'
 import {
   LocalRegressionDiscoveryAuthority,
+  READ_ONLY_COMPILER_DIGEST,
+  TRUSTED_COMPILER_DIGEST,
   createRegressionDiscoveryVerifier,
   projectCompilerInputFromArtifacts,
 } from '../src/index.js'
@@ -17,6 +27,10 @@ afterEach(async () => {
 })
 
 describe('可信回归 discovery', () => {
+  test('中性 compiler digest 保留历史 read-only 兼容别名', () => {
+    expect(READ_ONLY_COMPILER_DIGEST).toBe(TRUSTED_COMPILER_DIGEST)
+  })
+
   test('只从受信 compiler 输出运行本地隔离 Playwright --list 并签发事实', async () => {
     const authority = LocalRegressionDiscoveryAuthority.create({ issuer: 'DISCOVERY', keyId: 'DISCOVERY-1' })
     const result = await authority.compileAndAttest({
@@ -30,7 +44,7 @@ describe('可信回归 discovery', () => {
     expect(result.attestation.discoveredCaseIds).toEqual(['CASE-READ-1'])
     expect(result.attestation.caseMappings).toEqual([{ caseId: 'CASE-READ-1',
       relativePath: 'regression/tests/generated.spec.ts', testTitle: '读取订单' }])
-    expect(result.attestation).toMatchObject({ schemaVersion: '2.0.0',
+    expect(result.attestation).toMatchObject({ schemaVersion: '2.1.0',
       testDomain: 'prd-e2e-trusted-compiler', executionProfile: 'trusted-read-only',
       purpose: 'regression-discovery-attestation/v2' })
     expect(result.attestation.sourceFiles.map((file) => file.relativePath)).toEqual([
@@ -46,6 +60,36 @@ describe('可信回归 discovery', () => {
       authority.verifierMaterial.publicKeyDigest)
     expect(verifier(result.attestation, result.subject)).toBe(true)
     expect(verifier({ ...result.attestation, discoveredCaseIds: ['CASE-FAKE'] }, result.subject)).toBe(false)
+
+    if (result.subject.schemaVersion !== '2.1.0') throw new Error('expected current discovery subject')
+    const { typescriptVersion: _typescriptVersion, ...historicalToolchain } = result.subject.toolchain
+    const historicalSubject = RegressionDiscoverySubjectSchema.parse({
+      ...result.subject, schemaVersion: '2.0.0', toolchain: historicalToolchain,
+    })
+    const historicalKeys = generateKeyPairSync('ed25519')
+    const historicalSpki = historicalKeys.publicKey.export({ type: 'spki', format: 'der' })
+    const historicalMaterial = RegressionDiscoveryVerifierMaterialSchema.parse({
+      schemaVersion: '1.0.0', issuer: 'HISTORICAL-DISCOVERY', keyId: 'HISTORICAL-DISCOVERY-1',
+      purpose: 'regression-discovery-attestation/v2', algorithm: 'Ed25519',
+      publicKeySpkiBase64: historicalSpki.toString('base64'),
+      publicKeyDigest: digestBytes('regression-discovery-public-key/v1', historicalSpki),
+    })
+    const historicalDigest = digestText(
+      'regression-discovery-subject/v2', canonicalizeJson(historicalSubject),
+    )
+    const historicalPayload = Buffer.from(canonicalizeJson({
+      purpose: historicalMaterial.purpose, issuer: historicalMaterial.issuer,
+      keyId: historicalMaterial.keyId, signedDigest: historicalDigest,
+    }))
+    const historicalAttestation = RegressionDiscoveryAttestationSchema.parse({
+      ...historicalSubject, issuer: historicalMaterial.issuer, keyId: historicalMaterial.keyId,
+      purpose: historicalMaterial.purpose, algorithm: historicalMaterial.algorithm,
+      signedDigest: historicalDigest,
+      signature: sign(null, historicalPayload, historicalKeys.privateKey).toString('base64url'),
+    })
+    expect(createRegressionDiscoveryVerifier(historicalMaterial, historicalMaterial.publicKeyDigest)(
+      historicalAttestation, historicalSubject,
+    )).toBe(true)
   })
 
   test('full Playwright profile 进入 Discovery subject 和完整 Source Set 证明', async () => {
@@ -59,6 +103,8 @@ describe('可信回归 discovery', () => {
     })
     directories.push(result.projectDir)
     expect(result.subject.executionProfile).toBe('full-playwright')
+    expect(result.subject.schemaVersion).toBe('2.1.0')
+    if (result.subject.schemaVersion !== '2.1.0') throw new Error('expected current discovery subject')
     expect(result.subject.toolchain.typescriptVersion).toBe('5.9.3')
     expect(result.subject.sourceSetDigest).toMatch(/^sha256:[a-f0-9]{64}$/)
     expect(result.subject.sourceFiles.map((file) => file.relativePath)).toEqual(expect.arrayContaining([

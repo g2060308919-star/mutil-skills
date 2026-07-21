@@ -10,20 +10,24 @@ import { inspectTrustedCompilerInput, TRUSTED_TYPESCRIPT_VERSION,
   type TrustedCompilerInput } from './compiler-input-projector.js'
 import { validateFullPlaywrightFunctionBody } from './full-playwright-source-validation.js'
 import { assertFreshOutputRoot } from './regression-source-set.js'
+import { auditTrustedRegressionSourceSet } from './trusted-source-audit.js'
 
 type CompilerAction = CompilerInputV1['cases'][number]['actions'][number]
 
-export interface CompileReadOnlyProjectInput {
+export interface CompileTrustedProjectInput {
   outputDir: string
   compilerInput: TrustedCompilerInput
 }
 
-export interface CompileReadOnlyProjectResult {
+export interface CompileTrustedProjectResult {
   generatedFiles: string[]
   sourceDigests: Record<string, string>
 }
 
-export async function compileReadOnlyProject(input: CompileReadOnlyProjectInput): Promise<CompileReadOnlyProjectResult> {
+export type CompileReadOnlyProjectInput = CompileTrustedProjectInput
+export type CompileReadOnlyProjectResult = CompileTrustedProjectResult
+
+export async function compileTrustedProject(input: CompileTrustedProjectInput): Promise<CompileTrustedProjectResult> {
   if (!input || typeof input !== 'object'
     || Object.keys(input).sort().join('\0') !== ['compilerInput', 'outputDir'].join('\0')) {
     throw compilerError('Compiler 只接受可信 Projector 输入与输出目录')
@@ -138,6 +142,9 @@ export async function compileReadOnlyProject(input: CompileReadOnlyProjectInput)
 
   return { generatedFiles: [...files.keys()].sort(), sourceDigests }
 }
+
+/** @deprecated Use compileTrustedProject; this alias remains for API compatibility. */
+export const compileReadOnlyProject = compileTrustedProject
 
 function renderSafePageFixture(writeMode: boolean): string {
   return [
@@ -321,25 +328,15 @@ function renderSpec(input: CompilerInputV1): string {
 
 function renderFullPlaywrightSpec(input: CompilerInputV1): string {
   const lines = [
-    "import { test, expect, type APIRequestContext, type Browser, type BrowserContext, type Page, type TestInfo } from '@playwright/test'",
+    "import { test, expect } from '@playwright/test'",
     "import { executeFullPlaywrightAction } from '../fixtures/full-playwright-runtime.js'",
-    '',
-    'interface FullPlaywrightBindings {',
-    '  page: Page',
-    '  context: BrowserContext',
-    '  browser: Browser',
-    '  request: APIRequestContext',
-    '  expect: typeof expect',
-    '  testInfo: TestInfo',
-    '  state: Record<string, unknown>',
-    '}',
     '',
   ]
   let ordinal = 0
   for (const testCase of input.cases) {
     const timeoutMs = Math.min(2_147_483_647, 5_000 + testCase.actions.reduce((total, action) =>
       total + (action.kind === 'fullPlaywright' ? action.timeoutMs + action.cleanupTimeoutMs : 0), 0))
-    lines.push(`test(${literal(`${testCase.caseId} ${testCase.title}`)}, async ({ page, context, request }, testInfo) => {`)
+    lines.push(`test(${literal(`${testCase.caseId} ${testCase.title}`)}, async ({ page, context, browser, request }, testInfo) => {`)
     lines.push(`  test.setTimeout(${timeoutMs})`)
     lines.push('  testInfo.annotations.push(')
     lines.push(`    { type: 'assetId', description: ${literal(input.assetId)} },`)
@@ -358,17 +355,16 @@ function renderFullPlaywrightSpec(input: CompilerInputV1): string {
       if (action.kind !== 'fullPlaywright') throw compilerError('full-playwright Project 不得混合 legacy action')
       const actionOrdinal = ordinal++
       lines.push('  {')
-      lines.push(`    const __biztestRun${actionOrdinal} = async ({ page, context, browser, request, expect, testInfo, state }: FullPlaywrightBindings): Promise<unknown> => {`)
+      lines.push('    const state = {} as Record<string, unknown>')
+      lines.push(`    const __biztestRun${actionOrdinal} = async (): Promise<unknown> => {`)
       lines.push(action.source)
       lines.push('    }')
-      lines.push(`    const __biztestCleanup${actionOrdinal} = async ({ page, context, browser, request, expect, testInfo, state }: FullPlaywrightBindings): Promise<unknown> => {`)
+      lines.push(`    const __biztestCleanup${actionOrdinal} = async (): Promise<unknown> => {`)
       lines.push(action.cleanupSource)
       lines.push('    }')
-      lines.push('    const __biztestState = {} as Record<string, unknown>')
-      lines.push('    const __biztestBindings = { page, context, browser: context.browser()!, request, expect, testInfo, state: __biztestState }')
       lines.push('    await executeFullPlaywrightAction({')
-      lines.push(`      run: () => __biztestRun${actionOrdinal}(__biztestBindings),`)
-      lines.push(`      cleanup: () => __biztestCleanup${actionOrdinal}(__biztestBindings),`)
+      lines.push(`      run: () => __biztestRun${actionOrdinal}(),`)
+      lines.push(`      cleanup: () => __biztestCleanup${actionOrdinal}(),`)
       lines.push('      retire: __biztestRetire,')
       lines.push(`      programTimeoutMs: ${action.timeoutMs}, cleanupTimeoutMs: ${action.cleanupTimeoutMs},`)
       lines.push('    })')
@@ -387,8 +383,27 @@ function assertFullPlaywrightFragments(input: CompilerInputV1): void {
       const cleanupIssue = validateFullPlaywrightFunctionBody(action.cleanupSource)
       if (sourceIssue || cleanupIssue) throw compilerError(
         `full Playwright Action ${action.actionId} 不是密封 FunctionBody：${sourceIssue ?? cleanupIssue}`)
+      const audit = auditTrustedRegressionSourceSet([
+        trustedFragment(`${action.actionId}:source`, action.source, 'Run'),
+        trustedFragment(`${action.actionId}:cleanup`, action.cleanupSource, 'Cleanup'),
+      ], 'full-playwright')
+      if (!audit.valid) throw compilerError(
+        `full Playwright Action ${action.actionId} 不是密封 FunctionBody：${audit.findings[0]?.code ?? 'audit-failed'}`)
     }
   }
+}
+
+function trustedFragment(relativePath: string, source: string, kind: 'Run' | 'Cleanup'):
+{ relativePath: string; bytes: Uint8Array } {
+  const wrapped = [
+    "import { test } from '@playwright/test'",
+    "test('trusted fragment', async ({ page, context, browser, request }, testInfo) => {",
+    '  const state = {} as Record<string, unknown>',
+    `  const __biztest${kind}0 = async () => {`, source, '  }',
+    `  await __biztest${kind}0()`,
+    '})', '',
+  ].join('\n')
+  return { relativePath: `regression/fragments/${relativePath}.ts`, bytes: Buffer.from(wrapped, 'utf8') }
 }
 
 function renderFullPlaywrightRuntime(): string {
@@ -399,6 +414,12 @@ function renderFullPlaywrightRuntime(): string {
     'const __biztestClearTimeout = clearTimeout',
     'const __biztestError = Error',
     'const __biztestAggregateError = AggregateError',
+    'const __biztestProgramDeadlines = new WeakSet<object>()',
+    'const __biztestCleanupDeadlines = new WeakSet<object>()',
+    'const __biztestWeakSetAdd = __biztestProgramDeadlines.add.call.bind(__biztestProgramDeadlines.add) as',
+    '  (set: WeakSet<object>, value: object) => WeakSet<object>',
+    'const __biztestWeakSetHas = __biztestProgramDeadlines.has.call.bind(__biztestProgramDeadlines.has) as',
+    '  (set: WeakSet<object>, value: object) => boolean',
     '',
     'interface FullPlaywrightExecutionInput {',
     '  run(): Promise<unknown>',
@@ -410,12 +431,12 @@ function renderFullPlaywrightRuntime(): string {
     '',
     "type DeadlineKind = 'program' | 'cleanup'",
     '',
-    'function deadlineError(kind: DeadlineKind): Error & { biztestDeadline: DeadlineKind } {',
+    'function deadlineError(kind: DeadlineKind): Error {',
     "  const error = new __biztestError(kind === 'program'",
     "    ? 'BIZTEST_FULL_PLAYWRIGHT_PROGRAM_TIMEOUT_OUTCOME_UNKNOWN_CONTEXT_RETIRED_LEASE_QUARANTINED_NO_RETRY'",
-    "    : 'BIZTEST_FULL_PLAYWRIGHT_CLEANUP_TIMEOUT_OUTCOME_UNKNOWN') as Error & { biztestDeadline: DeadlineKind }",
+    "    : 'BIZTEST_FULL_PLAYWRIGHT_CLEANUP_TIMEOUT_OUTCOME_UNKNOWN')",
     "  error.name = 'BizTestFullPlaywrightDeadlineError'",
-    '  error.biztestDeadline = kind',
+    '  __biztestWeakSetAdd(kind === \'program\' ? __biztestProgramDeadlines : __biztestCleanupDeadlines, error)',
     '  return error',
     '}',
     '',
@@ -429,8 +450,8 @@ function renderFullPlaywrightRuntime(): string {
     '}',
     '',
     'function isDeadline(error: unknown, kind: DeadlineKind): boolean {',
-    "  return typeof error === 'object' && error !== null && 'biztestDeadline' in error",
-    '    && error.biztestDeadline === kind',
+    "  return typeof error === 'object' && error !== null",
+    '    && __biztestWeakSetHas(kind === \'program\' ? __biztestProgramDeadlines : __biztestCleanupDeadlines, error)',
     '}',
     '',
     'export async function executeFullPlaywrightAction(input: FullPlaywrightExecutionInput): Promise<void> {',

@@ -9,11 +9,24 @@ import { approvedCompilerArtifacts, approvedFullPlaywrightCompilerArtifacts,
   FULL_PLAYWRIGHT_SOURCE } from './compiler-artifacts.fixture.js'
 
 describe('Artifact → Compiler Input Projector', () => {
-  test('集合闭合比较为 Set membership 线性实现且不排序', async () => {
+  test('full Playwright 整体路径使用一次性索引且不逐 Case/Action 重扫或排序', async () => {
     const source = await readFile(new URL('../src/compiler-input-projector.ts', import.meta.url), 'utf8')
-    const implementation = source.match(/function sameUniqueStrings[\s\S]*?\n}/)?.[0] ?? ''
-    expect(implementation).toContain('new Set')
-    expect(implementation).not.toContain('.sort(')
+    const start = source.indexOf('function createFullPlaywrightConsumptionIndexes')
+    const end = source.indexOf('\nfunction assertFullPlaywrightIndexesConsumed', start)
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const implementation = source.slice(start, end)
+    expect(implementation).toContain('indexUnique(')
+    expect(source).toContain('const index = new Map')
+    expect(implementation).toContain('.delete(')
+    expect(implementation).not.toMatch(/\.(?:find|filter|some|sort)\(/)
+    expect(source).toContain('fullIndexes.unmappedByCase.get(caseId)')
+    expect(source).not.toContain('records(testCase.steps).sort(')
+    const traceStart = source.indexOf('function projectFullPlaywrightRequirementTrace')
+    const traceEnd = source.indexOf('\nfunction projectRequirementTrace', traceStart)
+    expect(traceStart).toBeGreaterThan(0)
+    expect(source.slice(traceStart, traceEnd)).not.toMatch(/\.(?:find|filter|some|sort|includes)\(/)
+    expect(source).not.toContain('function sameUniqueStrings')
   })
 
   test('TypeScript parser 版本漂移 fail closed', () => {
@@ -76,6 +89,13 @@ describe('Artifact → Compiler Input Projector', () => {
       cleanupSourceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, cleanupTimeoutMs: 30_000,
     }])
+  })
+
+  test('full Playwright 拒绝未按签名 ordinal canonical 排列的 Step，而不在 Projector 内排序', () => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts({ stepOrdinal: 1 }), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    })).toThrow('E2E_COMPILER_INPUT_INVALID')
   })
 
   test.each([
