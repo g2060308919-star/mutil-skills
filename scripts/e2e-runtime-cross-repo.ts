@@ -144,7 +144,7 @@ async function copyPublicationSource(target: string): Promise<void> {
       const path = relative(SOURCE_ROOT, source)
       if (path === '') return true
       const parts = path.split(sep)
-      return !parts.some((part) => ['.git', '.worktrees', '.superpowers', 'node_modules'].includes(part))
+      return !parts.some((part) => ['.git', '.worktrees', '.superpowers', '.tmp', 'node_modules'].includes(part))
     },
   })
 }

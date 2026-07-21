@@ -68,6 +68,7 @@ describe('E2E Runtime npm tarball', () => {
     expect(driver).toContain("rm(join(input.project, 'node_modules')")
     expect(driver).toContain("rm(join(input.project, 'package.json')")
     expect(driver).toContain('const harnessRoot = join(root, \'harness\')')
+    expect(driver).toContain("['.git', '.worktrees', '.superpowers', '.tmp', 'node_modules']")
   })
 
   test('跨仓 fixture 的全部外部资产都符合当前严格 schema', () => {

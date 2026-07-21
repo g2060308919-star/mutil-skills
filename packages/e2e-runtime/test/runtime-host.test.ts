@@ -219,6 +219,20 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('derives a publication-safe generation id from a protocol-valid lowercase request id', async () => {
+    const fixture = await hostFixture()
+    const response = await handleRequest(
+      fixture.host,
+      createRunRequest('request-lowercase:1', fixture.roots.project),
+    )
+
+    expect(successResult(response)).toMatchObject({
+      runId: expect.stringMatching(/^RUN-[A-F0-9]{32}$/),
+      generationId: expect.stringMatching(/^RUN-[A-F0-9]{32}$/),
+    })
+    await fixture.store.close()
+  })
+
   test('replays identical requests but fails closed when a request id is rebound', async () => {
     const fixture = await hostFixture()
     const request = createRunRequest('REQUEST-CREATE-1', fixture.roots.project)
