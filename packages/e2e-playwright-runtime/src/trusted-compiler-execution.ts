@@ -183,7 +183,8 @@ export async function prepareTrustedCompilerRun(
     authorityTransport: request.authorityTransport,
     ...(request.authorityRpcPublicKeyDigest === undefined
       ? {} : { authorityRpcPublicKeyDigest: request.authorityRpcPublicKeyDigest }),
-    runId: text(runBundle.runId), sourceDigest: subject.sourceSetDigest,
+    runId: text(runBundle.runId), assetId: subject.assetId, generationId: subject.generationId,
+    prdRevision: subject.prdRevision, sourceDigest: subject.sourceSetDigest,
   })
   return session
 }

@@ -2,11 +2,12 @@ import { createServer } from 'node:http'
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { chromium, expect as playwrightExpect, type APIRequestContext, type BrowserContext } from '@playwright/test'
 import { canonicalizeJson, digestBytes, digestText } from '@mutil-skills/e2e-contracts'
-import { LocalExecutionOutcomeVerifier, LocalGatewayAuditSigner } from '@mutil-skills/e2e-gateway'
+import { LocalExecutionOutcomeVerifier, LocalGatewayAuditSigner, LocalGatewayAuditVerifier,
+  verifyGatewayPublicationAudit, type GatewayPublicationAudit } from '@mutil-skills/e2e-gateway'
 import { runFullPlaywrightCase, type FullPlaywrightEvidenceStage } from '@mutil-skills/e2e-playwright-runtime'
-import { readyFixture } from '../packages/e2e-playwright-runtime/test/full-playwright-runner.test.js'
+import { readyFixture } from '../packages/e2e-playwright-runtime/test/full-playwright-runner.fixture.js'
 
-const origin = 'http://127.0.0.1:43210'
+let origin = ''
 const targetDigest = digestText('full-playwright-runner-test/v1', 'target')
 let applicationState: 'clean' | 'dirty' = 'clean'
 let server: ReturnType<typeof createServer>
@@ -35,8 +36,11 @@ beforeAll(async () => {
     </body></html>`)
   })
   await new Promise<void>((resolve, reject) => {
-    server.once('error', reject); server.listen(43210, '127.0.0.1', resolve)
+    server.once('error', reject); server.listen(0, '127.0.0.1', resolve)
   })
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('E2E_GOLDEN_DYNAMIC_PORT_REQUIRED')
+  origin = `http://127.0.0.1:${address.port}`
 })
 
 afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())) })
@@ -50,6 +54,10 @@ test('真实 Chromium：受控完整 Playwright program 与独立 cleanup sessio
   const programRequest = await playwrightRequest(programContext)
   const cleanupRequest = await playwrightRequest(cleanupContext)
   const counts = { received: 0, forwarded: 0, blocked: 0, byIntent: {} as Record<string, number> }
+  const signer = LocalGatewayAuditSigner.create({ issuer: 'GOLDEN-GATEWAY', keyId: 'GOLDEN-KEY',
+    instanceId: 'GOLDEN-GW', version: '1.0.0' })
+  const recorder = signer.createRecorder(digestText('full-playwright-runner-test/v1', 'gateway-policy'))
+  let publicationAudit: GatewayPublicationAudit | undefined
   const allowed = new Map([
     ['GET /', { id: 'DOCUMENT', max: 2 }], ['GET /popup', { id: 'POPUP', max: 1 }],
     ['GET /extra', { id: 'EXTRA', max: 1 }], ['GET /favicon.ico', { id: 'FAVICON', max: 2 }],
@@ -60,7 +68,10 @@ test('真实 Chromium：受控完整 Playwright program 与独立 cleanup sessio
     const key = `${method.toUpperCase()} ${new URL(rawUrl).pathname}`
     const rule = allowed.get(key)
     const used = rule ? counts.byIntent[rule.id] ?? 0 : 0
-    if (!rule || used >= rule.max) { counts.blocked += 1; return false }
+    const forwarded = Boolean(rule && used < rule.max)
+    recorder.recordReadDecision({ actionId: 'ACTION-1', executionSessionId: 'GW-SESSION-1',
+      decision: forwarded ? 'forwarded' : 'blocked', request: { method, url: rawUrl } })
+    if (!forwarded || !rule) { counts.blocked += 1; return false }
     counts.forwarded += 1; counts.byIntent[rule.id] = used + 1; return true
   }
   const routeContext = async (context: BrowserContext) => context.route('**/*', async (route) => {
@@ -130,15 +141,17 @@ test('真实 Chromium：受控完整 Playwright program 与独立 cleanup sessio
     canonicalOrigin: origin, exactPath: String(exactPath), query: [] as Array<[string, string]>,
     payload: { kind: 'no-body' as const }, targetFingerprint: targetDigest, maxRequests: Number(maxRequests),
     expectedOrder: index + 1 }))
-  const signer = LocalGatewayAuditSigner.create({ issuer: 'GOLDEN-GATEWAY', keyId: 'GOLDEN-KEY',
-    instanceId: 'GOLDEN-GW', version: '1.0.0' })
   try {
     const fixture = await readyFixture({ source, cleanupSource, networkRequests: requests,
       programBindings: { page: programPage, context: programContext, browser: controlledBrowser,
         request: controlledRequest(programRequest), expect: playwrightExpect, testInfo: { title: 'Golden' }, state },
       cleanupBindings: { page: cleanupPage, context: cleanupContext, browser,
         request: controlledRequest(cleanupRequest), expect: playwrightExpect, testInfo: { title: 'Golden cleanup' }, state },
-      capture: rawCapture, gatewaySummary: counts, issueOutcome: (binding) => signer.issueExecutionOutcomeReceipt(binding) })
+      capture: rawCapture, finalizeGateway: () => {
+        publicationAudit = recorder.finalize()
+        return { executionSessionId: 'GW-SESSION-1', policyDigest: publicationAudit.policyDigest,
+          summary: counts, auditDigest: publicationAudit.signedCounters.digest }
+      }, issueOutcome: (binding) => signer.issueExecutionOutcomeReceipt(binding) })
     const result = await runFullPlaywrightCase(fixture.input)
     expect(result).toMatchObject({ status: 'passed', effectObservation: 'applied',
       cleanup: { status: 'verified-clean' } })
@@ -147,6 +160,9 @@ test('真实 Chromium：受控完整 Playwright program 与独立 cleanup sessio
     expect(counts.byIntent).toMatchObject({ DOCUMENT: 2, POPUP: 1, EXTRA: 1, API: 1, RESET: 1 })
     expect(LocalExecutionOutcomeVerifier.create(signer.exportExecutionOutcomeVerifierMaterial())
       .verifyReceipt(result.outcome)).toBe(true)
+    expect(publicationAudit).toBeDefined()
+    expect(verifyGatewayPublicationAudit(publicationAudit!,
+      LocalGatewayAuditVerifier.create(signer.exportVerifierMaterial()))).toBe(true)
     expect(result.evidence.some((item) => item.kind === 'gateway-audit')).toBe(true)
   } finally {
     await programRequest.dispose(); await cleanupRequest.dispose()

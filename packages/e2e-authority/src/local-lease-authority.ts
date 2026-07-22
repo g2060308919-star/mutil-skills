@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { E2EError, type DataLease, type LeaseRequest } from '@mutil-skills/e2e-contracts'
+import { E2EError, type ApprovalExecutionBinding, type DataLease, type LeaseRequest } from '@mutil-skills/e2e-contracts'
 import { canonicalizeJson, digestText } from '@mutil-skills/e2e-contracts'
 import {
   SqliteSnapshotStore,
@@ -47,12 +47,15 @@ export class LocalLeaseAuthority {
     this.#stateStore?.close()
   }
 
-  createExecutionClient(): TrustedLeaseClient {
+  createExecutionClient(approvalBinding?: ApprovalExecutionBinding): TrustedLeaseClient {
     const client: TrustedLeaseClient = Object.freeze({
       verifyTarget: (leaseId: string, fencingToken: number, targetFingerprint: string) =>
         this.verifyTarget(leaseId, fencingToken, targetFingerprint),
     })
-    return trustLeaseClient(client, { transport: 'in-process-test' })
+    return trustLeaseClient(client, { transport: 'in-process-test', ...(approvalBinding ? { approvalBinding: {
+      runId: approvalBinding.runId, installationDigest: approvalBinding.installationDigest,
+      approvalType: approvalBinding.approvalType, subjectDigest: approvalBinding.subjectDigest,
+    } } : {}) })
   }
 
   async acquire(request: LeaseRequest): Promise<DataLease> {

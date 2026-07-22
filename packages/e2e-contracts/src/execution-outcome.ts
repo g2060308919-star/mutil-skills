@@ -4,7 +4,7 @@ import { WriteHttpIntentSetSchema } from './approval-freshness.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
-const AttemptContextSchema = z.object({
+export const AttemptExecutionContextSchema = z.object({
   assetId: SafeIdSchema, generationId: SafeIdSchema, prdRevision: DigestSchema,
   runId: SafeIdSchema, caseId: SafeIdSchema,
 }).strict()
@@ -46,7 +46,7 @@ export const ReversibleWriteCapabilitySnapshotSchema = z.discriminatedUnion('tra
 
 const ExecutionOutcomeBindingBaseSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
-  attemptContext: AttemptContextSchema,
+  attemptContext: AttemptExecutionContextSchema,
   grantId: SafeIdSchema,
   capabilityId: SafeIdSchema,
   actionId: SafeIdSchema,

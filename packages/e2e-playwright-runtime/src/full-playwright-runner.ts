@@ -1,5 +1,6 @@
 import {
   CleanupPlanDefinitionSchema,
+  AttemptExecutionContextSchema,
   ExecutionOutcomeBindingSchema,
   ExecutionOutcomeReceiptSchema,
   FullPlaywrightProgramSchema,
@@ -30,6 +31,10 @@ import {
 import { validateFullPlaywrightFunctionBody } from './full-playwright-source-validation.js'
 import { getWriteRuntimeSessionBinding, type TrustedWriteRuntimeSession } from './production-isolation.js'
 import { auditTrustedRegressionSourceSet } from './trusted-source-audit.js'
+import {
+  getFullPlaywrightControlledSession,
+  type FullPlaywrightControlledSessionBackend,
+} from './full-playwright-session-internal.js'
 
 const DIGEST = /^sha256:[a-f0-9]{64}$/
 const HostPromise = Promise
@@ -43,6 +48,7 @@ const HostAsyncFunction = Object.getPrototypeOf(async function () {}).constructo
 ) => (...values: unknown[]) => Promise<unknown>
 const programDeadlines = new WeakSet<object>()
 const cleanupDeadlines = new WeakSet<object>()
+const pendingFinalizations = new WeakMap<object, Map<string, () => Promise<FullPlaywrightCaseResult>>>()
 
 export interface FullPlaywrightBindings {
   page: unknown
@@ -101,31 +107,23 @@ export interface FullPlaywrightCaseResult {
   retireError?: FullPlaywrightErrorSummary
   resultDigest: string
   outcome?: ExecutionOutcomeReceipt
+  finalization?: FullPlaywrightFinalizationResult
 }
 
-export interface FullPlaywrightLeaseTerminalAuthority {
-  releaseForTarget(input: {
-    leaseId: string; fencingToken: number; targetFingerprint: string; cleanupDigest: string
-  }): Promise<string>
-  quarantineForTarget(input: {
-    leaseId: string; fencingToken: number; targetFingerprint: string; reason: string
-  }): Promise<string>
-}
-
-interface ControlledSessionBackend {
-  binding: ControlledFullPlaywrightSessionBinding
-  programBindings: FullPlaywrightBindings
-  cleanupBindings: FullPlaywrightBindings
-  capture(stage: FullPlaywrightEvidenceStage): Promise<FullPlaywrightEvidenceSummary[]>
-  retireProgram(): Promise<void>
-  retireCleanup(): Promise<void>
-  observeEffect(): 'proven-not-applied' | 'applied' | 'unknown'
-  finalizeGateway(): Promise<FullPlaywrightGatewayResult>
-  issueOutcome(binding: ExecutionOutcomeBinding): ExecutionOutcomeReceipt
+export interface FullPlaywrightFinalizationResult {
+  state: 'completed' | 'unknown' | 'terminal-failed'
+  terminalIntentDigest: string
+  leaseReceiptDigest?: string
+  outcomeReceiptDigest?: string
+  authorityReceiptDigest?: string
+  errors: FullPlaywrightErrorSummary[]
 }
 
 export interface ControlledFullPlaywrightSessionBinding {
   executionProfile: 'full-playwright'
+  assetId: string
+  generationId: string
+  prdRevision: string
   runId: string
   caseId: string
   stepId: string
@@ -140,30 +138,12 @@ export interface ControlledFullPlaywrightSessionBinding {
   approvedRequestSetDigest: string
   gatewayPolicyDigest: string
   executionSessionId: string
+  sourceSetDigest: string
+  programBrowserSessionId: string
+  cleanupBrowserSessionId: string
 }
 
 export interface ControlledFullPlaywrightSession {}
-const controlledSessions = new WeakMap<object, ControlledSessionBackend>()
-
-/** Test/Golden assembly seam. Production launcher wiring is intentionally Task 5. */
-export function createTestControlledFullPlaywrightSession(
-  backend: ControlledSessionBackend,
-): ControlledFullPlaywrightSession {
-  validateControlledBackend(backend)
-  const session = Object.freeze({})
-  controlledSessions.set(session, Object.freeze({
-    binding: Object.freeze(structuredClone(backend.binding)),
-    programBindings: backend.programBindings,
-    cleanupBindings: backend.cleanupBindings,
-    capture: backend.capture.bind(backend),
-    retireProgram: backend.retireProgram.bind(backend),
-    retireCleanup: backend.retireCleanup.bind(backend),
-    observeEffect: backend.observeEffect.bind(backend),
-    finalizeGateway: backend.finalizeGateway.bind(backend),
-    issueOutcome: backend.issueOutcome.bind(backend),
-  }))
-  return session
-}
 
 export interface RunFullPlaywrightCaseInput {
   program: FullPlaywrightProgram
@@ -182,13 +162,16 @@ export interface RunFullPlaywrightCaseInput {
     fencingToken: number
     targetFingerprint: string
     authority: TrustedLeaseClient
-    terminalAuthority: FullPlaywrightLeaseTerminalAuthority
   }
   runtime: TrustedWriteRuntimeSession
   session: ControlledFullPlaywrightSession
 }
 
 export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): Promise<FullPlaywrightCaseResult> {
+  if (input.session && typeof input.session === 'object') {
+    const pending = pendingFinalizations.get(input.session as object)?.get(input.attemptId)
+    if (pending) return await pending()
+  }
   const checked = await safetyPrecondition(input)
   if ('reasonCode' in checked) return blocked(input, checked.reasonCode)
   const { program, cleanupPlan, capability, session, grant, currentSubject } = checked
@@ -206,9 +189,9 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     || reservation.attemptId !== input.attemptId
     || reservation.attemptContext === undefined
     || canonicalizeJson(reservation.attemptContext) !== canonicalizeJson(input.attemptContext)) {
-    try { await input.authorization.authority.markUnknown(reservation.reservationId,
-      'full-playwright-reservation-owner-mismatch') } catch { /* fail closed below */ }
-    return blocked(input, 'E2E_FULL_PLAYWRIGHT_RESERVATION_OWNER_MISMATCH')
+    return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, [],
+      'full-playwright-reservation-owner-mismatch',
+      new HostError('E2E_FULL_PLAYWRIGHT_RESERVATION_OWNER_MISMATCH'))
   }
 
   const evidence: FullPlaywrightEvidenceSummary[] = []
@@ -221,13 +204,12 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   let cleanupValue: unknown
   let retireCaught = false
   let retireError: unknown
+  let infrastructureError: unknown
 
   try { evidence.push(...await captureChecked(session, 'before')) }
   catch (error) {
-    await unknownTerminal(input, reservation.reservationId, 'before-evidence-failed', error)
-    return failedUnknown(input, reservation.reservationId, evidence, 'E2E_FULL_PLAYWRIGHT_EVIDENCE_FAILED', {
-      primary: error,
-    })
+    return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
+      'before-evidence-failed', error)
   }
 
   try {
@@ -243,6 +225,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
 
   try { evidence.push(...await captureChecked(session, 'after')) }
   catch (error) {
+    infrastructureError = error
     if (!primaryCaught) { primaryCaught = true; primaryError = error }
   }
 
@@ -267,36 +250,47 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   }
   try { evidence.push(...await captureChecked(session, 'cleanup')) }
   catch (error) {
+    infrastructureError ??= error
     if (!cleanupCaught) { cleanupCaught = true; cleanupError = error }
+  }
+  if (infrastructureError !== undefined) {
+    return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
+      'evidence-capture-failed', infrastructureError)
   }
 
   let gateway: FullPlaywrightGatewayResult
   try { gateway = await session.finalizeGateway() }
   catch (error) {
-    cleanupError = cleanupCaught
-      ? new HostAggregateError([cleanupError, error], 'E2E_FULL_PLAYWRIGHT_CLEANUP_AND_GATEWAY_FAILED') : error
-    cleanupCaught = true
-    gateway = emptyGateway(session.binding)
+    return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
+      'gateway-finalize-failed', error)
   }
   if (gateway.executionSessionId !== session.binding.executionSessionId
     || gateway.policyDigest !== session.binding.gatewayPolicyDigest
-    || !DIGEST.test(gateway.auditDigest)) {
-    const bindingError = new HostError('E2E_FULL_PLAYWRIGHT_GATEWAY_BINDING_MISMATCH')
-    cleanupError = cleanupCaught
-      ? new HostAggregateError([cleanupError, bindingError], 'E2E_FULL_PLAYWRIGHT_CLEANUP_AND_GATEWAY_FAILED')
-      : bindingError
-    cleanupCaught = true
-    gateway = emptyGateway(session.binding)
+    || !validGatewayResult(gateway)) {
+    return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
+      'gateway-binding-invalid', new HostError('E2E_FULL_PLAYWRIGHT_GATEWAY_BINDING_MISMATCH'))
   }
   evidence.push(gatewayEvidence(gateway))
 
-  const observedEffect = session.observeEffect()
+  let observedEffect: ReturnType<FullPlaywrightControlledSessionBackend['observeEffect']>
+  try { observedEffect = session.observeEffect() }
+  catch (error) {
+    return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
+      'effect-observation-failed', error)
+  }
   const unknown = programTimedOut || cleanupCaught || gateway.summary.blocked > 0 || observedEffect === 'unknown'
   const effectObservation = unknown ? 'unknown' as const : observedEffect
   const status = !primaryCaught && !unknown && effectObservation === 'applied' ? 'passed' as const : 'failed' as const
   const cleanupStatus = cleanupCaught ? (cleanupTimedOut ? 'unknown' as const : 'failed' as const)
     : 'verified-clean' as const
-  const evidenceIds = uniqueEvidenceIds(evidence)
+  let evidenceIds: string[]
+  try {
+    assertCompleteEvidenceSet(evidence)
+    evidenceIds = uniqueEvidenceIds(evidence)
+  } catch (error) {
+    return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
+      'evidence-set-invalid', error)
+  }
   const evidenceSetDigest = digestText('execution-outcome-evidence-set/v1', canonicalizeJson([...evidenceIds].sort()))
   const cleanupResultDigest = digestText('full-playwright-cleanup-result/v1', canonicalizeJson({
     actionId: program.actionId, cleanupProgramDigest: program.cleanupSourceDigest,
@@ -311,28 +305,25 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     retireError: retireCaught ? errorSummary(retireError) : null,
   }))
 
+  const terminalErrors: FullPlaywrightErrorSummary[] = []
   let leaseReceiptDigest: string
+  let unknownObservation: string | undefined
   if (unknown) {
     const observation = programTimedOut ? 'full-playwright-program-timeout-effect-unknown'
       : gateway.summary.blocked > 0 ? 'full-playwright-gateway-blocked-effect-unknown'
         : 'full-playwright-cleanup-unverified-effect-unknown'
-    try {
-      await input.authorization.authority.markUnknown(reservation.reservationId, observation)
-      leaseReceiptDigest = await input.lease.terminalAuthority.quarantineForTarget({
-        leaseId: input.lease.leaseId, fencingToken: input.lease.fencingToken,
-        targetFingerprint: input.lease.targetFingerprint, reason: observation,
-      })
-    } catch (terminalError) {
-      leaseReceiptDigest = digestText('full-playwright-terminal-failure/v1', errorText(terminalError))
-      if (!retireCaught) { retireCaught = true; retireError = terminalError }
-    }
+    unknownObservation = observation
+    leaseReceiptDigest = await retryTerminal('quarantine', terminalErrors, () => session.terminal.quarantineLease({
+      leaseId: input.lease.leaseId, fencingToken: input.lease.fencingToken,
+      targetFingerprint: input.lease.targetFingerprint, reason: observation,
+    }))
   } else {
-    await input.authorization.authority.complete(reservation.reservationId, runnerResultDigest)
-    leaseReceiptDigest = await input.lease.terminalAuthority.releaseForTarget({
+    leaseReceiptDigest = await retryTerminal('release', terminalErrors, () => session.terminal.releaseLease({
       leaseId: input.lease.leaseId, fencingToken: input.lease.fencingToken,
       targetFingerprint: input.lease.targetFingerprint, cleanupDigest: cleanupResultDigest,
-    })
+    }))
   }
+  if (!DIGEST.test(leaseReceiptDigest)) throw new HostError('E2E_FULL_PLAYWRIGHT_LEASE_RECEIPT_INVALID')
 
   const cleanup: FullPlaywrightCleanupResult = {
     status: cleanupStatus, resultDigest: cleanupResultDigest, leaseReceiptDigest,
@@ -351,16 +342,44 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
       leaseId: capability.dataLeaseId, ...cleanup },
     evidenceIds, evidenceSetDigest, completedAt: new Date().toISOString(),
   } satisfies ExecutionOutcomeBinding)
-  const outcome = ExecutionOutcomeReceiptSchema.parse(session.issueOutcome(binding))
   const resultDigest = digestExecutionOutcomeBinding(binding)
-  return {
-    caseId: program.caseId, stepId: program.stepId, actionId: program.actionId,
-    status, effectObservation, retryAllowed: effectObservation === 'proven-not-applied',
-    reservationId: reservation.reservationId, evidence, cleanup,
-    ...(primaryCaught ? { primaryError: errorSummary(primaryError) } : {}),
-    ...(cleanupCaught ? { cleanupError: errorSummary(cleanupError) } : {}),
-    ...(retireCaught ? { retireError: errorSummary(retireError) } : {}),
-    resultDigest, outcome,
+  const finish = async (): Promise<FullPlaywrightCaseResult> => {
+    const outcome = await retryTerminal('sign', terminalErrors, async () =>
+      ExecutionOutcomeReceiptSchema.parse(session.issueOutcome(binding)))
+    const authorityReceiptDigest = unknown
+      ? await retryTerminal('markUnknown', terminalErrors, () => session.terminal.markReservationUnknown(
+        reservation.reservationId, `${unknownObservation}:${runnerResultDigest}`))
+      : await retryTerminal('complete', terminalErrors, () => session.terminal.completeReservation(
+        reservation.reservationId, outcome.signedDigest))
+    if (!DIGEST.test(authorityReceiptDigest)) throw new HostError('E2E_FULL_PLAYWRIGHT_AUTHORITY_RECEIPT_INVALID')
+    pendingFinalizations.get(input.session as object)?.delete(input.attemptId)
+    const finalization: FullPlaywrightFinalizationResult = {
+      state: unknown ? 'unknown' : 'completed', terminalIntentDigest: runnerResultDigest,
+      leaseReceiptDigest, outcomeReceiptDigest: outcome.signedDigest, authorityReceiptDigest,
+      errors: terminalErrors,
+    }
+    return {
+      caseId: program.caseId, stepId: program.stepId, actionId: program.actionId,
+      status, effectObservation, retryAllowed: effectObservation === 'proven-not-applied',
+      reservationId: reservation.reservationId, evidence, cleanup,
+      ...(primaryCaught ? { primaryError: errorSummary(primaryError) } : {}),
+      ...(cleanupCaught ? { cleanupError: errorSummary(cleanupError) } : {}),
+      ...(retireCaught ? { retireError: errorSummary(retireError) } : {}),
+      resultDigest, outcome, finalization,
+    }
+  }
+  try { return await finish() } catch (error) {
+    terminalErrors.push(errorSummary(error))
+    let attempts = pendingFinalizations.get(input.session as object)
+    if (!attempts) { attempts = new Map(); pendingFinalizations.set(input.session as object, attempts) }
+    attempts.set(input.attemptId, finish)
+    return {
+      caseId: program.caseId, stepId: program.stepId, actionId: program.actionId,
+      status: 'failed', effectObservation: 'unknown', retryAllowed: false,
+      reservationId: reservation.reservationId, evidence, cleanup, resultDigest,
+      finalization: { state: 'terminal-failed', terminalIntentDigest: runnerResultDigest,
+        leaseReceiptDigest, errors: terminalErrors },
+    }
   }
 }
 
@@ -368,10 +387,13 @@ async function safetyPrecondition(input: RunFullPlaywrightCaseInput): Promise<{
   program: FullPlaywrightProgram
   cleanupPlan: CleanupPlanDefinition
   capability: BrowserLocalReversibleWriteCapability
-  session: ControlledSessionBackend
+  session: FullPlaywrightControlledSessionBackend
   grant: SignedWriteGrant
   currentSubject: WriteApprovalSubject
 } | { reasonCode: string }> {
+  const parsedAttempt = AttemptExecutionContextSchema.safeParse(input.attemptContext)
+  if (!parsedAttempt.success) return { reasonCode: 'E2E_FULL_PLAYWRIGHT_ATTEMPT_CONTEXT_INVALID' }
+  const attempt = parsedAttempt.data
   const parsedProgram = FullPlaywrightProgramSchema.safeParse(input.program)
   const parsedPlan = CleanupPlanDefinitionSchema.safeParse(input.cleanupPlan)
   if (!parsedProgram.success) return { reasonCode: 'E2E_FULL_PLAYWRIGHT_PROGRAM_INVALID' }
@@ -380,17 +402,16 @@ async function safetyPrecondition(input: RunFullPlaywrightCaseInput): Promise<{
   }
   const program = parsedProgram.data
   const cleanupPlan = parsedPlan.data
-  if (input.attemptContext.caseId !== program.caseId
-    || input.attemptContext.prdRevision !== input.authorization.grant.subject.prdRevision
-    || input.attemptContext.assetId !== input.authorization.grant.subject.assetId
-    || input.attemptContext.runId !== input.authorization.grant.approvalContext.runId) {
+  if (attempt.caseId !== program.caseId
+    || attempt.prdRevision !== input.authorization.grant.subject.prdRevision
+    || attempt.assetId !== input.authorization.grant.subject.assetId
+    || attempt.runId !== input.authorization.grant.approvalContext.runId) {
     return { reasonCode: 'E2E_FULL_PLAYWRIGHT_ATTEMPT_CONTEXT_MISMATCH' }
   }
-  const session = input.session && typeof input.session === 'object'
-    ? controlledSessions.get(input.session as object) : undefined
+  const session = getFullPlaywrightControlledSession(input.session)
   if (!session) return { reasonCode: 'E2E_FULL_PLAYWRIGHT_CONTROLLED_SESSION_REQUIRED' }
   const runtime = getWriteRuntimeSessionBinding(input.runtime)
-  if (!runtime || !runtime.sandboxHealthy || !runtime.gatewayConnected) {
+  if (!runtime || runtime.mode === 'test-only' || !runtime.sandboxHealthy || !runtime.gatewayConnected) {
     return { reasonCode: 'E2E_FULL_PLAYWRIGHT_TRUSTED_RUNTIME_REQUIRED' }
   }
   if (!isTrustedWriteApprovalClient(input.authorization.authority)
@@ -433,7 +454,9 @@ async function safetyPrecondition(input: RunFullPlaywrightCaseInput): Promise<{
     return { reasonCode: 'E2E_FULL_PLAYWRIGHT_FROZEN_BINDING_MISMATCH' }
   }
   const binding = session.binding
-  if (binding.executionProfile !== 'full-playwright' || binding.runId !== input.attemptContext.runId
+  if (binding.executionProfile !== 'full-playwright' || binding.runId !== attempt.runId
+    || binding.assetId !== attempt.assetId || binding.generationId !== attempt.generationId
+    || binding.prdRevision !== attempt.prdRevision
     || binding.caseId !== program.caseId || binding.stepId !== program.stepId
     || binding.actionId !== program.actionId || binding.capabilityId !== capability.capabilityId
     || binding.programDigest !== program.sourceDigest || binding.cleanupProgramDigest !== program.cleanupSourceDigest
@@ -442,19 +465,26 @@ async function safetyPrecondition(input: RunFullPlaywrightCaseInput): Promise<{
     || binding.approvedRequestSetDigest !== approvedRequestSetDigest(program.networkRequests)) {
     return { reasonCode: 'E2E_FULL_PLAYWRIGHT_SESSION_BINDING_MISMATCH' }
   }
-  if (runtime.mode === 'trusted-compiler'
-    && (runtime.runId !== input.attemptContext.runId || runtime.sourceDigest !== program.sourceDigest)) {
+  if (runtime.runId !== attempt.runId || runtime.sourceDigest !== binding.sourceSetDigest
+    || runtime.assetId !== attempt.assetId || runtime.generationId !== attempt.generationId
+    || runtime.prdRevision !== attempt.prdRevision) {
     return { reasonCode: 'E2E_FULL_PLAYWRIGHT_RUNTIME_BINDING_MISMATCH' }
   }
   const writeBinding = getTrustedExecutionClientBinding(input.authorization.authority)
   const leaseBinding = getTrustedExecutionClientBinding(input.lease.authority)
-  if (!writeBinding || !leaseBinding || writeBinding.transport !== runtime.authorityTransport
-    || leaseBinding.transport !== runtime.authorityTransport) {
+  if (!writeBinding || !leaseBinding || !writeBinding.approvalBinding || !leaseBinding.approvalBinding
+    || writeBinding.transport !== runtime.authorityTransport || leaseBinding.transport !== runtime.authorityTransport
+    || (runtime.authorityTransport === 'authenticated-rpc'
+      && (writeBinding.transport !== 'authenticated-rpc' || leaseBinding.transport !== 'authenticated-rpc'
+        || writeBinding.authorityPublicKeyDigest !== runtime.authorityRpcPublicKeyDigest
+        || leaseBinding.authorityPublicKeyDigest !== runtime.authorityRpcPublicKeyDigest))) {
     return { reasonCode: 'E2E_FULL_PLAYWRIGHT_AUTHORITY_TRANSPORT_MISMATCH' }
   }
-  if (writeBinding.approvalBinding
-    && (writeBinding.approvalBinding.runId !== input.attemptContext.runId
-      || writeBinding.approvalBinding.subjectDigest !== grant.subjectDigest)) {
+  const expectedApprovalBinding = { runId: grant.approvalContext.runId,
+    installationDigest: grant.approvalContext.installationDigest,
+    approvalType: grant.approvalContext.approvalType, subjectDigest: grant.approvalContext.subjectDigest }
+  if (canonicalizeJson(writeBinding.approvalBinding) !== canonicalizeJson(expectedApprovalBinding)
+    || canonicalizeJson(leaseBinding.approvalBinding) !== canonicalizeJson(expectedApprovalBinding)) {
     return { reasonCode: 'E2E_FULL_PLAYWRIGHT_APPROVAL_CONTEXT_MISMATCH' }
   }
   const freshness = immutableSnapshot(input.authorization.freshnessReceipt)
@@ -521,7 +551,7 @@ function isDeadline(error: unknown, kind: 'program' | 'cleanup'): boolean {
     && (kind === 'program' ? programDeadlines : cleanupDeadlines).has(error)
 }
 
-async function captureChecked(session: ControlledSessionBackend, stage: FullPlaywrightEvidenceStage) {
+async function captureChecked(session: FullPlaywrightControlledSessionBackend, stage: FullPlaywrightEvidenceStage) {
   const evidence = await session.capture(stage)
   const requiredKinds = new Set(['screenshot', 'dom', 'url', 'trace'])
   if (!Array.isArray(evidence) || evidence.length === 0
@@ -538,23 +568,6 @@ function gatewayEvidence(gateway: FullPlaywrightGatewayResult): FullPlaywrightEv
     policyDigest: gateway.policyDigest, summary: gateway.summary }), 'utf8')
   return { evidenceId: `GATEWAY-${gateway.executionSessionId}`, stage: 'cleanup', kind: 'gateway-audit',
     byteLength: bytes.byteLength, digest: gateway.auditDigest }
-}
-
-function emptyGateway(binding: ControlledFullPlaywrightSessionBinding): FullPlaywrightGatewayResult {
-  const summary = { received: 0, forwarded: 0, blocked: 1, byIntent: {} }
-  return { executionSessionId: binding.executionSessionId, policyDigest: binding.gatewayPolicyDigest,
-    summary, auditDigest: digestText('full-playwright-gateway-failure/v1', canonicalizeJson(summary)) }
-}
-
-function validateControlledBackend(backend: ControlledSessionBackend): void {
-  if (!backend || typeof backend !== 'object' || backend.binding.executionProfile !== 'full-playwright'
-    || backend.programBindings === backend.cleanupBindings
-    || backend.programBindings.context === backend.cleanupBindings.context
-    || backend.programBindings.page === backend.cleanupBindings.page
-    || !['capture', 'retireProgram', 'retireCleanup', 'observeEffect', 'finalizeGateway', 'issueOutcome']
-      .every((method) => typeof backend[method as keyof ControlledSessionBackend] === 'function')) {
-    throw new HostError('E2E_FULL_PLAYWRIGHT_CONTROLLED_SESSION_INVALID')
-  }
 }
 
 function approvedRequestSetDigest(requests: BrowserLocalReversibleWriteCapability['requests']): string {
@@ -590,12 +603,69 @@ function blocked(input: Pick<RunFullPlaywrightCaseInput, 'program'>, reasonCode:
   return { ...core, resultDigest: digestText('full-playwright-runner-result/v1', canonicalizeJson(core)) }
 }
 
-async function unknownTerminal(input: RunFullPlaywrightCaseInput, reservationId: string,
-  observation: string, error: unknown): Promise<void> {
-  try { await input.authorization.authority.markUnknown(reservationId, observation) } catch { /* preserve original */ }
-  try { await input.lease.terminalAuthority.quarantineForTarget({ leaseId: input.lease.leaseId,
-    fencingToken: input.lease.fencingToken, targetFingerprint: input.lease.targetFingerprint,
-    reason: `${observation}:${errorText(error)}`.slice(0, 16 * 1024) }) } catch { /* preserve original */ }
+async function retryTerminal<T>(stage: string, errors: FullPlaywrightErrorSummary[], operation: () => Promise<T>): Promise<T> {
+  let last: unknown
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try { return await operation() }
+    catch (error) { last = error; errors.push({ ...errorSummary(error), message: `${stage}:${errorText(error)}` }) }
+  }
+  throw last
+}
+
+async function finalizeUnexpectedUnknown(
+  input: RunFullPlaywrightCaseInput,
+  session: FullPlaywrightControlledSessionBackend,
+  reservationId: string,
+  evidence: FullPlaywrightEvidenceSummary[],
+  observation: string,
+  error: unknown,
+): Promise<FullPlaywrightCaseResult> {
+  const terminalIntentDigest = digestText('full-playwright-terminal-intent/v1', canonicalizeJson({
+    reservationId, actionId: input.program.actionId, terminal: 'unknown', observation,
+    error: errorSummary(error),
+  }))
+  const errors: FullPlaywrightErrorSummary[] = [errorSummary(error)]
+  const reason = `${observation}:${terminalIntentDigest}`
+  const [leaseResult, authorityResult] = await Promise.allSettled([
+    retryTerminal('quarantine', errors, () => session.terminal.quarantineLease({
+      leaseId: input.lease.leaseId, fencingToken: input.lease.fencingToken,
+      targetFingerprint: input.lease.targetFingerprint, reason,
+    })),
+    retryTerminal('markUnknown', errors, () => session.terminal.markReservationUnknown(reservationId, reason)),
+  ])
+  const leaseReceiptDigest = leaseResult.status === 'fulfilled' && DIGEST.test(leaseResult.value)
+    ? leaseResult.value : undefined
+  const authorityReceiptDigest = authorityResult.status === 'fulfilled' && DIGEST.test(authorityResult.value)
+    ? authorityResult.value : undefined
+  const result = failedUnknown(input, reservationId, evidence, 'E2E_FULL_PLAYWRIGHT_POST_RESERVATION_FAILED', {
+    primary: error,
+  })
+  return { ...result, finalization: {
+    state: leaseReceiptDigest && authorityReceiptDigest ? 'unknown' : 'terminal-failed',
+    terminalIntentDigest,
+    ...(leaseReceiptDigest ? { leaseReceiptDigest } : {}),
+    ...(authorityReceiptDigest ? { authorityReceiptDigest } : {}),
+    errors,
+  } }
+}
+
+function validGatewayResult(gateway: FullPlaywrightGatewayResult): boolean {
+  const summary = gateway.summary
+  return DIGEST.test(gateway.auditDigest)
+    && [summary.received, summary.forwarded, summary.blocked].every((value) => Number.isSafeInteger(value) && value >= 0)
+    && summary.received >= summary.forwarded + summary.blocked
+    && summary.byIntent && typeof summary.byIntent === 'object'
+    && Object.values(summary.byIntent).every((value) => Number.isSafeInteger(value) && value >= 0)
+}
+
+function assertCompleteEvidenceSet(evidence: FullPlaywrightEvidenceSummary[]): void {
+  for (const stage of ['before', 'after', 'cleanup'] as const) {
+    for (const kind of ['screenshot', 'dom', 'url', 'trace'] as const) {
+      if (!evidence.some((item) => item.stage === stage && item.kind === kind)) {
+        throw new HostError(`E2E_FULL_PLAYWRIGHT_EVIDENCE_MISSING:${stage}:${kind}`)
+      }
+    }
+  }
 }
 
 function failedUnknown(input: RunFullPlaywrightCaseInput, reservationId: string,
