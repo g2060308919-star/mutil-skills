@@ -21,6 +21,10 @@ export * from './playwright-page-adapter.js'
 export * from './write-runner.js'
 export * from './full-playwright-runner.js'
 export {
+  createRuntimeHostFullPlaywrightSession,
+  type RuntimeHostFullPlaywrightSessionInput,
+} from './runtime-host-full-playwright-session.js'
+export {
   LocalRuntimeIsolationAuthority,
   createTestWriteRuntimeSession,
   createProductionWriteRuntimeSession,

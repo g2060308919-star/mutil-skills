@@ -55,9 +55,11 @@ import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js
 import {
   assertRuntimeReadSnapshotReady,
   executeRuntimeInjection,
+  executeRuntimeFullPlaywright,
   executeRuntimeRead,
   executeRuntimeWrite,
   type RuntimeInjectionExecutorCapability,
+  type RuntimeFullPlaywrightExecutorCapability,
   type RuntimeReadExecutionOutput,
   type RuntimeReadExecutorCapability,
   type RuntimeWriteExecutorCapability,
@@ -121,6 +123,7 @@ export interface RuntimeHostDependencies {
   readExecutor?: RuntimeReadExecutorCapability
   writeExecutor?: RuntimeWriteExecutorCapability
   injectionExecutor?: RuntimeInjectionExecutorCapability
+  fullPlaywrightExecutor?: RuntimeFullPlaywrightExecutorCapability
   preflightExecutor?: RuntimePreflightCapability
   writeProduction?: RuntimeWriteProductionCapability
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
@@ -1339,7 +1342,7 @@ export class E2ERuntimeHost {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     const startLock = await this.dependencies.runStore.acquireRunLock(identity.digest, request.payload.runId)
     let started: Awaited<ReturnType<RuntimeRunStore['beginExecutionAttempt']>> | undefined
-    let executionMode: 'read' | 'write' | 'injection' | undefined
+    let executionMode: 'read' | 'write' | 'injection' | 'full-playwright' | undefined
     let startError: unknown
     try {
       const current = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
@@ -1364,6 +1367,10 @@ export class E2ERuntimeHost {
         assertRuntimeReadSnapshotReady(current)
       } else if (executionMode === 'write') {
         if (this.dependencies.writeExecutor === undefined) throw blockedError('E2E_RUNTIME_WRITE_EXECUTOR_NOT_READY')
+      } else if (executionMode === 'full-playwright') {
+        if (this.dependencies.fullPlaywrightExecutor === undefined) {
+          throw blockedError('E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_NOT_READY')
+        }
       } else if (this.dependencies.injectionExecutor === undefined) {
         throw blockedError('E2E_RUNTIME_INJECTION_EXECUTOR_NOT_READY')
       } else {
@@ -1412,7 +1419,7 @@ export class E2ERuntimeHost {
     if (executionMode === undefined) throw runtimeHostError(
       'E2E_RUNTIME_EXECUTION_MODE_MISSING', 'internal', 'execution mode 未闭合持久 attempt',
     )
-    if (executionMode === 'write') {
+    if (executionMode === 'write' || executionMode === 'full-playwright') {
       const binding = runtimeWriteAttemptBinding(started.snapshot)
       try {
         const lock = await this.dependencies.runStore.acquireRunLock(identity.digest, request.payload.runId)
@@ -1454,6 +1461,7 @@ export class E2ERuntimeHost {
     }
     let execution: Awaited<ReturnType<typeof executeRuntimeRead>>
       | Awaited<ReturnType<typeof executeRuntimeWrite>>
+      | Awaited<ReturnType<typeof executeRuntimeFullPlaywright>>
       | Awaited<ReturnType<typeof executeRuntimeInjection>>
     try {
       execution = await executeWithOwnerHeartbeat(started.owner, async () => executionMode === 'read'
@@ -1464,6 +1472,10 @@ export class E2ERuntimeHost {
           ? await executeRuntimeWrite(this.dependencies.writeExecutor!, {
             snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
           })
+          : executionMode === 'full-playwright'
+            ? await executeRuntimeFullPlaywright(this.dependencies.fullPlaywrightExecutor!, {
+              snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
+            })
           : await executeRuntimeInjection(this.dependencies.injectionExecutor!, {
             snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
           }))
@@ -1478,7 +1490,7 @@ export class E2ERuntimeHost {
         releaseCause === undefined ? cause : new AggregateError([cause, releaseCause]),
       )
     }
-    if (executionMode === 'write') {
+    if (executionMode === 'write' || executionMode === 'full-playwright') {
       const write = execution as Awaited<ReturnType<typeof executeRuntimeWrite>>
       try {
         const lock = await this.dependencies.runStore.acquireRunLock(identity.digest, request.payload.runId)
@@ -1528,7 +1540,7 @@ export class E2ERuntimeHost {
     let quarantinedEvidence: RuntimeQuarantinedEvidenceFacts | undefined
     const ephemeralEvidence = executionMode === 'read'
       ? (execution as RuntimeReadExecutionOutput).evidence
-      : executionMode === 'write'
+      : executionMode === 'write' || executionMode === 'full-playwright'
         ? (execution as Awaited<ReturnType<typeof executeRuntimeWrite>>).evidence
         : (execution as Awaited<ReturnType<typeof executeRuntimeInjection>>).evidence
     if (ephemeralEvidence !== undefined && this.dependencies.evidenceQuarantine === undefined) {
@@ -1571,7 +1583,7 @@ export class E2ERuntimeHost {
       engineVersion: this.dependencies.installation.version,
     }).state
     const readExecution = executionMode === 'read' ? execution as RuntimeReadExecutionOutput : undefined
-    const writeExecution = executionMode === 'write'
+    const writeExecution = executionMode === 'write' || executionMode === 'full-playwright'
       ? execution as Awaited<ReturnType<typeof executeRuntimeWrite>> : undefined
     const persistedWriteExecution = writeExecution === undefined ? undefined
       : omitEphemeralWriteEvidence(writeExecution)
@@ -1814,7 +1826,7 @@ function parseResumeDecision(input: unknown):
     expectedAttemptId: record.expectedAttemptId }
 }
 
-function runtimeExecutionMode(snapshot: RuntimeRunSnapshot): 'read' | 'write' | 'injection' {
+function runtimeExecutionMode(snapshot: RuntimeRunSnapshot): 'read' | 'write' | 'injection' | 'full-playwright' {
   const grant = snapshot.trustedExecutionFacts['signed-execution-grant']
   if (typeof grant === 'object' && grant !== null && !Array.isArray(grant)) {
     const capabilities = (grant as Record<string, unknown>).capabilities
@@ -1825,6 +1837,8 @@ function runtimeExecutionMode(snapshot: RuntimeRunSnapshot): 'read' | 'write' | 
   }
   const actionMap = snapshot.frozenArtifacts['browser-action-map']
   const content = actionMap?.content
+  if (typeof content === 'object' && content !== null && !Array.isArray(content)
+    && (content as Record<string, unknown>).executionProfile === 'full-playwright') return 'full-playwright'
   const actions = typeof content === 'object' && content !== null && !Array.isArray(content)
     ? (content as Record<string, unknown>).actions : undefined
   if (!Array.isArray(actions) || actions.length !== 1 || typeof actions[0] !== 'object'
@@ -1856,9 +1870,10 @@ function runtimeWriteAttemptBinding(snapshot: RuntimeRunSnapshot): {
     throw runtimeHostError('E2E_RUNTIME_WRITE_GRANT_REQUIRED', 'safety', '写恢复记录需要严格绑定当前 Run 的 Grant')
   }
   const capabilities = parsed.data.capabilities.filter((candidate) => candidate.actionId === actionId
-    && candidate.transport === 'http' && candidate.effect === 'reversible-write')
+    && (candidate.transport === 'http' || candidate.transport === 'browser-local')
+    && candidate.effect === 'reversible-write')
   if (capabilities.length !== 1) throw runtimeHostError(
-    'E2E_RUNTIME_WRITE_CAPABILITY_BINDING_MISMATCH', 'safety', '写 action 未唯一绑定 HTTP capability',
+    'E2E_RUNTIME_WRITE_CAPABILITY_BINDING_MISMATCH', 'safety', '写 action 未唯一绑定 HTTP/full capability',
   )
   const capability = capabilities[0] as typeof capabilities[0] & {
     dataLeaseId?: unknown; fencingToken?: unknown; requests?: Array<{ targetFingerprint?: unknown }>

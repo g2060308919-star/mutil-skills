@@ -55,6 +55,7 @@ import { installChromium as installChromiumDefault, type InstallChromiumOptions 
 import {
   bootstrapInstalledBrowserRuntime,
   createProductionBrowserCapabilities,
+  createProductionFullPlaywrightBrowserCapability,
   createProductionInjectionBrowserCapability,
   createProductionWriteBrowserCapability,
 } from './runtime-browser-wiring.js'
@@ -440,12 +441,14 @@ export async function runCli(
       // 这里仅做只读短路；最终判定仍由持锁的 E2ERuntimeHost 完成，避免无效请求
       // 提前创建后端、密钥代理或隔离区并把输入错误污染成 cleanup/internal 错误。
       let executeRunMayReachExecutor = true
+      let executeSnapshot: RuntimeRunSnapshot | undefined
       if (request.command === 'execute-run') {
         const executionIdentity = await resolveProjectIdentity(request.projectRoot)
-        const snapshot = await runStore.getRun(executionIdentity.digest, request.payload.runId)
-        executeRunMayReachExecutor = snapshot?.workflow.current === 'compiled'
+        executeSnapshot = await runStore.getRun(executionIdentity.digest, request.payload.runId)
+        executeRunMayReachExecutor = executeSnapshot?.workflow.current === 'compiled'
       }
       let writeExecutor
+      let fullPlaywrightExecutor
       let injectionExecutor
       let evidenceQuarantine
       if (((request.command === 'execute-run' && executeRunMayReachExecutor)
@@ -467,7 +470,9 @@ export async function runCli(
       if ((request.command === 'execute-run' && executeRunMayReachExecutor)
         || request.command === 'finalize-run') {
         const executionIdentity = await resolveProjectIdentity(request.projectRoot)
-        if (request.command === 'execute-run') executionSecretBroker = await RuntimeSecretBroker.open({
+        const fullPlaywright = request.command === 'execute-run'
+          && executeSnapshotUsesFullPlaywright(executeSnapshot)
+        if (request.command === 'execute-run' && !fullPlaywright) executionSecretBroker = await RuntimeSecretBroker.open({
           homeDir: dependencies.homeDir, projectRoot: executionIdentity.realRoot,
         })
         quarantineSecretProvider = await RuntimeQuarantineSecretProvider.createForProject({
@@ -480,7 +485,7 @@ export async function runCli(
           audit: new InMemoryQuarantineAuditLog(),
           now: () => new Date(),
         })
-        if (request.command === 'execute-run') writeExecutor = createProductionWriteBrowserCapability({
+        if (request.command === 'execute-run' && !fullPlaywright) writeExecutor = createProductionWriteBrowserCapability({
           homeDir: dependencies.homeDir,
           projectRoot: request.projectRoot,
           installation,
@@ -488,7 +493,16 @@ export async function runCli(
           secretBroker: executionSecretBroker!,
           writeProduction: writeProduction!.capability,
         })
-        if (request.command === 'execute-run') injectionExecutor = createProductionInjectionBrowserCapability({
+        if (request.command === 'execute-run' && fullPlaywright) {
+          const artifacts = await getArtifactAuthority()
+          fullPlaywrightExecutor = createProductionFullPlaywrightBrowserCapability({
+            homeDir: dependencies.homeDir, projectRoot: request.projectRoot, installation,
+            authorityHost: getAuthorityHost, writeProduction: writeProduction!.capability,
+            freshnessAuthority: artifacts.createTrustedApprovalFreshnessClient(),
+            checkpointSigner: { signDigest: (digest) => artifacts.signDigest(digest) },
+          })
+        }
+        if (request.command === 'execute-run' && !fullPlaywright) injectionExecutor = createProductionInjectionBrowserCapability({
           homeDir: dependencies.homeDir,
           projectRoot: request.projectRoot,
           installation,
@@ -592,6 +606,7 @@ export async function runCli(
           readExecutor: browserCapabilities.read,
         }),
         ...(writeExecutor === undefined ? {} : { writeExecutor }),
+        ...(fullPlaywrightExecutor === undefined ? {} : { fullPlaywrightExecutor }),
         ...(injectionExecutor === undefined ? {} : { injectionExecutor }),
         ...(evidenceQuarantine === undefined ? {} : { evidenceQuarantine }),
         ...(generationFinalizer === undefined ? {} : { generationFinalizer }),
@@ -1360,6 +1375,12 @@ async function readRunWithLease(
     if (snapshot === undefined) throw cliAuthorityError('E2E_RUNTIME_RUN_NOT_FOUND')
     return snapshot
   } finally { await lock.close() }
+}
+
+function executeSnapshotUsesFullPlaywright(snapshot: RuntimeRunSnapshot | undefined): boolean {
+  const content = snapshot?.frozenArtifacts['browser-action-map']?.content
+  return typeof content === 'object' && content !== null && !Array.isArray(content)
+    && (content as Record<string, unknown>).executionProfile === 'full-playwright'
 }
 
 function approvalTypeForWorkflow(

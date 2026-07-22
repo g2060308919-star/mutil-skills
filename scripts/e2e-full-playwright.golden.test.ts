@@ -46,9 +46,11 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())) })
 
 test('真实 Chromium：受控完整 Playwright program 与独立 cleanup session 闭合', async () => {
-  const browser = await chromium.launch({ headless: true })
-  const programContext = await browser.newContext()
-  const cleanupContext = await browser.newContext()
+  const programBrowser = await chromium.launch({ headless: true })
+  const cleanupBrowser = await chromium.launch({ headless: true })
+  expect(programBrowser).not.toBe(cleanupBrowser)
+  const programContext = await programBrowser.newContext()
+  const cleanupContext = await cleanupBrowser.newContext()
   const programPage = await programContext.newPage()
   const cleanupPage = await cleanupContext.newPage()
   const programRequest = await playwrightRequest(programContext)
@@ -91,9 +93,9 @@ test('真实 Chromium：受控完整 Playwright program 与独立 cleanup sessio
       return typeof value === 'function' ? value.bind(target) : value
     },
   })
-  const controlledBrowser = new Proxy(browser, {
+  const controlledBrowser = new Proxy(programBrowser, {
     get(target, property, receiver) {
-      if (property === 'newContext') return async (...args: Parameters<typeof browser.newContext>) => {
+      if (property === 'newContext') return async (...args: Parameters<typeof programBrowser.newContext>) => {
         const context = await target.newContext(...args); await routeContext(context); return context
       }
       const value = Reflect.get(target, property, receiver)
@@ -145,7 +147,7 @@ test('真实 Chromium：受控完整 Playwright program 与独立 cleanup sessio
     const fixture = await readyFixture({ source, cleanupSource, networkRequests: requests,
       programBindings: { page: programPage, context: programContext, browser: controlledBrowser,
         request: controlledRequest(programRequest), expect: playwrightExpect, testInfo: { title: 'Golden' }, state },
-      cleanupBindings: { page: cleanupPage, context: cleanupContext, browser,
+      cleanupBindings: { page: cleanupPage, context: cleanupContext, browser: cleanupBrowser,
         request: controlledRequest(cleanupRequest), expect: playwrightExpect, testInfo: { title: 'Golden cleanup' }, state },
       capture: rawCapture, finalizeGateway: () => {
         publicationAudit = recorder.finalize()
@@ -166,7 +168,8 @@ test('真实 Chromium：受控完整 Playwright program 与独立 cleanup sessio
     expect(result.evidence.some((item) => item.kind === 'gateway-audit')).toBe(true)
   } finally {
     await programRequest.dispose(); await cleanupRequest.dispose()
-    await programContext.close(); await cleanupContext.close(); await browser.close()
+    await programContext.close(); await cleanupContext.close()
+    await programBrowser.close(); await cleanupBrowser.close()
   }
 })
 

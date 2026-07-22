@@ -356,6 +356,21 @@ describe('runFullPlaywrightCase', () => {
       outcomeDigest: recovered.outcome?.signedDigest })
   })
 
+  test.each([
+    ['release', {}], ['complete', {}], ['sign', {}],
+    ['quarantine', { cleanupSource: "return 'dirty'" }],
+    ['markUnknown', { cleanupSource: "return 'dirty'" }],
+  ] as const)('%s 持续故障均返回 terminal-failed，同 attempt 恢复不重跑 program', async (stage, options) => {
+    const fixture = await readyFixture({ ...options, terminalFailures: { [stage]: 2 } })
+    const failed = await runFullPlaywrightCase(fixture.input)
+    expect(failed).toMatchObject({ status: 'failed', effectObservation: 'unknown', retryAllowed: false,
+      finalization: { state: 'terminal-failed', terminalIntentDigest: expect.stringMatching(/^sha256:/) } })
+    const programEvents = [...fixture.events]
+    const recovered = await runFullPlaywrightCase(fixture.input)
+    expect(recovered.finalization?.state).toBe(stage === 'quarantine' || stage === 'markUnknown' ? 'unknown' : 'completed')
+    expect(fixture.events).toEqual(programEvents)
+  })
+
   test.each(['markUnknown', 'quarantine'] as const)(
     '%s 一次性故障恢复；markUnknown 失败也绝不跳过 quarantine', async (stage) => {
       const fixture = await readyFixture({ cleanupSource: "return 'dirty'", terminalFailures: { [stage]: 1 } })

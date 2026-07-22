@@ -306,44 +306,42 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   }))
 
   const terminalErrors: FullPlaywrightErrorSummary[] = []
-  let leaseReceiptDigest: string
-  let unknownObservation: string | undefined
-  if (unknown) {
-    const observation = programTimedOut ? 'full-playwright-program-timeout-effect-unknown'
+  let leaseReceiptDigest: string | undefined
+  let cleanup: FullPlaywrightCleanupResult | undefined
+  let resultDigest = runnerResultDigest
+  const unknownObservation = unknown
+    ? programTimedOut ? 'full-playwright-program-timeout-effect-unknown'
       : gateway.summary.blocked > 0 ? 'full-playwright-gateway-blocked-effect-unknown'
         : 'full-playwright-cleanup-unverified-effect-unknown'
-    unknownObservation = observation
-    leaseReceiptDigest = await retryTerminal('quarantine', terminalErrors, () => session.terminal.quarantineLease({
+    : undefined
+  const settleLease = async (): Promise<string> => unknown
+    ? await retryTerminal('quarantine', terminalErrors, () => session.terminal.quarantineLease({
       leaseId: input.lease.leaseId, fencingToken: input.lease.fencingToken,
-      targetFingerprint: input.lease.targetFingerprint, reason: observation,
+      targetFingerprint: input.lease.targetFingerprint, reason: unknownObservation!,
     }))
-  } else {
-    leaseReceiptDigest = await retryTerminal('release', terminalErrors, () => session.terminal.releaseLease({
+    : await retryTerminal('release', terminalErrors, () => session.terminal.releaseLease({
       leaseId: input.lease.leaseId, fencingToken: input.lease.fencingToken,
       targetFingerprint: input.lease.targetFingerprint, cleanupDigest: cleanupResultDigest,
     }))
-  }
-  if (!DIGEST.test(leaseReceiptDigest)) throw new HostError('E2E_FULL_PLAYWRIGHT_LEASE_RECEIPT_INVALID')
-
-  const cleanup: FullPlaywrightCleanupResult = {
-    status: cleanupStatus, resultDigest: cleanupResultDigest, leaseReceiptDigest,
-  }
-  const binding = ExecutionOutcomeBindingSchema.parse({
-    schemaVersion: '1.0.0', attemptContext: input.attemptContext,
-    grantId: grant.grantId, capabilityId: capability.capabilityId, actionId: program.actionId,
-    attemptId: input.attemptId, reservationId: reservation.reservationId, capability,
-    effect: 'reversible-write', status, effectObservation, runnerResultDigest,
-    gateway: {
-      executionSessionId: gateway.executionSessionId, policyDigest: gateway.policyDigest,
-      approvedRequestSetDigest: approvedRequestSetDigest(capability.requests),
-      received: gateway.summary.received, forwarded: gateway.summary.forwarded, blocked: gateway.summary.blocked,
-    },
-    cleanup: { cleanupPlanId: cleanupPlan.cleanupPlanId, cleanupPlanDigest: capability.cleanupPlanDigest,
-      leaseId: capability.dataLeaseId, ...cleanup },
-    evidenceIds, evidenceSetDigest, completedAt: new Date().toISOString(),
-  } satisfies ExecutionOutcomeBinding)
-  const resultDigest = digestExecutionOutcomeBinding(binding)
   const finish = async (): Promise<FullPlaywrightCaseResult> => {
+    leaseReceiptDigest ??= await settleLease()
+    if (!DIGEST.test(leaseReceiptDigest)) throw new HostError('E2E_FULL_PLAYWRIGHT_LEASE_RECEIPT_INVALID')
+    cleanup ??= { status: cleanupStatus, resultDigest: cleanupResultDigest, leaseReceiptDigest }
+    const binding = ExecutionOutcomeBindingSchema.parse({
+      schemaVersion: '1.0.0', attemptContext: input.attemptContext,
+      grantId: grant.grantId, capabilityId: capability.capabilityId, actionId: program.actionId,
+      attemptId: input.attemptId, reservationId: reservation.reservationId, capability,
+      effect: 'reversible-write', status, effectObservation, runnerResultDigest,
+      gateway: {
+        executionSessionId: gateway.executionSessionId, policyDigest: gateway.policyDigest,
+        approvedRequestSetDigest: approvedRequestSetDigest(capability.requests),
+        received: gateway.summary.received, forwarded: gateway.summary.forwarded, blocked: gateway.summary.blocked,
+      },
+      cleanup: { cleanupPlanId: cleanupPlan.cleanupPlanId, cleanupPlanDigest: capability.cleanupPlanDigest,
+        leaseId: capability.dataLeaseId, ...cleanup },
+      evidenceIds, evidenceSetDigest, completedAt: new Date().toISOString(),
+    } satisfies ExecutionOutcomeBinding)
+    resultDigest = digestExecutionOutcomeBinding(binding)
     const outcome = await retryTerminal('sign', terminalErrors, async () =>
       ExecutionOutcomeReceiptSchema.parse(session.issueOutcome(binding)))
     const authorityReceiptDigest = unknown
@@ -368,19 +366,22 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
       resultDigest, outcome, finalization,
     }
   }
-  try { return await finish() } catch (error) {
-    terminalErrors.push(errorSummary(error))
-    let attempts = pendingFinalizations.get(input.session as object)
-    if (!attempts) { attempts = new Map(); pendingFinalizations.set(input.session as object, attempts) }
-    attempts.set(input.attemptId, finish)
-    return {
+  const recover = async (): Promise<FullPlaywrightCaseResult> => {
+    try { return await finish() } catch (error) {
+      terminalErrors.push(errorSummary(error))
+      let attempts = pendingFinalizations.get(input.session as object)
+      if (!attempts) { attempts = new Map(); pendingFinalizations.set(input.session as object, attempts) }
+      attempts.set(input.attemptId, recover)
+      return {
       caseId: program.caseId, stepId: program.stepId, actionId: program.actionId,
       status: 'failed', effectObservation: 'unknown', retryAllowed: false,
-      reservationId: reservation.reservationId, evidence, cleanup, resultDigest,
+      reservationId: reservation.reservationId, evidence, ...(cleanup ? { cleanup } : {}), resultDigest,
       finalization: { state: 'terminal-failed', terminalIntentDigest: runnerResultDigest,
-        leaseReceiptDigest, errors: terminalErrors },
+        ...(leaseReceiptDigest ? { leaseReceiptDigest } : {}), errors: terminalErrors },
+      }
     }
   }
+  return await recover()
 }
 
 async function safetyPrecondition(input: RunFullPlaywrightCaseInput): Promise<{
