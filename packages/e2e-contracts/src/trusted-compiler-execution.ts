@@ -5,6 +5,10 @@ const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 
 export const TrustedCompilerExecutionFactSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
+  // 1.0.0 历史事实缺少此字段，读取时保持兼容；所有新执行事实必须由 Runtime 显式写入。
+  executionProfile: z.enum([
+    'trusted-read-only', 'trusted-reversible-write', 'production-isolated', 'full-playwright',
+  ]).optional(),
   runId: SafeIdSchema,
   compilerInputDigest: DigestSchema,
   sourceSetDigest: DigestSchema,

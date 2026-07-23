@@ -6,21 +6,34 @@ import {
   createAuthorityInjectionRpcClient,
   createAuthorityMaintenanceRpcClient,
   createAuthorityReadRpcClient,
+  type TrustedApprovalFreshnessClient,
 } from '@mutil-skills/e2e-authority'
-import { PlaywrightPageAdapter, runBrowserPreflight } from '@mutil-skills/e2e-playwright-runtime'
+import {
+  PlaywrightPageAdapter,
+  createRuntimeHostFullPlaywrightSession,
+  runBrowserPreflight,
+  runFullPlaywrightCase,
+  type FullPlaywrightEvidenceStage,
+} from '@mutil-skills/e2e-playwright-runtime'
 import {
   canonicalizeJson,
+  digestBytes,
   deriveExecutionResultId,
   digestCleanupPlanDefinition,
   digestRuntimeHttpResponseBody,
   digestText,
   E2EError,
+  FullPlaywrightProgramSchema,
   SignedGrantSchema,
   type RuntimeFixedHttpRequest,
   type RuntimeHttpReadProbe,
   type SignedInjectionGrant,
   type SignedGrant,
   type CapabilityReservation,
+  type ApprovalFreshnessReceipt,
+  type ArtifactAuthorityVerifierMaterial,
+  type ArtifactSignature,
+  type FullPlaywrightProgram,
 } from '@mutil-skills/e2e-contracts'
 import { InjectionGateway, LocalGatewayAuditSigner, ReversibleWriteGateway,
   digestBinaryHttpPayload, type TrustedGatewayPublicationAuditRecorder } from '@mutil-skills/e2e-gateway'
@@ -61,7 +74,12 @@ import {
   type RuntimeInjectionExecutorCapability,
   type RuntimeReadExecutorCapability,
   type RuntimeWriteExecutorCapability,
+  authorizeRuntimeFullPlaywrightExecutor,
+  type RuntimeFullPlaywrightExecutorCapability,
 } from './trusted-action-runner.js'
+import { projectRuntimeFullPlaywrightSnapshot } from './runtime-full-playwright-projector.js'
+import { RuntimeFullPlaywrightCheckpointStore } from './runtime-full-playwright-checkpoint.js'
+import type { RuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
 import { projectRuntimeWriteSnapshot } from './runtime-write-projector.js'
 import { executeSecretTemplateAtBridge, type SecretTemplateBroker } from './secret-template.js'
 import { GatewayCleanupTransport, authorizeGatewayCleanupTransport } from './gateway-cleanup-transport.js'
@@ -71,6 +89,10 @@ import {
   type RuntimeWriteProductionCapability,
 } from './runtime-write-production.js'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { expect as playwrightExpect, type APIRequestContext, type Browser, type BrowserContext,
+  type Route } from '@playwright/test'
 
 export interface RuntimeBrowserInstallationOperations {
   readSelection(homeDir: string): Promise<BrowserSelection | undefined>
@@ -693,7 +715,7 @@ export function createProductionWriteBrowserCapability(input: {
           actionId, observations, matches, cleanupStatus: cleanup.status,
           screenshot: await new PlaywrightPageAdapter(browser!.page).screenshot(),
         })
-        const outcome = await gateway!.writeLifecycle.finalizeWriteOutcome(
+        const terminal = await gateway!.writeLifecycle.finalizeWriteOutcome(
           projection.capability.capabilityId,
           {
             status, effectObservation, runnerResultDigest: resultDigest,
@@ -701,21 +723,12 @@ export function createProductionWriteBrowserCapability(input: {
             cleanup, evidenceIds: [writeEvidence.evidenceId], completedAt: new Date().toISOString(),
           },
         )
+        const outcome = terminal.outcome
         const gatewayAudit = await gateway!.handle.finalize()
         if (!gatewayAuditVerifierMaterial || !executionOutcomeVerifierMaterial) {
           throw writeWiringError('E2E_RUNTIME_WRITE_VERIFIER_MATERIAL_MISSING')
         }
-        const reservationReceiptDigest = digestText(
-          'authority-reservation-terminal-receipt/v1', canonicalizeJson({
-            reservationId: outcome.reservationId,
-            grantId: projection.grant.grantId,
-            capabilityId: projection.capability.capabilityId,
-            actionId,
-            attemptId,
-            terminalStatus: 'completed',
-            outcomeDigest: outcome.signedDigest,
-          }),
-        )
+        const reservationReceiptDigest = terminal.authorityReceiptDigest
         return {
           caseId, actionId, status, effectObservation, resultDigest,
           gatewayCommit: {
@@ -758,6 +771,595 @@ export function createProductionWriteBrowserCapability(input: {
         async () => maintenance.destroy(),
       ])
     }
+  })
+}
+
+/** Production full-playwright: real Gateway proxy plus independent program/cleanup Chromium lifecycles. */
+export function createProductionFullPlaywrightBrowserCapability(input: {
+  homeDir: string
+  browserHomeDir?: string
+  projectRoot: string
+  installation: RuntimeInstallation
+  authorityHost(): Promise<RuntimeAuthorityHost>
+  writeProduction: RuntimeWriteProductionCapability
+  freshnessAuthority: TrustedApprovalFreshnessClient
+  checkpointSigner: { signDigest(digest: string): ArtifactSignature }
+  checkpointAuthority: {
+    material: ArtifactAuthorityVerifierMaterial
+    expectedPublicKeyDigest: string
+  }
+  secretBroker?: SecretTemplateBroker
+}): RuntimeFullPlaywrightExecutorCapability {
+  const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
+  return authorizeRuntimeFullPlaywrightExecutor(async ({ snapshot, attemptId, projection }) => {
+    const writeAttempt = snapshot.writeAttempts?.[attemptId]
+    if (writeAttempt === undefined || writeAttempt.state !== 'prepared') {
+      throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_ATTEMPT_NOT_PREPARED')
+    }
+    if (projectRuntimeFullPlaywrightSnapshot(snapshot).sourceSetDigest !== projection.sourceSetDigest) {
+      throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_PROJECTION_CHANGED')
+    }
+    const renderedBodies = await renderRuntimeFullPlaywrightRequestBodies(
+      snapshot.runId, projection.program, input.secretBroker,
+    )
+    try {
+    const ownedResourceLifecycle = createRuntimeWriteOwnedResourceLifecycle(
+      input.writeProduction, writeAttempt.ownerMarker,
+    )
+    const authorityHost = await input.authorityHost()
+    const activated = await activateRuntimeGrant(authorityHost, projection.grant)
+    let authorityPublicKeyDigest = ''
+    const authority = activated.consumeConnection((consumed) => {
+      authorityPublicKeyDigest = consumed.verifierMaterial.publicKeyDigest
+      return createAuthorityExecutionRpcClients({
+        credential: consumed.credential, verifierMaterial: consumed.verifierMaterial,
+        expectedPublicKeyDigest: consumed.verifierMaterial.publicKeyDigest,
+        transport: createAuthenticatedRpcHttpTransport(consumed.endpoint),
+        approvalBinding: consumed.approvalBinding,
+      })
+    })
+    const maintenance = activated.consumeConnection((consumed) =>
+      createAuthorityMaintenanceRpcClient({
+        credential: consumed.credential, verifierMaterial: consumed.verifierMaterial,
+        expectedPublicKeyDigest: consumed.verifierMaterial.publicKeyDigest,
+        transport: createAuthenticatedRpcHttpTransport(consumed.endpoint),
+        approvalBinding: consumed.approvalBinding,
+      }))
+    const freshnessReceipt = snapshot.trustedExecutionFacts['approval-freshness-receipt'] as ApprovalFreshnessReceipt
+    const freshnessAuthority = input.freshnessAuthority
+    const approvedRequests = projection.program.networkRequests
+      .slice().sort((left, right) => left.expectedOrder - right.expectedOrder)
+      .map((request) => {
+        const body = renderedBodies.get(request.intentId)
+        return ({
+        actionId: projection.actionId, capabilityId: projection.capability.capabilityId,
+        requestId: request.intentId, method: request.method,
+        url: canonicalFullPlaywrightIntentUrl(request), maxUses: request.maxRequests,
+        signedBodyDigest: digestText('runtime-http-signed-payload/v1', canonicalizeJson(request.payload)),
+        headers: request.headers ?? [], redirectRequestIds: [], channel: 'http' as const,
+        ...(body === undefined ? {} : {
+          resolvedBodyDigest: digestText('gateway-request-body/v1', body.bytes.toString('base64url')),
+          contentType: body.contentType,
+        }),
+        behavior: { kind: 'pass-through' as const },
+      }) })
+    const projectedRules = projectGatewayRules({ runId: snapshot.runId, approvedRequests }).rules
+    const correlations = projectedRules.map((rule) => ({
+      requestId: rule.requestId!, ruleId: rule.ruleId, stepOrdinal: rule.stepOrdinal,
+      method: rule.method, url: rule.url, channel: 'http' as const, bodyDigest: rule.bodyDigest,
+      actionId: rule.actionId, capabilityId: rule.capabilityId, signedBodyDigest: rule.signedBodyDigest!,
+      redirectRequestIds: [] as string[], navigation: ['GET', 'HEAD'].includes(rule.method),
+      maxUses: rule.maxUses, headers: { ...rule.requestHeaders },
+      ...(renderedBodies.get(rule.requestId!) === undefined ? {} : {
+        body: renderedBodies.get(rule.requestId!),
+      }),
+    }))
+    let gateway: Awaited<ReturnType<typeof startGatewayProxyHostForRuntime>> | undefined
+    let programBrowser: Awaited<ReturnType<ControlledBrowserHost['open']>> | undefined
+    let cleanupBrowser: Awaited<ReturnType<ControlledBrowserHost['open']>> | undefined
+    let gatewayAuditVerifierMaterial: Record<string, unknown> | undefined
+    let executionOutcomeVerifierMaterial: Record<string, unknown> | undefined
+    let operationError: unknown
+    let checkpointStore: RuntimeFullPlaywrightCheckpointStore | undefined
+    let checkpointBindingDigest: string | undefined
+    let checkpointTerminalIntentDigest: string | undefined
+    let publishedGatewayAudit: Record<string, unknown> | undefined
+    const captured = new Map<FullPlaywrightEvidenceStage, { screenshot: Uint8Array; dom: Uint8Array }>()
+    try {
+      checkpointBindingDigest = digestText('runtime-full-playwright-checkpoint-binding/v1', canonicalizeJson({
+        attemptId, runId: snapshot.runId, assetId: snapshot.assetId, generationId: projection.generationId,
+        prdRevision: projection.grant.subject.prdRevision, actionId: projection.actionId,
+        capabilityId: projection.capability.capabilityId, programDigest: projection.program.sourceDigest,
+        cleanupProgramDigest: projection.program.cleanupSourceDigest, sourceSetDigest: projection.sourceSetDigest,
+        requests: projection.program.networkRequests, authorityPublicKeyDigest,
+        gatewayPolicyDigest: projectGatewayRules({ runId: snapshot.runId, approvedRequests }).policyDigest,
+      }))
+      checkpointStore = RuntimeFullPlaywrightCheckpointStore.open({
+        statePath: join(runtimeLayout(input.homeDir).state, 'full-playwright-terminal.sqlite'),
+        forbiddenRoots: [input.projectRoot], signDigest: (digest) => input.checkpointSigner.signDigest(digest),
+        artifactAuthority: input.checkpointAuthority,
+      })
+      checkpointTerminalIntentDigest = digestText('runtime-full-playwright-terminal-intent/v1', canonicalizeJson({
+        attemptId, bindingDigest: checkpointBindingDigest, actionId: projection.actionId,
+        capabilityId: projection.capability.capabilityId,
+      }))
+      const recovered = await checkpointStore.find(attemptId, checkpointBindingDigest)
+      if (recovered) {
+        const output = recovered.recovery.output
+        const evidenceArtifacts = recovered.recovery.evidenceArtifacts
+        if (output && typeof output === 'object' && !Array.isArray(output)
+          && evidenceArtifacts && typeof evidenceArtifacts === 'object' && !Array.isArray(evidenceArtifacts)) {
+          return await restoreRuntimeFullPlaywrightRecoveryOutput({
+            stateRoot: runtimeLayout(input.homeDir).state, output: output as Record<string, unknown>,
+            evidenceArtifacts: evidenceArtifacts as never,
+          })
+        }
+        const recovery = recovered.recovery
+        const material = plainRecord(recovery.material) ? recovery.material : {}
+        const terminalInput = plainRecord(material.terminalInput) ? material.terminalInput : undefined
+        const signedOutcome = plainRecord(material.outcome) ? material.outcome : undefined
+        const reservationQuery = { attemptId, grantId: projection.grant.grantId,
+          capabilityId: projection.capability.capabilityId, actionId: projection.actionId }
+        const reservation = await maintenance.queryReservation(reservationQuery)
+        if (reservation === undefined) throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_RECOVERY_RESERVATION_MISSING')
+        const recoveryObservation = `full-playwright-checkpoint-recovery:${recovered.checkpointDigest}`
+        const authorityReceiptDigest = reservation.status === 'completed' && reservation.outcomeDigest
+          ? await maintenance.completeReservation(reservationQuery, reservation.outcomeDigest)
+          : await maintenance.markReservationUnknown(reservationQuery, recoveryObservation)
+        const lease = await maintenance.queryLease(projection.capability.dataLeaseId,
+          projection.capability.fencingToken, projection.targetFingerprint)
+        const cleanupFromTerminal = terminalInput && plainRecord(terminalInput.cleanup)
+          ? terminalInput.cleanup : undefined
+        const leaseReceiptDigest = lease.status === 'released' && cleanupFromTerminal
+          && typeof cleanupFromTerminal.resultDigest === 'string'
+          ? await maintenance.releaseLease({ leaseId: lease.leaseId, fencingToken: lease.fencingToken,
+            targetFingerprint: projection.targetFingerprint, cleanupDigest: cleanupFromTerminal.resultDigest })
+          : await maintenance.quarantineLease({ leaseId: lease.leaseId, fencingToken: lease.fencingToken,
+            targetFingerprint: projection.targetFingerprint, reason: recoveryObservation })
+        const completed = reservation.status === 'completed'
+        const resultDigest = reservation.outcomeDigest ?? recovered.terminalIntentDigest
+        const recoveredOutput: RuntimeWriteExecutionOutput = {
+          caseId: projection.caseId, actionId: projection.actionId,
+          status: completed && terminalInput && typeof terminalInput.status === 'string'
+            ? terminalInput.status as RuntimeWriteExecutionOutput['status'] : 'failed',
+          effectObservation: completed && terminalInput && typeof terminalInput.effectObservation === 'string'
+            ? terminalInput.effectObservation as RuntimeWriteExecutionOutput['effectObservation'] : 'unknown',
+          resultDigest,
+          gatewayCommit: { reservationId: reservation.reservationId, reservationReceiptDigest: authorityReceiptDigest,
+            outcomeReceiptDigest: resultDigest, committed: true },
+          cleanup: completed && cleanupFromTerminal
+            && typeof cleanupFromTerminal.status === 'string' && typeof cleanupFromTerminal.resultDigest === 'string'
+            ? { status: cleanupFromTerminal.status as RuntimeWriteExecutionOutput['cleanup']['status'],
+              resultDigest: cleanupFromTerminal.resultDigest, leaseReceiptDigest }
+            : { status: 'unknown', resultDigest: digestText('runtime-full-playwright-recovery-cleanup/v1',
+              canonicalizeJson({ attemptId, checkpointDigest: recovered.checkpointDigest })), leaseReceiptDigest },
+          finalizationFacts: {
+            executionGrant: projection.grant as unknown as Record<string, unknown>,
+            gatewayAudit: plainRecord(material.publishedGateway) ? material.publishedGateway
+              : { recovery: true, stage: recovery.phase, checkpointDigest: recovered.checkpointDigest,
+                ...(plainRecord(material.gateway) ? { observation: material.gateway } : {}) },
+            cleanup: cleanupFromTerminal ?? { status: 'unknown', leaseReceiptDigest },
+            executionOutcomeReceipt: signedOutcome ?? { recovery: true, reservationId: reservation.reservationId,
+              status: reservation.status, outcomeDigest: reservation.outcomeDigest ?? null },
+            executionOutcomeVerifierMaterial: plainRecord(recovery.executionOutcomeVerifierMaterial)
+              ? recovery.executionOutcomeVerifierMaterial : { recovery: true },
+            gatewayAuditVerifierMaterial: plainRecord(recovery.gatewayAuditVerifierMaterial)
+              ? recovery.gatewayAuditVerifierMaterial : { recovery: true },
+            browserMeasurements: plainRecord(recovery.browserMeasurements)
+              ? recovery.browserMeasurements : { recovery: true },
+            isolationMeasurements: { recoveryCheckpointDigest: recovered.checkpointDigest },
+          },
+        }
+        await checkpointStore.put({ attemptId, terminalIntentDigest: checkpointTerminalIntentDigest,
+          bindingDigest: checkpointBindingDigest, terminal: completed ? 'completed' : 'unknown',
+          recovery: { ...recovery, phase: completed ? 'recovered-completed' : 'recovered-unknown',
+            output: recoveredOutput, authorityReceiptDigest, leaseReceiptDigest } })
+        if (evidenceArtifacts && plainRecord(evidenceArtifacts)) {
+          return await restoreRuntimeFullPlaywrightRecoveryOutput({ stateRoot: runtimeLayout(input.homeDir).state,
+            output: recoveredOutput as unknown as Record<string, unknown>, evidenceArtifacts: evidenceArtifacts as never })
+        }
+        return recoveredOutput
+      }
+      await checkpointStore.put({ attemptId, terminalIntentDigest: checkpointTerminalIntentDigest,
+        bindingDigest: checkpointBindingDigest, terminal: 'terminal-failed',
+        recovery: { phase: 'prepared', actionId: projection.actionId, capabilityId: projection.capability.capabilityId,
+          lease: { leaseId: projection.capability.dataLeaseId, fencingToken: projection.capability.fencingToken,
+            targetFingerprint: projection.targetFingerprint }, requests: projection.program.networkRequests } })
+      gateway = await startGatewayProxyHostForRuntime({
+        runId: snapshot.runId, mode: 'real-environment', authorityRoot: runtimeLayout(input.homeDir).authority,
+        approvedRequests,
+        ownedResource: { markerPath: join(runtimeLayout(input.homeDir).state, snapshot.runId, 'gateway',
+          `full-${writeAttempt.ownerMarker.markerDigest.slice(7, 31)}.owner.json`), lifecycle: ownedResourceLifecycle },
+        policyObjects: { factory: ({ signer, recorder }) => {
+          gatewayAuditVerifierMaterial = signer.exportVerifierMaterial() as unknown as Record<string, unknown>
+          executionOutcomeVerifierMaterial = signer.exportExecutionOutcomeVerifierMaterial() as unknown as Record<string, unknown>
+          return { writeGateways: { [projection.capability.capabilityId]: new ReversibleWriteGateway({
+            grant: projection.grant, currentSubject: projection.grant.subject, capability: projection.capability,
+            attemptId, attemptContext: { assetId: snapshot.assetId, generationId: projection.generationId,
+              prdRevision: projection.grant.subject.prdRevision, runId: snapshot.runId, caseId: projection.caseId },
+            authority: authority.gatewayAuthority, leaseAuthority: authority.lease, recorder, outcomeSigner: signer,
+            resolvedTemplatePayloadDigests: Object.fromEntries(projection.program.networkRequests
+              .filter((request) => request.payload.kind === 'template')
+              .map((request) => [request.intentId,
+                digestBinaryHttpPayload(renderedBodies.get(request.intentId)!.bytes)])),
+          }) } }
+        } },
+      })
+      const installation = await browserInstallation()
+      programBrowser = await new ControlledBrowserHost().open({ homeDir: input.homeDir,
+        runId: `${snapshot.runId}-PROGRAM`, installation, gateway, ownedResourceLifecycle })
+      cleanupBrowser = await new ControlledBrowserHost().open({ homeDir: input.homeDir,
+        runId: `${snapshot.runId}-CLEANUP`, installation, gateway, ownedResourceLifecycle })
+      const programRawBrowser = programBrowser.context.browser()
+      const cleanupRawBrowser = cleanupBrowser.context.browser()
+      if (!programRawBrowser || !cleanupRawBrowser || programRawBrowser === cleanupRawBrowser) {
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_BROWSER_LIFECYCLE_NOT_INDEPENDENT')
+      }
+      const state = Object.create(null) as Record<string, unknown>
+      const programBindings = fullPlaywrightBindings(programRawBrowser, programBrowser.context,
+        programBrowser.page, gateway, correlations, state, 'program')
+      const cleanupBindings = fullPlaywrightBindings(cleanupRawBrowser, cleanupBrowser.context,
+        cleanupBrowser.page, gateway, correlations, state, 'cleanup')
+      const gatewaySessionId = `GW-${gateway.handle.measurement.gatewaySessionMeasurementDigest.slice(7, 31)}`
+      const assembled = createRuntimeHostFullPlaywrightSession({
+        authorityRpcPublicKeyDigest: authorityPublicKeyDigest,
+        binding: { executionProfile: 'full-playwright', assetId: snapshot.assetId,
+          generationId: projection.generationId, prdRevision: projection.grant.subject.prdRevision,
+          runId: snapshot.runId, caseId: projection.caseId, stepId: projection.stepId,
+          actionId: projection.actionId, capabilityId: projection.capability.capabilityId,
+          programDigest: projection.program.sourceDigest, cleanupProgramDigest: projection.program.cleanupSourceDigest,
+          cleanupPlanDigest: digestCleanupPlanDefinition(projection.cleanupPlan),
+          leaseId: projection.capability.dataLeaseId, fencingToken: projection.capability.fencingToken,
+          targetFingerprint: projection.targetFingerprint,
+          approvedRequestSetDigest: digestText('execution-outcome-approved-request-set/v1',
+            canonicalizeJson(projection.program.networkRequests)),
+          gatewayPolicyDigest: gateway.handle.measurement.policyDigest, executionSessionId: gatewaySessionId,
+          sourceSetDigest: projection.sourceSetDigest,
+          programBrowserSessionId: `BROWSER-PROGRAM-${randomUUID()}`,
+          cleanupBrowserSessionId: `BROWSER-CLEANUP-${randomUUID()}` },
+        programBindings, cleanupBindings,
+        reserveCapability: async () => await gateway!.writeLifecycle.reserveWrite(
+          projection.capability.capabilityId,
+        ),
+        capture: async (stage) => {
+          const session = stage === 'cleanup' ? cleanupBrowser! : programBrowser!
+          const adapter = new PlaywrightPageAdapter(session.page)
+          const screenshot = await adapter.screenshot()
+          const dom = Buffer.from(await adapter.domSnapshot(), 'utf8')
+          captured.set(stage, { screenshot, dom })
+          const url = session.page.url()
+          return [
+            runtimeFullEvidence(stage, 'screenshot', screenshot), runtimeFullEvidence(stage, 'dom', dom),
+            runtimeFullEvidence(stage, 'url', Buffer.from(url, 'utf8')),
+            { ...runtimeFullEvidence(stage, 'trace', Buffer.from(`trace:${stage}`, 'utf8')),
+              references: [`runtime-trace://${snapshot.runId}/${attemptId}/${stage}`] },
+          ]
+        },
+        retireProgram: async () => await programBrowser!.close(),
+        retireCleanup: async () => await cleanupBrowser!.close(),
+        observeEffect: () => gateway!.handle.auditSummary().forwarded > 0 ? 'applied' : 'proven-not-applied',
+        freezeGateway: async () => {
+          await gateway!.handle.freeze()
+          const summary = gateway!.handle.auditSummary()
+          return { executionSessionId: gatewaySessionId, policyDigest: gateway!.handle.measurement.policyDigest,
+            summary: { received: summary.received, forwarded: summary.forwarded, blocked: summary.blocked,
+              byIntent: { ...summary.byIntent } } }
+        },
+        publishGateway: async () => {
+          const publication = await gateway!.handle.finalize()
+          publishedGatewayAudit = publication as unknown as Record<string, unknown>
+          return { auditDigest: digestText('gateway-publication-audit/v1', canonicalizeJson(publication)) }
+        },
+        checkpoint: async (stage, material) => {
+          const recoverableEvidence = captured.get('after') ?? captured.get('cleanup') ?? captured.get('before')
+          const evidenceArtifacts = recoverableEvidence === undefined ? undefined
+            : await persistRuntimeFullPlaywrightRecoveryEvidence({
+              stateRoot: runtimeLayout(input.homeDir).state, attemptId, evidence: recoverableEvidence,
+            })
+          await checkpointStore!.put({ attemptId, terminalIntentDigest: checkpointTerminalIntentDigest!,
+            bindingDigest: checkpointBindingDigest!, terminal: 'terminal-failed',
+            recovery: { phase: stage, material,
+              ...(evidenceArtifacts === undefined ? {} : { evidenceArtifacts }),
+              gatewayAuditVerifierMaterial: gatewayAuditVerifierMaterial ?? null,
+              executionOutcomeVerifierMaterial: executionOutcomeVerifierMaterial ?? null,
+              browserMeasurements: { program: programBrowser!.measurement, cleanup: cleanupBrowser!.measurement } } })
+        },
+        terminal: {
+          releaseLease: async (value) => await maintenance.releaseLease(value),
+          quarantineLease: async (value) => await maintenance.quarantineLease(value),
+          finalizeWriteOutcome: async (value) => await gateway!.writeLifecycle.finalizeWriteOutcome(
+            projection.capability.capabilityId, value,
+          ),
+          markWriteUnknownWithOutcome: async (value, observation) =>
+            await gateway!.writeLifecycle.markUnknownWithOutcome(
+              projection.capability.capabilityId, value, observation,
+            ),
+          markWriteUnknown: async (observation) => await gateway!.writeLifecycle.markUnknown(
+            projection.capability.capabilityId, observation,
+          ),
+        },
+      })
+      const result = await getControlledBrowserSessionBinding(programBrowser).executeWithCorrelations(correlations,
+        async () => await getControlledBrowserSessionBinding(cleanupBrowser!).executeWithCorrelations(correlations,
+          async () => await runFullPlaywrightCase({ program: projection.program,
+            cleanupPlan: projection.cleanupPlan, attemptId,
+            attemptContext: { assetId: snapshot.assetId, generationId: projection.generationId,
+              prdRevision: projection.grant.subject.prdRevision, runId: snapshot.runId, caseId: projection.caseId },
+            authorization: { grant: projection.grant, currentSubject: projection.grant.subject,
+              freshnessReceipt, freshnessAuthority, authority: authority.writeApproval },
+            lease: { leaseId: projection.capability.dataLeaseId, fencingToken: projection.capability.fencingToken,
+              targetFingerprint: projection.targetFingerprint, authority: authority.lease },
+            runtime: assembled.runtime, session: assembled.session })))
+      if (!result.reservationId || !result.cleanup || !result.finalization?.leaseReceiptDigest) {
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TERMINAL_RECOVERY_REQUIRED')
+      }
+      const after = captured.get('after') ?? captured.get('cleanup')
+      if (!after || !publishedGatewayAudit || !gatewayAuditVerifierMaterial || !executionOutcomeVerifierMaterial) {
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_FINALIZATION_FACTS_MISSING')
+      }
+      const output: RuntimeWriteExecutionOutput = { caseId: result.caseId, actionId: result.actionId,
+        status: result.status === 'safety-blocked' ? 'safety-blocked' : result.status,
+        effectObservation: result.effectObservation, resultDigest: result.resultDigest,
+        gatewayCommit: { reservationId: result.reservationId,
+          reservationReceiptDigest: result.finalization.authorityReceiptDigest ?? result.finalization.terminalIntentDigest,
+          outcomeReceiptDigest: result.outcome?.signedDigest ?? result.resultDigest, committed: true as const },
+        cleanup: result.cleanup, evidence: { screenshot: after.screenshot, dom: after.dom },
+        finalizationFacts: { executionGrant: projection.grant as unknown as Record<string, unknown>,
+          gatewayAudit: publishedGatewayAudit, cleanup: result.cleanup as unknown as Record<string, unknown>,
+          executionOutcomeReceipt: (result.outcome ?? { terminal: result.finalization }) as unknown as Record<string, unknown>,
+          executionOutcomeVerifierMaterial, gatewayAuditVerifierMaterial,
+          browserMeasurements: { program: programBrowser.measurement, cleanup: cleanupBrowser.measurement },
+          isolationMeasurements: { programBrowserMeasurementDigest: programBrowser.measurement.browserMeasurementDigest,
+            cleanupBrowserMeasurementDigest: cleanupBrowser.measurement.browserMeasurementDigest } } }
+      const { evidence: _ephemeralEvidence, ...durableOutput } = output
+      const evidenceArtifacts = await persistRuntimeFullPlaywrightRecoveryEvidence({
+        stateRoot: runtimeLayout(input.homeDir).state, attemptId, evidence: output.evidence!,
+      })
+      await checkpointStore.put({ attemptId, terminalIntentDigest: checkpointTerminalIntentDigest,
+        bindingDigest: checkpointBindingDigest, terminal: result.finalization.state,
+        recovery: { phase: 'completed', output: durableOutput, evidenceArtifacts,
+          actualTerminalIntentDigest: result.finalization.terminalIntentDigest,
+          authorityReceiptDigest: result.finalization.authorityReceiptDigest,
+          leaseReceiptDigest: result.finalization.leaseReceiptDigest,
+          outcomeReceiptDigest: result.finalization.outcomeReceiptDigest } })
+      return output
+    } catch (error) {
+      operationError = error
+      if (checkpointStore) {
+        const code = safeWriteErrorCode(error)
+        const bindingDigest = checkpointBindingDigest ?? digestText('runtime-full-playwright-failed-binding/v1', canonicalizeJson({
+          attemptId, runId: snapshot.runId, actionId: projection.actionId, sourceSetDigest: projection.sourceSetDigest,
+          authorityPublicKeyDigest,
+        }))
+        await checkpointStore.put({ attemptId,
+          terminalIntentDigest: checkpointTerminalIntentDigest ?? digestText(
+            'runtime-full-playwright-infrastructure-unknown/v1', canonicalizeJson({
+              attemptId, actionId: projection.actionId, code })), bindingDigest, terminal: 'terminal-failed',
+          recovery: { phase: 'infrastructure-unknown', code } }).catch(() => undefined)
+      }
+      throw error
+    } finally {
+      await settleRuntimeBrowserResources(operationError, [
+        ...(programBrowser ? [async () => await programBrowser!.close()] : []),
+        ...(cleanupBrowser ? [async () => await cleanupBrowser!.close()] : []),
+        ...(gateway ? [async () => await gateway!.handle.close()] : []),
+        async () => authority.destroy(), async () => maintenance.destroy(),
+        ...(checkpointStore ? [async () => checkpointStore!.close()] : []),
+      ])
+    }
+    } finally {
+      for (const body of renderedBodies.values()) body.bytes.fill(0)
+    }
+  })
+}
+
+export async function renderRuntimeFullPlaywrightRequestBodies(
+  runId: string,
+  candidateProgram: FullPlaywrightProgram,
+  broker?: SecretTemplateBroker,
+): Promise<Map<string, { bytes: Buffer; contentType: string }>> {
+  const program = FullPlaywrightProgramSchema.parse(candidateProgram)
+  const materials = new Map((program.networkRequestBodies ?? []).map((body) => [body.intentId, body]))
+  const rendered = new Map<string, { bytes: Buffer; contentType: string }>()
+  try {
+    for (const request of program.networkRequests.slice().sort((left, right) => left.expectedOrder - right.expectedOrder)) {
+      if (request.payload.kind === 'no-body') continue
+      const material = materials.get(request.intentId)
+      if (material === undefined || material.kind !== request.payload.kind) {
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_BODY_MATERIAL_REQUIRED')
+      }
+      if (material.kind === 'json') {
+        rendered.set(request.intentId, {
+          bytes: Buffer.from(material.canonicalJson, 'utf8'), contentType: 'application/json',
+        })
+      } else if (material.kind === 'binary') {
+        rendered.set(request.intentId, {
+          bytes: Buffer.from(material.bodyBase64Url, 'base64url'), contentType: material.contentType,
+        })
+      } else {
+        if (broker === undefined) throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_SECRET_BROKER_REQUIRED')
+        await executeSecretTemplateAtBridge({ runId, template: material.segments, broker,
+          dispatch: async (payload) => {
+            rendered.set(request.intentId, {
+              bytes: Buffer.from(payload), contentType: material.contentType,
+            })
+          } })
+      }
+    }
+    return rendered
+  } catch (error) {
+    for (const body of rendered.values()) body.bytes.fill(0)
+    throw error
+  }
+}
+
+interface RuntimeFullPlaywrightRecoveryArtifactRef {
+  kind: 'screenshot' | 'dom'
+  relativePath: string
+  byteLength: number
+  digest: string
+}
+
+export async function persistRuntimeFullPlaywrightRecoveryEvidence(input: {
+  stateRoot: string
+  attemptId: string
+  evidence: { screenshot: Uint8Array; dom: Uint8Array }
+}): Promise<{ screenshot: RuntimeFullPlaywrightRecoveryArtifactRef; dom: RuntimeFullPlaywrightRecoveryArtifactRef }> {
+  if (!/^[A-Za-z0-9._:-]{1,256}$/.test(input.attemptId)) {
+    throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_RECOVERY_ATTEMPT_INVALID')
+  }
+  const directoryName = digestText('runtime-full-playwright-recovery-directory/v1', input.attemptId).slice(7, 39)
+  const relativeDirectory = join('full-playwright-recovery', directoryName)
+  const directory = join(input.stateRoot, relativeDirectory)
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  const persist = async (kind: 'screenshot' | 'dom', bytes: Uint8Array) => {
+    const relativePath = join(relativeDirectory, `${kind}.bin`)
+    const path = join(input.stateRoot, relativePath)
+    const digest = digestBytes(`runtime-full-playwright-recovery-${kind}/v1`, bytes)
+    try {
+      await writeFile(path, bytes, { flag: 'wx', mode: 0o600 })
+    } catch (error) {
+      if (!nodeErrorCode(error, 'EEXIST')) throw error
+      const existing = await readFile(path)
+      try {
+        if (existing.byteLength !== bytes.byteLength
+          || digestBytes(`runtime-full-playwright-recovery-${kind}/v1`, existing) !== digest) {
+          throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_RECOVERY_ARTIFACT_CONFLICT')
+        }
+      } finally { existing.fill(0) }
+    }
+    return { kind, relativePath, byteLength: bytes.byteLength, digest }
+  }
+  return { screenshot: await persist('screenshot', input.evidence.screenshot),
+    dom: await persist('dom', input.evidence.dom) }
+}
+
+export async function restoreRuntimeFullPlaywrightRecoveryOutput(input: {
+  stateRoot: string
+  output: Record<string, unknown>
+  evidenceArtifacts: { screenshot: RuntimeFullPlaywrightRecoveryArtifactRef; dom: RuntimeFullPlaywrightRecoveryArtifactRef }
+}): Promise<RuntimeWriteExecutionOutput> {
+  const load = async (kind: 'screenshot' | 'dom', maxBytes: number): Promise<Buffer> => {
+    const ref = input.evidenceArtifacts[kind]
+    const expectedPrefix = join('full-playwright-recovery', '')
+    if (!ref || ref.kind !== kind || !ref.relativePath.startsWith(expectedPrefix)
+      || ref.relativePath.includes('..') || ref.byteLength < 0 || ref.byteLength > maxBytes
+      || !/^sha256:[a-f0-9]{64}$/.test(ref.digest)) {
+      throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_RECOVERY_ARTIFACT_REF_INVALID')
+    }
+    const bytes = await readFile(join(input.stateRoot, ref.relativePath))
+    if (bytes.byteLength !== ref.byteLength
+      || digestBytes(`runtime-full-playwright-recovery-${kind}/v1`, bytes) !== ref.digest) {
+      bytes.fill(0)
+      throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_RECOVERY_ARTIFACT_INVALID')
+    }
+    return bytes
+  }
+  const screenshot = await load('screenshot', 16 * 1024 * 1024)
+  let dom: Buffer | undefined
+  try {
+    dom = await load('dom', 4 * 1024 * 1024)
+    return { ...structuredClone(input.output), evidence: { screenshot, dom } } as unknown as RuntimeWriteExecutionOutput
+  } catch (error) {
+    screenshot.fill(0)
+    dom?.fill(0)
+    throw error
+  }
+}
+
+function nodeErrorCode(value: unknown, code: string): boolean {
+  return value instanceof Error && (value as NodeJS.ErrnoException).code === code
+}
+
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function canonicalFullPlaywrightIntentUrl(intent: {
+  canonicalOrigin: string; exactPath: string; query: Array<[string, string]>
+}): string {
+  const url = new URL(intent.exactPath, intent.canonicalOrigin)
+  for (const [name, value] of intent.query) url.searchParams.append(name, value)
+  return url.toString()
+}
+
+function runtimeFullEvidence(stage: FullPlaywrightEvidenceStage,
+  kind: 'screenshot' | 'dom' | 'url' | 'trace', bytes: Uint8Array) {
+  return { evidenceId: `${stage.toUpperCase()}-${kind.toUpperCase()}`, stage, kind,
+    byteLength: bytes.byteLength, digest: digestBytes(`runtime-evidence/${kind}/v1`, bytes) }
+}
+
+function fullPlaywrightBindings(browser: Browser, context: BrowserContext, page: unknown,
+  gateway: Awaited<ReturnType<typeof startGatewayProxyHostForRuntime>>,
+  correlations: Array<{ requestId: string; ruleId: string; stepOrdinal: number; method: string; url: string;
+    channel: 'http'; bodyDigest: string; actionId: string; capabilityId: string; signedBodyDigest: string;
+    redirectRequestIds: string[]; navigation: boolean; maxUses: number; headers: Record<string, string>;
+    body?: { bytes: Buffer; contentType: string } }>,
+  state: Record<string, unknown>, lifecycle: 'program' | 'cleanup') {
+  const controlledRequest = runtimeGatewayRequest(context.request, gateway, correlations)
+  const controlledBrowser = new Proxy(browser, { get(target, property, receiver) {
+    if (property === 'newContext') return async (...args: Parameters<Browser['newContext']>) => {
+      const child = await target.newContext(...args)
+      await installRuntimeGatewayRoute(child, gateway, correlations)
+      return runtimeGatewayContext(child, gateway, correlations)
+    }
+    const value = Reflect.get(target, property, receiver)
+    return typeof value === 'function' ? value.bind(target) : value
+  } })
+  return { page, context: runtimeGatewayContext(context, gateway, correlations), browser: controlledBrowser,
+    request: controlledRequest, expect: playwrightExpect, testInfo: Object.freeze({ title: `Runtime ${lifecycle}` }), state }
+}
+
+function runtimeGatewayContext(context: BrowserContext,
+  gateway: Awaited<ReturnType<typeof startGatewayProxyHostForRuntime>>,
+  correlations: Parameters<typeof fullPlaywrightBindings>[4]): BrowserContext {
+  return new Proxy(context, { get(target, property, receiver) {
+    if (property === 'request') return runtimeGatewayRequest(target.request, gateway, correlations)
+    const value = Reflect.get(target, property, receiver)
+    return typeof value === 'function' ? value.bind(target) : value
+  } })
+}
+
+function runtimeGatewayRequest(request: APIRequestContext,
+  gateway: Awaited<ReturnType<typeof startGatewayProxyHostForRuntime>>,
+  correlations: Parameters<typeof fullPlaywrightBindings>[4]): APIRequestContext {
+  return new Proxy(request, { get(target, property, receiver) {
+    if (['fetch', 'get', 'post', 'put', 'patch', 'delete', 'head'].includes(String(property))) {
+      return async (url: string, options: Record<string, unknown> = {}) => {
+        const method = property === 'fetch' ? String(options.method ?? 'GET').toUpperCase() : String(property).toUpperCase()
+        const correlation = correlations.find((candidate) => candidate.method === method && candidate.url === url)
+        if (!correlation) throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_REQUEST_OUT_OF_SET')
+        let response: unknown
+        await gateway.browserBinding.continueCorrelatedRequest(correlation, { continueWithHeaders: async (headers) => {
+          const execute = Reflect.get(target, property, receiver) as (url: string, options: unknown) => Promise<unknown>
+          response = await execute.call(target, url, { ...options,
+            ...(correlation.body === undefined ? {} : { data: correlation.body.bytes }),
+            headers: { ...(options.headers as object ?? {}), ...headers,
+              ...(correlation.body === undefined ? {} : { 'content-type': correlation.body.contentType }) } })
+        } })
+        return response
+      }
+    }
+    const value = Reflect.get(target, property, receiver)
+    return typeof value === 'function' ? value.bind(target) : value
+  } }) as APIRequestContext
+}
+
+async function installRuntimeGatewayRoute(context: BrowserContext,
+  gateway: Awaited<ReturnType<typeof startGatewayProxyHostForRuntime>>,
+  correlations: Parameters<typeof fullPlaywrightBindings>[4]): Promise<void> {
+  await context.route('**/*', async (route: Route) => {
+    const request = route.request()
+    const correlation = correlations.find((candidate) => candidate.method === request.method()
+      && candidate.url === request.url())
+    if (!correlation) { await route.abort('blockedbyclient'); return }
+    await gateway.browserBinding.continueCorrelatedRequest(correlation, {
+      continueWithHeaders: async (headers) => await route.continue({
+        ...(correlation.body === undefined ? {} : { postData: correlation.body.bytes }),
+        headers: { ...request.headers(), ...headers,
+          ...(correlation.body === undefined ? {} : { 'content-type': correlation.body.contentType }) },
+      }),
+    })
   })
 }
 

@@ -10,7 +10,7 @@ import {
 
 describe('Gateway write 终态协调器', () => {
   test('finalize 在首个 await 前 claim，child-exit unknown 只能等待同一终态', async () => {
-    const completion = deferred<ExecutionOutcomeReceipt>()
+    const completion = deferred<{ outcome: ExecutionOutcomeReceipt; authorityReceiptDigest: string }>()
     const complete = vi.fn(async () => await completion.promise)
     const unknown = vi.fn(async () => undefined)
     const coordinator = new GatewayWriteStateCoordinator()
@@ -22,17 +22,19 @@ describe('Gateway write 终态协调器', () => {
     const childExitSettlement = coordinator.settleAllUnknown('child-exit')
     expect(complete).toHaveBeenCalledTimes(1)
     expect(unknown).not.toHaveBeenCalled()
-    completion.resolve({ signedDigest: 'receipt' } as ExecutionOutcomeReceipt)
+    completion.resolve({ outcome: { signedDigest: 'receipt' } as ExecutionOutcomeReceipt,
+      authorityReceiptDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' })
 
     await expect(childExitSettlement).resolves.toBeUndefined()
     expect(coordinator.unsettledCount).toBe(0)
-    await expect(finalized).resolves.toMatchObject({ signedDigest: 'receipt' })
+    await expect(finalized).resolves.toMatchObject({ outcome: { signedDigest: 'receipt' } })
     expect(unknown).not.toHaveBeenCalled()
   })
 
   test('unknown 在首个 await 前 claim，并发 finalize 不会 complete 同一 reservation', async () => {
     const marking = deferred<void>()
-    const complete = vi.fn(async () => ({ signedDigest: 'receipt' }) as ExecutionOutcomeReceipt)
+    const complete = vi.fn(async () => ({ outcome: { signedDigest: 'receipt' } as ExecutionOutcomeReceipt,
+      authorityReceiptDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }))
     const unknown = vi.fn(async () => await marking.promise)
     const coordinator = new GatewayWriteStateCoordinator()
     coordinator.observeReservation('REQ-2', 'CAP-2', fakeWriteGateway(complete, unknown))
@@ -64,7 +66,8 @@ describe('Gateway write 终态协调器', () => {
 
   test('多步请求全部 transport observed 且 policy sequence complete 后才允许 finalize', async () => {
     let sequenceComplete = false
-    const complete = vi.fn(async () => ({ signedDigest: 'receipt' }) as ExecutionOutcomeReceipt)
+    const complete = vi.fn(async () => ({ outcome: { signedDigest: 'receipt' } as ExecutionOutcomeReceipt,
+      authorityReceiptDigest: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }))
     const coordinator = new GatewayWriteStateCoordinator()
     const gateway = fakeWriteGateway(complete, vi.fn(), () => sequenceComplete)
     coordinator.observeReservation('REQ-A', 'CAP-MULTI', gateway)
@@ -75,7 +78,8 @@ describe('Gateway write 终态协调器', () => {
       .rejects.toThrowError(/E2E_GATEWAY_WRITE_TRANSPORT_NOT_OBSERVED/)
     sequenceComplete = true
     coordinator.observeTransport('REQ-B')
-    await expect(coordinator.finalize('CAP-MULTI', {} as never)).resolves.toMatchObject({ signedDigest: 'receipt' })
+    await expect(coordinator.finalize('CAP-MULTI', {} as never))
+      .resolves.toMatchObject({ outcome: { signedDigest: 'receipt' } })
     expect(complete).toHaveBeenCalledTimes(1)
   })
 
@@ -106,15 +110,15 @@ describe('Gateway write 终态协调器', () => {
   })
 })
 
-test('finalize 严格执行 freeze/drain → terminal settlement → write settlement → audit', async () => {
+test('publication 严格执行 freeze/drain → child settlement → terminal assertion → audit', async () => {
   const calls: string[] = []
   await expect(freezeDrainAndFinalize({
     freezeAndDrain: async () => { calls.push('freeze-drain') },
     waitForTerminalSettlement: async () => { calls.push('terminal-settlement') },
-    settleWrites: async () => { calls.push('write-settlement') },
+    assertWritesTerminal: () => { calls.push('terminal-assertion') },
     signAudit: () => { calls.push('sign-audit'); return 'audit' },
   })).resolves.toBe('audit')
-  expect(calls).toEqual(['freeze-drain', 'terminal-settlement', 'write-settlement', 'sign-audit'])
+  expect(calls).toEqual(['freeze-drain', 'terminal-settlement', 'terminal-assertion', 'sign-audit'])
 })
 
 test('terminal/write settlement 未完成或失败时 finalize 不得签 audit', async () => {
@@ -123,7 +127,7 @@ test('terminal/write settlement 未完成或失败时 finalize 不得签 audit',
   const finalization = freezeDrainAndFinalize({
     freezeAndDrain: async () => undefined,
     waitForTerminalSettlement: async () => await terminal.promise,
-    settleWrites: async () => undefined,
+    assertWritesTerminal: () => undefined,
     signAudit: sign,
   })
   await Promise.resolve()
@@ -136,9 +140,9 @@ test('terminal/write settlement 未完成或失败时 finalize 不得签 audit',
   await expect(freezeDrainAndFinalize({
     freezeAndDrain: async () => undefined,
     waitForTerminalSettlement: async () => undefined,
-    settleWrites: async () => { throw new Error('unknown settlement failed') },
+    assertWritesTerminal: () => { throw new Error('terminal owner pending') },
     signAudit: rejectedSign,
-  })).rejects.toThrowError(/unknown settlement failed/)
+  })).rejects.toThrowError(/terminal owner pending/)
   expect(rejectedSign).not.toHaveBeenCalled()
 })
 
@@ -165,11 +169,13 @@ test('SSE 在真实 stream 终态桥完成前固定阻塞且不消费 reservatio
 })
 
 function fakeWriteGateway(
-  completeWithExecutionOutcome: (...args: any[]) => Promise<ExecutionOutcomeReceipt>,
+  completeWithExecutionOutcomeResult: (...args: any[]) => Promise<{
+    outcome: ExecutionOutcomeReceipt; authorityReceiptDigest: string
+  }>,
   markUnknown: (...args: any[]) => Promise<void>,
   isRequestSequenceComplete: () => boolean = () => true,
 ): ReversibleWriteGateway {
-  return { completeWithExecutionOutcome, markUnknown, isRequestSequenceComplete } as unknown as ReversibleWriteGateway
+  return { completeWithExecutionOutcomeResult, markUnknown, isRequestSequenceComplete } as unknown as ReversibleWriteGateway
 }
 
 function deferred<T>(): {

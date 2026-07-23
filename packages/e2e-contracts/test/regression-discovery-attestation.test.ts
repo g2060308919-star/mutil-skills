@@ -35,6 +35,19 @@ describe('RegressionDiscoveryAttestation 严格契约', () => {
       blockedCases: [{ caseId: 'CASE-1', reasonCode: 'E2E_BLOCKED' }] }).success).toBe(false)
   })
 
+  it('严格区分历史 2.0 与含 parser binding 的 2.1，full profile 只能使用 2.1', () => {
+    const current = { ...subject, schemaVersion: '2.1.0',
+      toolchain: { ...subject.toolchain, typescriptVersion: '5.9.3' } }
+    expect(RegressionDiscoverySubjectSchema.parse(subject)).toEqual(subject)
+    expect(RegressionDiscoverySubjectSchema.parse(current)).toEqual(current)
+    expect(RegressionDiscoverySubjectSchema.safeParse({ ...subject,
+      toolchain: { ...subject.toolchain, typescriptVersion: '5.9.3' } }).success).toBe(false)
+    expect(RegressionDiscoverySubjectSchema.safeParse({ ...current,
+      toolchain: subject.toolchain }).success).toBe(false)
+    expect(RegressionDiscoverySubjectSchema.safeParse({ ...subject,
+      executionProfile: 'full-playwright' }).success).toBe(false)
+  })
+
   it('专用 purpose 不能由通用 Artifact 签名替代', () => {
     const attestation = { ...subject, issuer: 'DISCOVERY', keyId: 'DISCOVERY-1',
       purpose: 'regression-discovery-attestation/v2', algorithm: 'Ed25519', signedDigest: d, signature: 'proof' }

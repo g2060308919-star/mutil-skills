@@ -1,0 +1,53 @@
+{
+  "schemaVersion": "1.0.0",
+  "probe": "w3c-disclosure-card",
+  "probeSourceSha256": "82528f2b8424e0e2fb7bcac0a25dd88bb5c6c60dfbbc47c712e3d9e304f10aef",
+  "target": "https://www.w3.org/WAI/ARIA/apg/patterns/disclosure/examples/disclosure-card/",
+  "startedAt": "2026-07-21T15:58:25.199Z",
+  "browser": {
+    "product": "Google Chrome",
+    "executablePath": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "version": "150.0.7871.129"
+  },
+  "isolation": {
+    "temporaryProfileCreated": true,
+    "profileRemoved": true
+  },
+  "checks": [
+    {
+      "id": "identity",
+      "passed": true,
+      "title": "Example Disclosure (Show/Hide) Card | APG | WAI | W3C",
+      "heading": "Example Disclosure (Show/Hide) Card",
+      "responseStatus": 200
+    },
+    {
+      "id": "initial-collapsed",
+      "passed": true,
+      "buttonCount": 3,
+      "buttonLabelIds": "symphonic-structure toggle-symphonic-structure",
+      "controls": "details-symphonic-structure",
+      "beforeExpanded": "false",
+      "beforeHeight": 15
+    },
+    {
+      "id": "expand",
+      "passed": true,
+      "afterExpanded": "true",
+      "afterHeight": 504,
+      "afterText": "Beethoven invites you to uncover the architectural principles that make a composition — or a curriculum — sing. He compares symphonic form to effective educational frameworks, emphasizing how recurring motifs and variations foster retention"
+    }
+  ],
+  "cleanup": {
+    "status": "verified-clean",
+    "cleanupExpanded": "false",
+    "cleanupHeight": 15
+  },
+  "targetResponse": {
+    "status": 200,
+    "lastModified": "Mon, 20 Jul 2026 08:05:33 GMT"
+  },
+  "screenshotSha256": "d8112317cf4f377ca3cf20ea41c46bf42a42697e9096728504c29fdf70366cfa",
+  "verdict": "passed",
+  "finishedAt": "2026-07-21T15:58:30.576Z"
+}

@@ -31,17 +31,24 @@ export const RegressionBlockedCasesSchema = z.array(RegressionBlockedCaseSchema)
     === [...items].sort((left, right) => left.caseId.localeCompare(right.caseId))
       .map((item) => item.caseId).join('\0'), 'blockedCases 必须按 caseId 排序')
 
-export const RegressionToolchainSchema = z.object({
+export const RegressionToolchainV2Schema = z.object({
   nodeVersion: SemverSchema,
   playwrightVersion: SemverSchema,
   compilerDigest: DigestSchema,
   playwrightCliDigest: DigestSchema,
 }).strict()
 
-const RegressionDiscoverySubjectObjectSchema = z.object({
-  schemaVersion: z.literal('2.0.0'),
+export const RegressionToolchainV2_1Schema = RegressionToolchainV2Schema.extend({
+  typescriptVersion: SemverSchema,
+}).strict()
+
+export const RegressionToolchainSchema = z.union([RegressionToolchainV2Schema, RegressionToolchainV2_1Schema])
+
+const RegressionDiscoverySubjectCommonShape = {
   testDomain: z.literal('prd-e2e-trusted-compiler'),
-  executionProfile: z.enum(['trusted-read-only', 'trusted-reversible-write', 'production-isolated']),
+  executionProfile: z.enum([
+    'trusted-read-only', 'trusted-reversible-write', 'production-isolated', 'full-playwright',
+  ]),
   assetId: AssetIdSchema,
   generationId: SafeIdSchema,
   prdRevision: DigestSchema,
@@ -55,7 +62,6 @@ const RegressionDiscoverySubjectObjectSchema = z.object({
   compilerInputDigest: DigestSchema,
   sourceFiles: z.array(RegressionSourceFileSchema).min(1).max(100_000),
   caseMappings: z.array(RegressionCaseMappingSchema).min(1).max(100_000),
-  toolchain: RegressionToolchainSchema,
   isolation: z.object({
     command: z.tuple([
       z.literal('node'), z.literal('@playwright/test/cli'), z.literal('test'),
@@ -67,9 +73,30 @@ const RegressionDiscoverySubjectObjectSchema = z.object({
   discoveredCaseIds: UniqueCaseIdsSchema,
   blockedCases: RegressionBlockedCasesSchema,
   sourceSetDigest: DigestSchema,
+}
+
+const RegressionDiscoverySubjectV2ObjectSchema = z.object({
+  schemaVersion: z.literal('2.0.0'),
+  ...RegressionDiscoverySubjectCommonShape,
+  toolchain: RegressionToolchainV2Schema,
 }).strict()
 
+const RegressionDiscoverySubjectV2_1ObjectSchema = z.object({
+  schemaVersion: z.literal('2.1.0'),
+  ...RegressionDiscoverySubjectCommonShape,
+  toolchain: RegressionToolchainV2_1Schema,
+}).strict()
+
+const RegressionDiscoverySubjectObjectSchema = z.discriminatedUnion('schemaVersion', [
+  RegressionDiscoverySubjectV2ObjectSchema,
+  RegressionDiscoverySubjectV2_1ObjectSchema,
+])
+
 function refineRegressionDiscoverySubject(subject: z.infer<typeof RegressionDiscoverySubjectObjectSchema>, context: z.RefinementCtx): void {
+  if (subject.schemaVersion === '2.0.0' && subject.executionProfile === 'full-playwright') {
+    context.addIssue({ code: 'custom', message: 'full-playwright 必须使用含 parser binding 的 2.1.0 Subject',
+      path: ['schemaVersion'] })
+  }
   const sourcePaths = subject.sourceFiles.map((file) => file.relativePath)
   const mappingCases = subject.caseMappings.map((mapping) => mapping.caseId)
   if (new Set(sourcePaths).size !== sourcePaths.length) {
@@ -109,14 +136,22 @@ export function computeRegressionSourceSetDigest(sourceFiles: z.infer<typeof Reg
 export const RegressionDiscoverySubjectSchema = RegressionDiscoverySubjectObjectSchema
   .superRefine(refineRegressionDiscoverySubject)
 
-export const RegressionDiscoveryAttestationSchema = RegressionDiscoverySubjectObjectSchema.extend({
+const RegressionDiscoveryAttestationShape = {
   issuer: SafeIdSchema,
   keyId: SafeIdSchema,
   purpose: z.literal('regression-discovery-attestation/v2'),
   algorithm: z.literal('Ed25519'),
   signedDigest: DigestSchema,
   signature: z.string().min(1).max(4096),
-}).strict().superRefine(refineRegressionDiscoverySubject)
+}
+
+const RegressionDiscoveryAttestationObjectSchema = z.discriminatedUnion('schemaVersion', [
+  RegressionDiscoverySubjectV2ObjectSchema.extend(RegressionDiscoveryAttestationShape).strict(),
+  RegressionDiscoverySubjectV2_1ObjectSchema.extend(RegressionDiscoveryAttestationShape).strict(),
+])
+
+export const RegressionDiscoveryAttestationSchema = RegressionDiscoveryAttestationObjectSchema
+  .superRefine(refineRegressionDiscoverySubject)
 
 export const RegressionDiscoveryVerifierMaterialSchema = z.object({
   schemaVersion: z.literal('1.0.0'),

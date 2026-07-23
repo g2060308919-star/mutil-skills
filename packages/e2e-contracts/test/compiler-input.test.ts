@@ -3,6 +3,8 @@ import {
   canonicalizeJson,
   CompilerInputV1Schema,
   computeCompilerInputDigest,
+  computeFullPlaywrightCleanupSourceDigest,
+  computeFullPlaywrightSourceDigest,
   digestCanonicalGrantApprovalSubject,
   digestText,
   type CompilerInputV1,
@@ -49,6 +51,7 @@ function compilerInput(): CompilerInputV1 {
     } },
     policyDigest: digest('c'),
     playwrightVersion: '1.61.1',
+    nodeVersion: '24.18.0',
     cases: [{
       caseId: 'CASE-1', title: '首页可见', reqIds: ['REQ-1'], ruleIds: ['RULE-1'],
       obligationIds: ['COV-1'], mode: 'real-environment',
@@ -86,5 +89,43 @@ describe('CompilerInputV1', () => {
       { kind: 'reversibleWrite', actionId: 'ACTION-2', buttonName: '批准', beforeText: '待审核',
         afterText: '已批准', dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1' },
     ] }] }).success).toBe(false)
+  })
+
+  test('full-playwright 必须显式选择并冻结 source、cleanup 与各自摘要', () => {
+    const input = compilerInput()
+    const source = 'await page.getByRole("textbox").fill("hello")'
+    const cleanupSource = 'await page.getByRole("textbox").fill(""); return "verified-clean"'
+    const fullAction = {
+      kind: 'fullPlaywright' as const,
+      actionId: 'ACTION-1',
+      source,
+      sourceDigest: computeFullPlaywrightSourceDigest(source),
+      cleanupSource,
+      cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource),
+      dataLeaseId: 'LEASE-1',
+      cleanupPlanId: 'CLEANUP-1',
+      timeoutMs: 30_000,
+      cleanupTimeoutMs: 30_000,
+    }
+    const fullInput = {
+      ...input,
+      executionProfile: 'full-playwright' as const,
+      cases: [{ ...input.cases[0], actions: [fullAction] }],
+    }
+    const typedFullInput: CompilerInputV1 = fullInput
+
+    expect(CompilerInputV1Schema.parse(typedFullInput)).toEqual(fullInput)
+    expect(CompilerInputV1Schema.safeParse({
+      ...fullInput,
+      cases: [{ ...fullInput.cases[0], actions: [{ ...fullAction, sourceDigest: digest('f') }] }],
+    }).success).toBe(false)
+    expect(CompilerInputV1Schema.safeParse({
+      ...fullInput,
+      cases: [{ ...fullInput.cases[0], actions: [{ ...fullAction, cleanupSource: undefined }] }],
+    }).success).toBe(false)
+    expect(CompilerInputV1Schema.safeParse({ ...fullInput, executionProfile: 'trusted-reversible-write' }).success)
+      .toBe(false)
+    expect(CompilerInputV1Schema.safeParse({ ...input, executionProfile: 'full-playwright' }).success)
+      .toBe(false)
   })
 })

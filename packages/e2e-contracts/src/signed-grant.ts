@@ -96,7 +96,7 @@ export const ReadBrowserCapabilitySchema = z.object({
 export const ReadCapabilitySchema = z.discriminatedUnion('transport', [
   ReadBrowserCapabilitySchema, ReadHttpCapabilitySchema,
 ])
-const WriteCapabilitySchema = z.object({
+const HttpWriteCapabilitySchema = z.object({
   capabilityId: SafeIdSchema, nonce: NonceSchema, transport: z.literal('http'),
   effect: z.literal('reversible-write'), operation: z.literal('http-request'), actionId: SafeIdSchema,
   dataLeaseId: SafeIdSchema,
@@ -104,6 +104,17 @@ const WriteCapabilitySchema = z.object({
   cleanupPlanDigest: DigestSchema,
   requests: z.array(WriteHttpIntentSchema).min(1).max(1_000), maxUses: z.literal(1),
 }).strict()
+const BrowserLocalWriteCapabilitySchema = z.object({
+  capabilityId: SafeIdSchema, nonce: NonceSchema, transport: z.literal('browser-local'),
+  effect: z.literal('reversible-write'), operation: z.literal('full-playwright'), actionId: SafeIdSchema,
+  programDigest: DigestSchema, cleanupProgramDigest: DigestSchema, dataLeaseId: SafeIdSchema,
+  fencingToken: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), cleanupPlanDigest: DigestSchema,
+  requests: z.array(WriteHttpIntentSchema).max(1_000), maxUses: z.literal(1),
+}).strict()
+const WriteCapabilitySchema = z.discriminatedUnion('transport', [
+  HttpWriteCapabilitySchema,
+  BrowserLocalWriteCapabilitySchema,
+])
 const InjectionCapabilitySchema = z.object({
   capabilityId: SafeIdSchema, nonce: NonceSchema, transport: z.literal('gateway-injection'),
   actionId: SafeIdSchema, caseId: SafeIdSchema, runId: SafeIdSchema,

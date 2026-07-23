@@ -81,6 +81,9 @@ export type WriteRuntimeSessionBinding =
       authorityTransport: 'in-process-test' | 'authenticated-rpc'
       authorityRpcPublicKeyDigest?: string
       runId: string
+      assetId: string
+      generationId: string
+      prdRevision: string
       sourceDigest: string
     }
   | {
@@ -98,6 +101,9 @@ export type WriteRuntimeSessionBinding =
       authorityRpcPublicKeyDigest: string
       isolationSessionId: string
       runId: string
+      assetId: string
+      generationId: string
+      prdRevision: string
       sourceDigest: string
       gatewayEndpoint: string
       attestationDigest: string
@@ -227,6 +233,8 @@ export function createProductionWriteRuntimeSession(input: {
     authorityTransport: 'authenticated-rpc',
     authorityRpcPublicKeyDigest: attestation.authorityRpcPublicKeyDigest,
     isolationSessionId: attestation.isolationSessionId, runId: attestation.runId,
+    assetId: attestation.assetId, generationId: attestation.generationId,
+    prdRevision: attestation.prdRevision,
     sourceDigest: attestation.filesystem.sourceDigest,
     gatewayEndpoint: attestation.network.gatewayEndpoint, attestationDigest: signedDigest,
   })

@@ -500,6 +500,20 @@ export class LocalApprovalAuthority {
         const mismatch = approvalContextMismatch(grant, trustedContext, this.#now())
         return mismatch ?? await this.verifyForSubject(grant, currentSubject)
       },
+      reserveForSubject: async (input: {
+        grant: SignedWriteGrant; currentSubject: WriteApprovalSubject; capabilityId: string
+        actionId: string; attemptId: string; attemptContext?: AttemptExecutionContext
+      }) => {
+        const mismatch = approvalContextMismatch(input.grant, trustedContext, this.#now())
+        if (mismatch) throw authorityError(mismatch.code, mismatch.reason)
+        return await this.reserveForSubject(input)
+      },
+      complete: async (reservationId: string, outcomeDigest: string) => {
+        await this.complete(reservationId, outcomeDigest)
+      },
+      markUnknown: async (reservationId: string, observation: string) => {
+        await this.markUnknown(reservationId, observation)
+      },
     })
     return trustWriteApprovalClient(client, { transport: 'in-process-test',
       approvalBinding: {
@@ -987,19 +1001,18 @@ export class LocalApprovalAuthority {
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
       expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
-      capabilities: subject.actions.map((action): ReversibleWriteCapability => ({
-        capabilityId: randomUUID(),
-        nonce: randomBytes(32).toString('hex'),
-        transport: 'http',
-        effect: 'reversible-write',
-        operation: 'http-request',
-        actionId: action.actionId,
-        dataLeaseId: action.dataLeaseId,
-        fencingToken: action.fencingToken,
-        cleanupPlanDigest: action.cleanupPlanDigest,
-        requests: action.requests.map((request) => ({ ...request, query: [...request.query], payload: { ...request.payload } })),
-        maxUses: 1,
-      })),
+      capabilities: subject.actions.map((action): ReversibleWriteCapability => {
+        const common = {
+          capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'),
+          effect: 'reversible-write' as const, actionId: action.actionId,
+          dataLeaseId: action.dataLeaseId, fencingToken: action.fencingToken,
+          cleanupPlanDigest: action.cleanupPlanDigest, requests: immutableSnapshot(action.requests), maxUses: 1 as const,
+        }
+        return 'transport' in action
+          ? { ...common, transport: action.transport, operation: action.operation,
+              programDigest: action.programDigest, cleanupProgramDigest: action.cleanupProgramDigest }
+          : { ...common, transport: 'http', operation: 'http-request' }
+      }),
       revocationSequence: 0,
     }
     const signature = signPayload(grantWithoutSignature, this.#privateKey)
@@ -3865,8 +3878,9 @@ function isReadGrant(grant: SignedGrant): grant is SignedReadGrant {
 function isWriteGrant(grant: SignedGrant): grant is SignedWriteGrant {
   return WriteApprovalSubjectV2Schema.safeParse(grant.subject).success
     && grant.capabilities.every((capability) =>
-      'operation' in capability && capability.operation === 'http-request'
-      && 'effect' in capability && capability.effect === 'reversible-write')
+      'operation' in capability && 'effect' in capability && capability.effect === 'reversible-write'
+      && ((capability.transport === 'http' && capability.operation === 'http-request')
+        || (capability.transport === 'browser-local' && capability.operation === 'full-playwright')))
 }
 
 function isDigest(value: string): boolean {

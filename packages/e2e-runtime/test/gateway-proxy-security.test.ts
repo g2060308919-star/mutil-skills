@@ -541,8 +541,14 @@ function createWriteAuthority() {
         },
       }
     },
-    complete: async function () { this.completed += 1 },
-    markUnknown: async function () { this.unknown += 1 },
+    complete: async function () {
+      this.completed += 1
+      return digestText('test-authority-terminal/v1', 'completed')
+    },
+    markUnknown: async function () {
+      this.unknown += 1
+      return digestText('test-authority-terminal/v1', 'unknown')
+    },
   }
 }
 

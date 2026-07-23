@@ -1,11 +1,40 @@
+import { readFile } from 'node:fs/promises'
 import { describe, expect, test } from 'vitest'
 import { E2EError } from '@mutil-skills/e2e-contracts'
 import { createTrustedCompilerReadiness } from '@mutil-skills/e2e-engine'
 import { projectCompilerInputFromArtifacts } from '../src/index.js'
 import { inspectTrustedCompilerInput } from '../src/compiler-input-projector.js'
-import { approvedCompilerArtifacts, compilerArtifactVerification } from './compiler-artifacts.fixture.js'
+import { approvedCompilerArtifacts, approvedFullPlaywrightCompilerArtifacts,
+  compilerArtifactVerification, FULL_PLAYWRIGHT_CLEANUP_SOURCE,
+  FULL_PLAYWRIGHT_SOURCE } from './compiler-artifacts.fixture.js'
 
 describe('Artifact → Compiler Input Projector', () => {
+  test('full Playwright 整体路径使用一次性索引且不逐 Case/Action 重扫或排序', async () => {
+    const source = await readFile(new URL('../src/compiler-input-projector.ts', import.meta.url), 'utf8')
+    const start = source.indexOf('function createFullPlaywrightConsumptionIndexes')
+    const end = source.indexOf('\nfunction assertFullPlaywrightIndexesConsumed', start)
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const implementation = source.slice(start, end)
+    expect(implementation).toContain('indexUnique(')
+    expect(source).toContain('const index = new Map')
+    expect(implementation).toContain('.delete(')
+    expect(implementation).not.toMatch(/\.(?:find|filter|some|sort)\(/)
+    expect(source).toContain('consumeOptionalIndex(fullIndexes.unmappedByPair')
+    expect(source).not.toContain('records(testCase.steps).sort(')
+    const traceStart = source.indexOf('function projectFullPlaywrightRequirementTrace')
+    const traceEnd = source.indexOf('\nfunction projectRequirementTrace', traceStart)
+    expect(traceStart).toBeGreaterThan(0)
+    expect(source.slice(traceStart, traceEnd)).not.toMatch(/\.(?:find|filter|some|sort|includes)\(/)
+    expect(source).not.toContain('function sameUniqueStrings')
+  })
+
+  test('TypeScript parser 版本漂移 fail closed', () => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedCompilerArtifacts(), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification, typescriptVersion: '5.9.2',
+    })).toThrow('E2E_COMPILER_TYPESCRIPT_VERSION_MISMATCH')
+  })
   test('Engine readiness 缺少真实 PRD、scope、lineage Artifact 时 fail closed', () => {
     expect(() => createTrustedCompilerReadiness({
       artifacts: [], contractsVersion: '2.0.0', verifyArtifactSignature: () => true,
@@ -15,7 +44,8 @@ describe('Artifact → Compiler Input Projector', () => {
 
   test('业务请求不能用普通对象伪造 Host 启动期信任根', () => {
     expect(() => projectCompilerInputFromArtifacts({
-      artifacts: approvedCompilerArtifacts(), playwrightVersion: '1.61.1', trust: {} as never,
+      artifacts: approvedCompilerArtifacts(), nodeVersion: '24.18.0', playwrightVersion: '1.61.1',
+      typescriptVersion: '5.9.3', trust: {} as never,
     })).toThrow('E2E_COMPILER_TRUST_INVALID')
   })
 
@@ -44,6 +74,65 @@ describe('Artifact → Compiler Input Projector', () => {
       beforeText: '待审核', afterText: '已批准', dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1',
     })
     expect(JSON.stringify(input)).not.toContain('.click')
+  })
+
+  test('从同一冻结 Action Map 与 Execution Contract 唯一投影 full Playwright action', () => {
+    const input = inspectTrustedCompilerInput(projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts(), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    }))
+    expect(input.executionProfile).toBe('full-playwright')
+    expect(input.cases[0]?.actions).toEqual([{
+      kind: 'fullPlaywright', actionId: 'ACTION-WRITE-1', source: FULL_PLAYWRIGHT_SOURCE,
+      sourceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      cleanupSource: FULL_PLAYWRIGHT_CLEANUP_SOURCE,
+      cleanupSourceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, cleanupTimeoutMs: 30_000,
+    }])
+  })
+
+  test('full Playwright 拒绝未按签名 ordinal canonical 排列的 Step，而不在 Projector 内排序', () => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts({ stepOrdinal: 1 }), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    })).toThrow('E2E_COMPILER_INPUT_INVALID')
+  })
+
+  test.each([
+    ['program source', { executionSource: "await page.goto('https://drift.example')" }],
+    ['capability set', { runBundleCapabilityId: 'CAP-FULL-DRIFT' }],
+    ['request set', { approvalRequestPath: '/different' }],
+  ])('拒绝 full Playwright %s 在冻结资产之间漂移', (_name, drift) => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts(drift), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    })).toThrow(/E2E_COMPILER_(?:INPUT_INVALID|APPROVAL_BINDING_INVALID)/)
+  })
+
+  test('拒绝未绑定 source 的 full Playwright digest', () => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts({ sourceDigest: `sha256:${'0'.repeat(64)}` }),
+      playwrightVersion: '1.61.1', ...compilerArtifactVerification,
+    })).toThrow(/E2E_(?:COMPILER_(?:INPUT_INVALID|CODE_FIELD_REJECTED)|APPROVAL_PROJECTION_FULL_PLAYWRIGHT_PROGRAM_INVALID)/)
+  })
+
+  test('拒绝 active step 集之外但在 mapping/program/intent/cleanup/capability/approval 中自洽的 leftover Action', () => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts({ extraFullAction: true }),
+      playwrightVersion: '1.61.1', ...compilerArtifactVerification,
+    })).toThrow(/E2E_COMPILER_(?:INPUT_INVALID|APPROVAL_BINDING_INVALID)/)
+  })
+
+  test.each([
+    ['额外 unmapped pair', { extraUnmapped: true }],
+    ['重复 unmapped pair', { duplicateUnmapped: true }],
+    ['额外 coverage obligation', { extraObligation: true }],
+    ['重复 obligation/case binding', { duplicateObligationCaseBinding: true }],
+  ])('full Playwright 拒绝未逐项唯一消费的%s', (_name, drift) => {
+    expect(() => projectCompilerInputFromArtifacts({
+      artifacts: approvedFullPlaywrightCompilerArtifacts(drift), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    })).toThrow(/E2E_COMPILER_(?:INPUT_INVALID|APPROVAL_BINDING_INVALID)/)
   })
 
   test('拒绝不同 generation、额外 Artifact 类型和调用方代码字段', () => {

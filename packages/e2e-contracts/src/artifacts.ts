@@ -8,7 +8,7 @@ import {
 } from './regression-discovery.js'
 import {
   ArtifactEnvelopeSchema, ArtifactSignatureSchema, AssetIdSchema, E2EError, RelativePathSchema,
-  canonicalizeJson,
+  canonicalizeJson, digestBytes, digestText,
 } from './common.js'
 import { RequirementModelSchema } from './design.js'
 import { ManualResultSchema } from './manual-result.js'
@@ -16,7 +16,11 @@ import { ApprovalAssuranceSchema } from './approval-assurance.js'
 import { SanitizationRecordSchema } from './privacy.js'
 import { PrivacyReviewReceiptSchema, SanitizerAttestationSchema } from './privacy-attestation.js'
 import { VerdictResultSchema } from './verdict.js'
-import { ApprovalCapabilityRecordSchema, ApprovalFreshnessReceiptSchema } from './approval-freshness.js'
+import {
+  ApprovalCapabilityRecordSchema,
+  ApprovalFreshnessReceiptSchema,
+  WriteHttpIntentSetSchema,
+} from './approval-freshness.js'
 import {
   CoverageDispositionDecisionReceiptSchema,
   DecisionReceiptSchema,
@@ -25,7 +29,7 @@ import {
 } from './decision-receipt.js'
 import { WorkflowEventsV2ContentSchema } from './attempt.js'
 import { ExecutionOutcomeReceiptSchema } from './execution-outcome.js'
-import { CleanupPlanDefinitionSchema } from './cleanup-plan.js'
+import { CleanupPlanDefinitionSchema, type CleanupPlanDefinition } from './cleanup-plan.js'
 import { RuntimeIsolationPolicySchema } from './runtime-isolation.js'
 import { TrustedCompilerExecutionFactSchema } from './trusted-compiler-execution.js'
 import { DiscoveryApprovalSubjectSchema } from './approval-subject.js'
@@ -37,17 +41,222 @@ import {
   type ReadHttpRequestReferences,
 } from './read-http-request.js'
 import {
+  RuntimeHttpBodySegmentSchema,
   RuntimeWriteHttpActionSchema,
+  digestRuntimeHttpBodyTemplate,
   digestRuntimeWriteHttpAction,
 } from './runtime-http-action.js'
 import { assertExecutionResultIdentities } from './execution-result-identity.js'
 import { SignedGrantSchema } from './signed-grant.js'
+import {
+  computeFullPlaywrightCleanupSourceDigest,
+  computeFullPlaywrightSourceDigest,
+} from './compiler-input.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const NonEmptyTextSchema = z.string().min(1).max(16 * 1024)
 const UniqueIdsSchema = z.array(SafeIdSchema).max(100_000)
   .refine((values) => new Set(values).size === values.length, 'ID 必须唯一')
+const ExecutionProfileSchema = z.enum([
+  'trusted-read-only', 'trusted-reversible-write', 'production-isolated', 'full-playwright',
+])
+
+const FullPlaywrightContentTypeSchema = z.string().min(1).max(8 * 1024)
+  .refine((value) => !/[\r\n\0]/.test(value))
+const FullPlaywrightRequestBodySchema = z.union([
+  z.object({ intentId: SafeIdSchema, kind: z.literal('json'),
+    canonicalJson: z.string().min(1).max(256 * 1024).refine((value) => {
+      try { return canonicalizeJson(JSON.parse(value)) === value } catch { return false }
+    }),
+  }).strict(),
+  z.object({ intentId: SafeIdSchema, kind: z.literal('binary'), contentType: FullPlaywrightContentTypeSchema,
+    bodyBase64Url: z.string().min(1).max(350 * 1024).regex(/^[A-Za-z0-9_-]+$/)
+      .refine((value) => Buffer.from(value, 'base64url').toString('base64url') === value),
+  }).strict(),
+  z.object({ intentId: SafeIdSchema, kind: z.literal('template'), contentType: FullPlaywrightContentTypeSchema,
+    segments: z.array(RuntimeHttpBodySegmentSchema).min(1).max(128), templateDigest: DigestSchema,
+  }).strict().superRefine((body, context) => {
+    if (body.templateDigest !== digestRuntimeHttpBodyTemplate({ kind: 'segments',
+      contentType: body.contentType, segments: body.segments })) {
+      context.addIssue({ code: 'custom', path: ['templateDigest'], message: 'template body digest mismatch' })
+    }
+  }),
+])
+
+export const FullPlaywrightProgramSchema = z.object({
+  schemaVersion: z.literal('full-playwright/v1'),
+  caseId: SafeIdSchema,
+  stepId: SafeIdSchema,
+  actionId: SafeIdSchema,
+  source: z.string().min(1).max(1024 * 1024),
+  sourceDigest: DigestSchema,
+  cleanupSource: z.string().min(1).max(1024 * 1024),
+  cleanupSourceDigest: DigestSchema,
+  dataLeaseId: SafeIdSchema,
+  cleanupPlanId: SafeIdSchema,
+  timeoutMs: z.number().int().positive().max(3_600_000),
+  networkRequests: WriteHttpIntentSetSchema,
+  networkRequestBodies: z.array(FullPlaywrightRequestBodySchema).max(1_000).optional(),
+}).strict().superRefine((program, context) => {
+  if (program.sourceDigest !== computeFullPlaywrightSourceDigest(program.source)) {
+    context.addIssue({ code: 'custom', message: 'sourceDigest 未绑定 full Playwright source', path: ['sourceDigest'] })
+  }
+  if (program.cleanupSourceDigest !== computeFullPlaywrightCleanupSourceDigest(program.cleanupSource)) {
+    context.addIssue({
+      code: 'custom', message: 'cleanupSourceDigest 未绑定 full Playwright cleanupSource',
+      path: ['cleanupSourceDigest'],
+    })
+  }
+  const intentIds = program.networkRequests.map((request) => request.intentId)
+  const expectedOrders = program.networkRequests.map((request) => request.expectedOrder)
+  if (new Set(intentIds).size !== intentIds.length) {
+    context.addIssue({ code: 'custom', message: 'full Playwright request intentId 必须唯一', path: ['networkRequests'] })
+  }
+  if (new Set(expectedOrders).size !== expectedOrders.length) {
+    context.addIssue({
+      code: 'custom', message: 'full Playwright request expectedOrder 必须唯一', path: ['networkRequests'],
+    })
+  }
+  if (program.networkRequestBodies !== undefined) {
+    const bodies = new Map(program.networkRequestBodies.map((body) => [body.intentId, body]))
+    if (bodies.size !== program.networkRequestBodies.length) {
+      context.addIssue({ code: 'custom', path: ['networkRequestBodies'], message: 'body intentId must be unique' })
+    }
+    for (const request of program.networkRequests) {
+      const body = bodies.get(request.intentId)
+      if (request.payload.kind === 'no-body') {
+        if (body !== undefined) context.addIssue({ code: 'custom', path: ['networkRequestBodies'],
+          message: 'no-body intent cannot have body material' })
+        continue
+      }
+      if (body === undefined || body.kind !== request.payload.kind) {
+        context.addIssue({ code: 'custom', path: ['networkRequestBodies'], message: 'body material missing or kind mismatch' })
+        continue
+      }
+      const digest = body.kind === 'json'
+        ? digestText('http-json-payload/v1', body.canonicalJson)
+        : body.kind === 'binary'
+          ? digestBytes('http-binary-payload/v1', Buffer.from(body.bodyBase64Url, 'base64url'))
+          : body.templateDigest
+      const approvedDigest = request.payload.kind === 'template'
+        ? request.payload.templateDigest : request.payload.digest
+      if (digest !== approvedDigest) context.addIssue({ code: 'custom', path: ['networkRequestBodies'],
+        message: 'body material digest does not match approved intent' })
+      bodies.delete(request.intentId)
+    }
+    if (bodies.size > 0) context.addIssue({ code: 'custom', path: ['networkRequestBodies'],
+      message: 'body material references unknown intent' })
+  }
+})
+
+export type FullPlaywrightProgram = z.infer<typeof FullPlaywrightProgramSchema>
+export type FullPlaywrightRequestBody = z.infer<typeof FullPlaywrightRequestBodySchema>
+
+function refineFullPlaywrightPrograms(input: {
+  executionProfile?: z.infer<typeof ExecutionProfileSchema>
+  programs: z.infer<typeof FullPlaywrightProgramSchema>[]
+  actionRefs: Array<{
+    actionId: string
+    caseId?: string
+    stepId?: string
+    effect: string
+    runtimeHttpActionDigest?: string
+    capabilityOperations?: string[]
+  }>
+  caseIds?: string[]
+  writeLeaseIds?: string[]
+  cleanupPlans?: CleanupPlanDefinition[]
+}, context: z.RefinementCtx): void {
+  const usesFullPlaywright = input.programs.length > 0
+  if (usesFullPlaywright !== (input.executionProfile === 'full-playwright')) {
+    context.addIssue({
+      code: 'custom', message: 'full Playwright program 必须且只能由显式 full-playwright Profile 使用',
+      path: ['executionProfile'],
+    })
+  }
+  const hasFullPlaywrightCapability = input.actionRefs.some((action) =>
+    action.capabilityOperations?.includes('full-playwright'))
+  if (input.actionRefs.some((action) => action.capabilityOperations !== undefined)
+    && hasFullPlaywrightCapability !== usesFullPlaywright) {
+    context.addIssue({
+      code: 'custom', message: 'full-playwright capability 必须且只能绑定 full Playwright program',
+      path: ['actions'],
+    })
+  }
+  if (!usesFullPlaywright) return
+
+  const programsByAction = new Map(input.programs.map((program) => [program.actionId, program]))
+  if (programsByAction.size !== input.programs.length) {
+    context.addIssue({ code: 'custom', message: 'full Playwright program actionId 必须唯一', path: ['fullPlaywrightPrograms'] })
+  }
+  const refsByAction = new Map(input.actionRefs.map((action) => [action.actionId, action]))
+  if (refsByAction.size !== input.actionRefs.length
+    || refsByAction.size !== programsByAction.size
+    || [...refsByAction].some(([actionId]) => !programsByAction.has(actionId))) {
+    context.addIssue({
+      code: 'custom', message: 'full Playwright program 必须与 action 一一闭合', path: ['fullPlaywrightPrograms'],
+    })
+  }
+  const knownCases = input.caseIds === undefined ? undefined : new Set(input.caseIds)
+  const knownWriteLeases = input.writeLeaseIds === undefined ? undefined : new Set(input.writeLeaseIds)
+  const cleanupPlans = input.cleanupPlans
+  const cleanupPlansById = cleanupPlans === undefined ? undefined
+    : new Map(cleanupPlans.map((plan) => [plan.cleanupPlanId, plan]))
+  if (cleanupPlans !== undefined && cleanupPlansById?.size !== cleanupPlans.length) {
+    context.addIssue({
+      code: 'custom', message: 'full Playwright cleanupPlanId 必须唯一', path: ['writeCleanupPlans'],
+    })
+  }
+  input.programs.forEach((program, index) => {
+    const action = refsByAction.get(program.actionId)
+    if (action === undefined
+      || (action.caseId !== undefined && action.caseId !== program.caseId)
+      || (action.stepId !== undefined && action.stepId !== program.stepId)
+      || action.effect !== 'reversible-write'
+      || action.runtimeHttpActionDigest !== undefined
+      || (action.capabilityOperations !== undefined
+        && (action.capabilityOperations.length !== 1 || action.capabilityOperations[0] !== 'full-playwright'))) {
+      context.addIssue({
+        code: 'custom', message: 'full Playwright case/action/step/effect 必须与 action 投影闭合',
+        path: ['fullPlaywrightPrograms', index],
+      })
+    }
+    if (knownCases !== undefined && !knownCases.has(program.caseId)) {
+      context.addIssue({
+        code: 'custom', message: 'full Playwright caseId 必须存在于 caseQueue',
+        path: ['fullPlaywrightPrograms', index, 'caseId'],
+      })
+    }
+    if (knownWriteLeases !== undefined && !knownWriteLeases.has(program.dataLeaseId)) {
+      context.addIssue({
+        code: 'custom', message: 'full Playwright dataLeaseId 必须存在于 write dataNeeds',
+        path: ['fullPlaywrightPrograms', index, 'dataLeaseId'],
+      })
+    }
+    const cleanupPlan = cleanupPlansById?.get(program.cleanupPlanId)
+    if (cleanupPlansById !== undefined && (cleanupPlan === undefined
+      || cleanupPlan.schemaVersion !== '2.0.0'
+      || cleanupPlan.actionId !== program.actionId || cleanupPlan.leaseId !== program.dataLeaseId
+      || cleanupPlan.cleanupProgramDigest !== program.cleanupSourceDigest)) {
+      context.addIssue({
+        code: 'custom', message: 'full Playwright cleanup plan 必须精确绑定 action、lease 与 cleanup program digest',
+        path: ['fullPlaywrightPrograms', index, 'cleanupPlanId'],
+      })
+    }
+    if (cleanupPlan?.schemaVersion === '2.0.0') {
+      const networkIntentIds = new Set(program.networkRequests.map((request) => request.intentId))
+      cleanupPlan.cleanupRequestIntentIds.forEach((intentId, intentIndex) => {
+        if (!networkIntentIds.has(intentId)) {
+          context.addIssue({
+            code: 'custom', message: 'full Playwright cleanup request intent 必须属于 program networkRequests',
+            path: ['fullPlaywrightPrograms', index, 'cleanupPlanId', 'cleanupRequestIntentIds', intentIndex],
+          })
+        }
+      })
+    }
+  })
+}
 
 export const RuntimeProvenanceSchema = z.object({
   runtimeVersion: z.string().regex(/^\d+\.\d+\.\d+$/),
@@ -305,9 +514,11 @@ export const ExecutionContractV10ContentSchema = z.object({
 }).strict()
 
 export const ExecutionContractV11ContentSchema = ExecutionContractV10ContentSchema.extend({
+  executionProfile: ExecutionProfileSchema.optional(),
   readHttpRequests: ReadHttpRequestSetSchema,
   writeHttpActions: z.array(RuntimeWriteHttpActionSchema).max(100_000).optional(),
   writeCleanupPlans: z.array(CleanupPlanDefinitionSchema).max(100_000).optional(),
+  fullPlaywrightPrograms: z.array(FullPlaywrightProgramSchema).max(100_000).optional(),
   actionIntents: z.array(ExecutionActionIntentV10Schema.extend({
     requestIds: z.array(SafeIdSchema).max(1_000),
   }).strict()).max(100_000),
@@ -357,13 +568,22 @@ export const ExecutionContractV11ContentSchema = ExecutionContractV10ContentSche
   }
   for (const [index, action] of writeActions.entries()) {
     const cleanup = cleanupById.get(action.cleanupPlanId)
-    if (cleanup !== undefined && cleanup.actionId !== action.actionId) {
+    if (cleanup !== undefined && (cleanup.schemaVersion !== '1.0.0' || cleanup.actionId !== action.actionId)) {
       context.addIssue({
-        code: 'custom', message: 'write action 与 cleanup plan 的 actionId 不闭合',
+        code: 'custom', message: 'HTTP write action 必须与 legacy cleanup plan 的 actionId 闭合',
         path: ['writeHttpActions', index, 'cleanupPlanId'],
       })
     }
   }
+  refineFullPlaywrightPrograms({
+    executionProfile: content.executionProfile,
+    programs: content.fullPlaywrightPrograms ?? [],
+    actionRefs: content.actionIntents.map((action) => ({ actionId: action.actionId, effect: action.effect,
+      runtimeHttpActionDigest: action.runtimeHttpActionDigest })),
+    caseIds: content.caseQueue.map((item) => item.caseId),
+    writeLeaseIds: content.dataNeeds.filter((item) => item.mode === 'write').map((item) => item.leaseId),
+    cleanupPlans,
+  }, context)
 })
 
 const executionContractContent = ExecutionContractV11ContentSchema
@@ -448,7 +668,15 @@ export const BrowserActionMapV20ContentSchema = z.object({
 }).strict()
 
 export const BrowserActionMapV21ContentSchema = BrowserActionMapV20ContentSchema.extend({
+  executionProfile: ExecutionProfileSchema.optional(),
+  fullPlaywrightPrograms: z.array(FullPlaywrightProgramSchema).max(100_000).optional(),
   actions: z.array(BrowserActionMapV20ActionSchema.extend({
+    capabilities: z.array(z.object({
+      operation: z.enum(['dom-read', 'screenshot', 'local-navigation', 'http-request', 'full-playwright']),
+      capabilityId: SafeIdSchema,
+    }).strict()).min(1).max(16).refine((items) =>
+      new Set(items.map((item) => item.operation)).size === items.length,
+    '同一 action 的 operation 必须唯一'),
     requestIds: z.array(SafeIdSchema).max(1_000)
       .refine((values) => new Set(values).size === values.length, 'requestId 引用必须唯一'),
   }).strict()).max(100_000),
@@ -463,6 +691,18 @@ export const BrowserActionMapV21ContentSchema = BrowserActionMapV20ContentSchema
       code: 'custom', message: 'E2E_READ_HTTP_REQUEST_REFERENCE_CARDINALITY', path: ['actions'],
     })
   }
+  refineFullPlaywrightPrograms({
+    executionProfile: content.executionProfile,
+    programs: content.fullPlaywrightPrograms ?? [],
+    actionRefs: content.actions.map((action) => ({
+      actionId: action.actionId,
+      caseId: action.caseId,
+      stepId: action.stepId,
+      effect: action.effect,
+      runtimeHttpActionDigest: action.runtimeHttpActionDigest,
+      capabilityOperations: action.capabilities.map((capability) => capability.operation),
+    })),
+  }, context)
 })
 
 const browserActionMapContent = BrowserActionMapV21ContentSchema
@@ -537,7 +777,7 @@ export function validateReadHttpProtocolProjection(input: {
 
 const regressionManifestContent = z.object({
   testDomain: z.literal('prd-e2e-trusted-compiler'),
-  executionProfile: z.enum(['trusted-read-only', 'trusted-reversible-write', 'production-isolated']),
+  executionProfile: ExecutionProfileSchema,
   templateDigest: DigestSchema,
   toolchain: RegressionToolchainSchema,
   sourceFiles: z.array(RegressionSourceFileSchema).max(100_000),
@@ -871,7 +1111,7 @@ export const FinalReportContentSchema = z.object({
   }).strict()).max(100_000),
   regressionDetails: z.object({
     testDomain: z.literal('prd-e2e-trusted-compiler'),
-    executionProfile: z.enum(['trusted-read-only', 'trusted-reversible-write', 'production-isolated']),
+    executionProfile: ExecutionProfileSchema,
     generationId: SafeIdSchema,
     manifestDigest: DigestSchema,
     command: NonEmptyTextSchema,

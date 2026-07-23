@@ -1,4 +1,6 @@
 import { canonicalizeJson, digestText } from './common.js'
+import { FullPlaywrightProgramSchema } from './artifacts.js'
+import { z } from 'zod'
 
 export const APPROVAL_PROJECTION_TYPES = [
   'project-policy', 'acceptance-scope', 'requirement-model', 'coverage-universe',
@@ -51,7 +53,15 @@ function actionMapProjection(content: unknown): unknown {
   if (!isRecord(content) || !Array.isArray(content.actions)) throw new Error('E2E_APPROVAL_PROJECTION_ACTION_MAP_INVALID')
   assertExactKeys(content, [
     'actionMapRevision', 'pageIdentities', 'actions', 'unmappedSteps', 'discoveredRisks',
+    ...(content.executionProfile === undefined ? [] : ['executionProfile']),
+    ...(content.fullPlaywrightPrograms === undefined ? [] : ['fullPlaywrightPrograms']),
   ], 'browser-action-map')
+  let fullPlaywrightPrograms: unknown = content.fullPlaywrightPrograms
+  if (content.fullPlaywrightPrograms !== undefined) {
+    const parsed = z.array(FullPlaywrightProgramSchema).max(100_000).safeParse(content.fullPlaywrightPrograms)
+    if (!parsed.success) throw new Error('E2E_APPROVAL_PROJECTION_FULL_PLAYWRIGHT_PROGRAM_INVALID')
+    fullPlaywrightPrograms = parsed.data
+  }
   return {
     actionMapRevision: content.actionMapRevision,
     pageIdentities: content.pageIdentities,
@@ -80,6 +90,9 @@ function actionMapProjection(content: unknown): unknown {
     }),
     unmappedSteps: content.unmappedSteps,
     discoveredRisks: content.discoveredRisks,
+    ...(content.executionProfile === undefined ? {} : { executionProfile: content.executionProfile }),
+    ...(content.fullPlaywrightPrograms === undefined
+      ? {} : { fullPlaywrightPrograms }),
   }
 }
 

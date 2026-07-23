@@ -19,8 +19,9 @@ import {
   type RegressionDiscoverySubject,
   type RegressionDiscoveryVerifierMaterial,
 } from '@mutil-skills/e2e-contracts'
-import { compileReadOnlyProject } from './compiler.js'
-import { inspectTrustedCompilerInput, type TrustedCompilerInput } from './compiler-input-projector.js'
+import { compileTrustedProject } from './compiler.js'
+import { inspectTrustedCompilerInput, TRUSTED_TYPESCRIPT_VERSION,
+  type TrustedCompilerInput } from './compiler-input-projector.js'
 import { assertExpectedRegressionSourceSet, readRegressionSourceSet } from './regression-source-set.js'
 import { auditTrustedRegressionSourceSet } from './trusted-source-audit.js'
 
@@ -31,13 +32,22 @@ const SOURCE_ROOT = 'regression'
 const DISCOVERY_PURPOSE = 'regression-discovery-attestation/v2' as const
 export const TRUSTED_COMPILER_VERSION = '4.0.0'
 export const TRUSTED_TEMPLATE_VERSION = '3.0.0'
-export const READ_ONLY_COMPILER_DIGEST = digestText('controlled-regression-compiler/v4', `mutil-skills/controlled-regression-compiler/${TRUSTED_COMPILER_VERSION}`)
+export const TRUSTED_COMPILER_DIGEST = digestText('controlled-regression-compiler/v4', `mutil-skills/controlled-regression-compiler/${TRUSTED_COMPILER_VERSION}`)
+/** @deprecated Use TRUSTED_COMPILER_DIGEST; this alias remains for API compatibility. */
+export const READ_ONLY_COMPILER_DIGEST = TRUSTED_COMPILER_DIGEST
 export const READ_ONLY_TEMPLATE_DIGEST = digestText('controlled-regression-template/v3', canonicalizeJson({
   version: TRUSTED_TEMPLATE_VERSION, files: ['README.md', 'package.json', 'package-lock.json', 'playwright.config.ts',
     'fixtures/safe-page.ts', 'tests/generated.spec.ts', 'run-bundle.json', 'safety-policy.json',
     'network-policy.json', 'evidence-policy.json', 'toolchain-manifest.json', 'template-manifest.json',
     'source-integrity.json'],
   actionKinds: ['assertText', 'reversibleWrite'], writeExecution: 'loopback-controlled-runner-bridge',
+}))
+export const FULL_PLAYWRIGHT_TEMPLATE_DIGEST = digestText('controlled-regression-template/full-playwright/v1', canonicalizeJson({
+  version: TRUSTED_TEMPLATE_VERSION, files: ['README.md', 'package.json', 'package-lock.json', 'playwright.config.ts',
+    'fixtures/full-playwright-runtime.ts', 'tests/generated.spec.ts', 'run-bundle.json', 'safety-policy.json', 'network-policy.json',
+    'evidence-policy.json', 'toolchain-manifest.json', 'template-manifest.json', 'source-integrity.json'],
+  executionProfile: 'full-playwright', actionKinds: ['fullPlaywright'],
+  writeExecution: 'trusted-full-playwright-runtime',
 }))
 
 export interface CompileAndAttestRegressionInput {
@@ -108,18 +118,23 @@ export class LocalRegressionDiscoveryAuthority {
     try { input = inspectTrustedCompilerInput(candidate.compilerInput) } catch (cause) {
       throw discoveryError('E2E_REGRESSION_DISCOVERY_INPUT_INVALID', 'Discovery 只接受可信 Projector 产物', cause)
     }
+    if (input.nodeVersion !== process.versions.node) {
+      throw discoveryError('E2E_REGRESSION_DISCOVERY_TOOLCHAIN_MISMATCH',
+        '冻结 Compiler Input 的 Node 版本与本地可信工具链不一致')
+    }
     input.blockedCases.sort(byCaseId)
     await mkdir(candidate.tempParent, { recursive: true })
     const projectDir = await mkdtemp(join(candidate.tempParent, 'e2e-regression-discovery-'))
     let completed = false
     try {
-    const compiled = await compileReadOnlyProject({ outputDir: projectDir, compilerInput: candidate.compilerInput })
+    const compiled = await compileTrustedProject({ outputDir: projectDir, compilerInput: candidate.compilerInput })
     const generatedPaths = [...compiled.generatedFiles].sort()
     const files = await readRegressionSourceSet(projectDir, SOURCE_ROOT)
     assertExpectedRegressionSourceSet(files, generatedPaths, SOURCE_ROOT)
     verifyTrustedCompilerOutput(compiled.sourceDigests, files, projectDir)
-    const executionProfile = input.cases[0]!.actions[0]!.kind === 'reversibleWrite'
-      ? 'trusted-reversible-write' : 'trusted-read-only'
+    const executionProfile = input.executionProfile === 'full-playwright' ? 'full-playwright'
+      : input.cases[0]!.actions[0]!.kind === 'reversibleWrite'
+        ? 'trusted-reversible-write' : 'trusted-read-only'
     const sourceAudit = auditTrustedRegressionSourceSet(files, executionProfile)
     if (!sourceAudit.valid) {
       throw discoveryError('E2E_REGRESSION_DISCOVERY_SOURCE_UNSAFE', sourceAudit.findings
@@ -197,15 +212,18 @@ export class LocalRegressionDiscoveryAuthority {
     const compilerInputDigest = computeCompilerInputDigest(input)
     const sourceSetDigest = computeRegressionSourceSetDigest(sourceFiles)
     const subject = RegressionDiscoverySubjectSchema.parse({
-      schemaVersion: '2.0.0', testDomain: 'prd-e2e-trusted-compiler', executionProfile,
+      schemaVersion: '2.1.0', testDomain: 'prd-e2e-trusted-compiler', executionProfile,
       assetId: input.assetId, generationId: input.generationId,
       prdRevision: input.prdRevision, compilerVersion: TRUSTED_COMPILER_VERSION,
       templateVersion: TRUSTED_TEMPLATE_VERSION, contractsVersion: input.contractsVersion,
       environmentId: input.environmentId, approvalDigest: input.approvalDigest, policyDigest: input.policyDigest,
-      templateDigest: READ_ONLY_TEMPLATE_DIGEST, compilerInputDigest,
+      templateDigest: executionProfile === 'full-playwright'
+        ? FULL_PLAYWRIGHT_TEMPLATE_DIGEST : READ_ONLY_TEMPLATE_DIGEST,
+      compilerInputDigest,
       sourceFiles, caseMappings,
       toolchain: { nodeVersion: process.versions.node, playwrightVersion: installedVersion,
-        compilerDigest: READ_ONLY_COMPILER_DIGEST, playwrightCliDigest: digestBytes('playwright-cli/v1', cliBytes) },
+        typescriptVersion: TRUSTED_TYPESCRIPT_VERSION,
+        compilerDigest: TRUSTED_COMPILER_DIGEST, playwrightCliDigest: digestBytes('playwright-cli/v1', cliBytes) },
       isolation: { command: DISCOVERY_COMMAND, exitCode: 0,
         stdoutDigest: digestBytes('playwright-list-stdout/v1', Buffer.from(stdout, 'utf8')) },
       discoveredCaseIds: discovered.caseIds,

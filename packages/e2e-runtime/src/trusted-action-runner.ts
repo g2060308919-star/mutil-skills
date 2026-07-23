@@ -36,6 +36,10 @@ import {
   type RuntimeInjectionExecutionOutput,
   type RuntimeWriteExecutionOutput,
 } from './runtime-execution-batch.js'
+import {
+  projectRuntimeFullPlaywrightSnapshot,
+  type RuntimeFullPlaywrightProjection,
+} from './runtime-full-playwright-projector.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 export interface TrustedReadAction {
@@ -100,6 +104,11 @@ type RuntimeWriteExecutorBackend = (input: {
 type RuntimeInjectionExecutorBackend = (input: {
   runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot
 }) => Promise<RuntimeInjectionExecutionOutput>
+type RuntimeFullPlaywrightExecutorBackend = (input: {
+  snapshot: RuntimeRunSnapshot
+  attemptId: string
+  projection: RuntimeFullPlaywrightProjection
+}) => Promise<RuntimeWriteExecutionOutput>
 
 declare const runtimeWriteExecutorCapabilityBrand: unique symbol
 export interface RuntimeWriteExecutorCapability {
@@ -109,8 +118,13 @@ declare const runtimeInjectionExecutorCapabilityBrand: unique symbol
 export interface RuntimeInjectionExecutorCapability {
   readonly [runtimeInjectionExecutorCapabilityBrand]: true
 }
+declare const runtimeFullPlaywrightExecutorCapabilityBrand: unique symbol
+export interface RuntimeFullPlaywrightExecutorCapability {
+  readonly [runtimeFullPlaywrightExecutorCapabilityBrand]: true
+}
 const runtimeWriteExecutors = new WeakMap<object, RuntimeWriteExecutorBackend>()
 const runtimeInjectionExecutors = new WeakMap<object, RuntimeInjectionExecutorBackend>()
+const runtimeFullPlaywrightExecutors = new WeakMap<object, RuntimeFullPlaywrightExecutorBackend>()
 
 /** 仅由 Runtime 生产装配层签发；backend 应闭合 Gateway reservation/outcome/cleanup 全链。 */
 export function authorizeRuntimeWriteExecutor(
@@ -128,6 +142,36 @@ export function authorizeRuntimeInjectionExecutor(
   const capability = Object.freeze({}) as RuntimeInjectionExecutorCapability
   runtimeInjectionExecutors.set(capability, backend)
   return capability
+}
+
+/** 仅由生产 full-playwright 装配层签发；普通调用方不能替换 Browser/Gateway/terminal backend。 */
+export function authorizeRuntimeFullPlaywrightExecutor(
+  backend: RuntimeFullPlaywrightExecutorBackend,
+): RuntimeFullPlaywrightExecutorCapability {
+  const capability = Object.freeze({}) as RuntimeFullPlaywrightExecutorCapability
+  runtimeFullPlaywrightExecutors.set(capability, backend)
+  return capability
+}
+
+export async function executeRuntimeFullPlaywright(
+  capability: RuntimeFullPlaywrightExecutorCapability,
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+): Promise<RuntimeWriteExecutionOutput> {
+  const backend = runtimeFullPlaywrightExecutors.get(capability)
+  if (!backend) throw trustedActionError(
+    'E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_CAPABILITY_INVALID',
+    'Full Playwright executor capability 未由生产装配层签发',
+  )
+  const projection = projectRuntimeFullPlaywrightSnapshot(input.snapshot)
+  const output = parseRuntimeWriteExecutionOutput(await backend({
+    snapshot: structuredClone(input.snapshot), attemptId: input.attemptId, projection,
+  }))
+  if (output.caseId !== projection.caseId || output.actionId !== projection.actionId) {
+    throw trustedActionError('E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_OUTPUT_INVALID',
+      'Full Playwright executor 输出未闭合 frozen case/action')
+  }
+  return new RuntimeExecutionBatch({ runId: input.snapshot.runId, attemptId: input.attemptId })
+    .commitRealWrite(output)
 }
 
 export async function executeRuntimeWrite(

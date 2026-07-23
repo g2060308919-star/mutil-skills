@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'vitest'
-import { digestApprovalProjection } from '../src/index.js'
+import {
+  computeFullPlaywrightCleanupSourceDigest,
+  computeFullPlaywrightSourceDigest,
+  digestApprovalProjection,
+} from '../src/index.js'
 
 describe('approval projection digest', () => {
   test('action-map 替换 capabilityId 保持稳定，但任一行为/安全字段变化都会改变摘要', () => {
@@ -26,6 +30,46 @@ describe('approval projection digest', () => {
     }
     expect(() => digestApprovalProjection('browser-action-map', { ...content, newSecurityField: true }))
       .toThrow('E2E_APPROVAL_PROJECTION_KEYS_INVALID')
+  })
+
+  test('full Playwright profile 与完整程序进入 action-map 审批投影', () => {
+    const legacy = {
+      actionMapRevision: 1, pageIdentities: [], actions: [], unmappedSteps: [], discoveredRisks: [],
+    }
+    const source = 'await page.title()'
+    const cleanupSource = "return 'verified-clean'"
+    const program = { schemaVersion: 'full-playwright/v1', caseId: 'CASE-1', stepId: 'STEP-1',
+      actionId: 'ACTION-1', source, sourceDigest: computeFullPlaywrightSourceDigest(source),
+      cleanupSource, cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource), dataLeaseId: 'LEASE-1',
+      cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, networkRequests: [] }
+    const full = { ...legacy, executionProfile: 'full-playwright', fullPlaywrightPrograms: [program] }
+    expect(() => digestApprovalProjection('browser-action-map', full)).not.toThrow()
+    expect(digestApprovalProjection('browser-action-map', full)).not.toBe(
+      digestApprovalProjection('browser-action-map', { ...full,
+        fullPlaywrightPrograms: [{ ...program, source: 'await page.url()',
+          sourceDigest: computeFullPlaywrightSourceDigest('await page.url()') }] }),
+    )
+  })
+
+  test.each([
+    ['program', (program: any) => { program.unknownProgramField = true }],
+    ['request', (program: any) => { program.networkRequests = [{
+      intentId: 'INTENT-1', method: 'POST', canonicalOrigin: 'https://example.test', exactPath: '/todos',
+      query: [], payload: { kind: 'no-body' }, targetFingerprint: `sha256:${'1'.repeat(64)}`,
+      maxRequests: 1, expectedOrder: 1, unknownRequestField: true,
+    }] }],
+  ])('action-map 审批投影严格拒绝 full Playwright %s 未知嵌套字段', (_name, mutate) => {
+    const source = 'await page.title()'
+    const cleanupSource = "return 'verified-clean'"
+    const program: any = { schemaVersion: 'full-playwright/v1', caseId: 'CASE-1', stepId: 'STEP-1',
+      actionId: 'ACTION-1', source, sourceDigest: computeFullPlaywrightSourceDigest(source),
+      cleanupSource, cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource),
+      dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, networkRequests: [] }
+    mutate(program)
+    expect(() => digestApprovalProjection('browser-action-map', {
+      actionMapRevision: 1, pageIdentities: [], actions: [], unmappedSteps: [], discoveredRisks: [],
+      executionProfile: 'full-playwright', fullPlaywrightPrograms: [program],
+    })).toThrow('E2E_APPROVAL_PROJECTION_FULL_PLAYWRIGHT_PROGRAM_INVALID')
   })
 
   test.each(['project-policy', 'acceptance-scope', 'requirement-model', 'coverage-universe', 'test-cases'] as const)(

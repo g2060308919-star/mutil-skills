@@ -214,7 +214,7 @@ export function runtimeReadOnlyFixture(input: {
     caseId: 'CASE-ORDER-1', relativePath: sourceFiles[0]!.relativePath, testTitle: '订单列表',
   }]
   const toolchain = {
-    nodeVersion: '24.0.0', playwrightVersion: '1.61.1',
+    nodeVersion: '24.0.0', playwrightVersion: '1.61.1', typescriptVersion: '5.9.3',
     compilerDigest: d('compiler'), playwrightCliDigest: d('playwright-cli'),
   }
   const regressionManifest = artifact(input, 'regression-manifest', {
@@ -222,7 +222,7 @@ export function runtimeReadOnlyFixture(input: {
     templateDigest: d('template'), toolchain, sourceFiles, caseMappings,
     blockedCases: [], deprecatedCases: [],
     listResult: { caseIds: ['CASE-ORDER-1'], digest: d('list-result'), attestation: {
-      schemaVersion: '2.0.0', testDomain: 'prd-e2e-trusted-compiler',
+      schemaVersion: '2.1.0', testDomain: 'prd-e2e-trusted-compiler',
       executionProfile: 'trusted-read-only', assetId: input.assetId, generationId: input.runId,
       prdRevision: input.prdRevision, compilerVersion: '0.1.0', templateVersion: '0.1.0',
       contractsVersion: '2.0.0', environmentId: 'TEST', approvalDigest: d('approval'),
