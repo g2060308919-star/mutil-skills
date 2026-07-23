@@ -32,8 +32,8 @@ export interface WriteAuthorityClient {
     capabilityId: string; actionId: string; attemptId: string
     attemptContext?: AttemptExecutionContext
   }): Promise<CapabilityReservation>
-  complete(reservationId: string, outcomeDigest: string): Promise<void>
-  markUnknown(reservationId: string, observation: string): Promise<void>
+  complete(reservationId: string, outcomeDigest: string): Promise<string>
+  markUnknown(reservationId: string, observation: string): Promise<string>
 }
 
 export interface LeaseTargetVerifier {
@@ -52,6 +52,11 @@ export interface CompleteExecutionOutcomeInput {
   }
   evidenceIds: string[]
   completedAt: string
+}
+
+export interface GatewayTerminalOutcome {
+  outcome: ExecutionOutcomeReceipt
+  authorityReceiptDigest: string
 }
 
 export function digestJsonHttpPayload(value: unknown): string {
@@ -148,6 +153,23 @@ export class ReversibleWriteGateway {
     this.#resolvedTemplatePayloadDigests = Object.freeze({ ...resolvedDigests })
   }
 
+  /** Runtime pre-effect reservation; transport decisions reuse this exact reservation. */
+  async reserve(): Promise<CapabilityReservation> {
+    if (this.#final) throw gatewayError('E2E_GATEWAY_ACTION_FINAL', 'Action 已进入终态')
+    if (this.#reservation) return { ...this.#reservation }
+    const grantDecision = await this.#authority.verifyForSubject(this.#grant, this.#currentSubject)
+    if (!grantDecision.allowed) throw gatewayError(grantDecision.code, grantDecision.reason)
+    for (const targetFingerprint of new Set(this.#requests.map((request) => request.targetFingerprint))) {
+      const targetAllowed = await this.#leaseAuthority.verifyTarget(
+        this.#capability.dataLeaseId, this.#capability.fencingToken, targetFingerprint,
+      )
+      if (!targetAllowed) {
+        throw gatewayError('E2E_GATEWAY_LEASE_TARGET_INVALID', 'Lease、fencing token 或目标指纹不再有效')
+      }
+    }
+    return await this.#reserveAfterVerification()
+  }
+
   async decide(raw: RawWriteHttpRequest): Promise<GatewayDecision> {
     this.#audit.received += 1
     if (this.#final) return this.block('E2E_GATEWAY_ACTION_FINAL', 'Action 已进入终态')
@@ -187,15 +209,7 @@ export class ReversibleWriteGateway {
         expected.targetFingerprint,
       )
       if (!targetAllowed) return this.block('E2E_GATEWAY_LEASE_TARGET_INVALID', 'Lease、fencing token 或目标指纹不再有效', request)
-      if (!this.#reservation) {
-        this.#reservation = await this.#authority.reserveForSubject({
-          grant: this.#grant, currentSubject: this.#currentSubject,
-          capabilityId: this.#capability.capabilityId,
-          actionId: this.#capability.actionId,
-          attemptId: this.#attemptId,
-          attemptContext: this.#attemptContext,
-        })
-      }
+      if (!this.#reservation) await this.#reserveAfterVerification()
     } catch (error) {
       return this.block(error instanceof E2EError ? error.code : 'E2E_GATEWAY_AUTHORITY_FAILURE', String(error), request)
     }
@@ -210,20 +224,25 @@ export class ReversibleWriteGateway {
     return { decision: 'forward', intentId: expected.intentId, request }
   }
 
-  async complete(outcomeDigest: string): Promise<void> {
+  async complete(outcomeDigest: string): Promise<string> {
     if (this.#final) throw gatewayError('E2E_GATEWAY_ACTION_FINAL', 'Action 已进入终态')
     if (!this.#reservation) throw gatewayError('E2E_GATEWAY_RESERVATION_MISSING', 'Action 尚未产生 capability reservation')
     if (this.#requestIndex !== this.#requests.length) {
       throw gatewayError('E2E_GATEWAY_REQUEST_SEQUENCE_INCOMPLETE', '已批准请求序列尚未完整执行')
     }
-    await this.#authority.complete(this.#reservation.reservationId, outcomeDigest)
+    const authorityReceiptDigest = await this.#authority.complete(this.#reservation.reservationId, outcomeDigest)
     this.#recorder.recordCapabilityReservation({
       reservation: { ...this.#reservation, status: 'completed', outcomeDigest }, consumed: true,
     })
     this.#final = true
+    return authorityReceiptDigest
   }
 
   async completeWithExecutionOutcome(input: CompleteExecutionOutcomeInput): Promise<ExecutionOutcomeReceipt> {
+    return (await this.completeWithExecutionOutcomeResult(input)).outcome
+  }
+
+  async completeWithExecutionOutcomeResult(input: CompleteExecutionOutcomeInput): Promise<GatewayTerminalOutcome> {
     if (this.#final) throw gatewayError('E2E_GATEWAY_ACTION_FINAL', 'Action 已进入终态')
     if (!this.#reservation) throw gatewayError('E2E_GATEWAY_RESERVATION_MISSING', 'Action 尚未产生 capability reservation')
     if (this.#requestIndex !== this.#requests.length) {
@@ -232,8 +251,61 @@ export class ReversibleWriteGateway {
     if (!this.#outcomeSigner || !this.#gatewayPolicyDigest) {
       throw gatewayError('E2E_GATEWAY_OUTCOME_SIGNER_REQUIRED', '结构化 ExecutionOutcome 完成事务需要同实例签发器')
     }
+    const receipt = this.#issueExecutionOutcome(input)
+    const authorityReceiptDigest = await this.#authority.complete(this.#reservation.reservationId, receipt.signedDigest)
+    if (!/^sha256:[a-f0-9]{64}$/.test(authorityReceiptDigest)) {
+      throw gatewayError('E2E_GATEWAY_AUTHORITY_RECEIPT_INVALID', 'Authority terminal receipt 摘要无效')
+    }
+    this.#recorder.recordCapabilityReservation({
+      reservation: {
+        ...this.#reservation,
+        status: 'completed',
+        outcomeDigest: receipt.signedDigest,
+      },
+      consumed: true,
+    })
+    this.#final = true
+    return { outcome: receipt, authorityReceiptDigest }
+  }
+
+  async markUnknown(observation: string): Promise<string> {
+    if (this.#final) throw gatewayError('E2E_GATEWAY_ACTION_FINAL', 'Action 已进入终态')
+    if (!this.#reservation) throw gatewayError('E2E_GATEWAY_RESERVATION_MISSING', 'Action 尚未产生 capability reservation')
+    const authorityReceiptDigest = await this.#authority.markUnknown(this.#reservation.reservationId, observation)
+    this.#recorder.recordCapabilityReservation({
+      reservation: { ...this.#reservation, status: 'unknown', observation }, consumed: false,
+    })
+    this.#final = true
+    return authorityReceiptDigest
+  }
+
+  async markUnknownWithExecutionOutcome(
+    input: CompleteExecutionOutcomeInput,
+    observation: string,
+  ): Promise<GatewayTerminalOutcome> {
+    if (this.#final) throw gatewayError('E2E_GATEWAY_ACTION_FINAL', 'Action 已进入终态')
+    if (!this.#reservation) throw gatewayError('E2E_GATEWAY_RESERVATION_MISSING', 'Action 尚未产生 capability reservation')
+    if (!this.#outcomeSigner || !this.#gatewayPolicyDigest) {
+      throw gatewayError('E2E_GATEWAY_OUTCOME_SIGNER_REQUIRED', '结构化 ExecutionOutcome 需要同实例签发器')
+    }
+    const outcome = this.#issueExecutionOutcome(input)
+    const authorityReceiptDigest = await this.#authority.markUnknown(this.#reservation.reservationId, observation)
+    if (!/^sha256:[a-f0-9]{64}$/.test(authorityReceiptDigest)) {
+      throw gatewayError('E2E_GATEWAY_AUTHORITY_RECEIPT_INVALID', 'Authority terminal receipt 摘要无效')
+    }
+    this.#recorder.recordCapabilityReservation({
+      reservation: { ...this.#reservation, status: 'unknown', observation }, consumed: false,
+    })
+    this.#final = true
+    return { outcome, authorityReceiptDigest }
+  }
+
+  #issueExecutionOutcome(input: CompleteExecutionOutcomeInput): ExecutionOutcomeReceipt {
+    if (!this.#reservation || !this.#outcomeSigner || !this.#gatewayPolicyDigest) {
+      throw gatewayError('E2E_GATEWAY_OUTCOME_SIGNER_REQUIRED', '结构化 ExecutionOutcome 需要 reservation 与同实例签发器')
+    }
     const evidenceIds = [...input.evidenceIds]
-    const receipt = this.#outcomeSigner.issueExecutionOutcomeReceipt({
+    return this.#outcomeSigner.issueExecutionOutcomeReceipt({
       schemaVersion: '1.0.0',
       attemptContext: { ...this.#attemptContext },
       grantId: this.#grant.grantId,
@@ -272,27 +344,6 @@ export class ReversibleWriteGateway {
       ),
       completedAt: input.completedAt,
     })
-    await this.#authority.complete(this.#reservation.reservationId, receipt.signedDigest)
-    this.#recorder.recordCapabilityReservation({
-      reservation: {
-        ...this.#reservation,
-        status: 'completed',
-        outcomeDigest: receipt.signedDigest,
-      },
-      consumed: true,
-    })
-    this.#final = true
-    return receipt
-  }
-
-  async markUnknown(observation: string): Promise<void> {
-    if (this.#final) throw gatewayError('E2E_GATEWAY_ACTION_FINAL', 'Action 已进入终态')
-    if (!this.#reservation) throw gatewayError('E2E_GATEWAY_RESERVATION_MISSING', 'Action 尚未产生 capability reservation')
-    await this.#authority.markUnknown(this.#reservation.reservationId, observation)
-    this.#recorder.recordCapabilityReservation({
-      reservation: { ...this.#reservation, status: 'unknown', observation }, consumed: false,
-    })
-    this.#final = true
   }
 
   getAuditSummary(): GatewayAuditSummary {
@@ -306,6 +357,19 @@ export class ReversibleWriteGateway {
   /** Transport Host 用于避免在多步已批准请求序列完成前开放 outcome finalization。 */
   isRequestSequenceComplete(): boolean {
     return this.#requestIndex === this.#requests.length
+  }
+
+  async #reserveAfterVerification(): Promise<CapabilityReservation> {
+    if (!this.#reservation) {
+      this.#reservation = await this.#authority.reserveForSubject({
+        grant: this.#grant, currentSubject: this.#currentSubject,
+        capabilityId: this.#capability.capabilityId,
+        actionId: this.#capability.actionId,
+        attemptId: this.#attemptId,
+        attemptContext: this.#attemptContext,
+      })
+    }
+    return { ...this.#reservation }
   }
 
   private block(code: string, reason: string, request?: GatewayDecision extends { request?: infer T } ? T : never): GatewayDecision {

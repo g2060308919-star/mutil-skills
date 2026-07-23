@@ -1683,10 +1683,24 @@ export class E2ERuntimeHost {
     if (decision.kind === 'recover-write-attempt') {
       const production = this.dependencies.writeProduction
       if (production === undefined) throw blockedError('E2E_RUNTIME_WRITE_RECOVERY_NOT_READY')
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      let recoverFullPlaywright = false
+      try { recoverFullPlaywright = snapshot !== undefined
+        && runtimeExecutionMode(snapshot) === 'full-playwright' } catch { /* legacy recovery */ }
+      if (recoverFullPlaywright && this.dependencies.fullPlaywrightExecutor === undefined) {
+        throw blockedError('E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_NOT_READY')
+      }
       const result = await recoverRuntimeProductionWrite(production, { projectIdentityDigest: identity.digest,
         runId: request.payload.runId, attemptId: decision.expectedAttemptId })
+      const fullPlaywrightTerminal = recoverFullPlaywright
+        ? await executeRuntimeFullPlaywright(this.dependencies.fullPlaywrightExecutor!, {
+          snapshot: snapshot!, attemptId: decision.expectedAttemptId,
+        }) : undefined
       const response = this.successResponse(request.requestId, {
         runId: request.payload.runId, recoveredAttemptId: decision.expectedAttemptId, ...result,
+        ...(fullPlaywrightTerminal === undefined ? {} : { fullPlaywrightTerminal: omitEphemeralWriteEvidence(
+          fullPlaywrightTerminal,
+        ) }),
       })
       return await this.completeGlobalResponse(request.requestId, requestDigest, response)
     }

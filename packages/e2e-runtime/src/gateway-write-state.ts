@@ -1,5 +1,6 @@
 import type {
   CompleteExecutionOutcomeInput,
+  GatewayTerminalOutcome,
   ReversibleWriteGateway,
 } from '@mutil-skills/e2e-gateway'
 import type { ExecutionOutcomeReceipt } from '@mutil-skills/e2e-contracts'
@@ -55,7 +56,7 @@ export class GatewayWriteStateCoordinator {
   async finalize(
     capabilityId: string,
     input: CompleteExecutionOutcomeInput,
-  ): Promise<ExecutionOutcomeReceipt> {
+  ): Promise<GatewayTerminalOutcome> {
     const record = this.#findCapability(capabilityId)
     if (record.state !== 'transport-observed') {
       if (record.terminalError) throw record.terminalError
@@ -65,7 +66,7 @@ export class GatewayWriteStateCoordinator {
     record.state = 'finalizing'
     const operation = (async () => {
       try {
-        const receipt = await record.gateway.completeWithExecutionOutcome(input)
+        const receipt = await record.gateway.completeWithExecutionOutcomeResult(input)
         record.state = 'finalized'
         this.#release(record)
         return receipt
@@ -80,8 +81,35 @@ export class GatewayWriteStateCoordinator {
     return await operation
   }
 
-  async markCapabilityUnknown(capabilityId: string, observation: string): Promise<void> {
-    await this.#claimUnknown(this.#findCapability(capabilityId), observation)
+  async markCapabilityUnknown(capabilityId: string, observation: string): Promise<string> {
+    return await this.#claimUnknown(this.#findCapability(capabilityId), observation)
+  }
+
+  async markCapabilityUnknownWithOutcome(
+    capabilityId: string,
+    input: CompleteExecutionOutcomeInput,
+    observation: string,
+  ): Promise<GatewayTerminalOutcome> {
+    const record = this.#findCapability(capabilityId)
+    if (record.state !== 'transport-observed') {
+      if (record.terminalError) throw record.terminalError
+      throw writeStateError('E2E_GATEWAY_WRITE_TRANSPORT_NOT_OBSERVED')
+    }
+    record.state = 'marking-unknown'
+    const operation = (async () => {
+      try {
+        const result = await record.gateway.markUnknownWithExecutionOutcome(input, observation)
+        record.state = 'unknown'
+        this.#release(record)
+        return result
+      } catch (error) {
+        record.state = 'terminal-failed'
+        record.terminalError = error
+        throw error
+      }
+    })()
+    record.operation = operation
+    return await operation
   }
 
   async settleAllUnknown(observation: string): Promise<void> {
@@ -104,20 +132,22 @@ export class GatewayWriteStateCoordinator {
     return this.#records.size
   }
 
-  async #claimUnknown(record: WriteRecord, observation: string): Promise<void> {
-    if (record.state === 'unknown' || record.state === 'finalized') return
+  async #claimUnknown(record: WriteRecord, observation: string): Promise<string> {
+    if (record.state === 'unknown' || record.state === 'finalized') {
+      throw writeStateError('E2E_GATEWAY_WRITE_ALREADY_TERMINAL')
+    }
     if (record.state === 'terminal-failed') throw record.terminalError
     if (record.state === 'finalizing' || record.state === 'marking-unknown') {
-      await record.operation
-      return
+      return await record.operation as string
     }
     // 原子 claim 必须发生在 Authority await 之前。
     record.state = 'marking-unknown'
     const operation = (async () => {
       try {
-        await record.gateway.markUnknown(observation)
+        const receiptDigest = await record.gateway.markUnknown(observation)
         record.state = 'unknown'
         this.#release(record)
+        return receiptDigest
       } catch (error) {
         record.state = 'terminal-failed'
         record.terminalError = error
@@ -125,7 +155,7 @@ export class GatewayWriteStateCoordinator {
       }
     })()
     record.operation = operation
-    await operation
+    return await operation
   }
 
   #findCapability(capabilityId: string): WriteRecord {

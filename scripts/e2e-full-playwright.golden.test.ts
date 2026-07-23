@@ -1,4 +1,7 @@
 import { createServer } from 'node:http'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterAll, beforeAll, expect, test } from 'vitest'
 import { chromium, expect as playwrightExpect, type APIRequestContext, type BrowserContext } from '@playwright/test'
 import { canonicalizeJson, digestBytes, digestText } from '@mutil-skills/e2e-contracts'
@@ -6,6 +9,8 @@ import { LocalExecutionOutcomeVerifier, LocalGatewayAuditSigner, LocalGatewayAud
   verifyGatewayPublicationAudit, type GatewayPublicationAudit } from '@mutil-skills/e2e-gateway'
 import { runFullPlaywrightCase, type FullPlaywrightEvidenceStage } from '@mutil-skills/e2e-playwright-runtime'
 import { readyFixture } from '../packages/e2e-playwright-runtime/test/full-playwright-runner.fixture.js'
+import { startGatewayProxyHostForRuntime } from '../packages/e2e-runtime/src/gateway-proxy-host.js'
+import { projectGatewayRules } from '../packages/e2e-runtime/src/gateway-rule-projector.js'
 
 let origin = ''
 const targetDigest = digestText('full-playwright-runner-test/v1', 'target')
@@ -44,6 +49,51 @@ beforeAll(async () => {
 })
 
 afterAll(async () => { await new Promise<void>((resolve) => server.close(() => resolve())) })
+
+test('真实 production Gateway child + Chromium proxy 闭合 document transport 与签名发布', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'e2e-full-production-gateway-'))
+  const approvedRequests = [{ actionId: 'ACTION-PRODUCTION-GOLDEN', capabilityId: 'CAP-PRODUCTION-GOLDEN',
+    requestId: 'DOCUMENT-PRODUCTION-GOLDEN', method: 'GET', url: `${origin}/extra`, maxUses: 1,
+    signedBodyDigest: digestText('runtime-http-signed-payload/v1', canonicalizeJson({ kind: 'no-body' })),
+    headers: [], redirectRequestIds: [], channel: 'http' as const, behavior: { kind: 'pass-through' as const } }]
+  const rule = projectGatewayRules({ runId: 'RUN-PRODUCTION-GOLDEN', approvedRequests }).rules[0]!
+  const gateway = await startGatewayProxyHostForRuntime({ runId: 'RUN-PRODUCTION-GOLDEN',
+    mode: 'real-environment', authorityRoot: join(home, 'authority'), approvedRequests })
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+  try {
+    browser = await chromium.launch({ headless: true,
+      proxy: { server: gateway.handle.endpoint, bypass: '<-loopback>' },
+      args: [`--ignore-certificate-errors-spki-list=${gateway.handle.caSpkiFingerprint}`] })
+    const context = await browser.newContext()
+    await context.route('**/*', async (route) => {
+      const request = route.request()
+      if (request.method() !== 'GET' || request.url() !== `${origin}/extra`) {
+        await route.abort('blockedbyclient'); return
+      }
+      await gateway.browserBinding.continueCorrelatedRequest({
+        requestId: rule.requestId!, ruleId: rule.ruleId, stepOrdinal: rule.stepOrdinal,
+        method: rule.method, url: rule.url, channel: 'http', bodyDigest: rule.bodyDigest,
+        actionId: rule.actionId, capabilityId: rule.capabilityId,
+        signedBodyDigest: rule.signedBodyDigest!, headers: { ...rule.requestHeaders },
+      }, { continueWithHeaders: async (headers) => await route.continue({
+        headers: { ...request.headers(), ...headers },
+      }) })
+    })
+    const page = await context.newPage()
+    await page.goto(`${origin}/extra`)
+    await expect(page.locator('main')).toHaveText('/extra')
+    await gateway.handle.freeze()
+    const publication = await gateway.handle.finalize()
+    expect(gateway.handle.auditSummary()).toMatchObject({ received: 1, forwarded: 1, blocked: 0,
+      byIntent: { 'DOCUMENT-PRODUCTION-GOLDEN': 1 } })
+    expect(publication.signedCounters.digest).toMatch(/^sha256:/)
+    await context.close()
+  } finally {
+    await browser?.close()
+    await gateway.handle.close()
+    await rm(home, { recursive: true, force: true })
+  }
+})
 
 test('真实 Chromium：受控完整 Playwright program 与独立 cleanup session 闭合', async () => {
   const programBrowser = await chromium.launch({ headless: true })

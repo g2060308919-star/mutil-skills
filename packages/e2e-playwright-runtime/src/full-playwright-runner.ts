@@ -71,11 +71,29 @@ export interface FullPlaywrightEvidenceSummary {
   references?: string[]
 }
 
-export interface FullPlaywrightGatewayResult {
+export interface FullPlaywrightGatewayObservation {
   executionSessionId: string
   policyDigest: string
   summary: GatewayAuditSummary
+}
+
+export interface FullPlaywrightGatewayResult extends FullPlaywrightGatewayObservation {
   auditDigest: string
+}
+
+export interface FullPlaywrightTerminalOutcomeInput {
+  status: 'passed' | 'failed' | 'environment-blocked' | 'safety-blocked'
+  effectObservation: 'proven-not-applied' | 'applied' | 'unknown'
+  runnerResultDigest: string
+  cleanupPlanId: string
+  cleanup: FullPlaywrightCleanupResult
+  evidenceIds: string[]
+  completedAt: string
+}
+
+export interface FullPlaywrightGatewayTerminalResult {
+  outcome: ExecutionOutcomeReceipt
+  authorityReceiptDigest: string
 }
 
 export interface FullPlaywrightCleanupResult {
@@ -177,10 +195,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   const { program, cleanupPlan, capability, session, grant, currentSubject } = checked
   let reservation
   try {
-    reservation = await input.authorization.authority.reserveForSubject({
-      grant, currentSubject, capabilityId: capability.capabilityId, actionId: program.actionId,
-      attemptId: input.attemptId, attemptContext: structuredClone(input.attemptContext),
-    })
+    reservation = await session.reserveCapability()
   } catch (error) {
     return blocked(input, errorCode(error, 'E2E_FULL_PLAYWRIGHT_RESERVATION_DENIED'))
   }
@@ -192,6 +207,14 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, [],
       'full-playwright-reservation-owner-mismatch',
       new HostError('E2E_FULL_PLAYWRIGHT_RESERVATION_OWNER_MISMATCH'))
+  }
+  try {
+    await session.checkpoint?.('reserved', immutableSnapshot({
+      reservation, binding: session.binding, attemptContext: input.attemptContext,
+    }))
+  } catch (error) {
+    return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, [],
+      'pre-effect-checkpoint-failed', error)
   }
 
   const evidence: FullPlaywrightEvidenceSummary[] = []
@@ -258,19 +281,18 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
       'evidence-capture-failed', infrastructureError)
   }
 
-  let gateway: FullPlaywrightGatewayResult
-  try { gateway = await session.finalizeGateway() }
+  let gateway: FullPlaywrightGatewayObservation
+  try { gateway = await session.freezeGateway() }
   catch (error) {
     return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
-      'gateway-finalize-failed', error)
+      'gateway-freeze-failed', error)
   }
   if (gateway.executionSessionId !== session.binding.executionSessionId
     || gateway.policyDigest !== session.binding.gatewayPolicyDigest
-    || !validGatewayResult(gateway)) {
+    || !validGatewayObservation(gateway)) {
     return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
       'gateway-binding-invalid', new HostError('E2E_FULL_PLAYWRIGHT_GATEWAY_BINDING_MISMATCH'))
   }
-  evidence.push(gatewayEvidence(gateway))
 
   let observedEffect: ReturnType<FullPlaywrightControlledSessionBackend['observeEffect']>
   try { observedEffect = session.observeEffect() }
@@ -286,7 +308,8 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   let evidenceIds: string[]
   try {
     assertCompleteEvidenceSet(evidence)
-    evidenceIds = uniqueEvidenceIds(evidence)
+    evidenceIds = uniqueEvidenceIds([...evidence, gatewayEvidence(gateway,
+      digestText('full-playwright-gateway-publication-pending/v1', gateway.executionSessionId))])
   } catch (error) {
     return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
       'evidence-set-invalid', error)
@@ -299,7 +322,8 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   const runnerResultDigest = digestText('full-playwright-runner-result/v1', canonicalizeJson({
     caseId: program.caseId, stepId: program.stepId, actionId: program.actionId,
     reservationId: reservation.reservationId, status, effectObservation, cleanupStatus,
-    gatewayAuditDigest: gateway.auditDigest, evidenceSetDigest,
+    gatewaySummaryDigest: digestText('full-playwright-gateway-summary/v1', canonicalizeJson(gateway)),
+    evidenceSetDigest,
     primaryError: primaryCaught ? errorSummary(primaryError) : null,
     cleanupError: cleanupCaught ? errorSummary(cleanupError) : null,
     retireError: retireCaught ? errorSummary(retireError) : null,
@@ -309,6 +333,8 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   let leaseReceiptDigest: string | undefined
   let cleanup: FullPlaywrightCleanupResult | undefined
   let resultDigest = runnerResultDigest
+  let terminalResult: FullPlaywrightGatewayTerminalResult | undefined
+  let publishedGateway: FullPlaywrightGatewayResult | undefined
   const unknownObservation = unknown
     ? programTimedOut ? 'full-playwright-program-timeout-effect-unknown'
       : gateway.summary.blocked > 0 ? 'full-playwright-gateway-blocked-effect-unknown'
@@ -324,32 +350,46 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
       targetFingerprint: input.lease.targetFingerprint, cleanupDigest: cleanupResultDigest,
     }))
   const finish = async (): Promise<FullPlaywrightCaseResult> => {
+    await session.checkpoint?.('lease-terminal-intent', immutableSnapshot({
+      reservationId: reservation.reservationId, runnerResultDigest, cleanupResultDigest,
+      cleanupStatus, unknown, unknownObservation: unknownObservation ?? null,
+      lease: { leaseId: input.lease.leaseId, fencingToken: input.lease.fencingToken,
+        targetFingerprint: input.lease.targetFingerprint }, gateway, evidence,
+    }))
     leaseReceiptDigest ??= await settleLease()
     if (!DIGEST.test(leaseReceiptDigest)) throw new HostError('E2E_FULL_PLAYWRIGHT_LEASE_RECEIPT_INVALID')
     cleanup ??= { status: cleanupStatus, resultDigest: cleanupResultDigest, leaseReceiptDigest }
-    const binding = ExecutionOutcomeBindingSchema.parse({
-      schemaVersion: '1.0.0', attemptContext: input.attemptContext,
-      grantId: grant.grantId, capabilityId: capability.capabilityId, actionId: program.actionId,
-      attemptId: input.attemptId, reservationId: reservation.reservationId, capability,
-      effect: 'reversible-write', status, effectObservation, runnerResultDigest,
-      gateway: {
-        executionSessionId: gateway.executionSessionId, policyDigest: gateway.policyDigest,
-        approvedRequestSetDigest: approvedRequestSetDigest(capability.requests),
-        received: gateway.summary.received, forwarded: gateway.summary.forwarded, blocked: gateway.summary.blocked,
-      },
-      cleanup: { cleanupPlanId: cleanupPlan.cleanupPlanId, cleanupPlanDigest: capability.cleanupPlanDigest,
-        leaseId: capability.dataLeaseId, ...cleanup },
-      evidenceIds, evidenceSetDigest, completedAt: new Date().toISOString(),
-    } satisfies ExecutionOutcomeBinding)
-    resultDigest = digestExecutionOutcomeBinding(binding)
-    const outcome = await retryTerminal('sign', terminalErrors, async () =>
-      ExecutionOutcomeReceiptSchema.parse(session.issueOutcome(binding)))
-    const authorityReceiptDigest = unknown
-      ? await retryTerminal('markUnknown', terminalErrors, () => session.terminal.markReservationUnknown(
-        reservation.reservationId, `${unknownObservation}:${runnerResultDigest}`))
-      : await retryTerminal('complete', terminalErrors, () => session.terminal.completeReservation(
-        reservation.reservationId, outcome.signedDigest))
-    if (!DIGEST.test(authorityReceiptDigest)) throw new HostError('E2E_FULL_PLAYWRIGHT_AUTHORITY_RECEIPT_INVALID')
+    const terminalInput: FullPlaywrightTerminalOutcomeInput = {
+      status, effectObservation, runnerResultDigest, cleanupPlanId: cleanupPlan.cleanupPlanId,
+      cleanup, evidenceIds, completedAt: new Date().toISOString(),
+    }
+    await session.checkpoint?.('write-terminal-intent', immutableSnapshot({
+      reservationId: reservation.reservationId, terminalInput,
+      observation: unknown ? `${unknownObservation}:${runnerResultDigest}` : null,
+    }))
+    terminalResult ??= unknown
+      ? await retryTerminal('markUnknown', terminalErrors, () => session.terminal.markWriteUnknownWithOutcome(
+        terminalInput, `${unknownObservation}:${runnerResultDigest}`))
+      : await retryTerminal('complete', terminalErrors, () => session.terminal.finalizeWriteOutcome(terminalInput))
+    const outcome = ExecutionOutcomeReceiptSchema.parse(terminalResult.outcome)
+    const authorityReceiptDigest = terminalResult.authorityReceiptDigest
+    if (!DIGEST.test(authorityReceiptDigest) || outcome.reservationId !== reservation.reservationId) {
+      throw new HostError('E2E_FULL_PLAYWRIGHT_AUTHORITY_RECEIPT_INVALID')
+    }
+    await session.checkpoint?.('authority-terminal', immutableSnapshot({
+      reservationId: reservation.reservationId, terminalInput, outcome, authorityReceiptDigest,
+    }))
+    resultDigest = outcome.signedDigest
+    if (!publishedGateway) {
+      const publication = await retryTerminal('publish', terminalErrors, () => session.publishGateway())
+      publishedGateway = { ...gateway, auditDigest: publication.auditDigest }
+      if (!validGatewayResult(publishedGateway)) throw new HostError('E2E_FULL_PLAYWRIGHT_GATEWAY_PUBLICATION_INVALID')
+      evidence.push(gatewayEvidence(publishedGateway, publishedGateway.auditDigest))
+    }
+    await session.checkpoint?.('published', immutableSnapshot({
+      reservationId: reservation.reservationId, terminalInput, outcome, authorityReceiptDigest,
+      publishedGateway, evidence,
+    }))
     pendingFinalizations.get(input.session as object)?.delete(input.attemptId)
     const finalization: FullPlaywrightFinalizationResult = {
       state: unknown ? 'unknown' : 'completed', terminalIntentDigest: runnerResultDigest,
@@ -564,11 +604,14 @@ async function captureChecked(session: FullPlaywrightControlledSessionBackend, s
   return immutableSnapshot(evidence)
 }
 
-function gatewayEvidence(gateway: FullPlaywrightGatewayResult): FullPlaywrightEvidenceSummary {
+function gatewayEvidence(
+  gateway: FullPlaywrightGatewayObservation,
+  auditDigest: string,
+): FullPlaywrightEvidenceSummary {
   const bytes = Buffer.from(canonicalizeJson({ executionSessionId: gateway.executionSessionId,
     policyDigest: gateway.policyDigest, summary: gateway.summary }), 'utf8')
   return { evidenceId: `GATEWAY-${gateway.executionSessionId}`, stage: 'cleanup', kind: 'gateway-audit',
-    byteLength: bytes.byteLength, digest: gateway.auditDigest }
+    byteLength: bytes.byteLength, digest: auditDigest }
 }
 
 function approvedRequestSetDigest(requests: BrowserLocalReversibleWriteCapability['requests']): string {
@@ -632,17 +675,22 @@ async function finalizeUnexpectedUnknown(
       leaseId: input.lease.leaseId, fencingToken: input.lease.fencingToken,
       targetFingerprint: input.lease.targetFingerprint, reason,
     })),
-    retryTerminal('markUnknown', errors, () => session.terminal.markReservationUnknown(reservationId, reason)),
+    retryTerminal('markUnknown', errors, () => session.terminal.markWriteUnknown(reason)),
   ])
   const leaseReceiptDigest = leaseResult.status === 'fulfilled' && DIGEST.test(leaseResult.value)
     ? leaseResult.value : undefined
   const authorityReceiptDigest = authorityResult.status === 'fulfilled' && DIGEST.test(authorityResult.value)
     ? authorityResult.value : undefined
+  const publicationResult = authorityReceiptDigest
+    ? await Promise.allSettled([retryTerminal('publish', errors, () => session.publishGateway())])
+      .then(([result]) => result)
+    : undefined
   const result = failedUnknown(input, reservationId, evidence, 'E2E_FULL_PLAYWRIGHT_POST_RESERVATION_FAILED', {
     primary: error,
   })
   return { ...result, finalization: {
-    state: leaseReceiptDigest && authorityReceiptDigest ? 'unknown' : 'terminal-failed',
+    state: leaseReceiptDigest && authorityReceiptDigest && publicationResult?.status === 'fulfilled'
+      ? 'unknown' : 'terminal-failed',
     terminalIntentDigest,
     ...(leaseReceiptDigest ? { leaseReceiptDigest } : {}),
     ...(authorityReceiptDigest ? { authorityReceiptDigest } : {}),
@@ -651,9 +699,13 @@ async function finalizeUnexpectedUnknown(
 }
 
 function validGatewayResult(gateway: FullPlaywrightGatewayResult): boolean {
+  return DIGEST.test(gateway.auditDigest) && validGatewayObservation(gateway)
+}
+
+function validGatewayObservation(gateway: FullPlaywrightGatewayObservation): boolean {
   const summary = gateway.summary
-  return DIGEST.test(gateway.auditDigest)
-    && [summary.received, summary.forwarded, summary.blocked].every((value) => Number.isSafeInteger(value) && value >= 0)
+  return [summary.received, summary.forwarded, summary.blocked]
+    .every((value) => Number.isSafeInteger(value) && value >= 0)
     && summary.received >= summary.forwarded + summary.blocked
     && summary.byIntent && typeof summary.byIntent === 'object'
     && Object.values(summary.byIntent).every((value) => Number.isSafeInteger(value) && value >= 0)

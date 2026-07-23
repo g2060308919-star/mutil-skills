@@ -1,15 +1,17 @@
-import type { ExecutionOutcomeBinding, ExecutionOutcomeReceipt } from '@mutil-skills/e2e-contracts'
+import type { CapabilityReservation } from '@mutil-skills/e2e-contracts'
 import type {
   ControlledFullPlaywrightSession,
   ControlledFullPlaywrightSessionBinding,
   FullPlaywrightBindings,
   FullPlaywrightEvidenceStage,
   FullPlaywrightEvidenceSummary,
-  FullPlaywrightGatewayResult,
+  FullPlaywrightGatewayObservation,
+  FullPlaywrightGatewayTerminalResult,
+  FullPlaywrightTerminalOutcomeInput,
 } from './full-playwright-runner.js'
 import {
   authorizeFullPlaywrightControlledSession,
-  createFullPlaywrightBrowserFacade,
+  createFullPlaywrightBindingFacades,
 } from './full-playwright-session-internal.js'
 import {
   registerTrustedCompilerWriteRuntimeSession,
@@ -23,19 +25,24 @@ export interface RuntimeHostFullPlaywrightSessionInput {
   authorityRpcPublicKeyDigest: string
   programBindings: FullPlaywrightBindings
   cleanupBindings: FullPlaywrightBindings
+  reserveCapability(): Promise<CapabilityReservation>
   capture(stage: FullPlaywrightEvidenceStage): Promise<FullPlaywrightEvidenceSummary[]>
   retireProgram(): Promise<void>
   retireCleanup(): Promise<void>
   observeEffect(): 'proven-not-applied' | 'applied' | 'unknown'
-  finalizeGateway(): Promise<FullPlaywrightGatewayResult>
-  issueOutcome(binding: ExecutionOutcomeBinding): ExecutionOutcomeReceipt
+  freezeGateway(): Promise<FullPlaywrightGatewayObservation>
+  publishGateway(): Promise<{ auditDigest: string }>
+  checkpoint?(stage: 'reserved' | 'lease-terminal-intent' | 'write-terminal-intent'
+    | 'authority-terminal' | 'published', material: Record<string, unknown>): Promise<void>
   terminal: {
     releaseLease(input: { leaseId: string; fencingToken: number; targetFingerprint: string;
       cleanupDigest: string }): Promise<string>
     quarantineLease(input: { leaseId: string; fencingToken: number; targetFingerprint: string;
       reason: string }): Promise<string>
-    completeReservation(reservationId: string, outcomeDigest: string): Promise<string>
-    markReservationUnknown(reservationId: string, observation: string): Promise<string>
+    finalizeWriteOutcome(input: FullPlaywrightTerminalOutcomeInput): Promise<FullPlaywrightGatewayTerminalResult>
+    markWriteUnknownWithOutcome(input: FullPlaywrightTerminalOutcomeInput,
+      observation: string): Promise<FullPlaywrightGatewayTerminalResult>
+    markWriteUnknown(observation: string): Promise<string>
   }
 }
 
@@ -60,25 +67,20 @@ export function createRuntimeHostFullPlaywrightSession(input: RuntimeHostFullPla
     runId: input.binding.runId, assetId: input.binding.assetId, generationId: input.binding.generationId,
     prdRevision: input.binding.prdRevision, sourceDigest: input.binding.sourceSetDigest,
   })
-  const programBindings = {
-    ...input.programBindings,
-    browser: createFullPlaywrightBrowserFacade(input.programBindings.browser as object, {
-      browserSessionId: input.binding.programBrowserSessionId,
-      gatewaySessionId: input.binding.executionSessionId, lifecycle: 'program',
-    }),
-  }
-  const cleanupBindings = {
-    ...input.cleanupBindings,
-    browser: createFullPlaywrightBrowserFacade(input.cleanupBindings.browser as object, {
-      browserSessionId: input.binding.cleanupBrowserSessionId,
-      gatewaySessionId: input.binding.executionSessionId, lifecycle: 'cleanup',
-    }),
-  }
+  const programBindings = createFullPlaywrightBindingFacades(input.programBindings, {
+    browserSessionId: input.binding.programBrowserSessionId,
+    gatewaySessionId: input.binding.executionSessionId, lifecycle: 'program',
+  })
+  const cleanupBindings = createFullPlaywrightBindingFacades(input.cleanupBindings, {
+    browserSessionId: input.binding.cleanupBrowserSessionId,
+    gatewaySessionId: input.binding.executionSessionId, lifecycle: 'cleanup',
+  })
   const session = authorizeFullPlaywrightControlledSession({
-    binding: input.binding, programBindings, cleanupBindings, capture: input.capture,
+    binding: input.binding, programBindings, cleanupBindings, reserveCapability: input.reserveCapability,
+    capture: input.capture,
     retireProgram: input.retireProgram, retireCleanup: input.retireCleanup,
-    observeEffect: input.observeEffect, finalizeGateway: input.finalizeGateway,
-    issueOutcome: input.issueOutcome, terminal: input.terminal,
+    observeEffect: input.observeEffect, freezeGateway: input.freezeGateway,
+    publishGateway: input.publishGateway, checkpoint: input.checkpoint, terminal: input.terminal,
   })
   return Object.freeze({ runtime, session })
 }

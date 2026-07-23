@@ -1,12 +1,12 @@
-/** 可单测的 finalize 顺序：先冻结并 drain，再等待 child terminal settlement，再收敛写状态，最后签审计。 */
+/** 可单测的 publication 顺序：冻结/drain 后只允许已由唯一 owner 终结的 write，再签审计。 */
 export async function freezeDrainAndFinalize<T>(operations: {
   freezeAndDrain(): Promise<void>
   waitForTerminalSettlement(): Promise<void>
-  settleWrites(): Promise<void>
+  assertWritesTerminal(): void
   signAudit(): T
 }): Promise<T> {
   await operations.freezeAndDrain()
   await operations.waitForTerminalSettlement()
-  await operations.settleWrites()
+  operations.assertWritesTerminal()
   return operations.signAudit()
 }

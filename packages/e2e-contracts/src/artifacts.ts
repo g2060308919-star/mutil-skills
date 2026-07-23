@@ -8,7 +8,7 @@ import {
 } from './regression-discovery.js'
 import {
   ArtifactEnvelopeSchema, ArtifactSignatureSchema, AssetIdSchema, E2EError, RelativePathSchema,
-  canonicalizeJson,
+  canonicalizeJson, digestBytes, digestText,
 } from './common.js'
 import { RequirementModelSchema } from './design.js'
 import { ManualResultSchema } from './manual-result.js'
@@ -41,7 +41,9 @@ import {
   type ReadHttpRequestReferences,
 } from './read-http-request.js'
 import {
+  RuntimeHttpBodySegmentSchema,
   RuntimeWriteHttpActionSchema,
+  digestRuntimeHttpBodyTemplate,
   digestRuntimeWriteHttpAction,
 } from './runtime-http-action.js'
 import { assertExecutionResultIdentities } from './execution-result-identity.js'
@@ -60,6 +62,28 @@ const ExecutionProfileSchema = z.enum([
   'trusted-read-only', 'trusted-reversible-write', 'production-isolated', 'full-playwright',
 ])
 
+const FullPlaywrightContentTypeSchema = z.string().min(1).max(8 * 1024)
+  .refine((value) => !/[\r\n\0]/.test(value))
+const FullPlaywrightRequestBodySchema = z.union([
+  z.object({ intentId: SafeIdSchema, kind: z.literal('json'),
+    canonicalJson: z.string().min(1).max(256 * 1024).refine((value) => {
+      try { return canonicalizeJson(JSON.parse(value)) === value } catch { return false }
+    }),
+  }).strict(),
+  z.object({ intentId: SafeIdSchema, kind: z.literal('binary'), contentType: FullPlaywrightContentTypeSchema,
+    bodyBase64Url: z.string().min(1).max(350 * 1024).regex(/^[A-Za-z0-9_-]+$/)
+      .refine((value) => Buffer.from(value, 'base64url').toString('base64url') === value),
+  }).strict(),
+  z.object({ intentId: SafeIdSchema, kind: z.literal('template'), contentType: FullPlaywrightContentTypeSchema,
+    segments: z.array(RuntimeHttpBodySegmentSchema).min(1).max(128), templateDigest: DigestSchema,
+  }).strict().superRefine((body, context) => {
+    if (body.templateDigest !== digestRuntimeHttpBodyTemplate({ kind: 'segments',
+      contentType: body.contentType, segments: body.segments })) {
+      context.addIssue({ code: 'custom', path: ['templateDigest'], message: 'template body digest mismatch' })
+    }
+  }),
+])
+
 export const FullPlaywrightProgramSchema = z.object({
   schemaVersion: z.literal('full-playwright/v1'),
   caseId: SafeIdSchema,
@@ -73,6 +97,7 @@ export const FullPlaywrightProgramSchema = z.object({
   cleanupPlanId: SafeIdSchema,
   timeoutMs: z.number().int().positive().max(3_600_000),
   networkRequests: WriteHttpIntentSetSchema,
+  networkRequestBodies: z.array(FullPlaywrightRequestBodySchema).max(1_000).optional(),
 }).strict().superRefine((program, context) => {
   if (program.sourceDigest !== computeFullPlaywrightSourceDigest(program.source)) {
     context.addIssue({ code: 'custom', message: 'sourceDigest 未绑定 full Playwright source', path: ['sourceDigest'] })
@@ -93,9 +118,40 @@ export const FullPlaywrightProgramSchema = z.object({
       code: 'custom', message: 'full Playwright request expectedOrder 必须唯一', path: ['networkRequests'],
     })
   }
+  if (program.networkRequestBodies !== undefined) {
+    const bodies = new Map(program.networkRequestBodies.map((body) => [body.intentId, body]))
+    if (bodies.size !== program.networkRequestBodies.length) {
+      context.addIssue({ code: 'custom', path: ['networkRequestBodies'], message: 'body intentId must be unique' })
+    }
+    for (const request of program.networkRequests) {
+      const body = bodies.get(request.intentId)
+      if (request.payload.kind === 'no-body') {
+        if (body !== undefined) context.addIssue({ code: 'custom', path: ['networkRequestBodies'],
+          message: 'no-body intent cannot have body material' })
+        continue
+      }
+      if (body === undefined || body.kind !== request.payload.kind) {
+        context.addIssue({ code: 'custom', path: ['networkRequestBodies'], message: 'body material missing or kind mismatch' })
+        continue
+      }
+      const digest = body.kind === 'json'
+        ? digestText('http-json-payload/v1', body.canonicalJson)
+        : body.kind === 'binary'
+          ? digestBytes('http-binary-payload/v1', Buffer.from(body.bodyBase64Url, 'base64url'))
+          : body.templateDigest
+      const approvedDigest = request.payload.kind === 'template'
+        ? request.payload.templateDigest : request.payload.digest
+      if (digest !== approvedDigest) context.addIssue({ code: 'custom', path: ['networkRequestBodies'],
+        message: 'body material digest does not match approved intent' })
+      bodies.delete(request.intentId)
+    }
+    if (bodies.size > 0) context.addIssue({ code: 'custom', path: ['networkRequestBodies'],
+      message: 'body material references unknown intent' })
+  }
 })
 
 export type FullPlaywrightProgram = z.infer<typeof FullPlaywrightProgramSchema>
+export type FullPlaywrightRequestBody = z.infer<typeof FullPlaywrightRequestBodySchema>
 
 function refineFullPlaywrightPrograms(input: {
   executionProfile?: z.infer<typeof ExecutionProfileSchema>

@@ -75,14 +75,29 @@ function dependencies() {
     authority: {
       verifyForSubject: vi.fn(async (): Promise<GrantDecision> => ({ allowed: true })),
       reserveForSubject: vi.fn(async () => reservation),
-      complete: vi.fn(async () => undefined),
-      markUnknown: vi.fn(async () => undefined),
+      complete: vi.fn(async () => digestText('authority-terminal-receipt/v1', 'completed')),
+      markUnknown: vi.fn(async () => digestText('authority-terminal-receipt/v1', 'unknown')),
     },
     leaseAuthority: { verifyTarget: vi.fn(async () => true) },
   }
 }
 
 describe('ReversibleWriteGateway', () => {
+  test('Runtime 预留与首个真实请求共享同一 capability reservation', async () => {
+    const { grant, capability } = fixture()
+    const deps = dependencies()
+    const gateway = new ReversibleWriteGateway({ grant, currentSubject: grant.subject, capability,
+      attemptId: 'ATTEMPT-1', attemptContext, ...deps })
+
+    const prepared = await gateway.reserve()
+    await expect(gateway.decide({ method: 'GET', url: 'https://test.example.com/api/orders/100' }))
+      .resolves.toMatchObject({ decision: 'forward', intentId: 'INTENT-LOAD' })
+
+    expect(prepared).toMatchObject({ reservationId: 'RESERVATION-1', status: 'reserved' })
+    expect(gateway.getReservation()).toEqual(prepared)
+    expect(deps.authority.reserveForSubject).toHaveBeenCalledTimes(1)
+  })
+
   test('template intent 只接受 Runtime 解析后摘要完全一致的 payload，且必须完整绑定', async () => {
     const { grant, capability } = fixture()
     const body = Buffer.from('{"token":"runtime-secret"}')

@@ -7,6 +7,10 @@ import {
   WriteApprovalSubjectV2Schema,
   computeFullPlaywrightCleanupSourceDigest,
   computeFullPlaywrightSourceDigest,
+  canonicalizeJson,
+  digestBytes,
+  digestRuntimeHttpBodyTemplate,
+  digestText,
 } from '../src/index.js'
 
 const digest = (value: string) => `sha256:${value.repeat(64)}`
@@ -73,6 +77,40 @@ describe('FullPlaywrightProgram', () => {
     const value = program()
     expect(FullPlaywrightProgramSchema.safeParse({ ...value, sourceDigest: digest('c') }).success).toBe(false)
     expect(FullPlaywrightProgramSchema.safeParse({ ...value, cleanupSourceDigest: digest('d') }).success).toBe(false)
+  })
+
+  test('full Playwright body material 精确绑定 JSON、binary 与 secret template intent', () => {
+    const value = program()
+    const json = { title: 'approved', nested: { count: 1 } }
+    const jsonDigest = digestText('http-json-payload/v1', canonicalizeJson(json))
+    const binary = Buffer.from([0, 1, 2, 255])
+    const binaryDigest = digestBytes('http-binary-payload/v1', binary)
+    const segments = [{ kind: 'literal' as const, value: '{"token":"' },
+      { kind: 'secretRef' as const, secretRef: 'TOKEN' }, { kind: 'literal' as const, value: '"}' }]
+    const templateDigest = digestRuntimeHttpBodyTemplate({ kind: 'segments',
+      contentType: 'application/json', segments })
+    const requests = [
+      { ...value.networkRequests[0]!, intentId: 'JSON', expectedOrder: 1,
+        payload: { kind: 'json' as const, digest: jsonDigest } },
+      { ...value.networkRequests[0]!, intentId: 'BINARY', expectedOrder: 2,
+        payload: { kind: 'binary' as const, digest: binaryDigest } },
+      { ...value.networkRequests[0]!, intentId: 'TEMPLATE', expectedOrder: 3,
+        payload: { kind: 'template' as const, templateDigest } },
+    ]
+    const requestBodies = [
+      { intentId: 'JSON', kind: 'json' as const, canonicalJson: canonicalizeJson(json) },
+      { intentId: 'BINARY', kind: 'binary' as const, contentType: 'application/octet-stream',
+        bodyBase64Url: binary.toString('base64url') },
+      { intentId: 'TEMPLATE', kind: 'template' as const, contentType: 'application/json',
+        segments, templateDigest },
+    ]
+    expect(FullPlaywrightProgramSchema.safeParse({ ...value, networkRequests: requests,
+      networkRequestBodies: requestBodies }).success).toBe(true)
+    expect(FullPlaywrightProgramSchema.safeParse({ ...value, networkRequests: requests,
+      networkRequestBodies: requestBodies.map((body) => body.intentId === 'BINARY'
+        ? { ...body, bodyBase64Url: Buffer.from('changed').toString('base64url') } : body) }).success).toBe(false)
+    expect(FullPlaywrightProgramSchema.safeParse({ ...value, networkRequests: requests,
+      networkRequestBodies: requestBodies.filter((body) => body.intentId !== 'TEMPLATE') }).success).toBe(false)
   })
 
   test('Execution Contract 与 Action Map 只在显式 full profile 下闭合投影', () => {

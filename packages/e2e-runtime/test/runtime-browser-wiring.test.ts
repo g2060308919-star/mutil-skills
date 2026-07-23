@@ -5,15 +5,98 @@ import {
   consumeRpcConnectionCredential,
   createAuditedRuntimeReadAuthority,
   createRuntimeFixedHttpWriteEvidence,
+  renderRuntimeFullPlaywrightRequestBodies,
+  persistRuntimeFullPlaywrightRecoveryEvidence,
+  restoreRuntimeFullPlaywrightRecoveryOutput,
   resolveRuntimeBrowserInstallation,
   settleRuntimeBrowserResourcesThenRecordProof,
   settleRuntimeBrowserResources,
 } from '../src/runtime-browser-wiring.js'
+import {
+  canonicalizeJson,
+  computeFullPlaywrightCleanupSourceDigest,
+  computeFullPlaywrightSourceDigest,
+  digestBytes,
+  digestRuntimeHttpBodyTemplate,
+  digestText,
+} from '@mutil-skills/e2e-contracts'
 import { systemChromeClosureDigest } from '../src/system-chrome.js'
 import { readBrowserSelection, writeBrowserSelection } from '../src/runtime-user-config.js'
 import { createRuntimeTestRoots } from './fixtures.js'
 
 describe('Runtime browser production wiring cleanup', () => {
+  test('full Playwright checkpoint 以摘要约束的 Git 外 artifact ref 恢复 evidence 与完整 finalization facts', async () => {
+    const roots = await createRuntimeTestRoots()
+    try {
+      const evidence = { screenshot: Uint8Array.from([137, 80, 78, 71]),
+        dom: Buffer.from('<main>ok</main>') }
+      const refs = await persistRuntimeFullPlaywrightRecoveryEvidence({
+        stateRoot: roots.home, attemptId: 'ATTEMPT-1', evidence,
+      })
+      const output = { caseId: 'CASE-1', actionId: 'ACTION-1', status: 'passed',
+        effectObservation: 'applied', resultDigest: digestText('test/v1', 'result'),
+        gatewayCommit: { reservationId: 'RES-1', reservationReceiptDigest: digestText('test/v1', 'receipt'),
+          outcomeReceiptDigest: digestText('test/v1', 'outcome'), committed: true },
+        cleanup: { status: 'verified-clean', resultDigest: digestText('test/v1', 'cleanup'),
+          leaseReceiptDigest: digestText('test/v1', 'lease') },
+        finalizationFacts: { gatewayAudit: { publication: 'full' }, cleanup: { status: 'verified-clean' },
+          executionOutcomeReceipt: { signedDigest: digestText('test/v1', 'outcome') },
+          executionOutcomeVerifierMaterial: { key: 'outcome' }, gatewayAuditVerifierMaterial: { key: 'gateway' },
+          browserMeasurements: { program: digestText('test/v1', 'program'), cleanup: digestText('test/v1', 'browser-cleanup') },
+          isolationMeasurements: { program: digestText('test/v1', 'isolation') } } }
+      const recovered = await restoreRuntimeFullPlaywrightRecoveryOutput({
+        stateRoot: roots.home, output, evidenceArtifacts: refs,
+      })
+      expect(recovered).toMatchObject(output)
+      expect([...recovered.evidence!.screenshot]).toEqual([...evidence.screenshot])
+      expect([...recovered.evidence!.dom]).toEqual([...evidence.dom])
+    } finally { await rm(roots.root, { recursive: true, force: true }) }
+  })
+
+  test('full Playwright JSON/binary/template body 仅由冻结 material 渲染并在 secret bridge 消费', async () => {
+    const source = 'await request.post("https://example.test/api")'
+    const cleanupSource = "return 'verified-clean'"
+    const json = { title: 'approved' }
+    const binary = Buffer.from([0, 1, 255])
+    const segments = [{ kind: 'literal' as const, value: 'prefix:' },
+      { kind: 'secretRef' as const, secretRef: 'TOKEN' }]
+    const templateDigest = digestRuntimeHttpBodyTemplate({ kind: 'segments',
+      contentType: 'text/plain', segments })
+    const templateSecret = Buffer.from('secret')
+    const program = {
+      schemaVersion: 'full-playwright/v1' as const, caseId: 'CASE-1', stepId: 'STEP-1', actionId: 'ACTION-1',
+      source, sourceDigest: computeFullPlaywrightSourceDigest(source), cleanupSource,
+      cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource), dataLeaseId: 'LEASE-1',
+      cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+      networkRequests: [
+        { intentId: 'JSON', method: 'POST', canonicalOrigin: 'https://example.test', exactPath: '/json', query: [],
+          payload: { kind: 'json' as const, digest: digestText('http-json-payload/v1', canonicalizeJson(json)) },
+          targetFingerprint: digestText('test/v1', 'target'), maxRequests: 1, expectedOrder: 1 },
+        { intentId: 'BINARY', method: 'PUT', canonicalOrigin: 'https://example.test', exactPath: '/binary', query: [],
+          payload: { kind: 'binary' as const, digest: digestBytes('http-binary-payload/v1', binary) },
+          targetFingerprint: digestText('test/v1', 'target'), maxRequests: 1, expectedOrder: 2 },
+        { intentId: 'TEMPLATE', method: 'PATCH', canonicalOrigin: 'https://example.test', exactPath: '/template', query: [],
+          payload: { kind: 'template' as const, templateDigest },
+          targetFingerprint: digestText('test/v1', 'target'), maxRequests: 1, expectedOrder: 3 },
+      ],
+      networkRequestBodies: [
+        { intentId: 'JSON', kind: 'json' as const, canonicalJson: canonicalizeJson(json) },
+        { intentId: 'BINARY', kind: 'binary' as const, contentType: 'application/octet-stream',
+          bodyBase64Url: binary.toString('base64url') },
+        { intentId: 'TEMPLATE', kind: 'template' as const, contentType: 'text/plain', segments, templateDigest },
+      ],
+    }
+    const bodies = await renderRuntimeFullPlaywrightRequestBodies('RUN-1', program, {
+      resolve: async () => ({ handleId: 'HANDLE-1' }) as never,
+      consume: async () => templateSecret,
+    })
+    expect(bodies.get('JSON')?.bytes.toString()).toBe(canonicalizeJson(json))
+    expect(bodies.get('BINARY')?.bytes).toEqual(binary)
+    expect(bodies.get('TEMPLATE')?.bytes.toString()).toBe('prefix:secret')
+    expect(templateSecret.every((value) => value === 0)).toBe(true)
+    for (const body of bodies.values()) body.bytes.fill(0)
+  })
+
   test('生产装配按用户选择重验系统 Chrome，且旧托管安装只迁移为 managed-chromium', async () => {
     const runtimeInstallationDigest = `sha256:${'1'.repeat(64)}`
     const selection = {

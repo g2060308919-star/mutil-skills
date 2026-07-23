@@ -57,6 +57,8 @@ export async function readyFixture(input: {
   gatewaySummary?: { received: number; forwarded: number; blocked: number; byIntent: Record<string, number> }
   issueOutcome?: (binding: ExecutionOutcomeBinding) => ExecutionOutcomeReceipt
   terminalFailures?: Partial<Record<'complete' | 'release' | 'markUnknown' | 'quarantine' | 'sign', number>>
+  checkpoint?: (stage: 'reserved' | 'lease-terminal-intent' | 'write-terminal-intent'
+    | 'authority-terminal' | 'published', material: Record<string, unknown>) => Promise<void>
 } = {}) {
   const events: string[] = []
   const terminalCalls = { complete: 0, release: 0, markUnknown: 0, quarantine: 0, sign: 0 }
@@ -214,6 +216,40 @@ export async function readyFixture(input: {
   const evidence = (stage: FullPlaywrightEvidenceStage) => evidenceForStage(stage)
   const gatewaySummary = input.gatewaySummary ?? { received: 1, forwarded: 1, blocked: input.gatewayBlocked ?? 0,
     byIntent: { 'LOCAL-DOCUMENT': 1 } }
+  let gatewayReservation: Awaited<ReturnType<LocalApprovalAuthority['reserveForSubject']>> | undefined
+  const issueTerminalOutcome = (terminal: {
+    status: 'passed' | 'failed' | 'environment-blocked' | 'safety-blocked'
+    effectObservation: 'proven-not-applied' | 'applied' | 'unknown'
+    runnerResultDigest: string
+    cleanupPlanId: string
+    cleanup: { status: 'verified-clean' | 'failed' | 'unknown'; resultDigest: string; leaseReceiptDigest: string }
+    evidenceIds: string[]
+    completedAt: string
+  }): ExecutionOutcomeReceipt => {
+    fail('sign')
+    if (!gatewayReservation) throw new Error('gateway reservation missing')
+    const binding: ExecutionOutcomeBinding = {
+      schemaVersion: '1.0.0', attemptContext: { assetId: 'ASSET-1', generationId: 'GEN-1',
+        prdRevision: d('prd'), runId: 'RUN-TEST', caseId: 'CASE-1' },
+      grantId: grant.grantId, capabilityId: capability.capabilityId, actionId: capability.actionId,
+      attemptId: 'ATTEMPT-1', reservationId: gatewayReservation.reservationId, capability,
+      effect: 'reversible-write', status: terminal.status, effectObservation: terminal.effectObservation,
+      runnerResultDigest: terminal.runnerResultDigest,
+      gateway: { executionSessionId: 'GW-SESSION-1', policyDigest: d('gateway-policy'),
+        approvedRequestSetDigest: digestText('execution-outcome-approved-request-set/v1',
+          canonicalizeJson(input.networkRequests ?? [])), received: gatewaySummary.received,
+        forwarded: gatewaySummary.forwarded, blocked: gatewaySummary.blocked },
+      cleanup: { cleanupPlanId: terminal.cleanupPlanId, cleanupPlanDigest,
+        leaseId: active.leaseId, ...terminal.cleanup },
+      evidenceIds: terminal.evidenceIds,
+      evidenceSetDigest: digestText('execution-outcome-evidence-set/v1',
+        canonicalizeJson([...terminal.evidenceIds].sort())),
+      completedAt: terminal.completedAt,
+    }
+    return input.issueOutcome?.(binding) ?? ({ ...binding, issuer: 'GATEWAY', keyId: 'GW-KEY',
+      purpose: 'execution-outcome-receipt/v1', algorithm: 'Ed25519',
+      signedDigest: digestExecutionOutcomeBinding(binding), signature: 'test-signature' })
+  }
   const session = authorizeFullPlaywrightControlledSession({
     binding: { executionProfile: 'full-playwright', assetId: 'ASSET-1', generationId: 'GEN-1',
       prdRevision: d('prd'), runId: 'RUN-TEST', caseId: 'CASE-1', stepId: 'STEP-1',
@@ -224,30 +260,50 @@ export async function readyFixture(input: {
       gatewayPolicyDigest: d('gateway-policy'), executionSessionId: 'GW-SESSION-1',
       sourceSetDigest: d('source-set'), programBrowserSessionId: 'BROWSER-PROGRAM-1',
       cleanupBrowserSessionId: 'BROWSER-CLEANUP-1' },
-    programBindings, cleanupBindings, capture: input.capture ?? (async (stage) => evidence(stage)),
+    programBindings, cleanupBindings,
+    reserveCapability: async () => {
+      events.push('gateway-reserve')
+      gatewayReservation = await authority.reserveForSubject({ grant, currentSubject: subject,
+        capabilityId: capability.capabilityId, actionId: capability.actionId,
+        attemptId: 'ATTEMPT-1', attemptContext: { assetId: 'ASSET-1', generationId: 'GEN-1',
+          prdRevision: d('prd'), runId: 'RUN-TEST', caseId: 'CASE-1' } })
+      return gatewayReservation
+    },
+    capture: input.capture ?? (async (stage) => evidence(stage)),
     retireProgram: async () => { events.push('retire-program'); if (input.retireProgramError) throw input.retireProgramError },
     retireCleanup: async () => { events.push('retire-cleanup'); if (input.retireCleanupError) throw input.retireCleanupError },
     observeEffect: () => { if (input.observeEffectError) throw input.observeEffectError
       return input.effectObservation ?? 'applied' },
-    finalizeGateway: async () => { if (input.gatewayError) throw input.gatewayError
-      if (input.finalizeGateway) return input.finalizeGateway()
-      return { executionSessionId: 'GW-SESSION-1', policyDigest: d('gateway-policy'),
-        summary: gatewaySummary, auditDigest: d('gateway-audit') }
+    freezeGateway: async () => { events.push('gateway-freeze'); if (input.gatewayError) throw input.gatewayError
+      const value = input.finalizeGateway?.()
+      return value ? { executionSessionId: value.executionSessionId, policyDigest: value.policyDigest,
+        summary: value.summary } : { executionSessionId: 'GW-SESSION-1', policyDigest: d('gateway-policy'),
+        summary: gatewaySummary }
     },
-    issueOutcome: (binding: ExecutionOutcomeBinding) => {
-      fail('sign')
-      return input.issueOutcome?.(binding) ?? ({ ...binding, issuer: 'GATEWAY', keyId: 'GW-KEY',
-        purpose: 'execution-outcome-receipt/v1', algorithm: 'Ed25519',
-        signedDigest: digestExecutionOutcomeBinding(binding), signature: 'test-signature' })
-    },
+    publishGateway: async () => { events.push('gateway-publish'); return { auditDigest: d('gateway-audit') } },
+    ...(input.checkpoint === undefined ? {} : { checkpoint: input.checkpoint }),
     terminal: {
       releaseLease: terminalAuthority.releaseForTarget,
       quarantineLease: terminalAuthority.quarantineForTarget,
-      completeReservation: async (reservationId: string, outcomeDigest: string) => {
-        fail('complete'); return await authority.complete(reservationId, outcomeDigest)
+      finalizeWriteOutcome: async (terminal) => {
+        const outcome = issueTerminalOutcome(terminal)
+        events.push('gateway-terminal-complete')
+        fail('complete')
+        return { outcome, authorityReceiptDigest: await authority.complete(
+          outcome.reservationId, outcome.signedDigest) }
       },
-      markReservationUnknown: async (reservationId: string, observation: string) => {
-        fail('markUnknown'); return await authority.markUnknown(reservationId, observation)
+      markWriteUnknownWithOutcome: async (terminal, observation) => {
+        const outcome = issueTerminalOutcome(terminal)
+        events.push('gateway-terminal-unknown')
+        fail('markUnknown')
+        return { outcome, authorityReceiptDigest: await authority.markUnknown(
+          outcome.reservationId, observation) }
+      },
+      markWriteUnknown: async (observation) => {
+        events.push('gateway-terminal-unknown')
+        fail('markUnknown')
+        if (!gatewayReservation) throw new Error('gateway reservation missing')
+        return await authority.markUnknown(gatewayReservation.reservationId, observation)
       },
     },
   })
@@ -310,9 +366,10 @@ describe('runFullPlaywrightCase', () => {
     expect(result).toMatchObject({ status: 'passed', effectObservation: 'applied', retryAllowed: false,
       cleanup: { status: 'verified-clean' } })
     expect(fixture.events).toEqual([
+      'gateway-reserve',
       'fill:Name:Ada', 'press:Name:Enter', 'check:Enabled', 'click:link:Details', 'dblclick:#row',
       'hover:#remove', 'popup:page', 'new-context', 'new-page', 'request:http://127.0.0.1/api',
-      'expect', 'cleanup-page-close',
+      'expect', 'cleanup-page-close', 'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish',
     ])
     expect(result.evidence.map((item) => item.stage)).toEqual(expect.arrayContaining(['before', 'after', 'cleanup']))
     expect(result.outcome).toBeDefined()
@@ -320,6 +377,36 @@ describe('runFullPlaywrightCase', () => {
     expect(fixture.authority.getReservation(result.reservationId!)).toMatchObject({
       status: 'completed', outcomeDigest: result.outcome?.signedDigest,
     })
+  })
+
+  test('Gateway 成功 reservation 先由唯一 terminal owner 完成，再发布签名审计', async () => {
+    const fixture = await readyFixture()
+    const result = await runFullPlaywrightCase(fixture.input)
+    expect(result.finalization?.state).toBe('completed')
+    expect(fixture.events.filter((event) => event.startsWith('gateway-'))).toEqual([
+      'gateway-reserve', 'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish',
+    ])
+  })
+
+  test('持久 checkpoint 在 program 副作用与每个 terminal side effect 前记录可重放输入', async () => {
+    const stages: string[] = []
+    const materials: Record<string, unknown>[] = []
+    const fixture = await readyFixture({ checkpoint: async (stage, material) => {
+      stages.push(stage); materials.push(material)
+    } })
+    await expect(runFullPlaywrightCase(fixture.input)).resolves.toMatchObject({
+      status: 'passed', finalization: { state: 'completed' },
+    })
+    expect(stages).toEqual(['reserved', 'lease-terminal-intent', 'write-terminal-intent',
+      'authority-terminal', 'published'])
+    expect(materials[0]).toMatchObject({ reservation: { reservationId: expect.any(String) } })
+    expect(materials[1]).toMatchObject({ runnerResultDigest: expect.stringMatching(/^sha256:/),
+      lease: { leaseId: expect.any(String), fencingToken: 1 } })
+    expect(materials[2]).toMatchObject({ terminalInput: { runnerResultDigest: expect.stringMatching(/^sha256:/) } })
+    expect(materials[3]).toMatchObject({ outcome: { signedDigest: expect.stringMatching(/^sha256:/) },
+      authorityReceiptDigest: expect.stringMatching(/^sha256:/) })
+    expect(materials[4]).toMatchObject({ publishedGateway: { auditDigest: expect.stringMatching(/^sha256:/) } })
+    expect(fixture.events.indexOf('gateway-reserve')).toBeLessThan(fixture.events.indexOf('fill:Name:Ada'))
   })
 
   test.each(['complete', 'release', 'sign'] as const)(
@@ -347,11 +434,11 @@ describe('runFullPlaywrightCase', () => {
     expect(failed.outcome).toBeUndefined()
     expect(failed.finalization?.outcomeReceiptDigest).toBeUndefined()
     expect(failed.finalization?.authorityReceiptDigest).toBeUndefined()
-    const programEvents = [...fixture.events]
+    const programEvents = fixture.events.filter((event) => !event.startsWith('gateway-'))
     const recovered = await runFullPlaywrightCase(fixture.input)
     expect(recovered).toMatchObject({ status: 'passed', finalization: { state: 'completed',
       outcomeReceiptDigest: expect.stringMatching(/^sha256:/), authorityReceiptDigest: expect.stringMatching(/^sha256:/) } })
-    expect(fixture.events).toEqual(programEvents)
+    expect(fixture.events.filter((event) => !event.startsWith('gateway-'))).toEqual(programEvents)
     expect(fixture.authority.getReservation(recovered.reservationId!)).toMatchObject({ status: 'completed',
       outcomeDigest: recovered.outcome?.signedDigest })
   })
@@ -365,10 +452,10 @@ describe('runFullPlaywrightCase', () => {
     const failed = await runFullPlaywrightCase(fixture.input)
     expect(failed).toMatchObject({ status: 'failed', effectObservation: 'unknown', retryAllowed: false,
       finalization: { state: 'terminal-failed', terminalIntentDigest: expect.stringMatching(/^sha256:/) } })
-    const programEvents = [...fixture.events]
+    const programEvents = fixture.events.filter((event) => !event.startsWith('gateway-'))
     const recovered = await runFullPlaywrightCase(fixture.input)
     expect(recovered.finalization?.state).toBe(stage === 'quarantine' || stage === 'markUnknown' ? 'unknown' : 'completed')
-    expect(fixture.events).toEqual(programEvents)
+    expect(fixture.events.filter((event) => !event.startsWith('gateway-'))).toEqual(programEvents)
   })
 
   test.each(['markUnknown', 'quarantine'] as const)(
@@ -447,7 +534,8 @@ describe('runFullPlaywrightCase', () => {
     const result = await runFullPlaywrightCase(fixture.input)
     expect(result).toMatchObject({ status: 'failed', effectObservation: 'unknown', retryAllowed: false,
       cleanup: { status: 'verified-clean' } })
-    expect(fixture.events).toEqual(['retire-program', 'cleanup-page-close'])
+    expect(fixture.events).toEqual(['gateway-reserve', 'retire-program', 'cleanup-page-close',
+      'gateway-freeze', 'gateway-terminal-unknown', 'gateway-publish'])
     expect(fixture.authority.getReservation(result.reservationId!)).toMatchObject({ status: 'unknown' })
     expect(await fixture.trustedLease.verifyTarget(fixture.active.leaseId, 1, d('target'))).toBe(false)
 
@@ -461,7 +549,8 @@ describe('runFullPlaywrightCase', () => {
     const result = await runFullPlaywrightCase(fixture.input)
     expect(result).toMatchObject({ status: 'failed', effectObservation: 'applied',
       primaryError: { present: true, type: 'undefined' }, cleanup: { status: 'verified-clean' } })
-    expect(fixture.events).toEqual(['cleanup-page-close'])
+    expect(fixture.events).toEqual(['gateway-reserve', 'cleanup-page-close',
+      'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish'])
   })
 
   test('primary 与 cleanup 双错并存，retire 错误也不覆盖前两者', async () => {

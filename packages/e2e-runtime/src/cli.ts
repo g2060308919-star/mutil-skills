@@ -442,11 +442,15 @@ export async function runCli(
       // 提前创建后端、密钥代理或隔离区并把输入错误污染成 cleanup/internal 错误。
       let executeRunMayReachExecutor = true
       let executeSnapshot: RuntimeRunSnapshot | undefined
-      if (request.command === 'execute-run') {
+      if (request.command === 'execute-run' || request.command === 'resume-run') {
         const executionIdentity = await resolveProjectIdentity(request.projectRoot)
         executeSnapshot = await runStore.getRun(executionIdentity.digest, request.payload.runId)
-        executeRunMayReachExecutor = executeSnapshot?.workflow.current === 'compiled'
+        if (request.command === 'execute-run') {
+          executeRunMayReachExecutor = executeSnapshot?.workflow.current === 'compiled'
+        }
       }
+      const resumeUsesFullPlaywright = request.command === 'resume-run'
+        && executeSnapshotUsesFullPlaywright(executeSnapshot)
       let writeExecutor
       let fullPlaywrightExecutor
       let injectionExecutor
@@ -468,11 +472,12 @@ export async function runCli(
         })
       }
       if ((request.command === 'execute-run' && executeRunMayReachExecutor)
+        || resumeUsesFullPlaywright
         || request.command === 'finalize-run') {
         const executionIdentity = await resolveProjectIdentity(request.projectRoot)
-        const fullPlaywright = request.command === 'execute-run'
+        const fullPlaywright = (request.command === 'execute-run' || request.command === 'resume-run')
           && executeSnapshotUsesFullPlaywright(executeSnapshot)
-        if (request.command === 'execute-run' && !fullPlaywright) executionSecretBroker = await RuntimeSecretBroker.open({
+        if (request.command === 'execute-run' || request.command === 'resume-run') executionSecretBroker = await RuntimeSecretBroker.open({
           homeDir: dependencies.homeDir, projectRoot: executionIdentity.realRoot,
         })
         quarantineSecretProvider = await RuntimeQuarantineSecretProvider.createForProject({
@@ -493,13 +498,16 @@ export async function runCli(
           secretBroker: executionSecretBroker!,
           writeProduction: writeProduction!.capability,
         })
-        if (request.command === 'execute-run' && fullPlaywright) {
+        if ((request.command === 'execute-run' || request.command === 'resume-run') && fullPlaywright) {
           const artifacts = await getArtifactAuthority()
           fullPlaywrightExecutor = createProductionFullPlaywrightBrowserCapability({
             homeDir: dependencies.homeDir, projectRoot: request.projectRoot, installation,
             authorityHost: getAuthorityHost, writeProduction: writeProduction!.capability,
             freshnessAuthority: artifacts.createTrustedApprovalFreshnessClient(),
             checkpointSigner: { signDigest: (digest) => artifacts.signDigest(digest) },
+            checkpointAuthority: { material: artifacts.artifactVerifierMaterial,
+              expectedPublicKeyDigest: artifacts.artifactVerifierMaterial.publicKeyDigest },
+            secretBroker: executionSecretBroker!,
           })
         }
         if (request.command === 'execute-run' && !fullPlaywright) injectionExecutor = createProductionInjectionBrowserCapability({
@@ -508,7 +516,9 @@ export async function runCli(
           installation,
           authorityHost: getAuthorityHost,
         })
-        if (request.command === 'execute-run') evidenceQuarantine = createProductionEvidenceQuarantine({ quarantine })
+        if (request.command === 'execute-run' || request.command === 'resume-run') {
+          evidenceQuarantine = createProductionEvidenceQuarantine({ quarantine })
+        }
       }
       if ((request.command === 'render-report' || request.command === 'finalize-run')
         && dependencies.projectPublisherFactory === undefined) {

@@ -185,8 +185,8 @@ export interface GatewayWriteAuthorityRpcClient {
     attemptId: string
     attemptContext?: AttemptExecutionContext
   }): Promise<CapabilityReservation>
-  complete(reservationId: string, outcomeDigest: string): Promise<void>
-  markUnknown(reservationId: string, observation: string): Promise<void>
+  complete(reservationId: string, outcomeDigest: string): Promise<string>
+  markUnknown(reservationId: string, observation: string): Promise<string>
 }
 
 export interface AuthorityExecutionRpcClientOptions {
@@ -360,23 +360,21 @@ export function registerAuthorityExecutionRpcOperations(
       const input = parseGatewayCompleteInput(payload)
       requireReservationOwner(dependencies.gatewayAuthority!, reservationContexts,
         input.reservationId, rpcContext)
-      await dependencies.gatewayAuthority!.complete(input.reservationId, input.outcomeDigest)
+      const receipt = await dependencies.gatewayAuthority!.complete(input.reservationId, input.outcomeDigest)
+      const result = terminalReceiptResult(receipt, 'completed', input)
       finalizeReservationOwner(dependencies.gatewayAuthority!, reservationContexts,
-        input.reservationId, rpcContext, 'completed', digestText(
-          'authority-rpc-terminal-tombstone/v1', canonicalizeJson(input),
-        ))
-      return { completed: true }
+        input.reservationId, rpcContext, 'completed', result.receiptDigest)
+      return result
     })
     rpc.registerOperation(GATEWAY_UNKNOWN_OPERATION, async (payload, rpcContext) => {
       const input = parseGatewayUnknownInput(payload)
       requireReservationOwner(dependencies.gatewayAuthority!, reservationContexts,
         input.reservationId, rpcContext)
-      await dependencies.gatewayAuthority!.markUnknown(input.reservationId, input.observation)
+      const receipt = await dependencies.gatewayAuthority!.markUnknown(input.reservationId, input.observation)
+      const result = terminalReceiptResult(receipt, 'unknown', input)
       finalizeReservationOwner(dependencies.gatewayAuthority!, reservationContexts,
-        input.reservationId, rpcContext, 'unknown', digestText(
-          'authority-rpc-terminal-tombstone/v1', canonicalizeJson(input),
-        ))
-      return { markedUnknown: true }
+        input.reservationId, rpcContext, 'unknown', result.receiptDigest)
+      return result
     })
   }
   if (dependencies.discoveryAuthority) {
@@ -676,12 +674,12 @@ export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRp
     },
     async complete(reservationId: string, outcomeDigest: string) {
       const input = parseGatewayCompleteInput({ reservationId, outcomeDigest })
-      parseAck(await rpc.call(GATEWAY_COMPLETE_OPERATION, input), 'completed',
+      return parseReceiptResult(await rpc.call(GATEWAY_COMPLETE_OPERATION, input),
         'E2E_RPC_GATEWAY_COMPLETE_RESULT_INVALID')
     },
     async markUnknown(reservationId: string, observation: string) {
       const input = parseGatewayUnknownInput({ reservationId, observation })
-      parseAck(await rpc.call(GATEWAY_UNKNOWN_OPERATION, input), 'markedUnknown',
+      return parseReceiptResult(await rpc.call(GATEWAY_UNKNOWN_OPERATION, input),
         'E2E_RPC_GATEWAY_UNKNOWN_RESULT_INVALID')
     },
   })

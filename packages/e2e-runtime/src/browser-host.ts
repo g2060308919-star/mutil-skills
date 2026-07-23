@@ -167,9 +167,12 @@ function resolveActionRequest(
         && (resolver.consumed.get(source.requestId) ?? 0) > 0
         && source.redirectRequestIds.includes(candidate.requestId))
     }
-    return candidate.navigation
-      ? request.isNavigationRequest && request.isMainFrame && request.resourceType === 'document'
-      : !request.isNavigationRequest
+    // Playwright owns the request classification. HTTP method cannot distinguish a document GET
+    // from script/style/image/fetch GETs, so correlation uses the observed navigation/resource
+    // properties and the frozen exact URL instead of the caller's historical method-derived hint.
+    return request.isNavigationRequest
+      ? request.isMainFrame && request.resourceType === 'document'
+      : request.resourceType !== 'document'
   })
   if (eligible.length === 0) return undefined
   // effect probe 与 cleanup verification 合法地复用同一 GET URL；按已签 stepOrdinal

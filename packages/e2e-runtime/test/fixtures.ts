@@ -104,7 +104,9 @@ export async function startGatewayProxyHostForTest(
     requestThroughProxy: started.requestThroughProxy,
     openWebSocketThroughProxy: started.openWebSocketThroughProxy,
     requestWithTokenHeaders: started.requestWithTokenHeaders,
+    reserveWrite: started.writeLifecycle.reserveWrite,
     finalizeWriteOutcome: started.writeLifecycle.finalizeWriteOutcome,
+    markUnknownWithOutcome: started.writeLifecycle.markUnknownWithOutcome,
     markUnknown: started.writeLifecycle.markUnknown,
   })
 }
@@ -161,8 +163,8 @@ export async function executeWriteFixtureFlow(input: {
       prdRevision: subject.prdRevision, runId: 'RUN-1', caseId: 'CASE-ORDER-UPDATE' },
     authority: { verifyForSubject: (grant, current) => authority.verifyForSubject(grant, current),
       reserveForSubject: (reservation) => authority.reserveForSubject(reservation),
-      complete: async (reservationId, outcomeDigest) => { await authority.complete(reservationId, outcomeDigest) },
-      markUnknown: async (reservationId, observation) => { await authority.markUnknown(reservationId, observation) } },
+      complete: async (reservationId, outcomeDigest) => await authority.complete(reservationId, outcomeDigest),
+      markUnknown: async (reservationId, observation) => await authority.markUnknown(reservationId, observation) },
     leaseAuthority, recorder, outcomeSigner: signer })
   let pageState: 'pending' | 'approved' = 'pending'
   let upstreamWriteCount = 0

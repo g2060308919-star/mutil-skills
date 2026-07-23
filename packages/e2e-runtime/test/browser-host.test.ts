@@ -253,6 +253,34 @@ describe('Controlled Browser Host', () => {
     await session.close()
   })
 
+  test('GET 子资源依据 Playwright navigation/resourceType 关联，不被方法误判成 document', async () => {
+    const roots = await createRuntimeTestRoots()
+    const driver = fakeDriver()
+    const session = await new ControlledBrowserHost(driver).open({
+      homeDir: roots.home, runId: 'RUN-SUBRESOURCES', installation: installation(),
+      gateway: gateway(vi.fn(async () => ({ approved: true, denied: true, proofDigest: digest('c') }))),
+    })
+    const binding = getControlledBrowserSessionBinding(session) as any
+    const base = { channel: 'http', bodyDigest: digest('2'), signedBodyDigest: digest('3'),
+      actionId: 'ACTION-1', capabilityId: 'CAP-HTTP', headers: {}, maxUses: 1,
+      redirectRequestIds: [], navigation: true }
+    const definitions = [
+      ['DOC', 'https://example.test/', 'document', true],
+      ['SCRIPT', 'https://example.test/app.js', 'script', false],
+      ['CSS', 'https://example.test/app.css', 'stylesheet', false],
+      ['IMAGE', 'https://example.test/logo.png', 'image', false],
+      ['FETCH', 'https://example.test/api/data', 'fetch', false],
+    ] as const
+    const outcomes = await binding.executeWithCorrelations(definitions.map(([id, url], index) => ({
+      ...base, requestId: `REQUEST-${id}`, ruleId: digest(String(index + 1)), stepOrdinal: index + 1,
+      method: 'GET', url,
+    })), async () => await driver.dispatchRequests!(definitions.map(([, url, resourceType, navigation]) =>
+      request(url, resourceType, navigation, navigation))))
+
+    expect(outcomes).toEqual([true, true, true, true, true])
+    await session.close()
+  })
+
   test.each(['.', '..'])('rejects path-special runId %s before creating a profile', async (runId) => {
     const roots = await createRuntimeTestRoots()
     const driver = fakeDriver()

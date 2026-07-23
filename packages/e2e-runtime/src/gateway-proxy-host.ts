@@ -9,6 +9,7 @@ import {
   type GatewayPublicationAudit,
   type TrustedGatewayPublicationAuditRecorder,
   type CompleteExecutionOutcomeInput,
+  type GatewayTerminalOutcome,
 } from '@mutil-skills/e2e-gateway'
 import {
   canonicalizeJson,
@@ -64,6 +65,7 @@ export interface GatewayProxyProcessHandle {
   caSpkiFingerprint: string
   measurement: GatewaySessionMeasurement
   auditSummary(): GatewayAuditSummary & { injected: number }
+  freeze(): Promise<void>
   finalize(): Promise<GatewayPublicationAudit>
   close(): Promise<void>
 }
@@ -156,11 +158,14 @@ export interface RuntimeGatewayProxyHost {
 }
 
 export interface GatewayWriteLifecycle {
+  reserveWrite(capabilityId: string): Promise<import('@mutil-skills/e2e-contracts').CapabilityReservation>
   finalizeWriteOutcome(
     capabilityId: string,
     input: CompleteExecutionOutcomeInput,
-  ): Promise<import('@mutil-skills/e2e-contracts').ExecutionOutcomeReceipt>
-  markUnknown(capabilityId: string, observation: string): Promise<void>
+  ): Promise<GatewayTerminalOutcome>
+  markUnknownWithOutcome(capabilityId: string, input: CompleteExecutionOutcomeInput,
+    observation: string): Promise<GatewayTerminalOutcome>
+  markUnknown(capabilityId: string, observation: string): Promise<string>
 }
 
 export async function startGatewayProxyHost(options: GatewayProxyStartOptions): Promise<GatewayProxyProcessHandle> {
@@ -440,12 +445,15 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
       pid: child.pid!, endpoint, caCertPath: join(ca.identity.realPath, 'cert.pem'),
       caSpkiFingerprint: ca.spkiFingerprint, measurement,
       auditSummary: () => ({ ...counters, byIntent: { ...counters.byIntent } }),
+      freeze: async () => await freezeTransport(),
       finalize: async () => {
         if (publication) return structuredClone(publication)
         finalizationPromise ??= freezeDrainAndFinalize({
           freezeAndDrain: freezeTransport,
           waitForTerminalSettlement: async () => await terminalSettlement,
-          settleWrites: async () => await writeState.settleAllUnknown('gateway-finalized-with-unfinished-write'),
+          assertWritesTerminal: () => {
+            if (writeState.unsettledCount !== 0) throw gatewayHostError('E2E_GATEWAY_WRITE_TERMINAL_PENDING')
+          },
           signAudit: () => {
             publication = recorder.finalize()
             return publication
@@ -558,14 +566,22 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
       },
     })
     const writeLifecycle: GatewayWriteLifecycle = Object.freeze({
+      reserveWrite: async (capabilityId: string) => {
+        const gateway = policies.writeGateways?.[capabilityId]
+        if (!gateway) throw gatewayHostError('E2E_GATEWAY_WRITE_CAPABILITY_NOT_ACTIVE')
+        return await gateway.reserve()
+      },
       finalizeWriteOutcome: async (
         capabilityId: string,
         outcome: CompleteExecutionOutcomeInput,
       ) => {
         return await writeState.finalize(capabilityId, outcome)
       },
+      markUnknownWithOutcome: async (capabilityId: string, outcome: CompleteExecutionOutcomeInput,
+        observation: string) =>
+        await writeState.markCapabilityUnknownWithOutcome(capabilityId, outcome, observation),
       markUnknown: async (capabilityId: string, observation: string) => {
-        await writeState.markCapabilityUnknown(capabilityId, observation)
+        return await writeState.markCapabilityUnknown(capabilityId, observation)
       },
     })
     return {
