@@ -1,7 +1,8 @@
 import { link, lstat, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { Readable, Writable } from 'node:stream'
 import { expect, test, vi } from 'vitest'
-import { canonicalizeJson, digestText, RuntimeRequestEnvelopeSchema } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, digestArtifactContent, digestText,
+  RuntimeRequestEnvelopeSchema, type RuntimeRequestEnvelope } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, getTrustedApprovalFreshnessClientKind } from '@mutil-skills/e2e-authority'
 import {
   RuntimeAuthorityHost,
@@ -79,6 +80,8 @@ test('local Authority adapter signs a subject-bound grant without inventing a We
     })
     const finalized = await session.finalize!(subject)
     expect(finalized.grant.approver).toEqual({ kind: 'local-caller' })
+    expect(Date.parse(finalized.grant.expiresAt) - Date.parse(finalized.grant.issuedAt))
+      .toBe(15 * 60_000)
     expect(finalized.grant.approvalContext).toMatchObject({
       subject: 'local-caller', runId: snapshot.runId, subjectDigest, installationDigest,
     })
@@ -660,14 +663,16 @@ test('Runtime Host finalizes a Grant and journals the traceable Grant plus four-
       projectRoot: roots.project,
       payload: { runId: snapshot.runId, approvalType: 'execution', grantSubject },
     })
-    const first = await host.handle(request, JSON.stringify(request))
+    const confirmedRequest = await semanticConfirmRequest(host, request)
+    const first = await host.handle(confirmedRequest, JSON.stringify(confirmedRequest))
     expect(first).toMatchObject({ ok: true, result: {
       sessionId: 'SESSION-FINALIZE', signedGrant, approvalBinding,
     } })
-    expect(await host.handle(request, JSON.stringify(request))).toEqual(first)
+    expect(await host.handle(confirmedRequest, JSON.stringify(confirmedRequest))).toEqual(first)
     expect(requestApproval).toHaveBeenCalledTimes(1)
     expect(finalize).toHaveBeenCalledOnce()
-    expect((await runStore.getRun(identity.digest, snapshot.runId))?.requestResponses['APPROVE-FINALIZE'])
+    expect((await runStore.getRun(identity.digest, snapshot.runId))
+      ?.requestResponses['APPROVE-FINALIZE-CONFIRMED'])
       .toMatchObject({ response: first })
   } finally {
     await runStore.close()
@@ -731,15 +736,16 @@ test('Runtime Host keeps a finalized request pending when Run Store persistence 
       projectRoot: roots.project,
       payload: { runId: snapshot.runId, approvalType: 'execution', grantSubject },
     })
+    const confirmedRequest = await semanticConfirmRequest(host, request)
     const originalWriteTrustedFactOutcome = runStore.writeTrustedFactOutcome.bind(runStore)
     vi.spyOn(runStore, 'writeTrustedFactOutcome')
       .mockRejectedValueOnce(new Error('simulated Run Store fsync failure'))
       .mockImplementation(originalWriteTrustedFactOutcome)
 
-    expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
+    expect(await host.handle(confirmedRequest, JSON.stringify(confirmedRequest))).toMatchObject({
       ok: false, error: { code: 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING' },
     })
-    expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
+    expect(await host.handle(confirmedRequest, JSON.stringify(confirmedRequest))).toMatchObject({
       ok: true, result: { signedGrant, approvalBinding },
     })
     expect(finalize).toHaveBeenCalledOnce()
@@ -807,15 +813,16 @@ test('Runtime Host holds the Run lock across recover registration and outcome pe
       projectRoot: roots.project,
       payload: { runId: snapshot.runId, approvalType: 'execution', grantSubject },
     })
+    const confirmedRequest = await semanticConfirmRequest(host, request)
 
-    expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
+    expect(await host.handle(confirmedRequest, JSON.stringify(confirmedRequest))).toMatchObject({
       ok: true, result: { signedGrant, approvalBinding },
     })
     expect(interleavingError).toMatchObject({ code: 'E2E_RUNTIME_RUN_LOCKED' })
     expect(requestApproval).not.toHaveBeenCalled()
     expect(writeTrustedFactOutcome).toHaveBeenCalledOnce()
     expect((await runStore.getRun(identity.digest, snapshot.runId))
-      ?.requestResponses['APPROVE-RECOVER-CHANGED']).toBeDefined()
+      ?.requestResponses['APPROVE-RECOVER-CHANGED-CONFIRMED']).toBeDefined()
   } finally {
     await runStore.close()
     await rm(roots.root, { recursive: true, force: true })
@@ -1447,15 +1454,65 @@ test('default rpc production wiring starts a real Authority child and closes it 
 })
 
 function runSnapshot(): RuntimeRunSnapshot {
+  const normalizedText = '# 订单\n必须显示待审核订单。'
+  const requirementModel: Record<string, unknown> = {
+    artifactId: 'ARTIFACT-REQUIREMENT-MODEL', artifactType: 'requirement-model', schemaVersion: '1.0.0',
+    engineVersion: '0.3.0', assetId: 'ASSET-1', prdRevision: `sha256:${'3'.repeat(64)}`,
+    generationId: 'RUN-1', createdAt: '2026-07-16T00:00:00.000Z', contentDigest: '',
+    signatures: [], dependencies: [], graph: { defines: [], references: [] },
+    content: { modelRevision: 1, requirements: [{
+      reqId: 'REQ-1', revision: 1, title: '订单列表', actors: ['auditor'], entities: ['order'],
+      preconditions: [], rules: [{ ruleId: 'RULE-1', category: 'business', statement: '显示待审核订单',
+        sourceRefs: ['PRD-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'] }], states: [], transitions: [],
+      observableOutcomes: [{ oracleId: 'ORACLE-1', statement: '页面显示待审核订单' }],
+      applicability: [], sourceRefs: ['PRD-1'], status: 'active',
+    }], coupledDimensions: [], applicabilityRules: ['RULE-1'],
+    modelDecisionDigest: `sha256:${'4'.repeat(64)}` },
+  }
+  requirementModel.contentDigest = digestArtifactContent(
+    'artifact-content/1.0.0/requirement-model', requirementModel,
+  )
   return {
     schemaVersion: '1.1.0', runId: 'RUN-1', assetId: 'ASSET-1',
     projectIdentityDigest: `sha256:${'1'.repeat(64)}`,
     runtimeInstallationDigest: installationDigest,
     workflow: { current: 'awaiting-scope-approval', sequence: 2, eventChainDigest: `sha256:${'2'.repeat(64)}` },
-    artifactDigests: { 'prd-source': `sha256:${'3'.repeat(64)}`, scope: `sha256:${'4'.repeat(64)}` },
-    frozenArtifacts: {}, trustedExecutionFacts: {},
+    artifactDigests: { 'prd-source': `sha256:${'3'.repeat(64)}`, scope: `sha256:${'4'.repeat(64)}`,
+      'requirement-model': requirementModel.contentDigest as string },
+    frozenArtifacts: { 'requirement-model': requirementModel as never },
+    trustedExecutionFacts: { 'prd-source-snapshot': {
+      schemaVersion: '1.0.0', sourceRef: 'inputs/prd.md', normalizedText,
+      normalizedDigest: digestText('e2e-prd-normalized-source/v1', normalizedText),
+      byteLength: Buffer.byteLength(normalizedText),
+    } },
     requestResponses: {}, createdAt: '2026-07-16T00:00:00.000Z', updatedAt: '2026-07-16T00:00:00.000Z',
   }
+}
+
+async function semanticConfirmRequest(
+  host: E2ERuntimeHost,
+  request: RuntimeRequestEnvelope,
+) {
+  if (request.command !== 'open-approval') throw new Error('open-approval required')
+  const response = await host.handle(request, JSON.stringify(request))
+  expect(response).toMatchObject({ ok: true, result: {
+    status: 'confirmation-required', approvalMode: 'webauthn',
+    summary: { semanticReview: { requirements: expect.any(Array) } },
+  } })
+  if (!response.ok) throw new Error('semantic confirmation was not created')
+  const result = response.result as { confirmationId: string; subjectDigest: string }
+  return RuntimeRequestEnvelopeSchema.parse({
+    schemaVersion: request.schemaVersion,
+    requestId: `${request.requestId}-CONFIRMED`,
+    client: request.client,
+    command: 'confirm-approval',
+    projectRoot: request.projectRoot,
+    payload: {
+      runId: request.payload.runId,
+      confirmationId: result.confirmationId,
+      subjectDigest: result.subjectDigest,
+    },
+  })
 }
 
 function manualDraft() {

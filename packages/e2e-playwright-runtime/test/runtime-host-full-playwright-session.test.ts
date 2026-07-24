@@ -61,6 +61,7 @@ describe('Runtime Host full Playwright production assembly', () => {
 
   test('page/context/browser/browserType 全对象图不能逃逸到 raw Browser lifecycle', async () => {
     const close = vi.fn()
+    const closeChild = vi.fn(async () => undefined)
     const launch = vi.fn(async () => rawBrowser)
     const rawBrowserType = { launch, launchPersistentContext: launch, connect: launch, connectOverCDP: launch }
     const rawBrowser: any = { close, browserType: () => rawBrowserType,
@@ -68,7 +69,7 @@ describe('Runtime Host full Playwright production assembly', () => {
     const rawContext: any = { browser: () => rawBrowser, pages: () => [rawPage],
       newPage: async () => rawPage, waitForEvent: async () => rawPage, newCDPSession: async () => ({}) }
     const rawPage: any = { context: () => rawContext, opener: async () => rawPage }
-    const rawChildContext: any = { browser: () => rawBrowser, pages: () => [],
+    const rawChildContext: any = { browser: () => rawBrowser, pages: () => [], close: closeChild,
       newPage: async () => rawChildPage, newCDPSession: async () => ({}) }
     const rawChildPage: any = { context: () => rawChildContext, opener: async () => rawPage }
     const cleanupBrowser = { close() {}, contexts: () => [], browserType: () => rawBrowserType }
@@ -103,6 +104,9 @@ describe('Runtime Host full Playwright production assembly', () => {
     expect(childPage.context()).toBe(childContext)
     expect((await childPage.opener()).context()).toBe(program.context)
     expect(childContext.newCDPSession).toBeUndefined()
+    expect(childContext.close).toEqual(expect.any(Function))
+    await childContext.close()
+    expect(closeChild).toHaveBeenCalledOnce()
     expect(close).not.toHaveBeenCalled()
     expect(launch).not.toHaveBeenCalled()
   })

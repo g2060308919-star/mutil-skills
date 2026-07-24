@@ -3,7 +3,7 @@ import type {
   GatewayTerminalOutcome,
   ReversibleWriteGateway,
 } from '@mutil-skills/e2e-gateway'
-import type { ExecutionOutcomeReceipt } from '@mutil-skills/e2e-contracts'
+import type { ExecutionOutcomeReceipt, GatewayAuditSummary } from '@mutil-skills/e2e-contracts'
 
 type WriteState = 'reserved' | 'transport-observed' | 'finalizing' | 'marking-unknown' | 'finalized' | 'unknown' | 'terminal-failed'
 
@@ -130,6 +130,10 @@ export class GatewayWriteStateCoordinator {
 
   get unsettledCount(): number {
     return this.#records.size
+  }
+
+  auditSummary(capabilityId: string): GatewayAuditSummary {
+    return this.#findCapability(capabilityId).gateway.getAuditSummary()
   }
 
   async #claimUnknown(record: WriteRecord, observation: string): Promise<string> {

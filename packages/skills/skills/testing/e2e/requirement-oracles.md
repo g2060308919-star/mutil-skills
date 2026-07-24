@@ -10,7 +10,7 @@
 
 ## 允许的语义输出
 
-REQ/RULE、actor、state/transition、可观察 oracle、interaction flow 和明确标记的 inference 候选。
+REQ/RULE、actor、state/transition、可观察 oracle、interaction flow、Rule→Oracle 显式引用和明确标记的 inference 候选。
 
 ## 调用的确定性 API
 
@@ -20,11 +20,11 @@ Runtime 内部必须调用 Contracts 校验 `requirement-model`/`interaction-flo
 
 ## 执行步骤
 
-逐个纳入需求建立来源；把规则转成浏览器可观察的 UI/network/state oracle；建立入口、分支、错误、恢复和终点；把未确认推断保留为 pending。
+逐个纳入需求建立来源；把规则转成浏览器可观察的 UI/network/state oracle，并在 Rule 的 `oracleIds` 中显式列出对应 Oracle。旧资产没有 `oracleIds` 时只能标记为 `requirement-level` 关联，不得伪装成精确映射；建立入口、分支、错误、恢复和终点；把未确认推断保留为 pending。
 
 ## 退出条件
 
-每个 REQ/RULE/oracle/flow 均有来源与稳定 ID，所有确定性预期来自 PRD 或签名决定。
+每个 REQ/RULE/oracle/flow 均有来源与稳定 ID，每条 Rule 至少显式引用一个同 Requirement 的 Oracle，所有确定性预期来自 PRD 或签名决定。
 
 ## 暂停条件
 

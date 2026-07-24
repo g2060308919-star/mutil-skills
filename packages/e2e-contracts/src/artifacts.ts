@@ -506,7 +506,11 @@ export const ExecutionContractV10ContentSchema = z.object({
   identities: z.array(z.object({ identityId: SafeIdSchema, roleIds: z.array(SafeIdSchema).min(1), secretRef: SafeIdSchema }).strict()).max(10_000),
   caseQueue: z.array(z.object({ ordinal: z.number().int().nonnegative(), caseId: SafeIdSchema }).strict()).max(100_000),
   actionIntents: z.array(ExecutionActionIntentV10Schema).max(100_000),
-  dataNeeds: z.array(z.object({ leaseId: SafeIdSchema, resourceKey: SafeIdSchema, mode: z.enum(['read', 'write']) }).strict()).max(100_000),
+  dataNeeds: z.array(z.discriminatedUnion('mode', [
+    z.object({ leaseId: SafeIdSchema, resourceKey: SafeIdSchema, mode: z.literal('read') }).strict(),
+    z.object({ leaseId: SafeIdSchema, resourceKey: SafeIdSchema,
+      resourceFingerprint: DigestSchema, mode: z.literal('write') }).strict(),
+  ])).max(100_000),
   manualProcedures: z.array(z.object({ manualProcedureId: SafeIdSchema, instructionDigest: DigestSchema }).strict()).max(100_000),
   evidencePolicyDigest: DigestSchema,
   runtimeIsolation: RuntimeIsolationPolicySchema.nullable(),

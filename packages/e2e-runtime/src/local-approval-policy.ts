@@ -26,6 +26,9 @@ export function localApprovalDisposition(input: LocalApprovalPolicyInput): Local
   if (input.effects.some((effect) => effect === 'unknown' || effect === 'irreversible-write')) return {
     kind: 'blocked', reasonCode: 'E2E_LOCAL_APPROVAL_EFFECT_BLOCKED',
   }
+  if (input.approvalType === 'execution') return {
+    kind: 'confirmation-required', reasonCode: 'E2E_LOCAL_EXECUTION_SEMANTIC_CONFIRMATION_REQUIRED',
+  }
   if (input.hasInjection || input.hasPrivacyUnlock || input.hasManualFinalization
     || input.effects.some((effect) => effect !== 'read')) return {
     kind: 'confirmation-required', reasonCode: 'E2E_LOCAL_HIGH_RISK_CONFIRMATION_REQUIRED',

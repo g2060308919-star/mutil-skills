@@ -4,7 +4,7 @@ import { createServer } from 'node:http'
 import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { runtimeReadOnlyFixture } from './fixture.js'
+import { runtimeFullPlaywrightFixture, runtimeReadOnlyFixture } from './fixture.js'
 
 const homeDir = requiredEnvironment('HOME')
 const projectRoot = requiredEnvironment('E2E_PACKED_PROJECT')
@@ -73,16 +73,56 @@ await Promise.all([
   writeFile(join(projectRoot, '.biztest', 'project.json'), `${JSON.stringify({
     schemaVersion: '1.0.0', projectId: 'RUNTIME-CROSS-REPO-GOLDEN',
   })}\n`, { mode: 0o600 }),
-  writeFile(join(projectRoot, 'inputs', 'prd.md'), '# 订单验收\n\n审计员应能看到待审核订单。\n', { mode: 0o600 }),
+  writeFile(join(projectRoot, 'inputs', 'prd.md'), [
+    '# 订单验收',
+    '',
+    '审计员应能看到待审核订单。',
+    '审计员可以填写姓名、按键提交、勾选启用状态并打开详情弹窗。',
+    '系统必须支持独立多页面，并以 JSON Body 提交写请求。',
+    '写操作完成后必须执行 Cleanup，再 Reload 页面确认状态恢复为 clean。',
+    '',
+  ].join('\n'), { mode: 0o600 }),
   writeFile(join(projectRoot, 'inputs', 'policy.json'), `${JSON.stringify({
     schemaVersion: '1.0.0', environment: 'test', browser: 'chromium',
   })}\n`, { mode: 0o600 }),
 ])
 
 const installation = await inspectRuntimeInstallation({ homeDir })
-const fixtureServer = createServer((_request, response) => {
+let applicationState = 'clean'
+const receivedApiBodies = []
+let resetObserved = false
+let rootReadsAfterReset = 0
+const fixtureServer = createServer(async (request, response) => {
+  const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+  if (request.method === 'POST' && url.pathname === '/api') {
+    const body = await readRequestBody(request)
+    receivedApiBodies.push(body)
+    if (body !== canonicalizeJson({ enabled: true, name: 'Ada' })) {
+      response.writeHead(400); response.end('bad json body'); return
+    }
+    applicationState = 'dirty'
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end('{"ok":true}')
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/reset') {
+    applicationState = 'clean'
+    resetObserved = true
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end('{"ok":true}')
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/' && resetObserved) rootReadsAfterReset += 1
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-  response.end('<!doctype html><html data-e2e-role="auditor"><head><title>订单</title></head><body><main><h1>订单列表</h1>页面显示待审核订单</main></body></html>')
+  if (url.pathname === '/popup') {
+    response.end('<!doctype html><html><head><title>popup</title></head><body>details</body></html>')
+    return
+  }
+  if (url.pathname === '/extra') {
+    response.end('<!doctype html><html><head><title>extra</title></head><body>extra page</body></html>')
+    return
+  }
+  response.end(`<!doctype html><html data-e2e-role="auditor"><head><title>订单</title><link rel="icon" href="data:,"></head><body><main><h1>订单列表</h1><p>页面显示待审核订单</p><label>Name<input aria-label="Name"></label><label>Enabled<input aria-label="Enabled" type="checkbox"></label><a href="/popup" target="_blank">Details</a><div id="row">row</div><button id="remove">remove</button><span id="state">${applicationState}</span></main></body></html>`)
 })
 await listen(fixtureServer)
 const address = fixtureServer.address()
@@ -103,7 +143,8 @@ const approvalAuthority = LocalApprovalAuthority.create({
     subject: approver.subject, runId, approvalType: expected.approvalType,
     subjectDigest: expected.subjectDigest, installationDigest: installation.installationDigest,
     origin: 'http://127.0.0.1:43210', issuedAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    // 上级审批上下文必须完整包住稍后签发的 10 分钟 Grant，避免毫秒级越界。
+    expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
   }),
 })
 const rpc = AuthenticatedRpcServer.create({
@@ -232,7 +273,9 @@ try {
   await submit(runId, 'SUBMIT-REGRESSION', 'execution-approved', 'regression-manifest',
     fixture.regressionManifest)
   const executed = await invoke('EXECUTE-CROSS-REPO', 'execute-run', { runId })
-  if (executed.status !== 'passed') throw new Error(`authoritative runtime result:${executed.status}`)
+  if (executed.status !== 'passed') throw new Error(
+    `authoritative runtime result:${safeCode(executed.status)}:${safeCode(executed.result?.reasonCode)}`,
+  )
   const finalized = await invoke('FINALIZE-CROSS-REPO', 'finalize-run', { runId })
   if (finalized.terminalVerdict !== 'accepted') {
     throw new Error(`final generation verdict:${finalized.terminalVerdict}`)
@@ -245,6 +288,9 @@ try {
     projectRoot, '.biztest', 'assets', 'ASSET-ORDER-1', 'generations', runId, 'run', 'final-report.json',
   )
   const report = JSON.parse(await readFile(reportPath, 'utf8'))
+  const fullPlaywright = await executeFullPlaywrightGolden({
+    installation, fixtureUrl: new URL('/', fixtureUrl).href,
+  })
   process.stdout.write(`${JSON.stringify({
     doctor,
     managedBrowserInstalled: await pathExists(join(
@@ -252,6 +298,7 @@ try {
     )),
     report,
     publishedRegression,
+    fullPlaywright,
     tracePath: [
       'PRD-ORDER-1', 'REQ-ORDER-1', 'RULE-ORDER-1', 'COV-ORDER-1',
       'CASE-ORDER-1', 'ACTION-ORDER-1', 'EVIDENCE-ORDER-1', report.content.verdict,
@@ -264,6 +311,93 @@ try {
     Promise.resolve().then(() => approvalAuthority.close()),
     new Promise((resolve, reject) => fixtureServer.close((error) => error ? reject(error) : resolve())),
   ])
+}
+
+async function executeFullPlaywrightGolden(input) {
+  applicationState = 'clean'
+  receivedApiBodies.length = 0
+  resetObserved = false
+  rootReadsAfterReset = 0
+  const created = await invoke('CREATE-FULL-PLAYWRIGHT', 'create-run', {
+    assetId: 'ASSET-FULL-1', prdSource: { kind: 'file', path: 'inputs/prd.md' },
+    projectPolicyPath: 'inputs/policy.json',
+  })
+  runId = requiredString(created, 'runId')
+  const fixture = runtimeFullPlaywrightFixture({
+    runId, assetId: requiredString(created, 'assetId'), prdRevision: requiredString(created, 'prdRevision'),
+    installationDigest: input.installation.installationDigest, url: input.fixtureUrl, now: new Date(),
+    evidencePolicyDigest: runtimeProductionSanitizerPolicyDigest(),
+  })
+  await submit(runId, 'SUBMIT-FULL-PRD', 'created', 'prd-request', fixture.semanticArtifacts['prd-request'])
+  for (const artifactType of ['project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation']) {
+    await submit(runId, `SUBMIT-FULL-${artifactType}`, 'source-frozen', artifactType,
+      fixture.semanticArtifacts[artifactType])
+  }
+  await submit(runId, 'SUBMIT-FULL-SCOPE', 'source-frozen', 'acceptance-scope',
+    fixture.semanticArtifacts['acceptance-scope'])
+  await approve('APPROVE-FULL-LINEAGE', { runId, approvalType: 'lineage' })
+  const scope = await approve('APPROVE-FULL-SCOPE', { runId, approvalType: 'scope' })
+  for (const artifactType of ['interaction-flow', 'design-audit']) {
+    await submit(runId, `SUBMIT-FULL-${artifactType}`, 'scope-approved', artifactType,
+      fixture.semanticArtifacts[artifactType])
+  }
+  await submit(runId, 'SUBMIT-FULL-MODEL', 'scope-approved', 'requirement-model',
+    fixture.semanticArtifacts['requirement-model'])
+  await submit(runId, 'SUBMIT-FULL-COVERAGE', 'modeled', 'coverage-universe',
+    fixture.semanticArtifacts['coverage-universe'])
+  const discovery = await approve('APPROVE-FULL-DISCOVERY', {
+    runId, approvalType: 'discovery',
+    grantSubject: fixture.discoverySubject({ scopeReceipt: scope.decisionReceipt }),
+  })
+  const discoveryGrant = SignedGrantSchema.parse(discovery.signedGrant)
+  const preflight = await invoke('RUN-FULL-PREFLIGHT', 'run-preflight', { runId })
+  if (preflight.status !== 'ready') throw new Error(`full preflight:${safeCode(preflight.reasonCode)}`)
+  const preflightDigest = requiredString(preflight.preflightFact, 'preflightDigest')
+  await submit(runId, 'SUBMIT-FULL-ACTION-MAP', 'preflight-readonly', 'browser-action-map',
+    fixture.frozenArtifacts['browser-action-map'])
+  await submit(runId, 'SUBMIT-FULL-TEST-CASES', 'binding-draft', 'test-cases',
+    fixture.frozenArtifacts['test-cases'])
+  await submit(runId, 'SUBMIT-FULL-EXECUTION-CONTRACT', 'binding-draft', 'execution-contract',
+    fixture.frozenArtifacts['execution-contract'])
+  const approval = await approve('APPROVE-FULL-EXECUTION', {
+    runId, approvalType: 'execution',
+    grantSubject: fixture.writeSubject(discoveryGrant.grantId, preflightDigest,
+      { scopeReceipt: scope.decisionReceipt }),
+  })
+  const review = approval.semanticReview
+  if (!review || review.prd?.normalizedText !== await readFile(join(projectRoot, 'inputs', 'prd.md'), 'utf8')
+    || review.requirements?.[0]?.rules?.[0]?.oracles?.[0]?.oracleId !== 'ORACLE-1'
+    || review.requirements[0].rules[0].oracleMapping !== 'explicit') {
+    throw new Error('E2E_RUNTIME_PRD_SEMANTIC_CONFIRMATION_INCOMPLETE')
+  }
+  await submit(runId, 'SUBMIT-FULL-REGRESSION', 'execution-approved', 'regression-manifest',
+    fixture.regressionManifest)
+  const executed = await invoke('EXECUTE-FULL-PLAYWRIGHT', 'execute-run', { runId })
+  const executionResult = requiredRecord(executed, 'result')
+  const executionCleanup = requiredRecord(executionResult, 'cleanup')
+  if (executed.status !== 'passed' || executionCleanup.status !== 'verified-clean') {
+    throw new Error(`full execution:${safeCode(executed.status)}:${safeCode(executionCleanup.status)}`)
+  }
+  if (applicationState !== fixture.expected.cleanupState
+    || !receivedApiBodies.includes(fixture.expected.jsonBody)
+    || rootReadsAfterReset < 2) {
+    throw new Error('E2E_RUNTIME_FULL_PLAYWRIGHT_EXTERNAL_ASSERTION_FAILED')
+  }
+  const finalized = await invoke('FINALIZE-FULL-PLAYWRIGHT', 'finalize-run', { runId })
+  if (finalized.terminalVerdict !== 'accepted') {
+    throw new Error(`full finalization:${safeCode(finalized.terminalVerdict)}`)
+  }
+  await invoke('REPORT-FULL-PLAYWRIGHT', 'render-report', { runId })
+  const reportPath = join(projectRoot, '.biztest', 'assets', 'ASSET-FULL-1',
+    'generations', runId, 'run', 'final-report.json')
+  const report = JSON.parse(await readFile(reportPath, 'utf8'))
+  return {
+    runId, executionProfile: 'full-playwright', status: executed.status,
+    cleanupStatus: executionCleanup.status,
+    reloadVerified: applicationState === 'clean' && rootReadsAfterReset >= 2,
+    jsonBodyVerified: receivedApiBodies.includes(fixture.expected.jsonBody),
+    semanticReview: review, report, reportPath,
+  }
 }
 
 async function executePublishedRegression(input) {
@@ -605,11 +739,16 @@ async function submit(run, requestId, expectedState, artifactType, candidate) {
 async function approve(requestId, payload) {
   const opened = await invoke(requestId, 'open-approval', payload)
   if (opened.status !== 'confirmation-required') return opened
-  return await invoke(`${requestId}-CONFIRM`, 'confirm-approval', {
+  const confirmed = await invoke(`${requestId}-CONFIRM`, 'confirm-approval', {
     runId: payload.runId,
     confirmationId: requiredString(opened, 'confirmationId'),
     subjectDigest: requiredString(opened, 'subjectDigest'),
   })
+  return {
+    ...confirmed,
+    ...(opened.summary?.semanticReview === undefined
+      ? {} : { semanticReview: opened.summary.semanticReview }),
+  }
 }
 
 async function invoke(requestId, command, payload) {
@@ -671,6 +810,12 @@ function requiredString(record, key) {
   return value
 }
 
+function requiredRecord(record, key) {
+  const value = record?.[key]
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`missing ${key}`)
+  return value
+}
+
 function safeCode(value) {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : 'unknown'
 }
@@ -723,4 +868,10 @@ async function listen(server) {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', resolve)
   })
+}
+
+async function readRequestBody(request) {
+  const chunks = []
+  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  return Buffer.concat(chunks).toString('utf8')
 }

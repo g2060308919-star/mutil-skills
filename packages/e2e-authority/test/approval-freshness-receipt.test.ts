@@ -103,7 +103,7 @@ async function readyWriteGrant(now: () => Date) {
     environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'OPERATOR',
     discoveryGrantId: discovery.grantId, preflightDigest,
     actions: [{ actionId: 'ACTION-WRITE-1', effect: 'reversible-write' as const, dataLeaseId: 'LEASE-1',
-      fencingToken: 7, cleanupPlanDigest: d('cleanup'), requests: [{ intentId: 'INTENT-WRITE-1', method: 'POST',
+      resourceKey: 'order:1', fencingToken: 7, cleanupPlanDigest: d('cleanup'), requests: [{ intentId: 'INTENT-WRITE-1', method: 'POST',
         canonicalOrigin: 'https://example.test', exactPath: '/api/orders/1/approve', query: [],
         payload: { kind: 'json' as const, digest: d('payload') }, targetFingerprint: d('resource'),
         maxRequests: 1, expectedOrder: 1 }] }],

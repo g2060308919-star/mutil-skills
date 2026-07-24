@@ -64,6 +64,17 @@ test('规则投影绑定完整 URL/body 且 digest 不含随机动作 token', ()
   }] })).toThrowError(/E2E_GATEWAY_URL_INVALID/)
 })
 
+test('带 requestId 的只读规则以请求意图记账，而不是退化为 capabilityId', () => {
+  const projected = projectGatewayRules({ runId: 'RUN-REQUEST-INTENT', approvedRequests: [{
+    actionId: 'ACTION-1', capabilityId: 'CAP-1', requestId: 'REQUEST-DOCUMENT', method: 'GET',
+    url: 'https://example.test/app', maxUses: 1,
+    signedBodyDigest: digestText('test-signed-body/v1', 'none'), headers: [], redirectRequestIds: [],
+    behavior: { kind: 'pass-through' },
+  }] })
+
+  expect(projected.readIntents).toMatchObject([{ intentId: 'REQUEST-DOCUMENT', actionId: 'ACTION-1' }])
+})
+
 test('规则投影拒绝真重复与 correlation 冲突，但允许同 URL 的有序不同 body', () => {
   const base = {
     actionId: 'ACTION-MULTI', capabilityId: 'CAP-MULTI', method: 'POST',
@@ -169,6 +180,21 @@ test.each(['partial', 'symlink'] as const)('CA generation 对 %s state fail clos
 describe.skipIf(!loopbackAvailable)(
   '真实 loopback transport（默认 sandbox 不可用时跳过，不计为功能通过）',
   () => {
+
+test('Gateway child 接受只携带已解析 body 摘要与 content-type 的受控请求规则', async () => {
+  const gateway = await startGatewayProxyHostForTest({
+    runId: 'RUN-RESOLVED-BODY', mode: 'real-environment',
+    approvedRequests: [{
+      actionId: 'ACTION-RESOLVED-BODY', capabilityId: 'CAP-RESOLVED-BODY',
+      requestId: 'REQUEST-RESOLVED-BODY', method: 'POST', url: 'https://example.test/api', maxUses: 1,
+      signedBodyDigest: digestText('test-signed-body/v1', 'json'), headers: [], redirectRequestIds: [],
+      resolvedBodyDigest: digestText('gateway-request-body/v1', '{"ok":true}'),
+      contentType: 'application/json', behavior: { kind: 'pass-through' },
+    }],
+  })
+  handles.push(gateway)
+  expect(gateway.auditSummary()).toMatchObject({ received: 0, forwarded: 0, blocked: 0 })
+})
 
 test('动作 token、完整 URL 与 maxUses 共同约束转发，页面直连语义流量不能复用授权', async () => {
   let reached = 0
@@ -584,7 +610,8 @@ function createWriteGateway(
       executionDigest: digest, environment: 'test', baseOrigin: url.origin,
       actions: [{
         actionId: capability.actionId, effect: 'reversible-write', dataLeaseId: capability.dataLeaseId,
-        fencingToken: capability.fencingToken, cleanupPlanDigest: capability.cleanupPlanDigest,
+        resourceKey: 'order:1', fencingToken: capability.fencingToken,
+        cleanupPlanDigest: capability.cleanupPlanDigest,
         requests: capability.requests,
       }],
     },

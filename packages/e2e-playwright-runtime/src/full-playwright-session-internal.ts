@@ -72,6 +72,7 @@ export function createFullPlaywrightBindingFacades(
     throw new Error('E2E_FULL_PLAYWRIGHT_BINDING_GRAPH_INVALID')
   }
   const contexts = new WeakMap<object, object>()
+  const protectedContexts = new WeakSet<object>([bindings.context as object])
   const pages = new WeakMap<object, object>()
   const browserTypes = new WeakMap<object, object>()
   let browserFacade: object
@@ -117,7 +118,12 @@ export function createFullPlaywrightBindingFacades(
     if (existing) return existing
     const facade = new Proxy(raw, { get(target, property) {
       if (property === 'browser') return () => browserFacade
-      if (property === 'close' || property === 'newCDPSession') return undefined
+      if (property === 'close') {
+        if (protectedContexts.has(raw)) return undefined
+        const close = method(target, 'close')
+        return async (...args: unknown[]) => await close(...args)
+      }
+      if (property === 'newCDPSession') return undefined
       if (property === 'newPage') return async (...args: unknown[]) =>
         wrapPage(await objectAsyncMethod(target, 'newPage', args))
       if (property === 'pages' || property === 'backgroundPages' || property === 'serviceWorkers') {

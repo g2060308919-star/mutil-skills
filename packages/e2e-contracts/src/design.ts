@@ -12,6 +12,7 @@ export const RuleSchema = z.object({
   statement: NonEmptyStringSchema,
   sourceRefs: z.array(NonEmptyStringSchema).min(1),
   certainty: z.enum(['explicit', 'confirmed-inference']),
+  oracleIds: z.array(NonEmptyStringSchema).min(1).optional(),
 }).strict()
 
 export const RequirementSchema = z.object({
@@ -40,7 +41,15 @@ export const RequirementSchema = z.object({
   }).strict()),
   sourceRefs: z.array(NonEmptyStringSchema).min(1),
   status: z.enum(['active', 'deprecated']),
-}).strict()
+}).strict().superRefine((requirement, context) => {
+  const oracleIds = new Set(requirement.observableOutcomes.map((oracle) => oracle.oracleId))
+  requirement.rules.forEach((rule, ruleIndex) => rule.oracleIds?.forEach((oracleId, oracleIndex) => {
+    if (!oracleIds.has(oracleId)) context.addIssue({
+      code: 'custom', path: ['rules', ruleIndex, 'oracleIds', oracleIndex],
+      message: 'Rule oracleId 必须引用同一 Requirement 的 observableOutcome',
+    })
+  }))
+})
 
 export const RequirementModelSchema = z.object({
   modelRevision: z.number().int().positive(),

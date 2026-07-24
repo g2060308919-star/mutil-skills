@@ -44,6 +44,7 @@ async function subject(authority: RuntimeApprovalAuthority, input: {
       actionId: 'ACTION-APPROVE-1',
       effect: 'reversible-write',
       dataLeaseId: 'LEASE-1',
+      resourceKey: 'order:100',
       fencingToken: 7,
       cleanupPlanDigest: digest,
       requests: [

@@ -147,7 +147,8 @@ describe('FullPlaywrightProgram', () => {
       identities: [], caseQueue: [{ ordinal: 0, caseId: 'CASE-1' }],
       actionIntents: [{ actionId: 'ACTION-1', effect: 'reversible-write' as const,
         intentDigest: digest('e'), requestIds: [] }],
-      dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'TODOS', mode: 'write' as const }],
+      dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'TODOS',
+        resourceFingerprint: value.networkRequests[0]!.targetFingerprint, mode: 'write' as const }],
       manualProcedures: [], evidencePolicyDigest: digest('f'), runtimeIsolation: null,
       unresolvedItems: [], readHttpRequests: [], writeCleanupPlans: [cleanupPlan], fullPlaywrightPrograms: [value],
     }
@@ -226,11 +227,11 @@ describe('FullPlaywrightProgram', () => {
       actionId: value.actionId, transport: 'browser-local' as const, operation: 'full-playwright' as const,
       effect: 'reversible-write' as const, programDigest: value.sourceDigest,
       cleanupProgramDigest: value.cleanupSourceDigest, dataLeaseId: value.dataLeaseId,
-      fencingToken: 1, cleanupPlanDigest: digest('d'), requests: value.networkRequests,
+      resourceKey: 'todos:fixture', fencingToken: 1, cleanupPlanDigest: digest('d'), requests: value.networkRequests,
     }
     const httpAction = {
       actionId: 'ACTION-HTTP', effect: 'reversible-write' as const, dataLeaseId: 'LEASE-HTTP',
-      fencingToken: 1, cleanupPlanDigest: digest('e'), requests: value.networkRequests,
+      resourceKey: 'todos:http', fencingToken: 1, cleanupPlanDigest: digest('e'), requests: value.networkRequests,
     }
 
     expect(WriteApprovalSubjectV2Schema.safeParse({ ...base, actions: [browserAction] }).success).toBe(true)

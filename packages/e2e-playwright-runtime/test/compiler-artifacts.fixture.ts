@@ -93,7 +93,7 @@ export function approvedCompilerArtifacts(options: {
     actionMapDigest: digest('action-map'), policyDigest: digest('policy'), executionContractDigest: digest('execution'),
     runBundleProjectionDigest: digest('run-bundle'), environment: 'test', baseOrigin: 'https://example.test', actor: 'USER',
     discoveryGrantId: 'DISCOVERY-1', preflightDigest: digest('preflight'), actions: [{
-      actionId, effect: 'reversible-write', dataLeaseId: 'LEASE-1', fencingToken: 1,
+      actionId, effect: 'reversible-write', dataLeaseId: 'LEASE-1', resourceKey: 'ORDER-1', fencingToken: 1,
       cleanupPlanDigest: digest('cleanup-plan'), requests: [{ intentId: 'INTENT-1', method: 'POST',
         canonicalOrigin: 'https://example.test', exactPath: '/orders/1/approve', query: [],
         payload: { kind: 'no-body' }, targetFingerprint: digest('target'), maxRequests: 1, expectedOrder: 1 }],
@@ -185,7 +185,8 @@ export function approvedCompilerArtifacts(options: {
       actionId: currentActionId, effect, intentDigest: digest(`intent-${index + 1}`), requestIds: [],
       })),
       readHttpRequests: [],
-      dataNeeds: effect === 'read' ? [] : [{ leaseId: 'LEASE-1', resourceKey: 'ORDER-1', mode: 'write' }],
+      dataNeeds: effect === 'read' ? [] : [{ leaseId: 'LEASE-1', resourceKey: 'ORDER-1',
+        resourceFingerprint: digest('target'), mode: 'write' }],
       manualProcedures: [], evidencePolicyDigest: digest('evidence-policy'), runtimeIsolation: null, unresolvedItems: [],
     },
     'run-bundle': {
@@ -406,13 +407,15 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   receipt.capabilities = options.extraFullAction ? [capability, extraCapability] : [capability]
   receipt.capabilitySetDigest = digestText('approval-capability-set/v1', canonicalizeJson(receipt.capabilities))
   const subjectActions = [{
-    actionId: 'ACTION-WRITE-1', effect: 'reversible-write', dataLeaseId: 'LEASE-1', fencingToken: 1,
+    actionId: 'ACTION-WRITE-1', effect: 'reversible-write', dataLeaseId: 'LEASE-1',
+    resourceKey: 'ORDER-1', fencingToken: 1,
     cleanupPlanDigest, transport: 'browser-local', operation: 'full-playwright',
     programDigest: sourceDigest, cleanupProgramDigest: cleanupSourceDigest,
     requests: [{ ...request, exactPath: options.approvalRequestPath ?? request.exactPath }],
   }]
   if (options.extraFullAction) subjectActions.push({
-    actionId: extraProgram.actionId, effect: 'reversible-write', dataLeaseId: 'LEASE-1', fencingToken: 1,
+    actionId: extraProgram.actionId, effect: 'reversible-write', dataLeaseId: 'LEASE-1',
+    resourceKey: 'ORDER-1', fencingToken: 1,
     cleanupPlanDigest: digestCleanupPlanDefinition(extraCleanupPlan), transport: 'browser-local',
     operation: 'full-playwright', programDigest: sourceDigest, cleanupProgramDigest: cleanupSourceDigest,
     requests: [extraRequest],

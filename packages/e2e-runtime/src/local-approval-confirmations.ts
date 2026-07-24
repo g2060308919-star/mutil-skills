@@ -3,6 +3,7 @@ import {
   ApprovalModeSchema,
   ApprovalTypeSchema,
   LocalApprovalSummarySchema,
+  PrdSemanticReviewSchema,
   canonicalizeJson,
   digestText,
   E2EError,
@@ -16,6 +17,31 @@ import { z } from 'zod'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
+
+export const PrdSourceSnapshotSchema = z.object({
+  schemaVersion: z.literal('1.0.0'),
+  sourceRef: z.string().min(1).max(4 * 1024),
+  normalizedText: z.string().min(1).max(1024 * 1024),
+  normalizedDigest: DigestSchema,
+  byteLength: z.number().int().positive().max(16 * 1024 * 1024),
+}).strict().superRefine((value, context) => {
+  if (value.normalizedDigest !== digestText('e2e-prd-normalized-source/v1', value.normalizedText)) {
+    context.addIssue({ code: 'custom', path: ['normalizedDigest'], message: 'PRD 原文摘要不匹配' })
+  }
+})
+
+export const PrdSemanticConfirmationSchema = z.object({
+  schemaVersion: z.literal('1.0.0'),
+  confirmationId: SafeIdSchema,
+  subjectDigest: DigestSchema,
+  reviewDigest: DigestSchema,
+  confirmedAt: z.string().datetime({ offset: true }),
+  semanticReview: PrdSemanticReviewSchema,
+}).strict().superRefine((value, context) => {
+  if (value.reviewDigest !== value.semanticReview.reviewDigest) context.addIssue({
+    code: 'custom', path: ['reviewDigest'], message: '语义确认摘要不匹配',
+  })
+})
 
 export const PendingLocalApprovalConfirmationSchema = z.object({
   schemaVersion: z.literal('1.0.0'),

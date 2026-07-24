@@ -159,6 +159,29 @@ describe('ReversibleWriteGateway', () => {
     expect(gateway.getAuditSummary()).toMatchObject({ received: 2, forwarded: 2, blocked: 0 })
   })
 
+  test('每个 intent 首次出现保持有序，已出现 intent 可在 maxRequests 内交错复用', async () => {
+    const { grant, capability } = fixture()
+    capability.requests[0] = { ...capability.requests[0]!, maxRequests: 3 }
+    grant.capabilities = [capability]
+    const deps = dependencies()
+    const gateway = new ReversibleWriteGateway({ grant, currentSubject: grant.subject, capability,
+      attemptId: 'ATTEMPT-1', attemptContext, ...deps })
+
+    await expect(gateway.decide({ method: 'GET', url: 'https://test.example.com/api/orders/100' }))
+      .resolves.toMatchObject({ decision: 'forward', intentId: 'INTENT-LOAD' })
+    await expect(gateway.decide({
+      method: 'POST', url: 'https://test.example.com/api/orders/100/approve?source=e2e',
+      body: Buffer.from(JSON.stringify(payload)), contentType: 'application/json',
+    })).resolves.toMatchObject({ decision: 'forward', intentId: 'INTENT-APPROVE' })
+    for (let repeat = 0; repeat < 2; repeat += 1) {
+      await expect(gateway.decide({ method: 'GET', url: 'https://test.example.com/api/orders/100' }))
+        .resolves.toMatchObject({ decision: 'forward', intentId: 'INTENT-LOAD' })
+    }
+    await expect(gateway.decide({ method: 'GET', url: 'https://test.example.com/api/orders/100' }))
+      .resolves.toMatchObject({ decision: 'block', code: 'E2E_GATEWAY_MAX_REQUESTS_EXCEEDED' })
+    await gateway.complete(digestText('outcome/v1', 'interleaved-complete'))
+  })
+
   test('records signed-publication inputs for every write decision and the completed reservation', async () => {
     const { grant, capability } = fixture()
     const deps = dependencies()
@@ -207,6 +230,7 @@ describe('ReversibleWriteGateway', () => {
       gateway: { received: 2, forwarded: 2, blocked: 0 },
       cleanup: { cleanupPlanDigest: capability.cleanupPlanDigest, leaseId: capability.dataLeaseId },
     })
+    expect(gateway.getExecutionSessionId()).toBe(receipt.gateway.executionSessionId)
     const audit = deps.recorder.finalize()
     expect(audit.requestEvents).toHaveLength(2)
     expect(new Set(audit.requestEvents.map((event) => event.executionSessionId)))

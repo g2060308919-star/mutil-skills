@@ -380,7 +380,7 @@ function isProjectedRule(value: unknown): value is ProjectedGatewayRule {
     || !Number.isSafeInteger(value.stepOrdinal) || value.stepOrdinal < 1 || value.stepOrdinal > 10_000
     || (value.bodyBase64Url !== undefined && !isCanonicalBase64Url(value.bodyBase64Url, 1024 * 1024))
     || (value.contentType !== undefined && (typeof value.contentType !== 'string'
-      || value.bodyBase64Url === undefined || value.contentType.length > 8 * 1024 || /[\r\n\0]/.test(value.contentType)))
+      || value.contentType.length > 8 * 1024 || /[\r\n\0]/.test(value.contentType)))
     || !isProjectedBehavior(value.behavior)) return false
   try {
     const url = new URL(value.url)

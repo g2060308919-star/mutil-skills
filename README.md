@@ -20,6 +20,10 @@ npm run typecheck
 npm run lint:architecture
 ```
 
+E2E 发布先运行 `npm run verify:e2e-pack` 验证本地 tarball；发布全部 workspace 后运行
+`npm run verify:e2e-release`。后者固定从 npm Registry 安装全部十四个包，并在全新 HOME、
+系统 Chrome 和正式 RPC 下完成跨仓 Golden；本地 tarball 通过不能替代公开发布验收。
+
 Telemetry hook 使用 `install-hooks --runtime all` 显式安装，使用 `uninstall-hooks --runtime all` 卸载；安装后 runtime 位于用户目录，不依赖当前 checkout。第一期默认不保存或上传事件，详细口径见 [统计说明](./docs/telemetry-hook-statistics-guide.md)。
 
 本实现统一使用的包 scope 是 `@mutil-skills/*`。
@@ -34,7 +38,7 @@ E2E Skill 负责从 PRD 编排需求、审批、受控浏览器执行、证据�
 2. 用户显式安装精确版本 Runtime：
 
    ```bash
-   npm exec --yes --package=@mutil-skills/e2e-runtime@0.2.1 -- repo-e2e install-runtime --version 0.2.1
+   npm exec --yes --package=@mutil-skills/e2e-runtime@0.3.0 -- repo-e2e install-runtime --version 0.3.0
    ```
 
 3. 验证并选择本机系统 Google Chrome。Runtime 只使用 Chrome executable，并为每次 Run 创建全新的一次性 Profile：
@@ -65,7 +69,7 @@ E2E Skill 负责从 PRD 编排需求、审批、受控浏览器执行、证据�
 ### 运行边界
 
 - Runtime Host、Approval Authority 和 Safety Gateway 都是按需启动的本地临时进程，不是需要部署或维护的远程后端。
-- 0.2 默认支持 macOS/Linux 上经过验证的系统 Google Chrome，并保留托管 Chromium 兜底；未执行 Firefox/WebKit 时，报告不能宣称跨浏览器通过。
+- 0.3 默认支持 macOS/Linux 上经过验证的系统 Google Chrome，并保留托管 Chromium 兜底；未执行 Firefox/WebKit 时，报告不能宣称跨浏览器通过。
 - 首个版本只对显式审批闭包内的 HTTP/HTTPS、逐跳 Redirect 和 Beacon 提供生产执行。WebSocket 与 SSE 在缺少转发前逐帧/流终态桥时固定 `safety-blocked`，不会连接上游，也不能被报告为已覆盖。
 - Runtime 安装、浏览器选择和产生副作用的确认都必须由用户显式触发。Doctor 不会代替用户安装或修复环境。
 - 每个 Run 的一次性 Chrome Profile 与日常 Profile 完全分离：不会读取或改变日常 Cookie、历史、扩展、缓存、账号登录或已打开页面；浏览器正常关闭后删除，异常残留由 Runtime recovery 按 owner marker 清理。

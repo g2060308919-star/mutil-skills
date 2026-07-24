@@ -155,7 +155,7 @@ export function projectGatewayRules(input: {
     if (rule.channel === 'websocket' || !['GET', 'HEAD'].includes(rule.method) || rule.behavior.kind !== 'pass-through') return []
     const canonical = canonicalizeHttpRequest({ method: rule.method, url: rule.url })
     return [{
-      intentId: rule.capabilityId,
+      intentId: rule.requestId ?? rule.capabilityId,
       actionId: rule.actionId,
       stage: 'case',
       methods: [rule.method as 'GET' | 'HEAD'],

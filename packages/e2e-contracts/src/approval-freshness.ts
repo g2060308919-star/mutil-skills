@@ -155,6 +155,12 @@ const WriteApprovalSubjectV2Shape = {
 
 const WriteActionShape = {
   actionId: SafeIdSchema, effect: z.literal('reversible-write'), dataLeaseId: SafeIdSchema,
+  resourceKey: SafeIdSchema,
+  fencingToken: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), cleanupPlanDigest: DigestSchema,
+}
+
+const LegacyWriteActionShape = {
+  actionId: SafeIdSchema, effect: z.literal('reversible-write'), dataLeaseId: SafeIdSchema,
   fencingToken: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), cleanupPlanDigest: DigestSchema,
 }
 
@@ -176,7 +182,7 @@ export const BrowserLocalWriteApprovalActionSchema = z.object({
 export const LegacyWriteApprovalSubjectV23Schema = z.object({
   ...WriteApprovalSubjectV2Shape,
   actions: z.array(z.object({
-    ...WriteActionShape,
+    ...LegacyWriteActionShape,
     requests: z.array(LegacyWriteHttpIntentV23Schema).min(1).max(MAX_WRITE_HTTP_INTENTS),
   }).strict()).min(1).max(100_000),
 }).strict()

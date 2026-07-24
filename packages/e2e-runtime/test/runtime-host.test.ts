@@ -188,6 +188,14 @@ describe('E2ERuntimeHost', () => {
       prdRevision: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       workflow: { current: 'created', sequence: 0 },
     })
+    const createdSnapshot = await fixture.store.getRun(
+      createdResult.projectIdentityDigest as string, createdResult.runId as string,
+    )
+    expect(createdSnapshot?.trustedExecutionFacts['prd-source-snapshot']).toMatchObject({
+      schemaVersion: '1.0.0', sourceRef: 'inputs/prd.md',
+      normalizedText: '# Product\nA stable PRD.',
+      normalizedDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+    })
 
     const status = await handleRequest(fixture.host, getStatusRequest(
       'REQUEST-STATUS-1',
@@ -432,6 +440,68 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('写 Execution Contract 冻结时原子预留 Lease，并向 Skill 返回 Authority 分配的 fencing token', async () => {
+    const reserveExecutionLeases = vi.fn(async (input: {
+      runId: string
+      leases: Array<{ leaseId: string; resourceKey: string; resourceFingerprint: string; ttlMs: number }>
+    }) => input.leases.map((lease) => ({
+      ...lease, runId: input.runId, exclusive: true as const, status: 'active' as const,
+      fencingToken: 7, acquiredAt: '2026-07-17T00:00:00.000Z', expiresAt: '2026-07-17T00:10:00.000Z',
+    })))
+    const fixture = await hostFixture({ reserveExecutionLeases })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-WRITE-BINDING', fixture.roots.project),
+    ))
+    const projected = projectionFixture()
+    const binding = { assetId: created.assetId as string, generationId: created.generationId as string,
+      prdRevision: created.prdRevision as string }
+    const actionMap = rebindArtifact(projected.frozenArtifacts['browser-action-map'], binding)
+    await fixture.store.beginRequest('SEED-WRITE-BINDING-DRAFT', digest('6'))
+    const lock = await fixture.store.acquireRunLock(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string, created.runId as string,
+      'SEED-WRITE-BINDING-DRAFT', digest('6'),
+      (snapshot) => ({ snapshot: { ...snapshot,
+        artifactDigests: { ...snapshot.artifactDigests, 'browser-action-map': actionMap.contentDigest },
+        frozenArtifacts: { 'browser-action-map': actionMap },
+        workflow: { current: 'binding-draft', sequence: 7, eventChainDigest: digest('7') },
+      }, response: { seeded: true } }),
+      'test-seed-write-binding-draft', lock,
+    )
+    await lock.close()
+    const testCases = rebindArtifact(projected.frozenArtifacts['test-cases'], binding)
+    await handleSuccess(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-SUBMIT-WRITE-CASES', projectRoot: fixture.roots.project,
+      runId: created.runId as string, expectedState: 'binding-draft',
+      artifactType: 'test-cases', candidate: testCases,
+    }))
+    const source = structuredClone(projected.frozenArtifacts['execution-contract']) as ArtifactDocument & {
+      content: { dataNeeds: unknown[] }
+    }
+    source.content.dataNeeds = [{ leaseId: 'LEASE-WRITE-1', resourceKey: 'order:1',
+      resourceFingerprint: digest('3'), mode: 'write' }]
+    const executionContract = rebindArtifact(source, binding)
+
+    const result = successResult(await handleRequest(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-SUBMIT-WRITE-CONTRACT', projectRoot: fixture.roots.project,
+      runId: created.runId as string, expectedState: 'binding-draft',
+      artifactType: 'execution-contract', candidate: executionContract,
+    })))
+
+    expect(reserveExecutionLeases).toHaveBeenCalledWith({
+      runId: created.runId,
+      leases: [{ leaseId: 'LEASE-WRITE-1', resourceKey: 'order:1',
+        resourceFingerprint: digest('3'), ttlMs: 600_000 }],
+    })
+    expect(result).toMatchObject({
+      workflow: { current: 'awaiting-execution-approval', sequence: 9 },
+      reservedLeases: [{ leaseId: 'LEASE-WRITE-1', fencingToken: 7, status: 'active' }],
+    })
+    await fixture.store.close()
+  })
+
   test('从 create-run 走公开 Host 全链，以正式 Authority Grant 执行只读 Case', async () => {
     const now = new Date('2026-07-17T00:00:00.000Z')
     const approver = { subject: 'os-user:runtime-host-test', roles: [
@@ -541,6 +611,11 @@ describe('E2ERuntimeHost', () => {
       generationId: created.generationId as string,
       prdRevision: created.prdRevision as string,
     }
+    await handleSuccess(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-FORMAL-POLICY', projectRoot: fixture.roots.project,
+      runId, expectedState: 'created', artifactType: 'project-policy',
+      candidate: projectPolicyCandidate(binding, 'RUNTIME-POLICY-FORMAL'),
+    }))
     const requestCandidate = prdRequestCandidate(binding)
     await handleSuccess(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-FORMAL-PRD', projectRoot: fixture.roots.project,
@@ -634,21 +709,77 @@ describe('E2ERuntimeHost', () => {
       requestId: 'REQUEST-FORMAL-CONTRACT', projectRoot: fixture.roots.project,
       runId, expectedState: 'binding-draft', artifactType: 'execution-contract', candidate: executionContract,
     }))
+    const bindingSnapshot = await fixture.store.getRun(
+      created.projectIdentityDigest as string, runId,
+    )
+    const projectedExecutionGrant = SignedGrantSchema.parse(projected.grant) as any
+    const runBundleProjection: Record<string, unknown> = {
+      runId,
+      schedule: [{ ordinal: 0, caseId: 'CASE-1', stepIds: ['STEP-1'], actionIds: ['ACTION-1'] }],
+      attemptPlans: [{ caseId: 'CASE-1', slots: 1 }],
+      signedCapabilities: projectedExecutionGrant.capabilities.map((capability: any) => ({
+        capabilityId: capability.capabilityId,
+        actionId: capability.actionId,
+        operation: capability.operation,
+        effect: capability.effect,
+        maxUses: capability.maxUses,
+        digest: digestText('approval-capability/v1', canonicalizeJson(capability)),
+      })),
+      secretRefs: [],
+      runtimeIsolationPolicyDigest: 'not-applicable',
+    }
+    runBundleProjection.allInputRefs = [
+      'project-policy', 'acceptance-scope', 'requirement-model', 'coverage-universe',
+      'test-cases', 'execution-contract', 'browser-action-map',
+    ].map((artifactType) => {
+      const artifact = bindingSnapshot?.frozenArtifacts[artifactType]
+      if (artifact === undefined) throw new Error(`missing ${artifactType}`)
+      return {
+        artifactId: artifact.artifactId,
+        digest: digestApprovalProjection(
+          artifactType as Parameters<typeof digestApprovalProjection>[0], artifact.content,
+        ),
+      }
+    })
+    runBundleProjection.runtimePolicyDigest = ((bindingSnapshot?.frozenArtifacts['project-policy']
+      ?.content as { runtimePolicy: { digest: string } }).runtimePolicy.digest)
     const readSubject = {
       ...structuredClone(projected.currentSubject),
       assetId: binding.assetId, prdRevision: binding.prdRevision,
       caseDigest: digestApprovalProjection('test-cases', testCases.content),
       actionMapDigest: digestApprovalProjection('browser-action-map', actionMap.content),
       executionContractDigest: digestApprovalProjection('execution-contract', executionContract.content),
+      runBundleProjectionDigest: digestApprovalProjection('run-bundle', runBundleProjection),
       discoveryGrantId: discoveryGrant.grantId, preflightDigest: formalPreflightDigest,
     }
-    const executionResult = await handleSuccess(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+    const semanticConfirmation = await handleSuccess(fixture.host, RuntimeRequestEnvelopeSchema.parse({
       ...requestHeader('REQUEST-FORMAL-EXECUTION'), command: 'open-approval',
       projectRoot: fixture.roots.project,
       payload: { runId, approvalType: 'execution', grantSubject: readSubject },
     }))
+    expect(semanticConfirmation).toMatchObject({
+      status: 'confirmation-required', approvalMode: 'webauthn',
+      summary: { semanticReview: { prd: { normalizedText: expect.any(String) } } },
+    })
+    const executionResult = await handleSuccess(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-FORMAL-EXECUTION-CONFIRM'), command: 'confirm-approval',
+      projectRoot: fixture.roots.project,
+      payload: { runId, confirmationId: semanticConfirmation.confirmationId,
+        subjectDigest: semanticConfirmation.subjectDigest },
+    }))
     await expect(authority.verify(SignedGrantSchema.parse(executionResult.signedGrant)))
       .resolves.toMatchObject({ allowed: true })
+    const executionApproved = await fixture.store.getRun(
+      created.projectIdentityDigest as string, runId,
+    )
+    const approvedGrant = SignedGrantSchema.parse(executionResult.signedGrant)
+    expect(executionApproved?.frozenArtifacts['run-bundle']).toBeDefined()
+    expect(((executionApproved?.frozenArtifacts['browser-action-map']?.content as {
+      actions: Array<{ capabilities: Array<{ capabilityId: string }> }>
+    }).actions[0]?.capabilities[0]?.capabilityId)).toBe(approvedGrant.capabilities[0]?.capabilityId)
+    expect(digestApprovalProjection(
+      'run-bundle', executionApproved?.frozenArtifacts['run-bundle']?.content,
+    )).toBe((approvedGrant.subject as { runBundleProjectionDigest: string }).runBundleProjectionDigest)
     const regression = regressionManifestCandidate(binding)
     await handleSuccess(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-FORMAL-REGRESSION', projectRoot: fixture.roots.project,
@@ -1478,6 +1609,7 @@ async function hostFixture(options: {
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
   finalizeGeneration?: Parameters<typeof authorizeRuntimeGenerationFinalizer>[0]
   quarantineEvidence?: Parameters<typeof authorizeRuntimeEvidenceQuarantine>[0]
+  reserveExecutionLeases?: NonNullable<ConstructorParameters<typeof E2ERuntimeHost>[0]['reserveExecutionLeases']>
 } = {}) {
   const roots = options.roots ?? await createRuntimeTestRoots()
   await mkdir(join(roots.project, '.biztest'), { recursive: true })
@@ -1503,6 +1635,9 @@ async function hostFixture(options: {
     }),
     runStore: store,
     now: () => new Date('2026-07-17T00:00:00.000Z'),
+    ...(options.reserveExecutionLeases === undefined ? {} : {
+      reserveExecutionLeases: options.reserveExecutionLeases,
+    }),
     ...(options.reader === undefined ? {} : { projectFileReader: options.reader }),
     ...(options.executeReadOnlyRun === undefined ? {} : {
       readExecutor: authorizeRuntimeReadExecutor(options.executeReadOnlyRun),
@@ -1584,7 +1719,8 @@ function executionGrantForMode(mode: 'write' | 'injection', runId: string) {
       runBundleProjectionDigest: digest('c'), environment: 'test' as const,
       baseOrigin: 'https://test.example.com', actor: 'auditor', discoveryGrantId: 'DISCOVERY-1',
       preflightDigest: digest('d'), actions: [{ actionId: 'ACTION-1', effect: 'reversible-write' as const,
-        dataLeaseId: 'LEASE-1', fencingToken: 1, cleanupPlanDigest: digest('e'), requests: [request] }],
+        dataLeaseId: 'LEASE-1', resourceKey: 'order:1', fencingToken: 1,
+        cleanupPlanDigest: digest('e'), requests: [request] }],
     }
     const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
     return SignedGrantSchema.parse({ ...common, grantId: 'WRITE-1', subject, subjectDigest,

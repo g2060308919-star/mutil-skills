@@ -59,7 +59,8 @@ export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
     caseQueue: [{ ordinal: 0, caseId: 'CASE-1' }], readHttpRequests: [], actionIntents: [{ actionId: 'ACTION-1',
       effect: 'reversible-write' as const, intentDigest: program.sourceDigest, requestIds: [] }],
     writeCleanupPlans: [cleanupPlan], fullPlaywrightPrograms: [program],
-    dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'app:fixture', mode: 'write' as const }],
+    dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'app:fixture',
+      resourceFingerprint: d('target'), mode: 'write' as const }],
     manualProcedures: [], evidencePolicyDigest: d('evidence'), runtimeIsolation: null, unresolvedItems: [],
   }
   const actionMapContent = {
@@ -100,7 +101,8 @@ export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
     preflightDigest: d('preflight'), actions: [{ actionId: 'ACTION-1', transport: 'browser-local' as const,
       operation: 'full-playwright' as const, effect: 'reversible-write' as const,
       programDigest: program.sourceDigest, cleanupProgramDigest: program.cleanupSourceDigest,
-      dataLeaseId: 'LEASE-1', fencingToken: 1, cleanupPlanDigest, requests }],
+      dataLeaseId: 'LEASE-1', resourceKey: 'app:fixture', fencingToken: 1,
+      cleanupPlanDigest, requests }],
   }
   const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
   const grant: SignedWriteGrant = {

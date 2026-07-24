@@ -1,6 +1,6 @@
 {
   "name": "@mutil-skills/cli",
-  "version": "0.0.0",
+  "version": "0.3.0",
   "type": "module",
   "files": [
     "dist/src"
@@ -19,11 +19,11 @@
     }
   },
   "dependencies": {
-    "@mutil-skills/core": "0.0.0",
-    "@mutil-skills/foundation": "0.0.0",
-    "@mutil-skills/hooks": "0.0.0",
-    "@mutil-skills/schema": "0.0.0",
-    "@mutil-skills/skills": "0.0.0",
-    "@mutil-skills/template": "0.0.0"
+    "@mutil-skills/core": "0.3.0",
+    "@mutil-skills/foundation": "0.3.0",
+    "@mutil-skills/hooks": "0.3.0",
+    "@mutil-skills/schema": "0.3.0",
+    "@mutil-skills/skills": "0.3.0",
+    "@mutil-skills/template": "0.3.0"
   }
 }

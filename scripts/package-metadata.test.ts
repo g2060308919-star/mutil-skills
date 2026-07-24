@@ -33,17 +33,24 @@ describe('package publishing metadata', () => {
     expect(skills.files).toContain('skills')
   })
 
-  test.each(e2ePackages)('%s 使用 0.2.1 且内部依赖全部精确同版', async (packageName) => {
+  test('根包和所有 workspace 统一使用 0.3.0，内部依赖全部精确同版', async () => {
+    const root = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
+      version?: string
+    }
+    expect(root.version).toBe('0.3.0')
+
+    for (const packageName of [...packages, ...e2ePackages]) {
     const pkg = JSON.parse(await readFile(
       new URL(`../packages/${packageName}/package.json`, import.meta.url),
       'utf8',
     )) as { version?: string; dependencies?: Record<string, string> }
 
-    expect(pkg.version).toBe('0.2.1')
+    expect(pkg.version, packageName).toBe('0.3.0')
     for (const [dependency, version] of Object.entries(pkg.dependencies ?? {})) {
-      if (dependency.startsWith('@mutil-skills/e2e-')) expect(version, dependency).toBe('0.2.1')
+      if (dependency.startsWith('@mutil-skills/')) expect(version, dependency).toBe('0.3.0')
       expect(version).not.toBe('latest')
       expect(version).not.toMatch(/^workspace:/)
+    }
     }
   })
 
@@ -86,5 +93,19 @@ describe('package publishing metadata', () => {
     expect(root.devDependencies?.['@playwright/test']).toBe('1.61.1')
     expect(root.devDependencies?.playwright).toBe('1.61.1')
     expect(runtime.dependencies?.playwright).toBe('1.61.1')
+  })
+
+  test('正式发布门强制从 npm Registry 验证，不能以本地 tarball 冒充发布成功', async () => {
+    const root = JSON.parse(await readFile(
+      new URL('../package.json', import.meta.url),
+      'utf8',
+    )) as { scripts?: Record<string, string> }
+
+    expect(root.scripts?.['verify:e2e-pack']).toContain('npm pack --workspaces')
+    expect(root.scripts?.['verify:e2e-release']).toContain('npm run verify:e2e-pack')
+    expect(root.scripts?.['verify:e2e-release']).toContain('scripts/package-metadata.test.ts')
+    expect(root.scripts?.['verify:e2e-release']).toContain('E2E_RUNTIME_RELEASE_PACKS_DIR=')
+    expect(root.scripts?.['verify:e2e-release']).toContain('E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE=registry')
+    expect(root.scripts?.['verify:e2e-release']).toContain('E2E_RUNTIME_RUN_CROSS_REPO=1')
   })
 })

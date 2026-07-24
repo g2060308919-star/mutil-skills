@@ -8,11 +8,12 @@ describe('local approval policy', () => {
     expect(projectRiskTier('test')).toBe('test')
   })
 
-  test('auto-approves only complete non-production read-only subjects', () => {
+  test('execution 始终要求确认语义链，其他完整非生产只读主题才自动批准', () => {
     expect(localApprovalDisposition({
       approvalType: 'execution', riskTier: 'test', effects: ['read'],
       hasInjection: false, hasPrivacyUnlock: false, hasManualFinalization: false,
-    })).toEqual({ kind: 'auto-approved', reasonCode: 'E2E_LOCAL_READ_ONLY_AUTO_APPROVED' })
+    })).toEqual({ kind: 'confirmation-required',
+      reasonCode: 'E2E_LOCAL_EXECUTION_SEMANTIC_CONFIRMATION_REQUIRED' })
     expect(localApprovalDisposition({
       approvalType: 'scope', riskTier: 'local', effects: [],
       hasInjection: false, hasPrivacyUnlock: false, hasManualFinalization: false,

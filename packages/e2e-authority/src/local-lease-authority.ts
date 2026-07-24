@@ -9,6 +9,9 @@ import {
 import { trustLeaseClient, type TrustedLeaseClient } from './trusted-execution-clients.js'
 
 const DigestPattern = /^sha256:[a-f0-9]{64}$/
+export type BoundLeaseRequest = LeaseRequest & { leaseId: string }
+export type ActiveBoundLeaseRequest = BoundLeaseRequest & { fencingToken: number }
+
 export class LocalLeaseAuthority {
   readonly #now: () => Date
   readonly #stateStore?: SqliteSnapshotStore
@@ -60,9 +63,11 @@ export class LocalLeaseAuthority {
 
   async acquire(request: LeaseRequest): Promise<DataLease> {
     if (this.#stateStore && !this.#stateContext.getStore()) {
-      return await this.#withMutation(() => this.acquire(request))
+      validateRequest(request)
+      return await this.#withReconciledMutation([request.resourceKey], () => this.acquire(request))
     }
     validateRequest(request)
+    this.#releaseExpiredOwner(request.resourceKey)
     const existingId = this.#resourceOwners.get(request.resourceKey)
     if (existingId) {
       const existing = this.#leases.get(existingId)
@@ -86,6 +91,109 @@ export class LocalLeaseAuthority {
     this.#leases.set(lease.leaseId, lease)
     this.#resourceOwners.set(lease.resourceKey, lease.leaseId)
     return copy(lease)
+  }
+
+  async acquireBound(request: BoundLeaseRequest): Promise<DataLease> {
+    const leases = await this.acquireBoundBatch([request])
+    return leases[0]!
+  }
+
+  /**
+   * 在一个 Authority 事务内预校验并激活整批租约。任一资源冲突时，
+   * 不会创建或激活这批请求中的任何 Lease。
+   */
+  async acquireBoundBatch(requests: BoundLeaseRequest[]): Promise<DataLease[]> {
+    if (this.#stateStore && !this.#stateContext.getStore()) {
+      validateBoundBatch(requests)
+      return await this.#withReconciledMutation(
+        requests.map((request) => request.resourceKey),
+        () => this.acquireBoundBatch(requests),
+      )
+    }
+    validateBoundBatch(requests)
+    for (const resourceKey of new Set(requests.map((request) => request.resourceKey))) {
+      this.#releaseExpiredOwner(resourceKey)
+    }
+
+    // 先完整校验，然后才修改内存/持久状态，避免部分成功。
+    for (const request of requests) {
+      const existing = this.#leases.get(request.leaseId)
+      if (existing !== undefined) {
+        if (!sameBoundLease(existing, request)
+          || !['tentative', 'active'].includes(existing.status)
+          || this.#resourceOwners.get(request.resourceKey) !== request.leaseId) {
+          throw leaseError('E2E_LEASE_BINDING_MISMATCH', '指定 leaseId 已绑定其他资源或终态')
+        }
+        continue
+      }
+      if (this.#resourceOwners.get(request.resourceKey) !== undefined) {
+        throw leaseError('E2E_LEASE_RESOURCE_UNAVAILABLE', `资源 ${request.resourceKey} 已被租用或隔离`)
+      }
+    }
+
+    const now = this.#now()
+    const result: DataLease[] = []
+    for (const request of requests) {
+      const existing = this.#leases.get(request.leaseId)
+      if (existing?.status === 'active') {
+        result.push(copy(existing))
+        continue
+      }
+      const token = (this.#fencingTokens.get(request.resourceKey) ?? 0) + 1
+      this.#fencingTokens.set(request.resourceKey, token)
+      if (existing?.status === 'tentative') {
+        existing.status = 'active'
+        existing.fencingToken = token
+        result.push(copy(existing))
+        continue
+      }
+      const lease: DataLease = {
+        leaseId: request.leaseId, runId: request.runId, resourceKey: request.resourceKey,
+        resourceFingerprint: request.resourceFingerprint, exclusive: request.exclusive,
+        status: 'active', fencingToken: token, acquiredAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + request.ttlMs).toISOString(),
+      }
+      this.#leases.set(lease.leaseId, lease)
+      this.#resourceOwners.set(lease.resourceKey, lease.leaseId)
+      result.push(copy(lease))
+    }
+    return result
+  }
+
+  /** 审批签发阶段只校验已预留的 active Lease，不创建、不激活。 */
+  async requireActiveBoundBatch(requests: ActiveBoundLeaseRequest[]): Promise<DataLease[]> {
+    if (this.#stateStore && !this.#stateContext.getStore()) {
+      validateBoundBatch(requests)
+      for (const request of requests) {
+        if (!Number.isSafeInteger(request.fencingToken) || request.fencingToken <= 0) {
+          throw leaseError('E2E_LEASE_BINDING_MISMATCH', 'Lease fencing token 无效')
+        }
+      }
+      return await this.#withReconciledMutation(
+        requests.map((request) => request.resourceKey),
+        () => this.requireActiveBoundBatch(requests),
+      )
+    }
+    validateBoundBatch(requests)
+    for (const request of requests) {
+      if (!Number.isSafeInteger(request.fencingToken) || request.fencingToken <= 0) {
+        throw leaseError('E2E_LEASE_BINDING_MISMATCH', 'Lease fencing token 无效')
+      }
+    }
+    for (const resourceKey of new Set(requests.map((request) => request.resourceKey))) {
+      this.#releaseExpiredOwner(resourceKey)
+    }
+    return requests.map((request) => {
+      const lease = this.#leases.get(request.leaseId)
+      if (lease === undefined || lease.status !== 'active'
+        || !sameBoundLease(lease, request)
+        || lease.fencingToken !== request.fencingToken
+        || this.#resourceOwners.get(request.resourceKey) !== request.leaseId
+        || this.#now().getTime() >= Date.parse(lease.expiresAt)) {
+        throw leaseError('E2E_LEASE_BINDING_MISMATCH', '审批主题未绑定同一个有效 active Lease')
+      }
+      return copy(lease)
+    })
   }
 
   async activate(leaseId: string): Promise<DataLease> {
@@ -196,6 +304,32 @@ export class LocalLeaseAuthority {
     return lease
   }
 
+  #releaseExpiredOwner(resourceKey: string): boolean {
+    const leaseId = this.#resourceOwners.get(resourceKey)
+    if (leaseId === undefined) return false
+    const lease = this.#leases.get(leaseId)
+    if (lease === undefined || lease.status === 'released') {
+      this.#resourceOwners.delete(resourceKey)
+      return true
+    }
+    if (this.#now().getTime() < Date.parse(lease.expiresAt)) return false
+    if (lease.status === 'tentative') {
+      lease.status = 'released'
+      lease.cleanupDigest = digestText('expired-tentative-data-lease/v1', canonicalizeJson({
+        leaseId: lease.leaseId, runId: lease.runId, resourceKey: lease.resourceKey,
+        expiresAt: lease.expiresAt,
+      }))
+      this.#resourceOwners.delete(resourceKey)
+      return true
+    }
+    if (lease.status === 'active') {
+      lease.status = 'quarantined'
+      lease.quarantineReason = 'active lease expired before verified cleanup'
+      return true
+    }
+    return false
+  }
+
   #requireBinding(lease: DataLease, fencingToken: number, targetFingerprint: string): void {
     if (!Number.isSafeInteger(fencingToken) || fencingToken <= 0
       || lease.fencingToken !== fencingToken || lease.resourceFingerprint !== targetFingerprint) {
@@ -217,6 +351,43 @@ export class LocalLeaseAuthority {
       } catch (error) {
         this.#stateStore!.rollback()
         throw error
+      } finally {
+        this.#activeStateTransactions -= 1
+      }
+    })
+  }
+
+  /**
+   * 过期 active Lease 的隔离是安全终态，不能随随后业务拒绝一起回滚。
+   * 同一互斥区内先独立提交过期状态，再开始调用方事务，避免进程间竞态。
+   */
+  async #withReconciledMutation<T>(resourceKeys: string[], operation: () => Promise<T>): Promise<T> {
+    if (!this.#stateStore || this.#stateContext.getStore()) {
+      for (const resourceKey of new Set(resourceKeys)) this.#releaseExpiredOwner(resourceKey)
+      return await operation()
+    }
+    return await this.#stateStore.runExclusive(async () => {
+      this.#hydrate(parseLeaseSnapshot(this.#stateStore!.begin()))
+      this.#activeStateTransactions += 1
+      try {
+        return await this.#stateContext.run(true, async () => {
+          let changed = false
+          for (const resourceKey of new Set(resourceKeys)) {
+            changed = this.#releaseExpiredOwner(resourceKey) || changed
+          }
+          if (changed) this.#stateStore!.commit(canonicalizeJson(this.#snapshot()))
+          else this.#stateStore!.rollback()
+
+          this.#hydrate(parseLeaseSnapshot(this.#stateStore!.begin()))
+          try {
+            const result = await operation()
+            this.#stateStore!.commit(canonicalizeJson(this.#snapshot()))
+            return result
+          } catch (error) {
+            this.#stateStore!.rollback()
+            throw error
+          }
+        })
       } finally {
         this.#activeStateTransactions -= 1
       }
@@ -359,6 +530,29 @@ function validateRequest(request: LeaseRequest): void {
   if (!request.runId || !request.resourceKey) throw leaseError('E2E_LEASE_INPUT_INVALID', 'Run ID 和 resourceKey 必填')
   if (!DigestPattern.test(request.resourceFingerprint)) throw leaseError('E2E_LEASE_FINGERPRINT_INVALID', 'Resource fingerprint 无效')
   if (!Number.isSafeInteger(request.ttlMs) || request.ttlMs <= 0) throw leaseError('E2E_LEASE_TTL_INVALID', 'Lease TTL 必须为正整数')
+}
+
+function validateBoundBatch(requests: BoundLeaseRequest[]): void {
+  if (!Array.isArray(requests)) throw leaseError('E2E_LEASE_INPUT_INVALID', 'Lease batch 无效')
+  const leaseIds = new Set<string>()
+  const resourceKeys = new Set<string>()
+  for (const request of requests) {
+    validateRequest(request)
+    if (!safeId(request.leaseId)) throw leaseError('E2E_LEASE_INPUT_INVALID', 'leaseId 非法')
+    if (leaseIds.has(request.leaseId) || resourceKeys.has(request.resourceKey)) {
+      throw leaseError('E2E_LEASE_BATCH_DUPLICATE', '同一批次不得重复 leaseId 或 resourceKey')
+    }
+    leaseIds.add(request.leaseId)
+    resourceKeys.add(request.resourceKey)
+  }
+}
+
+function sameBoundLease(lease: DataLease, request: BoundLeaseRequest): boolean {
+  return lease.leaseId === request.leaseId
+    && lease.runId === request.runId
+    && lease.resourceKey === request.resourceKey
+    && lease.resourceFingerprint === request.resourceFingerprint
+    && lease.exclusive === request.exclusive
 }
 
 function copy(lease: DataLease): DataLease {

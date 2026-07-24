@@ -99,7 +99,8 @@ export function runtimeWriteProjectionFixture(): RuntimeRunSnapshot {
     actionIntents: [{ actionId: 'ACTION-1', effect: 'reversible-write', intentDigest: actionDigest,
       runtimeHttpActionDigest: actionDigest, requestIds: [] }],
     writeHttpActions: [action], writeCleanupPlans: [cleanup],
-    dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'order:1', mode: 'write' }], manualProcedures: [],
+    dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'order:1', resourceFingerprint: target,
+      mode: 'write' }], manualProcedures: [],
     evidencePolicyDigest: d('evidence'), runtimeIsolation: null, unresolvedItems: [],
   }
   const actionMapContent = {
@@ -134,7 +135,8 @@ export function runtimeWriteProjectionFixture(): RuntimeRunSnapshot {
     runBundleProjectionDigest: digestApprovalProjection('run-bundle', runBundleContent), environment: 'test',
     baseOrigin: 'https://test.example.com', actor: 'qa', discoveryGrantId: 'DISCOVERY-1',
     preflightDigest: d('preflight'), actions: [{ actionId: 'ACTION-1', effect: 'reversible-write',
-      dataLeaseId: 'LEASE-1', fencingToken: 1, cleanupPlanDigest: capability.cleanupPlanDigest, requests }],
+      dataLeaseId: 'LEASE-1', resourceKey: 'order:1', fencingToken: 1,
+      cleanupPlanDigest: capability.cleanupPlanDigest, requests }],
   }
   const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
   const grant: SignedWriteGrant = {

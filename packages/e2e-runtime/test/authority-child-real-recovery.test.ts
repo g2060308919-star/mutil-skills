@@ -5,6 +5,7 @@ import { expect, test, vi } from 'vitest'
 import { isoCBOR } from '@simplewebauthn/server/helpers'
 import {
   LocalApprovalAuthority,
+  LocalLeaseAuthority,
   createAuthenticatedRpcHttpTransport,
   createAuthorityExecutionRpcClients,
   startAuthorityExecutionRpcHostProcess,
@@ -12,6 +13,7 @@ import {
 import {
   RuntimeRequestEnvelopeSchema,
   canonicalizeJson,
+  digestArtifactContent,
   digestText,
 } from '@mutil-skills/e2e-contracts'
 import { RuntimeAuthorityHost } from '../src/authority-host.js'
@@ -40,6 +42,23 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
       schemaVersion: '1.0.0', projectId: 'PROJECT-REAL-RECOVERY',
     }))
     const identity = await resolveProjectIdentity(roots.project)
+    const normalizedText = '# 订单\n必须显示待审核订单。'
+    const requirementModel: Record<string, any> = {
+      artifactId: 'ARTIFACT-REQUIREMENT-MODEL', artifactType: 'requirement-model', schemaVersion: '1.0.0',
+      engineVersion: '0.3.0', assetId: 'ASSET-REAL-RECOVERY', prdRevision: digest('prd'),
+      generationId: 'RUN-REAL-RECOVERY', createdAt: fixedNow, contentDigest: '', signatures: [],
+      dependencies: [], graph: { defines: [], references: [] }, content: { modelRevision: 1,
+        requirements: [{ reqId: 'REQ-1', revision: 1, title: '订单列表', actors: ['operator'],
+          entities: ['order'], preconditions: [], rules: [{ ruleId: 'RULE-1', category: 'business',
+            statement: '显示待审核订单', sourceRefs: ['PRD-1'], certainty: 'explicit',
+            oracleIds: ['ORACLE-1'] }], states: [], transitions: [], observableOutcomes: [{
+            oracleId: 'ORACLE-1', statement: '页面显示待审核订单' }], applicability: [],
+          sourceRefs: ['PRD-1'], status: 'active' }], coupledDimensions: [],
+        applicabilityRules: ['RULE-1'], modelDecisionDigest: digest('model-decision') },
+    }
+    requirementModel.contentDigest = digestArtifactContent(
+      'artifact-content/1.0.0/requirement-model', requirementModel,
+    )
     const snapshot: RuntimeRunSnapshot = {
       schemaVersion: '1.1.0', runId: 'RUN-REAL-RECOVERY', assetId: 'ASSET-REAL-RECOVERY',
       projectIdentityDigest: identity.digest, runtimeInstallationDigest: installationDigest,
@@ -47,8 +66,14 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
         current: 'awaiting-execution-approval', sequence: 8,
         eventChainDigest: `sha256:${'8'.repeat(64)}`,
       },
-      artifactDigests: { 'prd-source': digest('prd'), scope: digest('scope') },
-      frozenArtifacts: {}, trustedExecutionFacts: {},
+      artifactDigests: { 'prd-source': digest('prd'), scope: digest('scope'),
+        'requirement-model': requirementModel.contentDigest },
+      frozenArtifacts: { 'requirement-model': requirementModel as never },
+      trustedExecutionFacts: { 'prd-source-snapshot': {
+        schemaVersion: '1.0.0', sourceRef: 'inputs/prd.md', normalizedText,
+        normalizedDigest: digestText('e2e-prd-normalized-source/v1', normalizedText),
+        byteLength: Buffer.byteLength(normalizedText),
+      } },
       requestResponses: {}, createdAt: fixedNow, updatedAt: fixedNow,
     }
     const seedRequestDigest = digest('seed-request')
@@ -115,7 +140,8 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
       discoveryGrantId: discovery.grantId, preflightDigest,
       actions: [{
         actionId: 'ACTION-WRITE-REAL', effect: 'reversible-write' as const,
-        dataLeaseId: 'LEASE-REAL', fencingToken: 1, cleanupPlanDigest: digest('cleanup'),
+        dataLeaseId: 'LEASE-REAL', resourceKey: 'order:1', fencingToken: 1,
+        cleanupPlanDigest: digest('cleanup'),
         requests: [{
           intentId: 'INTENT-WRITE-REAL', method: 'POST', canonicalOrigin: discoverySubject.baseOrigin,
           exactPath: '/orders/1', query: [], payload: { kind: 'no-body' as const },
@@ -124,6 +150,14 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
       }],
     }
     seedAuthority.close()
+    const leaseAuthority = await LocalLeaseAuthority.open({
+      now, statePath: leasePath, testWorkspaceRoots: [process.cwd()],
+    })
+    await leaseAuthority.acquireBound({
+      leaseId: 'LEASE-REAL', runId: snapshot.runId, resourceKey: 'order:1',
+      resourceFingerprint: digest('target'), exclusive: true, ttlMs: 300_000,
+    })
+    leaseAuthority.close()
     const request = RuntimeRequestEnvelopeSchema.parse({
       schemaVersion: '1.0.0', requestId: 'APPROVE-REAL-RECOVERY',
       client: { name: 'test', version: '1.0.0' }, command: 'open-approval', projectRoot: roots.project,
@@ -172,11 +206,23 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
       },
     })
     const originalWriteTrustedFactOutcome = runStore.writeTrustedFactOutcome.bind(runStore)
+    const confirmationResponse = await runtime.handle(request, JSON.stringify(request))
+    expect(confirmationResponse).toMatchObject({ ok: true, result: {
+      status: 'confirmation-required', approvalMode: 'webauthn',
+    } })
+    if (!confirmationResponse.ok) throw new Error('semantic confirmation missing')
+    const confirmation = confirmationResponse.result as { confirmationId: string; subjectDigest: string }
+    const confirmedRequest = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'APPROVE-REAL-RECOVERY-CONFIRMED',
+      client: { name: 'test', version: '1.0.0' }, command: 'confirm-approval', projectRoot: roots.project,
+      payload: { runId: snapshot.runId, confirmationId: confirmation.confirmationId,
+        subjectDigest: confirmation.subjectDigest },
+    })
     vi.spyOn(runStore, 'writeTrustedFactOutcome')
       .mockRejectedValueOnce(new Error('simulated Run Store fsync failure'))
       .mockImplementation(originalWriteTrustedFactOutcome)
 
-    const first = await runtime.handle(request, JSON.stringify(request))
+    const first = await runtime.handle(confirmedRequest, JSON.stringify(confirmedRequest))
     if (first.error?.code === 'E2E_APPROVAL_PLATFORM_PERMISSION_DENIED') { skip(); return }
     expect(first).toMatchObject({
       ok: false, error: { code: 'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING' },
@@ -186,7 +232,7 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
     await currentAuthority.close()
     currentAuthority = undefined
     currentAuthority = await startAuthority()
-    const second = await runtime.handle(request, JSON.stringify(request))
+    const second = await runtime.handle(confirmedRequest, JSON.stringify(confirmedRequest))
     expect(second).toMatchObject({
       ok: true,
       result: {

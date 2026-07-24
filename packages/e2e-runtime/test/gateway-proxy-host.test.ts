@@ -70,6 +70,31 @@ test('Gateway 在独立子进程运行，CA 只写入受限 Authority root', asy
   expect(await readFile(gateway.caCertPath, 'utf8')).toContain('BEGIN CERTIFICATE')
 })
 
+test('同一 Gateway 可分别证明 program 与 cleanup 两个受控浏览器生命周期', async () => {
+  const roots = await createRuntimeTestRoots()
+  const authorityRoot = join(roots.home, '.mutil-skills', 'e2e', 'authority')
+  await mkdir(authorityRoot, { recursive: true, mode: 0o700 })
+  const started = await startGatewayProxyHostWithTestControl({
+    runId: 'RUN-TWO-BROWSER-CANARIES', mode: 'real-environment', approvedRequests: [], authorityRoot,
+  })
+  handles.push(started.handle)
+  const executeThroughControlledBrowser = async (request: {
+    url: string
+    correlation?: { actionId: string; capabilityId: string }
+  }) => {
+    const response = await started.requestThroughProxy(request.url, request.correlation ?? {
+      actionId: 'UNAPPROVED-CANARY', capabilityId: 'UNAPPROVED-CANARY',
+    })
+    return { status: response.status }
+  }
+  for (const label of ['program', 'cleanup']) {
+    await expect(started.browserBinding.runCanary({
+      browserMeasurementDigest: digestText('gateway-two-browser-canary/v1', label),
+      executeThroughControlledBrowser,
+    })).resolves.toMatchObject({ approved: true, denied: true })
+  }
+})
+
 test('生产 Gateway 在 spawn 前登记 marker descriptor，正常关闭后才完成 tombstone', async () => {
   const roots = await createRuntimeTestRoots()
   const marker = createRuntimeOwnedResourceMarker({

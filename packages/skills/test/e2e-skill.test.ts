@@ -49,7 +49,7 @@ describe('E2E skill package', () => {
           'verified installation manifest + protocol major + safety probes',
         ],
         whenMissing: {
-          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.2.1',
+          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.3.0',
           terminalState: 'environment-blocked', reasonCode: 'E2E_RUNTIME_HOST_UNAVAILABLE',
         },
       }],
@@ -128,7 +128,7 @@ describe('E2E skill package', () => {
     expect(entry).toContain('默认流程不执行 `identity enroll`')
     expect(entry).toContain('`confirmation-required`')
     expect(entry).toContain('必须暂停并等待调用者明确确认')
-    expect(entry).toContain('@mutil-skills/e2e-runtime@0.2.1')
+    expect(entry).toContain('@mutil-skills/e2e-runtime@0.3.0')
     expect(approval).toContain('`confirm-approval`')
     expect(approval).toContain('本地确认不验证自然人身份，也不证明职责分离')
     expect(browser).toContain('系统 Google Chrome')

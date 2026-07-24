@@ -48,6 +48,10 @@ import type { RuntimeWriteOwnedResourceLifecycle } from './runtime-write-product
 
 const START_TIMEOUT_MS = 10_000
 const STOP_TIMEOUT_MS = 5_000
+// full-playwright 的 program 与 cleanup 使用独立浏览器生命周期；每个生命周期都必须
+// 在同一 Gateway 上完成正反 canary。该随机内部规则不授予业务访问，仅为受控 Host
+// 提供有界的隔离证明容量，避免第二个合法浏览器被一次性规则误拒绝。
+const MAX_BROWSER_CANARY_PROOFS = 64
 
 export interface GatewaySessionMeasurement {
   runId: string
@@ -159,6 +163,8 @@ export interface RuntimeGatewayProxyHost {
 
 export interface GatewayWriteLifecycle {
   reserveWrite(capabilityId: string): Promise<import('@mutil-skills/e2e-contracts').CapabilityReservation>
+  writeAuditSummary(capabilityId: string): import('@mutil-skills/e2e-contracts').GatewayAuditSummary
+  writeExecutionSessionId(capabilityId: string): string
   finalizeWriteOutcome(
     capabilityId: string,
     input: CompleteExecutionOutcomeInput,
@@ -187,7 +193,7 @@ export async function startGatewayProxyHostForRuntime(
 /** 仅供未发布的 test/fixtures.ts 使用；package exports 不暴露本模块。 */
 export async function startGatewayProxyHostWithTestControl(
   options: GatewayProxyStartOptions,
-): Promise<TestControl & { writeLifecycle: GatewayWriteLifecycle }> {
+): Promise<TestControl & { browserBinding: GatewayBrowserBinding; writeLifecycle: GatewayWriteLifecycle }> {
   return await startGatewayProxyHostInternal(options)
 }
 
@@ -204,7 +210,7 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
     runId: options.runId,
     approvedRequests: [{
       actionId: `CANARY-${canaryNonce}`, capabilityId: `CANARY-CAP-${canaryNonce}`,
-      method: 'GET', url: canaryApprovedUrl, maxUses: 1,
+      method: 'GET', url: canaryApprovedUrl, maxUses: MAX_BROWSER_CANARY_PROOFS,
       // 204 导航会被 Chromium 表示为 ERR_ABORTED，Playwright 因而无法取得
       // response status；固定 200 静态体才能同时证明 Browser 与 Gateway 链路。
       behavior: { kind: 'http-response', status: 200, body: 'e2e-gateway-canary' },
@@ -212,7 +218,7 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
   })
   const canaryRule = canaryProjection.rules[0]!
   const signer = options.policyObjects?.auditSigner ?? LocalGatewayAuditSigner.create({
-    issuer: 'e2e-runtime-gateway', keyId: 'gateway-v1', instanceId: options.runId, version: '0.2.1',
+    issuer: 'e2e-runtime-gateway', keyId: 'gateway-v1', instanceId: options.runId, version: '0.3.0',
   })
   const recorder = signer.createRecorder(projection.policyDigest)
   const factoryPolicies = options.policyObjects?.factory?.({
@@ -566,6 +572,12 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
       },
     })
     const writeLifecycle: GatewayWriteLifecycle = Object.freeze({
+      writeAuditSummary: (capabilityId: string) => writeState.auditSummary(capabilityId),
+      writeExecutionSessionId: (capabilityId: string) => {
+        const writeGateway = policies.writeGateways?.[capabilityId]
+        if (!writeGateway) throw gatewayHostError('E2E_GATEWAY_WRITE_CAPABILITY_NOT_ACTIVE')
+        return writeGateway.getExecutionSessionId()
+      },
       reserveWrite: async (capabilityId: string) => {
         const gateway = policies.writeGateways?.[capabilityId]
         if (!gateway) throw gatewayHostError('E2E_GATEWAY_WRITE_CAPABILITY_NOT_ACTIVE')

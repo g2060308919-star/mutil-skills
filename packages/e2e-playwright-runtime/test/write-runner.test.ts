@@ -91,7 +91,8 @@ async function trustedContext(input: { authorizationAllowed: boolean; leaseAllow
       runBundleProjectionDigest: projectionDigest, actor: 'operator', discoveryGrantId: discovery.grantId,
       preflightDigest, actions: [{
         actionId: 'ACTION-APPROVE', effect: 'reversible-write', dataLeaseId: active.leaseId,
-        fencingToken: active.fencingToken, cleanupPlanDigest: digestText('write-runner-test/v1', 'cleanup'),
+        resourceKey: 'order:100', fencingToken: active.fencingToken,
+        cleanupPlanDigest: digestText('write-runner-test/v1', 'cleanup'),
         requests: [{ intentId: 'INTENT-WRITE', method: 'POST', canonicalOrigin: 'https://test.example.com',
           exactPath: '/orders/100', query: [], payload: { kind: 'no-body' }, targetFingerprint,
           maxRequests: 1, expectedOrder: 1 }],

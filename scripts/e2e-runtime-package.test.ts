@@ -5,8 +5,10 @@ import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { afterEach, describe, expect, test } from 'vitest'
-import { ArtifactSchemaRegistry, digestText } from '@mutil-skills/e2e-contracts'
-import { runtimeReadOnlyFixture } from './e2e-runtime-read-only.fixture.js'
+import { ArtifactSchemaRegistry, WriteApprovalSubjectV2Schema, digestText }
+  from '@mutil-skills/e2e-contracts'
+import { runtimeFullPlaywrightFixture, runtimeReadOnlyFixture }
+  from './e2e-runtime-read-only.fixture.js'
 
 const execFileAsync = promisify(execFile)
 const temporaryRoots: string[] = []
@@ -90,6 +92,53 @@ describe('E2E Runtime npm tarball', () => {
     expect(executionContract.identities).toEqual([
       { identityId: 'IDENTITY-AUDITOR', roleIds: ['auditor'], secretRef: 'SECRET-REF-LOCAL' },
     ])
+  })
+
+  test('跨仓 full-playwright fixture 冻结表单、Popup、多页面、JSON 写、Cleanup 与 Reload', () => {
+    const fixture = runtimeFullPlaywrightFixture({
+      runId: 'RUN-FULL-CROSS-REPO', assetId: 'ASSET-FULL-CROSS-REPO',
+      prdRevision: digestText('test/v1', 'full-prd'),
+      installationDigest: digestText('test/v1', 'runtime'),
+      url: 'http://fixture.test/', now: new Date('2026-07-23T00:00:00.000Z'),
+    })
+    for (const document of [
+      ...Object.values(fixture.semanticArtifacts), ...Object.values(fixture.frozenArtifacts),
+      fixture.regressionManifest,
+    ]) {
+      const parsed = ArtifactSchemaRegistry[document.artifactType].safeParse(document)
+      expect(parsed.success, `${document.artifactType}:${parsed.success ? '' : parsed.error.message}`).toBe(true)
+      expect(document.artifactId).toBe(`ARTIFACT-${document.artifactType.toUpperCase()}`)
+    }
+    const subject = WriteApprovalSubjectV2Schema.parse(fixture.writeSubject(
+      'DISCOVERY-FULL-1', digestText('test/v1', 'preflight'),
+    ))
+    expect(subject.actions[0]).toMatchObject({
+      operation: 'full-playwright', dataLeaseId: 'LEASE-FULL-1', fencingToken: 1,
+    })
+    const program = (fixture.frozenArtifacts['execution-contract'].content as any)
+      .fullPlaywrightPrograms[0]
+    expect(program.source).toContain("getByLabel('Name').fill('Ada')")
+    expect(program.source).toContain("waitForEvent('page')")
+    expect(program.source).toContain('browser.newContext()')
+    expect(program.networkRequestBodies).toEqual([
+      { intentId: 'API', kind: 'json', canonicalJson: '{"enabled":true,"name":"Ada"}' },
+    ])
+    expect(program.cleanupSource).toContain("request.post('http://fixture.test/reset')")
+    expect(program.cleanupSource).toContain('page.reload()')
+    expect(program.cleanupSource).toContain("locator('#state')")
+    const automatedCaseIds = (fixture.semanticArtifacts['coverage-universe'].content as any)
+      .obligations.flatMap((obligation: any) => obligation.disposition.kind === 'automated'
+        ? obligation.disposition.caseIds : [])
+    const activeCaseIds = (fixture.frozenArtifacts['test-cases'].content as any)
+      .cases.filter((testCase: any) => testCase.status === 'active')
+      .map((testCase: any) => testCase.caseId)
+    expect(automatedCaseIds).toEqual(activeCaseIds)
+    const executionRoles = (fixture.frozenArtifacts['execution-contract'].content as any)
+      .identities.flatMap((identity: any) => identity.roleIds)
+    const scheduledActors = (fixture.frozenArtifacts['test-cases'].content as any)
+      .cases.filter((testCase: any) => activeCaseIds.includes(testCase.caseId))
+      .map((testCase: any) => testCase.actor)
+    expect(executionRoles).toEqual(scheduledActors)
   })
 
   test('allowlist 包含 launcher、审批资产与 helper，并排除测试、原始证据和环境文件', async () => {
@@ -177,7 +226,7 @@ describe('E2E Runtime npm tarball', () => {
           name?: unknown
           version?: unknown
         }
-        expect(manifest).toMatchObject({ name: packageName, version: '0.2.1' })
+        expect(manifest).toMatchObject({ name: packageName, version: '0.3.0' })
         const loaded = await import(pathToFileURL(join(packageRoot, 'dist', 'src', 'index.js')).href)
         expect(loaded).toBeTypeOf('object')
         expect(await realpath(packageRoot)).not.toContain(sourceRoot)
@@ -189,7 +238,7 @@ describe('E2E Runtime npm tarball', () => {
       const version = await execFileAsync(process.execPath, [runtimeBin, '--version'], {
         cwd: project, env: commandEnvironment, timeout: 30_000,
       })
-      expect(version.stdout.trim()).toBe('0.2.1')
+      expect(version.stdout.trim()).toBe('0.3.0')
       expect(`${version.stdout}${version.stderr}`).not.toContain(sourceRoot)
 
       await expect(execFileAsync(process.execPath, [runtimeBin, 'doctor', '--json'], {
@@ -208,9 +257,9 @@ async function resolvePackageTarballs(directory: string): Promise<string[]> {
   const files = await readdir(root)
   return publishedPackages.map((packageName) => {
     const expectedPrefix = packageName.replace('@mutil-skills/', 'mutil-skills-').replaceAll('/', '-')
-    const matches = files.filter((file) => file === `${expectedPrefix}-0.2.1.tgz`)
+    const matches = files.filter((file) => file === `${expectedPrefix}-0.3.0.tgz`)
     if (matches.length !== 1) {
-      throw new Error(`打包目录中 ${packageName}@0.2.1 的 tarball 数量必须为 1`)
+      throw new Error(`打包目录中 ${packageName}@0.3.0 的 tarball 数量必须为 1`)
     }
     return join(root, matches[0]!)
   })

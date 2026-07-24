@@ -53,6 +53,7 @@ export async function readyFixture(input: {
   retireProgramError?: Error
   retireCleanupError?: Error
   networkRequests?: FullPlaywrightProgram['networkRequests']
+  networkRequestBodies?: FullPlaywrightProgram['networkRequestBodies']
   capture?: (stage: FullPlaywrightEvidenceStage) => Promise<ReturnType<typeof evidenceForStage>>
   gatewaySummary?: { received: number; forwarded: number; blocked: number; byIntent: Record<string, number> }
   issueOutcome?: (binding: ExecutionOutcomeBinding) => ExecutionOutcomeReceipt
@@ -136,6 +137,9 @@ export async function readyFixture(input: {
     cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource), dataLeaseId: active.leaseId,
     cleanupPlanId: 'CLEANUP-1', timeoutMs: input.programTimeoutMs ?? 500,
     networkRequests: input.networkRequests ?? [],
+    ...(input.networkRequestBodies === undefined ? {} : {
+      networkRequestBodies: input.networkRequestBodies,
+    }),
   }
   const cleanupPlan: CleanupPlanDefinition = {
     schemaVersion: '2.0.0', transport: 'browser-local', cleanupPlanId: 'CLEANUP-1', actionId: 'ACTION-1',
@@ -188,7 +192,8 @@ export async function readyFixture(input: {
     preflightDigest, actions: [{ actionId: 'ACTION-1', transport: 'browser-local' as const,
       operation: 'full-playwright' as const, effect: 'reversible-write' as const,
       programDigest: program.sourceDigest, cleanupProgramDigest: program.cleanupSourceDigest,
-      dataLeaseId: active.leaseId, fencingToken: 1, cleanupPlanDigest, requests: input.networkRequests ?? [] }],
+      dataLeaseId: active.leaseId, resourceKey: 'browser-local:fixture', fencingToken: 1,
+      cleanupPlanDigest, requests: input.networkRequests ?? [] }],
   }
   const grant = await authority.issueWriteGrant({ subject, approver: { subject: 'alice', roles: ['e2e-approver'] },
     approvalSessionRef: 'session:alice', ttlMs: 60_000 })

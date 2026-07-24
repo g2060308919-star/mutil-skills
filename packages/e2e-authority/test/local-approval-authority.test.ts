@@ -53,7 +53,8 @@ async function browserLocalSubject(authority: ReturnType<typeof LocalApprovalAut
     environment: 'test', baseOrigin: 'https://test.example.com',
     actions: [{
       actionId: 'ACTION-1', transport: 'browser-local', operation: 'full-playwright', effect: 'reversible-write',
-      programDigest, cleanupProgramDigest, dataLeaseId: 'LEASE-1', fencingToken: 7, cleanupPlanDigest,
+      programDigest, cleanupProgramDigest, dataLeaseId: 'LEASE-1', resourceKey: 'todos:fixture',
+      fencingToken: 7, cleanupPlanDigest,
       requests: [request],
     }],
   }

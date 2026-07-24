@@ -3161,14 +3161,23 @@ function validateStoredGrantStructure(grant: Record<string, unknown>, policy: Au
   }
   for (const capability of grant.capabilities) {
     if (!isPlainSnapshot(capability)) corruptSnapshot()
+    const browserLocalWrite = kind === 'write' && capability.transport === 'browser-local'
     const capabilityKeys = (kind === 'discovery' || kind === 'read') && capability.transport === 'http'
       ? ['actionId', 'capabilityId', 'effect', 'maxUses', 'nonce', 'operation', 'requestIds', 'transport']
-      : keySets[kind]
+      : browserLocalWrite
+        ? [...keySets.write, 'cleanupProgramDigest', 'programDigest']
+        : keySets[kind]
     requireExactKeys(capability, capabilityKeys)
     if (typeof capability.capabilityId !== 'string' || typeof capability.actionId !== 'string'
       || typeof capability.nonce !== 'string' || !/^[a-f0-9]{64}$/.test(capability.nonce)
       || typeof capability.maxUses !== 'number' || !Number.isSafeInteger(capability.maxUses)
       || capability.maxUses < 1) corruptSnapshot()
+    if (kind === 'write' && !(
+      (capability.transport === 'http' && capability.operation === 'http-request')
+      || (browserLocalWrite && capability.operation === 'full-playwright'
+        && typeof capability.programDigest === 'string' && isDigest(capability.programDigest)
+        && typeof capability.cleanupProgramDigest === 'string' && isDigest(capability.cleanupProgramDigest))
+    )) corruptSnapshot()
   }
   const capabilities = grant.capabilities as Array<Record<string, unknown>>
   if (kind === 'write' && capabilities.some((capability) =>

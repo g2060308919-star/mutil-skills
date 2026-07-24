@@ -104,6 +104,8 @@ export async function startGatewayProxyHostForTest(
     requestThroughProxy: started.requestThroughProxy,
     openWebSocketThroughProxy: started.openWebSocketThroughProxy,
     requestWithTokenHeaders: started.requestWithTokenHeaders,
+    writeAuditSummary: started.writeLifecycle.writeAuditSummary,
+    writeExecutionSessionId: started.writeLifecycle.writeExecutionSessionId,
     reserveWrite: started.writeLifecycle.reserveWrite,
     finalizeWriteOutcome: started.writeLifecycle.finalizeWriteOutcome,
     markUnknownWithOutcome: started.writeLifecycle.markUnknownWithOutcome,
@@ -149,7 +151,8 @@ export async function executeWriteFixtureFlow(input: {
     runBundleProjectionDigest: flowDigest('bundle'), environment: 'test',
     baseOrigin: 'https://test.example.com', actor: 'qa', discoveryGrantId: discovery.grantId,
     preflightDigest: discovery.preflightDigest, actions: [{ actionId: 'ACTION-ORDER-UPDATE',
-      effect: 'reversible-write', dataLeaseId: lease.leaseId, fencingToken: lease.fencingToken!,
+      effect: 'reversible-write', dataLeaseId: lease.leaseId, resourceKey: 'order:100',
+      fencingToken: lease.fencingToken!,
       cleanupPlanDigest: flowDigest('cleanup-plan'), requests: [request] }],
   }
   const grant = await authority.issueWriteGrant({ subject, approver: flowApprover,

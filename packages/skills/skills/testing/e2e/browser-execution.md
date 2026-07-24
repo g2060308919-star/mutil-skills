@@ -6,7 +6,7 @@
 
 ## 必需 Artifact 与摘要
 
-不可变 v2 `run-bundle`、`execution-contract`、V2 `regression-manifest`、v2 `approval-grants` freshness receipt、`data-leases`、Gateway session 和 v2 Action Map。每个动作按 `actionId + operation` 绑定全部真实 capabilityId/digest。执行 Profile 必须是 `trusted-read-only`、`trusted-reversible-write` 或 `production-isolated`，且与 Discovery attestation、manifest 和 final-report 完全一致。
+不可变 v2 `run-bundle`、`execution-contract`、V2 `regression-manifest`、v2 `approval-grants` freshness receipt、`data-leases`、Gateway session 和 v2 Action Map。每个动作按 `actionId + operation` 绑定全部真实 capabilityId/digest。执行 Profile 必须是 `trusted-read-only`、`trusted-reversible-write`、`full-playwright` 或 `production-isolated`，且与 Discovery attestation、manifest 和 final-report 完全一致。
 
 默认 Browser Selection 是经过路径、所有者、权限、版本和 executable digest 重验的系统 Google Chrome。托管 Chromium 只在用户显式选择时使用；两种来源都必须进入同一个 `ControlledBrowserHost`，不得连接已打开的日常 Chrome。
 
@@ -24,6 +24,8 @@ Runtime 内部必须调用 `prepareTrustedCompilerRun()`、固定 `executeTruste
 ## 执行步骤
 
 Runtime 启动生成测试前必须先调用 `prepareTrustedCompilerRun()`；它失败时不得创建浏览器动作或 Bridge。每次受控会话创建新的 `0700` 一次性 Profile 目录，它不是简单的新标签页，也不读取或改变日常 Chrome Profile、Cookie、扩展、历史、缓存、已登录账号或打开页面；浏览器进程确认关闭后删除 Profile，异常退出则保留 owner marker 交给恢复流程清理。所有目标流量强制经过本次 Gateway，并先运行 direct-bypass canary。每角色创建独立 Context；先执行 real-environment 与健康基线，再为每个 injection Case 创建新 Context/policy；逐步记录 attempt slot、action、actual、effectObservation 和 evidence ref。写动作必须先且只能匹配 grant 中同 actionId 的一个 reversible-write capability，再动态复验 currentSubject、撤销/过期/nonce 状态、leaseId、fencingToken，以及 capability 中全部 request 的 targetFingerprint；任一失败都不得触碰页面。Gateway 对每个写请求记录签名发布审计；清理完成后，Gateway 必须使用 `execution-outcome-receipt/v1` 专用 purpose 签发完整 `ExecutionOutcomeReceipt`，绑定 `assetId、generationId、prdRevision、runId、caseId` AttemptContext、Grant/Capability/Action/Reservation、Runner 结果、Gateway 策略和请求计数、cleanup plan/lease/结果以及 evidence 集合。Authority reservation 的 `outcomeDigest` 必须等于该回执 `signedDigest`，然后 Gateway 记录 `reservationId + completed + outcomeDigest + consumed=true`。受控桥和独立 Playwright 子进程都必须重算 binding 并验证 Ed25519；回执按 `actionId` 写入 `browser-results.executionOutcomeReceipts[]`，staging 再与 Gateway、cleanup、evidence 和 Attempt 逐项复核。`passed|failed` terminal 必须显式携带同一 `reservationId + outcomeDigest`。当前每代只允许一个 scheduled actor；多角色单代缺少 per-case actor/preflight 证明时必须 fail-closed。
+
+`full-playwright` 只接受冻结且通过源码验证的 `full-playwright/v1` program。它可使用受控 `page/context/browser/request/expect/testInfo/state` 完成表单、键盘、checkbox、Popup、多 Context/页面和 hover/dblclick；所有 document、Popup、子页面与 API 请求都必须命中冻结的 Gateway request intent。JSON/binary/template Body 只能由 Runtime 从冻结 `networkRequestBodies` 渲染并覆盖调用方 options，JSON 使用 canonical bytes。主程序和 Cleanup 使用两个独立 Chrome 生命周期；Cleanup 必须释放租约并返回 `verified-clean`，再以独立页面 Reload 验证目标状态已恢复。Gateway freeze/finalize、签名审计、证据与 Authority terminal 回执全部完成后才允许返回 passed；Checkpoint 恢复只能协调已执行终态，不得重放浏览器写动作。
 
 ## 退出条件
 

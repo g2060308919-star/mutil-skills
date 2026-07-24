@@ -932,7 +932,9 @@ export function auditArtifactSemantics(
     const productionIsolated = regressionProfile === 'production-isolated'
     const trustedReadOnly = regressionProfile === 'trusted-read-only'
     const trustedReversibleWrite = regressionProfile === 'trusted-reversible-write'
-    if ((hasNonReadAction && trustedReadOnly) || (!hasNonReadAction && trustedReversibleWrite)) {
+    const trustedFullPlaywright = regressionProfile === 'full-playwright'
+    if ((hasNonReadAction && trustedReadOnly)
+      || (!hasNonReadAction && (trustedReversibleWrite || trustedFullPlaywright))) {
       add('E2E_GENERATION_REGRESSION_PROFILE_EFFECT_MISMATCH', 'regression-manifest', regressionProfile)
     }
     if (productionIsolated) {
@@ -945,14 +947,14 @@ export function auditArtifactSemantics(
           add('E2E_GENERATION_RUNTIME_ISOLATION_BINDING_MISMATCH', 'run-bundle', runtimeIsolationPolicyDigest)
         }
       }
-    } else if (trustedReadOnly || trustedReversibleWrite) {
+    } else if (trustedReadOnly || trustedReversibleWrite || trustedFullPlaywright) {
       if (runtimeIsolation !== null || runtimeIsolationPolicyDigest !== 'not-applicable') {
         add('E2E_GENERATION_RUNTIME_ISOLATION_UNEXPECTED', 'execution-contract', 'runtimeIsolation')
       }
     } else {
       add('E2E_COMPILER_UNATTESTED_SOURCE', 'regression-manifest', 'executionProfile')
     }
-    if (!productionIsolated && !trustedReadOnly && !trustedReversibleWrite
+    if (!productionIsolated && !trustedReadOnly && !trustedReversibleWrite && !trustedFullPlaywright
       && (runtimeIsolation !== null || runtimeIsolationPolicyDigest !== 'not-applicable')) {
       add('E2E_GENERATION_RUNTIME_ISOLATION_UNEXPECTED', 'execution-contract', 'runtimeIsolation')
     }
@@ -1678,9 +1680,11 @@ function auditExecutionOutcomeReceipts(
       const capabilityRecordMatches = arrayAt(sources.runBundle, 'signedCapabilities').filter((record) =>
         stringAt(record, 'capabilityId') === stringAt(receipt, 'capabilityId'))
       const capabilityRecord = capabilityRecordMatches[0] ?? {}
+      const capabilityOperation = stringAt(capability, 'operation')
       if (capabilityRecordMatches.length !== 1
         || stringAt(capabilityRecord, 'actionId') !== actionId
-        || stringAt(capabilityRecord, 'operation') !== 'http-request'
+        || !['http-request', 'full-playwright'].includes(capabilityOperation)
+        || stringAt(capabilityRecord, 'operation') !== capabilityOperation
         || stringAt(capabilityRecord, 'effect') !== 'reversible-write'
         || stringAt(capabilityRecord, 'digest') !== digestText(
           'approval-capability/v1', canonicalizeJson(capability))) {
@@ -1701,6 +1705,8 @@ function auditExecutionOutcomeReceipts(
       const attemptContext = objectAt(receipt, 'attemptContext')
       const stepEvidence = [...stringsAt(step, 'evidenceIds')].sort()
       const receiptEvidence = [...stringsAt(receipt, 'evidenceIds')].sort()
+      const receiptGateway = objectAt(receipt, 'gateway')
+      const receiptExecutionSessionId = stringAt(receiptGateway, 'executionSessionId')
       if (stringAt(receipt, 'attemptId') !== stringAt(caseResult, 'attemptId')
         || stringAt(receipt, 'status') !== stringAt(caseResult, 'status')
         || stringAt(receipt, 'effectObservation') !== stringAt(caseResult, 'effectObservation')
@@ -1709,7 +1715,10 @@ function auditExecutionOutcomeReceipts(
         || stringAt(attemptContext, 'prdRevision') !== sources.context.prdRevision
         || stringAt(attemptContext, 'runId') !== sources.context.runId
         || stringAt(attemptContext, 'caseId') !== caseId
-        || canonicalizeJson(stepEvidence) !== canonicalizeJson(receiptEvidence)) {
+        || !executionOutcomeEvidenceContextMatches({
+          operation: capabilityOperation, actionId, executionSessionId: receiptExecutionSessionId,
+          stepEvidence, receiptEvidence,
+        })) {
         add('E2E_GENERATION_EXECUTION_OUTCOME_CONTEXT_MISMATCH', 'browser-results', `${caseId}:${actionId}`)
       }
 
@@ -1729,8 +1738,8 @@ function auditExecutionOutcomeReceipts(
         add('E2E_GENERATION_EXECUTION_OUTCOME_RESERVATION_MISMATCH', 'gateway-audit', `${caseId}:${actionId}`)
       }
 
-      const gateway = objectAt(receipt, 'gateway')
-      const executionSessionId = stringAt(gateway, 'executionSessionId')
+      const gateway = receiptGateway
+      const executionSessionId = receiptExecutionSessionId
       const sessionEvents = events.filter((event) =>
         stringAt(event, 'executionSessionId') === executionSessionId)
       const publishedForwarded = sessionEvents.filter((event) =>
@@ -1769,6 +1778,23 @@ function auditExecutionOutcomeReceipts(
       }
     }
   }
+}
+
+function executionOutcomeEvidenceContextMatches(input: {
+  operation: string
+  actionId: string
+  executionSessionId: string
+  stepEvidence: string[]
+  receiptEvidence: string[]
+}): boolean {
+  if (input.operation !== 'full-playwright') {
+    return canonicalizeJson(input.stepEvidence) === canonicalizeJson(input.receiptEvidence)
+  }
+  const expectedReceiptEvidence = (['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
+    ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`))
+  expectedReceiptEvidence.push(`GATEWAY-${input.executionSessionId}`)
+  return canonicalizeJson(input.stepEvidence) === canonicalizeJson([`EVIDENCE-${input.actionId}`])
+    && canonicalizeJson(input.receiptEvidence) === canonicalizeJson([...expectedReceiptEvidence].sort())
 }
 
 function objectAt(value: Record<string, unknown>, key: string): Record<string, unknown> {

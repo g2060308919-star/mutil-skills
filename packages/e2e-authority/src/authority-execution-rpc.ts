@@ -230,18 +230,22 @@ export function registerAuthorityExecutionRpcOperations(
     rpc.registerOperation(WRITE_COMPLETE_OPERATION, async (payload, rpcContext) => {
       const input = parseWriteCompleteInput(payload)
       requireReservationOwner(writeAuthority, reservationContexts, input.reservationId, rpcContext)
-      await writeAuthority.complete(input.reservationId, input.outcomeDigest)
+      const result = terminalReceiptResult(
+        await writeAuthority.complete(input.reservationId, input.outcomeDigest), 'completed', input,
+      )
       finalizeReservationOwner(writeAuthority, reservationContexts, input.reservationId, rpcContext, 'completed',
-        digestText('authority-rpc-terminal-tombstone/v1', canonicalizeJson(input)))
-      return { completed: true }
+        result.receiptDigest)
+      return result
     })
     rpc.registerOperation(WRITE_UNKNOWN_OPERATION, async (payload, rpcContext) => {
       const input = parseWriteUnknownInput(payload)
       requireReservationOwner(writeAuthority, reservationContexts, input.reservationId, rpcContext)
-      await writeAuthority.markUnknown(input.reservationId, input.observation)
+      const result = terminalReceiptResult(
+        await writeAuthority.markUnknown(input.reservationId, input.observation), 'unknown', input,
+      )
       finalizeReservationOwner(writeAuthority, reservationContexts, input.reservationId, rpcContext, 'unknown',
-        digestText('authority-rpc-terminal-tombstone/v1', canonicalizeJson(input)))
-      return { markedUnknown: true }
+        result.receiptDigest)
+      return result
     })
   }
   rpc.registerOperation(LEASE_VERIFY_OPERATION, async (payload, rpcContext) => {
@@ -624,6 +628,7 @@ function requireLeaseRunBinding(lease: DataLease, runId: string): void {
 export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRpcClientOptions): {
   writeApproval: TrustedWriteApprovalClient
   lease: TrustedLeaseClient
+  browserLocalAuthority: GatewayWriteAuthorityRpcClient
   gatewayAuthority: GatewayWriteAuthorityRpcClient
   destroy(): void
 } {
@@ -634,7 +639,7 @@ export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRp
     authorityPublicKeyDigest: rpc.authorityPublicKeyDigest,
     approvalBinding,
   }
-  const writeApproval = trustWriteApprovalClient(Object.freeze({
+  const browserLocalAuthority: GatewayWriteAuthorityRpcClient = Object.freeze({
     async verifyForSubject(grant: SignedWriteGrant, currentSubject: WriteApprovalSubject): Promise<GrantDecision> {
       return parseGrantDecision(await rpc.call(WRITE_VERIFY_OPERATION, { grant, currentSubject }))
     },
@@ -647,11 +652,23 @@ export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRp
     },
     async complete(reservationId: string, outcomeDigest: string) {
       const input = parseWriteCompleteInput({ reservationId, outcomeDigest })
-      parseAck(await rpc.call(WRITE_COMPLETE_OPERATION, input), 'completed', 'E2E_RPC_WRITE_COMPLETE_RESULT_INVALID')
+      return parseReceiptResult(await rpc.call(WRITE_COMPLETE_OPERATION, input),
+        'E2E_RPC_WRITE_COMPLETE_RESULT_INVALID')
     },
     async markUnknown(reservationId: string, observation: string) {
       const input = parseWriteUnknownInput({ reservationId, observation })
-      parseAck(await rpc.call(WRITE_UNKNOWN_OPERATION, input), 'markedUnknown', 'E2E_RPC_WRITE_UNKNOWN_RESULT_INVALID')
+      return parseReceiptResult(await rpc.call(WRITE_UNKNOWN_OPERATION, input),
+        'E2E_RPC_WRITE_UNKNOWN_RESULT_INVALID')
+    },
+  })
+  const writeApproval = trustWriteApprovalClient(Object.freeze({
+    verifyForSubject: browserLocalAuthority.verifyForSubject,
+    reserveForSubject: browserLocalAuthority.reserveForSubject,
+    async complete(reservationId: string, outcomeDigest: string) {
+      await browserLocalAuthority.complete(reservationId, outcomeDigest)
+    },
+    async markUnknown(reservationId: string, observation: string) {
+      await browserLocalAuthority.markUnknown(reservationId, observation)
     },
   }), binding)
   const lease = trustLeaseClient(Object.freeze({
@@ -683,7 +700,7 @@ export function createAuthorityExecutionRpcClients(options: AuthorityExecutionRp
         'E2E_RPC_GATEWAY_UNKNOWN_RESULT_INVALID')
     },
   })
-  return { writeApproval, lease, gatewayAuthority, destroy: () => rpc.destroy() }
+  return { writeApproval, lease, browserLocalAuthority, gatewayAuthority, destroy: () => rpc.destroy() }
 }
 
 export function createAuthorityReadRpcClient(
@@ -1117,7 +1134,7 @@ function parseSignedWriteGrant(value: unknown): SignedWriteGrant | undefined {
     || typeof value.keyId !== 'string' || !SAFE_ID.test(value.keyId) || value.proofScope !== 'local-os-user'
     || !isApprover(value.approver) || typeof value.subjectDigest !== 'string' || !DIGEST.test(value.subjectDigest)
     || !approvalContext.success || approvalContext.data.approvalType !== 'execution'
-    || approvalContext.data.subject !== (value.approver as { subject: string }).subject
+    || approvalContext.data.subject !== approvalApproverSubject(value.approver as SignedGrant['approver'])
     || approvalContext.data.subjectDigest !== value.subjectDigest
     || canonicalGrantApprovalSubjectDigest(subject.data) !== value.subjectDigest
     || typeof value.issuedAt !== 'string' || !isCanonicalInstant(value.issuedAt)
@@ -1134,9 +1151,12 @@ function parseSignedWriteGrant(value: unknown): SignedWriteGrant | undefined {
 }
 
 function isApprover(value: unknown): boolean {
-  return isPlainObject(value) && hasExactKeys(value, ['roles', 'subject'])
+  if (!isPlainObject(value)) return false
+  if (value.kind === 'local-caller') return hasExactKeys(value, ['kind'])
+  return hasExactKeys(value, ['roles', 'subject'])
     && typeof value.subject === 'string' && SAFE_ID.test(value.subject)
-    && Array.isArray(value.roles) && value.roles.length <= 100
+    && Array.isArray(value.roles) && value.roles.length >= 1 && value.roles.length <= 1_000
+    && new Set(value.roles).size === value.roles.length
     && value.roles.every((role) => typeof role === 'string' && SAFE_ID.test(role))
 }
 

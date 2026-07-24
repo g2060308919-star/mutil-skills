@@ -21,6 +21,7 @@ import {
   type ApprovalMode,
   type DecisionReceipt,
   type DecisionSubject,
+  type DataLease,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
   type SignedGrant,
@@ -99,6 +100,7 @@ import {
   type PendingLocalApprovalConfirmation,
 } from './local-approval-confirmations.js'
 import { projectLocalApproval } from './local-approval-projection.js'
+import { bindRuntimeExecutionGrantArtifacts } from './runtime-execution-artifact-binder.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -113,6 +115,15 @@ export interface RuntimeHostDependencies {
   now(): Date
   approvalMode?: ApprovalMode
   projectFileReader?: SecureProjectFileReader
+  reserveExecutionLeases?(input: {
+    runId: string
+    leases: Array<{
+      leaseId: string
+      resourceKey: string
+      resourceFingerprint: string
+      ttlMs: number
+    }>
+  }): Promise<DataLease[]>
   authorityHostFactory?: () => Promise<Partial<Pick<RuntimeAuthorityHost,
     'requestApproval' | 'recoverApproval' | 'acknowledgeFinalization'
     | 'prepareManualResult' | 'requestManualResultRole' | 'recoverManualResultRole'>>>
@@ -159,6 +170,7 @@ export class E2ERuntimeHost {
       if (reservation.kind === 'pending'
         && request.command !== 'open-approval'
         && request.command !== 'confirm-approval'
+        && request.command !== 'submit-candidate'
         && request.command !== 'run-preflight'
         && request.command !== 'execute-run'
         && request.command !== 'resume-run'
@@ -259,8 +271,15 @@ export class E2ERuntimeHost {
 
     const prdBytes = await reader.readFile(identity, request.payload.prdSource.path)
     const projectPolicyBytes = await reader.readFile(identity, request.payload.projectPolicyPath)
+    const normalizedPrd = decodeUtf8(prdBytes, 'PRD')
+    if (Buffer.byteLength(normalizedPrd, 'utf8') > 1024 * 1024) {
+      throw runtimeHostError(
+        'E2E_RUNTIME_PRD_SEMANTIC_REVIEW_TOO_LARGE', 'input',
+        'PRD 原文超过单次语义确认上限 1 MiB；请拆分 PRD 后重试',
+      )
+    }
     const prdRevision = computePrdRevision({
-      normalizedPrd: decodeUtf8(prdBytes, 'PRD'),
+      normalizedPrd,
       sourceIdentity: { sourceId: 'PRD-BODY', version: '1', kind: 'file' },
       attachments: [],
     }).prdRevision
@@ -278,7 +297,15 @@ export class E2ERuntimeHost {
         'project-policy-source': digestBytes('e2e-project-policy-source/v1', projectPolicyBytes),
       },
       frozenArtifacts: {},
-      trustedExecutionFacts: { 'approval-mode': this.dependencies.approvalMode ?? 'webauthn' },
+      trustedExecutionFacts: {
+        'approval-mode': this.dependencies.approvalMode ?? 'webauthn',
+        'prd-source-snapshot': {
+          schemaVersion: '1.0.0', sourceRef: request.payload.prdSource.path,
+          normalizedText: normalizedPrd,
+          normalizedDigest: digestText('e2e-prd-normalized-source/v1', normalizedPrd),
+          byteLength: prdBytes.byteLength,
+        },
+      },
       writeAttempts: {},
       executionResults: { readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} },
       requestResponses: {},
@@ -522,89 +549,127 @@ export class E2ERuntimeHost {
     }
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) {
+        throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      }
+      this.requireInstallation(snapshot)
+      if (request.payload.expectedState !== snapshot.workflow.current) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH',
+          'input',
+          'expectedState 只能作为当前状态的并发前置条件，不能指定 next state',
+        )
+      }
+
+      const candidate = parseCandidate(request.payload.artifactType, request.payload.candidate)
+      const expectedDigest = digestArtifactContent(
+        `artifact-content/${candidate.schemaVersion}/${candidate.artifactType}`,
+        candidate as unknown as Record<string, unknown>,
+      )
+      if (candidate.contentDigest !== expectedDigest) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_CANDIDATE_DIGEST_MISMATCH',
+          'artifact',
+          'Candidate contentDigest 与 Runtime 重算结果不一致',
+        )
+      }
+      if (candidate.assetId !== snapshot.assetId
+        || candidate.prdRevision !== snapshot.artifactDigests['prd-source']
+        || candidate.generationId !== snapshot.runId) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_CANDIDATE_BINDING_MISMATCH',
+          'artifact',
+          'Candidate assetId、prdRevision 或 generationId 未绑定当前 Run',
+        )
+      }
+
+      const existing = snapshot.frozenArtifacts[request.payload.artifactType]
+      if (existing !== undefined && canonicalizeJson(existing) !== canonicalizeJson(candidate)) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_CANDIDATE_ALREADY_FROZEN',
+          'artifact',
+          '同一 Run 中已冻结的 Artifact 类型不得被不同候选覆盖',
+        )
+      }
+
+      const next = nextWorkflowNode(snapshot.workflow.current, request.payload.artifactType)
+      const bindingAsset = snapshot.workflow.current === 'binding-draft'
+        && (request.payload.artifactType === 'test-cases'
+          || request.payload.artifactType === 'execution-contract')
+      const supplementalAsset = isSupplementalCandidate(
+        snapshot.workflow.current, request.payload.artifactType,
+      )
+      if (next === undefined && !bindingAsset && !supplementalAsset) {
+        throw blockedError(missingCapabilityCode(snapshot.workflow.current))
+      }
+      const frozenArtifacts = {
+        ...snapshot.frozenArtifacts,
+        [request.payload.artifactType]: candidate,
+      }
+      const bindingComplete = bindingAsset
+        && frozenArtifacts['test-cases'] !== undefined
+        && frozenArtifacts['execution-contract'] !== undefined
+
+      let reservedLeases: DataLease[] = []
+      let workflow = snapshot.workflow
+      if (next !== undefined) {
+        workflow = transitionWorkflow({
+          state: workflow,
+          next,
+          reason: `accepted candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
+          timestamp: this.dependencies.now().toISOString(),
+          engineVersion: this.dependencies.installation.version,
+        }).state
+      } else if (bindingComplete) {
+        const leaseRequests = executionContractWriteLeaseRequests(frozenArtifacts)
+        if (leaseRequests.length > 0) {
+          if (this.dependencies.reserveExecutionLeases === undefined) {
+            throw blockedError('E2E_RUNTIME_LEASE_AUTHORITY_NOT_READY')
+          }
+          reservedLeases = await this.dependencies.reserveExecutionLeases({
+            runId: snapshot.runId,
+            leases: leaseRequests.map((lease) => ({ ...lease, ttlMs: 10 * 60_000 })),
+          })
+          assertReservedExecutionLeases(snapshot.runId, leaseRequests, reservedLeases, this.dependencies.now())
+          workflow = transitionWorkflow({
+            state: workflow,
+            next: 'lease-reserved',
+            reason: `atomically reserved ${reservedLeases.length} execution lease(s)`,
+            timestamp: this.dependencies.now().toISOString(),
+            engineVersion: this.dependencies.installation.version,
+          }).state
+        }
+        workflow = transitionWorkflow({
+          state: workflow,
+          next: 'awaiting-execution-approval',
+          reason: `accepted binding candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
+          timestamp: this.dependencies.now().toISOString(),
+          engineVersion: this.dependencies.installation.version,
+        }).state
+      }
+
+      const updated: RuntimeRunSnapshot = {
+        ...snapshot,
+        workflow,
+        artifactDigests: {
+          ...snapshot.artifactDigests,
+          [request.payload.artifactType]: candidate.contentDigest,
+        },
+        frozenArtifacts,
+        updatedAt: this.dependencies.now().toISOString(),
+      }
       const outcome = await this.dependencies.runStore.updateRunOutcome(
         identity.digest,
         request.payload.runId,
         request.requestId,
         requestDigest,
-        (snapshot) => {
-          this.requireInstallation(snapshot)
-          if (request.payload.expectedState !== snapshot.workflow.current) {
+        (current) => {
+          if (canonicalizeJson(current) !== canonicalizeJson(snapshot)) {
             throw runtimeHostError(
-              'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH',
-              'input',
-              'expectedState 只能作为当前状态的并发前置条件，不能指定 next state',
+              'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH', 'safety',
+              '租约预留后 Run 快照发生并发变化；须以同一请求恢复',
             )
-          }
-
-          const candidate = parseCandidate(request.payload.artifactType, request.payload.candidate)
-          const expectedDigest = digestArtifactContent(
-            `artifact-content/${candidate.schemaVersion}/${candidate.artifactType}`,
-            candidate as unknown as Record<string, unknown>,
-          )
-          if (candidate.contentDigest !== expectedDigest) {
-            throw runtimeHostError(
-              'E2E_RUNTIME_CANDIDATE_DIGEST_MISMATCH',
-              'artifact',
-              'Candidate contentDigest 与 Runtime 重算结果不一致',
-            )
-          }
-          if (candidate.assetId !== snapshot.assetId
-            || candidate.prdRevision !== snapshot.artifactDigests['prd-source']
-            || candidate.generationId !== snapshot.runId) {
-            throw runtimeHostError(
-              'E2E_RUNTIME_CANDIDATE_BINDING_MISMATCH',
-              'artifact',
-              'Candidate assetId、prdRevision 或 generationId 未绑定当前 Run',
-            )
-          }
-
-          const existing = snapshot.frozenArtifacts[request.payload.artifactType]
-          if (existing !== undefined
-            && canonicalizeJson(existing) !== canonicalizeJson(candidate)) {
-            throw runtimeHostError(
-              'E2E_RUNTIME_CANDIDATE_ALREADY_FROZEN',
-              'artifact',
-              '同一 Run 中已冻结的 Artifact 类型不得被不同候选覆盖',
-            )
-          }
-
-          const next = nextWorkflowNode(snapshot.workflow.current, request.payload.artifactType)
-          const bindingAsset = snapshot.workflow.current === 'binding-draft'
-            && (request.payload.artifactType === 'test-cases'
-              || request.payload.artifactType === 'execution-contract')
-          const supplementalAsset = isSupplementalCandidate(
-            snapshot.workflow.current, request.payload.artifactType,
-          )
-          if (next === undefined && !bindingAsset && !supplementalAsset) {
-            throw blockedError(missingCapabilityCode(snapshot.workflow.current))
-          }
-          const frozenArtifacts = {
-            ...snapshot.frozenArtifacts,
-            [request.payload.artifactType]: candidate,
-          }
-          const nextAfterBinding = bindingAsset
-            && frozenArtifacts['test-cases'] !== undefined
-            && frozenArtifacts['execution-contract'] !== undefined
-            ? 'awaiting-execution-approval' as const : undefined
-          const workflow = next === undefined && nextAfterBinding === undefined
-            ? snapshot.workflow
-            : transitionWorkflow({
-                state: snapshot.workflow,
-                next: next ?? nextAfterBinding!,
-                reason: `accepted candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
-                timestamp: this.dependencies.now().toISOString(),
-                engineVersion: this.dependencies.installation.version,
-              }).state
-          const updated: RuntimeRunSnapshot = {
-            ...snapshot,
-            workflow,
-            artifactDigests: {
-              ...snapshot.artifactDigests,
-              [request.payload.artifactType]: candidate.contentDigest,
-            },
-            frozenArtifacts,
-            updatedAt: this.dependencies.now().toISOString(),
           }
           return {
             snapshot: updated,
@@ -615,6 +680,7 @@ export class E2ERuntimeHost {
                 artifactType: request.payload.artifactType,
                 contentDigest: candidate.contentDigest,
               },
+              reservedLeases,
             }),
           }
         },
@@ -642,23 +708,30 @@ export class E2ERuntimeHost {
     )
     const approvalMode = approvalModeFromTrustedFacts(initial.trustedExecutionFacts)
     if (confirmed !== undefined) {
-      if (approvalMode !== 'local-confirmation') throw confirmationHostError('E2E_LOCAL_CONFIRMATION_MODE_MISMATCH')
+      const webAuthnSemanticConfirmation = approvalMode === 'webauthn'
+        && confirmed.approvalType === 'execution'
+        && confirmed.summary.semanticReview !== undefined
+      if (approvalMode !== 'local-confirmation' && !webAuthnSemanticConfirmation) {
+        throw confirmationHostError('E2E_LOCAL_CONFIRMATION_MODE_MISMATCH')
+      }
       assertCurrentLocalApprovalConfirmation(confirmed, {
         confirmationId: confirmed.confirmationId, subjectDigest,
         projectIdentityDigest: identity.digest,
         runtimeInstallationDigest: initial.runtimeInstallationDigest,
         workflowState: initial.workflow.current, now: this.dependencies.now(),
       })
-    } else if (approvalMode === 'local-confirmation') {
+    } else if (approvalMode === 'local-confirmation'
+      || (approvalMode === 'webauthn' && request.payload.approvalType === 'execution')) {
       const provisionalExpiry = new Date(this.dependencies.now().getTime() + 10 * 60_000).toISOString()
       const projected = projectLocalApproval({
         snapshot: initial, approvalType: request.payload.approvalType,
         subjectDigest, grantSubject: request.payload.grantSubject, expiresAt: provisionalExpiry,
       })
-      if (projected.disposition.kind === 'blocked') {
+      if (approvalMode === 'local-confirmation' && projected.disposition.kind === 'blocked') {
         throw confirmationHostError(projected.disposition.reasonCode)
       }
-      if (projected.disposition.kind === 'confirmation-required') {
+      if (projected.disposition.kind === 'confirmation-required'
+        || (approvalMode === 'webauthn' && request.payload.approvalType === 'execution')) {
         const confirmation = createPendingLocalApprovalConfirmation({
           approvalType: request.payload.approvalType, subjectDigest,
           projectIdentityDigest: identity.digest,
@@ -685,7 +758,7 @@ export class E2ERuntimeHost {
                 updatedAt: this.dependencies.now().toISOString(),
               },
               response: this.successResponse(request.requestId, {
-                status: 'confirmation-required', approvalMode: 'local-confirmation',
+                status: 'confirmation-required', approvalMode,
                 confirmationId: confirmation.confirmationId, subjectDigest,
                 expiresAt: confirmation.expiresAt, summary: confirmation.summary,
               }),
@@ -829,18 +902,40 @@ export class E2ERuntimeHost {
           await this.dependencies.runStore.writeTrustedFactOutcome({
             capability, requestId: request.requestId, requestDigest,
             factType, fact: finalized.grant, response,
-            update: (snapshot) => clearLocalConfirmation({
-              ...snapshot,
-              workflow: transitionWorkflow({
-                state: snapshot.workflow,
-                next: factType === 'signed-discovery-grant' ? 'discovery-approved' : 'execution-approved',
-                reason: `${request.payload.approvalType} grant finalized`,
-                timestamp: this.dependencies.now().toISOString(),
-                engineVersion: this.dependencies.installation.version,
-                ...(factType === 'signed-execution-grant' ? { executionGrantValid: true } : {}),
-              }).state,
-              updatedAt: this.dependencies.now().toISOString(),
-            }, confirmed),
+            update: (snapshot) => {
+              const approvedSnapshot = factType === 'signed-execution-grant'
+                && 'runBundleProjectionDigest' in finalized.grant.subject
+                ? bindRuntimeExecutionGrantArtifacts({
+                  snapshot,
+                  grant: finalized.grant,
+                  createdAt: this.dependencies.now().toISOString(),
+                  engineVersion: this.dependencies.installation.version,
+                })
+                : snapshot
+              if (factType === 'signed-execution-grant'
+                && confirmed?.summary.semanticReview !== undefined) {
+                approvedSnapshot.trustedExecutionFacts['prd-semantic-confirmation'] = {
+                  schemaVersion: '1.0.0',
+                  confirmationId: confirmed.confirmationId,
+                  subjectDigest: confirmed.subjectDigest,
+                  reviewDigest: confirmed.summary.semanticReview.reviewDigest,
+                  confirmedAt: this.dependencies.now().toISOString(),
+                  semanticReview: structuredClone(confirmed.summary.semanticReview),
+                }
+              }
+              return clearLocalConfirmation({
+                ...approvedSnapshot,
+                workflow: transitionWorkflow({
+                  state: approvedSnapshot.workflow,
+                  next: factType === 'signed-discovery-grant' ? 'discovery-approved' : 'execution-approved',
+                  reason: `${request.payload.approvalType} grant finalized`,
+                  timestamp: this.dependencies.now().toISOString(),
+                  engineVersion: this.dependencies.installation.version,
+                  ...(factType === 'signed-execution-grant' ? { executionGrantValid: true } : {}),
+                }).state,
+                updatedAt: this.dependencies.now().toISOString(),
+              }, confirmed)
+            },
           }),
         )
       }
@@ -949,7 +1044,14 @@ export class E2ERuntimeHost {
       const current = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
       if (current === undefined) throw confirmationHostError('E2E_RUNTIME_RUN_NOT_FOUND')
       this.requireInstallation(current)
-      if (approvalModeFromTrustedFacts(current.trustedExecutionFacts) !== 'local-confirmation') {
+      const mode = approvalModeFromTrustedFacts(current.trustedExecutionFacts)
+      const pending = current.trustedExecutionFacts['pending-local-approval']
+      const webAuthnSemanticConfirmation = mode === 'webauthn'
+        && typeof pending === 'object' && pending !== null
+        && (pending as { approvalType?: unknown }).approvalType === 'execution'
+        && typeof (pending as { summary?: unknown }).summary === 'object'
+        && (pending as { summary?: { semanticReview?: unknown } }).summary?.semanticReview !== undefined
+      if (mode !== 'local-confirmation' && !webAuthnSemanticConfirmation) {
         throw confirmationHostError('E2E_LOCAL_CONFIRMATION_MODE_MISMATCH')
       }
       const parsed = assertCurrentLocalApprovalConfirmation(
@@ -1809,6 +1911,68 @@ function parseCandidate(artifactType: ArtifactType, input: unknown): ArtifactDoc
     )
   }
   return parsed.data as ArtifactDocument
+}
+
+interface ExecutionWriteLeaseRequest {
+  leaseId: string
+  resourceKey: string
+  resourceFingerprint: string
+}
+
+function executionContractWriteLeaseRequests(
+  frozenArtifacts: Record<string, ArtifactDocument>,
+): ExecutionWriteLeaseRequest[] {
+  const source = frozenArtifacts['execution-contract']
+  if (source === undefined) throw runtimeHostError(
+    'E2E_RUNTIME_EXECUTION_CONTRACT_REQUIRED', 'artifact', '缺少冻结 Execution Contract',
+  )
+  const parsed = ArtifactSchemaRegistry['execution-contract'].parse(source)
+  const requests = parsed.content.dataNeeds
+    .filter((need) => need.mode === 'write')
+    .map((need) => ({
+      leaseId: need.leaseId,
+      resourceKey: need.resourceKey,
+      resourceFingerprint: need.resourceFingerprint,
+    }))
+  const leaseIds = new Set(requests.map((request) => request.leaseId))
+  const resourceKeys = new Set(requests.map((request) => request.resourceKey))
+  if (leaseIds.size !== requests.length || resourceKeys.size !== requests.length) {
+    throw runtimeHostError(
+      'E2E_RUNTIME_EXECUTION_LEASE_SET_INVALID', 'artifact',
+      'Execution Contract 写 dataNeeds 不得重复 leaseId 或 resourceKey',
+    )
+  }
+  return requests
+}
+
+function assertReservedExecutionLeases(
+  runId: string,
+  requests: ExecutionWriteLeaseRequest[],
+  leases: DataLease[],
+  now: Date,
+): void {
+  if (leases.length !== requests.length) throw runtimeHostError(
+    'E2E_RUNTIME_EXECUTION_LEASE_BINDING_MISMATCH', 'safety',
+    'Authority 返回的 Lease 数量与冻结 Execution Contract 不一致',
+  )
+  const byId = new Map(leases.map((lease) => [lease.leaseId, lease]))
+  if (byId.size !== leases.length) throw runtimeHostError(
+    'E2E_RUNTIME_EXECUTION_LEASE_BINDING_MISMATCH', 'safety', 'Authority 返回重复 Lease',
+  )
+  for (const request of requests) {
+    const lease = byId.get(request.leaseId)
+    if (lease === undefined || lease.runId !== runId || lease.status !== 'active'
+      || lease.resourceKey !== request.resourceKey
+      || lease.resourceFingerprint !== request.resourceFingerprint
+      || lease.exclusive !== true
+      || !Number.isSafeInteger(lease.fencingToken) || lease.fencingToken <= 0
+      || now.getTime() >= Date.parse(lease.expiresAt)) {
+      throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTION_LEASE_BINDING_MISMATCH', 'safety',
+        'Authority 返回的 Lease 未与当前 Run、资源或指纹闭合',
+      )
+    }
+  }
 }
 
 function requireManualResultWorkflow(snapshot: RuntimeRunSnapshot): void {

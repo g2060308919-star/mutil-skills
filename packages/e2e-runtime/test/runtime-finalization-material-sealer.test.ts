@@ -2,6 +2,9 @@ import {
   ArtifactSchemaRegistry,
   canonicalGrantApprovalSubjectDigest,
   canonicalizeJson,
+  computeFullPlaywrightCleanupSourceDigest,
+  computeFullPlaywrightSourceDigest,
+  digestApprovalProjection,
   deriveExecutionResultId,
   digestCleanupPlanDefinition,
   digestArtifactContent,
@@ -40,6 +43,14 @@ describe('RuntimeFinalizationMaterialSealer', () => {
       'cleanup-results',
     ].includes(artifact.artifactType)).map((artifact) => [artifact.artifactType,
       artifact.artifactType === 'project-policy' ? withEvidencePolicy(artifact) : artifact]))
+    const customPolicy = structuredClone(frozenArtifacts['project-policy']) as ArtifactDocument
+    customPolicy.artifactId = 'CUSTOM-PROJECT-POLICY-ID'
+    customPolicy.signatures = []
+    customPolicy.contentDigest = digestArtifactContent(
+      `artifact-content/${customPolicy.schemaVersion}/${customPolicy.artifactType}`,
+      customPolicy,
+    )
+    frozenArtifacts['project-policy'] = customPolicy
     const projection = projectionFixture()
     const dom = Buffer.from(JSON.stringify({
       format: 'dom-tree/1', roots: [{ tag: 'main', text: 'Home', assertionRelevant: true }],
@@ -84,6 +95,10 @@ describe('RuntimeFinalizationMaterialSealer', () => {
       artifact.artifactType === 'browser-action-map')!.artifact.content as any
     const resolvedRunBundle = material.artifacts.find(({ artifact }) =>
       artifact.artifactType === 'run-bundle')!.artifact.content as any
+    expect(resolvedRunBundle.allInputRefs).toContainEqual({
+      artifactId: 'CUSTOM-PROJECT-POLICY-ID',
+      digest: expect.stringMatching(/^sha256:/),
+    })
     for (const capability of resolvedActionMap.actions[0].capabilities) {
       expect(capability.capabilityId).toBe(resolvedRunBundle.signedCapabilities.find((item: any) =>
         item.actionId === resolvedActionMap.actions[0].actionId
@@ -178,6 +193,68 @@ describe('RuntimeFinalizationMaterialSealer', () => {
     expect(material.cleanup).toEqual([
       expect.objectContaining({ leaseId: 'LEASE-1', status: 'verified-clean' }),
     ])
+  })
+
+  test('full-playwright 的十三项签名原始证据可通过正式 finalization，发布证据仍使用净化 ID', async () => {
+    const sessionId = 'SESSION-WRITE-1'
+    const rawEvidenceIds = [
+      ...(['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
+        ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`)),
+      `GATEWAY-${sessionId}`,
+    ]
+    const prepared = writeSnapshot({ capabilityMode: 'full-playwright', receiptEvidenceIds: rawEvidenceIds })
+    const material = await sealPrepared(prepared)
+    const browserResults = material.artifacts.find(({ artifact }) =>
+      artifact.artifactType === 'browser-results')!.artifact.content as any
+
+    expect(browserResults.caseResults[0].executionOutcomeReceipts[0].evidenceIds).toEqual(rawEvidenceIds)
+    expect(browserResults.caseResults[0].evidenceRefs).toEqual(['EVIDENCE-ACTION-1'])
+    expect(material.evidence).toEqual([expect.objectContaining({ evidenceId: 'EVIDENCE-ACTION-1' })])
+  })
+
+  test('finalization 双向拒绝 full-playwright 单证据降级与 HTTP 写冒充十三项证据', async () => {
+    const fullIds = [
+      ...(['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
+        ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`)),
+      'GATEWAY-SESSION-WRITE-1',
+    ]
+    await expect(sealPrepared(writeSnapshot({ capabilityMode: 'full-playwright' })))
+      .rejects.toMatchObject({ code: 'E2E_RUNTIME_FINALIZATION_WRITE_OUTCOME_BINDING_INVALID' })
+    await expect(sealPrepared(writeSnapshot({ receiptEvidenceIds: fullIds })))
+      .rejects.toMatchObject({ code: 'E2E_RUNTIME_FINALIZATION_WRITE_OUTCOME_BINDING_INVALID' })
+  })
+
+  test('finalization 拒绝同 capabilityId 下 receipt 替换 transport/operation 的完整 capability', async () => {
+    const fullIds = [
+      ...(['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
+        ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`)),
+      'GATEWAY-SESSION-WRITE-1',
+    ]
+    await expect(sealPrepared(writeSnapshot({ capabilityMode: 'full-playwright',
+      receiptCapabilityMode: 'http', receiptEvidenceIds: fullIds })))
+      .rejects.toMatchObject({ code: 'E2E_RUNTIME_FINALIZATION_WRITE_OUTCOME_BINDING_INVALID' })
+  })
+
+  test('冻结 run-bundle 的 generation envelope 被 browser-preflight 继承', async () => {
+    const seed = writeSnapshot()
+    const seedMaterial = await sealPrepared(seed)
+    const seedRunBundle = seedMaterial.artifacts.find(({ artifact }) =>
+      artifact.artifactType === 'run-bundle')!.artifact
+    const prepared = writeSnapshot()
+    const frozen = structuredClone(seedRunBundle) as any
+    frozen.createdAt = '2026-07-17T00:00:00.000Z'
+    frozen.signatures = []
+    frozen.contentDigest = digestArtifactContent(
+      `artifact-content/${frozen.schemaVersion}/${frozen.artifactType}`, frozen,
+    )
+    frozen.signatures = [(prepared.authority.signArtifactDigest as Function)(frozen.contentDigest)]
+    prepared.snapshot.frozenArtifacts['run-bundle'] = ArtifactSchemaRegistry['run-bundle'].parse(frozen)
+
+    const material = await sealPrepared(prepared)
+    const artifact = (type: string) => material.artifacts.find(({ artifact }) =>
+      artifact.artifactType === type)!.artifact
+    expect(artifact('browser-preflight').createdAt).toBe(artifact('run-bundle').createdAt)
+    expect(artifact('browser-preflight').engineVersion).toBe(artifact('run-bundle').engineVersion)
   })
 
   test('同一 Case 的 real baseline 与独立 injection 被封存为双 result、双 Gateway session 和独立净化证据', async () => {
@@ -697,7 +774,11 @@ function snapshot(input: {
   }
 }
 
-function writeSnapshot(): {
+function writeSnapshot(options: {
+  receiptEvidenceIds?: string[]
+  capabilityMode?: 'http' | 'full-playwright'
+  receiptCapabilityMode?: 'grant' | 'http'
+} = {}): {
   snapshot: RuntimeRunSnapshot
   quarantine: { readEvidence(input: { relativePath: string }): Promise<Uint8Array>; writeEvidence(input: {
     relativePath: string; plaintext: Uint8Array
@@ -741,12 +822,74 @@ function writeSnapshot(): {
   projectPolicy.evidencePolicy.digest = evidencePolicyDigest
   projectPolicy.runtimePolicy.digest = gatewayPolicyDigest
   frozenArtifacts['project-policy'] = rebind(frozenArtifacts['project-policy']!, projectPolicy)
+  const grant = structuredClone(base.trustedExecutionFacts['signed-execution-grant']) as any
   const executionContent = structuredClone(frozenArtifacts['execution-contract']!.content) as any
   executionContent.evidencePolicyDigest = evidencePolicyDigest
+  if (options.capabilityMode === 'full-playwright') {
+    const fixed = grant.capabilities[0]
+    const source = "state.programCompleted = true"
+    const cleanupSource = "return 'verified-clean'"
+    const program = {
+      schemaVersion: 'full-playwright/v1', caseId: 'CASE-1', stepId: 'STEP-1', actionId: 'ACTION-1',
+      source, sourceDigest: computeFullPlaywrightSourceDigest(source), cleanupSource,
+      cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource),
+      dataLeaseId: fixed.dataLeaseId, cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+      networkRequests: [], networkRequestBodies: [],
+    }
+    const fullCleanupPlan = {
+      schemaVersion: '2.0.0', transport: 'browser-local', cleanupPlanId: 'CLEANUP-1',
+      actionId: 'ACTION-1', leaseId: fixed.dataLeaseId, executorId: 'FULL-PLAYWRIGHT',
+      cleanupProgramDigest: program.cleanupSourceDigest, cleanupRequestIntentIds: [],
+      verificationProbes: [{ probeId: 'PROBE-CLEAN-1', kind: 'browser-observation',
+        expectedDigest: digestText('write-sealer/v1', 'clean-observation') }], timeoutMs: 30_000,
+    }
+    executionContent.executionProfile = 'full-playwright'
+    executionContent.fullPlaywrightPrograms = [program]
+    executionContent.writeHttpActions = []
+    executionContent.writeCleanupPlans = [fullCleanupPlan]
+    executionContent.actionIntents[0].intentDigest = program.sourceDigest
+    delete executionContent.actionIntents[0].runtimeHttpActionDigest
+
+    const actionMapContent = structuredClone(frozenArtifacts['browser-action-map']!.content) as any
+    actionMapContent.executionProfile = 'full-playwright'
+    actionMapContent.fullPlaywrightPrograms = [program]
+    actionMapContent.actions[0].playwrightAction = 'full-playwright/v1'
+    actionMapContent.actions[0].capabilities = [{ operation: 'full-playwright', capabilityId: fixed.capabilityId }]
+    delete actionMapContent.actions[0].runtimeHttpActionDigest
+    frozenArtifacts['browser-action-map'] = rebind(frozenArtifacts['browser-action-map']!, actionMapContent)
+
+    const cleanupPlanDigest = digestCleanupPlanDefinition(fullCleanupPlan as never)
+    grant.capabilities = [{ capabilityId: fixed.capabilityId, nonce: fixed.nonce,
+      transport: 'browser-local', effect: 'reversible-write', operation: 'full-playwright',
+      actionId: fixed.actionId, programDigest: program.sourceDigest,
+      cleanupProgramDigest: program.cleanupSourceDigest,
+      dataLeaseId: fixed.dataLeaseId, fencingToken: fixed.fencingToken,
+      cleanupPlanDigest, requests: fixed.requests, maxUses: 1 }]
+    const action = grant.subject.actions[0]
+    grant.subject.actions = [{ actionId: action.actionId, effect: action.effect,
+      dataLeaseId: action.dataLeaseId, resourceKey: action.resourceKey, fencingToken: action.fencingToken,
+      cleanupPlanDigest, transport: 'browser-local', operation: 'full-playwright',
+      programDigest: program.sourceDigest, cleanupProgramDigest: program.cleanupSourceDigest,
+      requests: action.requests }]
+  }
   frozenArtifacts['execution-contract'] = rebind(frozenArtifacts['execution-contract']!, executionContent)
 
-  const grant = structuredClone(base.trustedExecutionFacts['signed-execution-grant']) as any
+  if (options.capabilityMode === 'full-playwright') {
+    grant.subject.executionContractDigest = digestApprovalProjection('execution-contract', executionContent)
+    grant.subject.actionMapDigest = digestApprovalProjection(
+      'browser-action-map', frozenArtifacts['browser-action-map']!.content,
+    )
+    grant.subjectDigest = canonicalGrantApprovalSubjectDigest(grant.subject)
+    grant.approvalContext.subjectDigest = grant.subjectDigest
+  }
   const capability = grant.capabilities[0]
+  const receiptCapability = options.receiptCapabilityMode === 'http'
+    ? { capabilityId: capability.capabilityId, nonce: capability.nonce,
+      transport: 'http', effect: 'reversible-write', operation: 'http-request',
+      actionId: capability.actionId, dataLeaseId: capability.dataLeaseId,
+      fencingToken: capability.fencingToken, cleanupPlanDigest: capability.cleanupPlanDigest,
+      requests: capability.requests, maxUses: 1 }
+    : capability
   const cleanupPlan = executionContent.writeCleanupPlans[0]
   const resultDigest = digestText('write-sealer/v1', 'runner-result')
   const cleanup = {
@@ -755,6 +898,7 @@ function writeSnapshot(): {
     leaseReceiptDigest: digestText('write-sealer/v1', 'lease-release'),
   }
   const evidenceId = 'EVIDENCE-ACTION-1'
+  const receiptEvidenceIds = options.receiptEvidenceIds ?? [evidenceId]
   const gatewaySigner = LocalGatewayAuditSigner.create({
     issuer: 'write-gateway', keyId: 'write-gateway-key', instanceId: 'WRITE-GATEWAY-1', version: '1.0.0',
   })
@@ -764,7 +908,7 @@ function writeSnapshot(): {
       runId, caseId: 'CASE-1' },
     grantId: grant.grantId, capabilityId: capability.capabilityId,
     actionId: 'ACTION-1', attemptId: 'ATTEMPT-1', reservationId: 'RESERVATION-WRITE-1',
-    capability, effect: 'reversible-write', status: 'passed', effectObservation: 'applied',
+    capability: receiptCapability, effect: 'reversible-write', status: 'passed', effectObservation: 'applied',
     runnerResultDigest: resultDigest,
     gateway: {
       executionSessionId: 'SESSION-WRITE-1', policyDigest: gatewayPolicyDigest,
@@ -775,8 +919,8 @@ function writeSnapshot(): {
     cleanup: { cleanupPlanId: cleanupPlan.cleanupPlanId,
       cleanupPlanDigest: digestCleanupPlanDefinition(cleanupPlan), leaseId: cleanupPlan.leaseId,
       ...cleanup },
-    evidenceIds: [evidenceId],
-    evidenceSetDigest: digestText('execution-outcome-evidence-set/v1', canonicalizeJson([evidenceId])),
+    evidenceIds: receiptEvidenceIds,
+    evidenceSetDigest: digestText('execution-outcome-evidence-set/v1', canonicalizeJson([...receiptEvidenceIds].sort())),
     completedAt: '2026-07-18T00:00:00.000Z',
   })
   const recorder = gatewaySigner.createRecorder(gatewayPolicyDigest)

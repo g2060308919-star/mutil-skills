@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.0] - 2026-07-24
+
+### Added
+
+- `full-playwright` 正式执行 Profile：支持表单与键盘、Popup、多页面/多 Context、冻结 JSON Body 写请求、独立 Cleanup 和 Reload 验证。
+- 执行批准时展示并绑定完整 `PRD 原文 → Requirement → Rule → Oracle` 语义审查，保存可追踪 `reviewDigest`。
+- Authority 在可逆写批准最终化时按批准主题中的真实 resourceKey 原子配置 DataLease，精确绑定 leaseId、target fingerprint 与 fencing token；不同 Run 对同一资源真实争用。
+- 跨仓发行 Golden 支持在全新 HOME 中从 workspace tarball 或 npm registry 安装，使用系统 Chrome、正式 `repo-e2e rpc` 与完整报告验证发布闭包。
+
+### Fixed
+
+- 执行批准后将 Authority 实际 capabilityId 绑定到 ActionMap，并冻结同一 RunBundle 供执行和最终报告复用。
+- Gateway 读请求审计按 requestId 计数，不再错误退化为 capabilityId。
+- Finalizer 使用真实输入 artifactId，并签署批准时冻结的 RunBundle，避免审批、执行和发布三段发生投影漂移。
+- JSON Body 只从批准并冻结的 body material 渲染，Cleanup 始终使用独立浏览器上下文与受控 Gateway。
+- 过期 active DataLease 的隔离状态在业务拒绝后仍独立持久化；批准恢复会重新验证全部 Lease，不能用 outbox 重放绕过过期或隔离。
+
+### Changed
+
+- 根包与全部十四个 workspace、内部依赖、Skill 安装命令及 Runtime 常量统一升级到精确 `0.3.0`。
+- 默认本地批准仍不做身份权限管控，但每次执行必须显式确认完整语义映射和执行影响；WebAuthn 模式同样先完成语义确认，再进行用户在场认证。报告继续如实声明实际身份与职责分离保障。
+- 发布前 tarball 检查与发布后 Registry Golden 分离；正式发布门强制安装并核验 npm 上全部十四个精确同版包及内部依赖。
+
 ## [0.2.1] - 2026-07-20
 
 ### Fixed

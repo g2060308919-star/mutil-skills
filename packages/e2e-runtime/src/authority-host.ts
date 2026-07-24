@@ -1,5 +1,7 @@
 import {
   LocalApprovalAuthority,
+  LocalLeaseAuthority,
+  provisionWriteApprovalLeases,
   startAuthorityExecutionRpcHostProcess,
   type AuthorityExecutionRpcProcessHandle,
   type WebAuthnApprovalAssets,
@@ -39,6 +41,7 @@ import {
   type ManualResult,
   type ManualResultDraft,
   type ManualResultVerification,
+  type DataLease,
 } from '@mutil-skills/e2e-contracts'
 import type { CompleteGenerationAuthority } from '@mutil-skills/e2e-engine'
 import { constants } from 'node:fs'
@@ -504,6 +507,15 @@ export interface RuntimeArtifactStoreAuthority extends CompleteGenerationAuthori
     event: AppendAttemptEventInput
   }): { event: AttemptEvent; eventChainDigest: string }
   verifyManualResult(result: ManualResult): ManualResultVerification
+  reserveExecutionLeases(input: {
+    runId: string
+    leases: Array<{
+      leaseId: string
+      resourceKey: string
+      resourceFingerprint: string
+      ttlMs: number
+    }>
+  }): Promise<DataLease[]>
   finalizeLocalApprovalGrant(input: {
     subject: ApprovalGrantSubject
     ttlMs: number
@@ -566,7 +578,10 @@ export function createRuntimeLocalApprovalHost(
               throw authorityHostError('E2E_APPROVAL_FINALIZATION_INVALID')
             }
             const grant = await authority.finalizeLocalApprovalGrant({
-              subject: grantSubject, ttlMs: 5 * 60_000,
+              // 系统 Chrome 的首次受控启动、Gateway 装配、浏览器观测和资源关闭都发生在
+              // discovery Grant 生命周期内。使用 Authority 已限定的 15 分钟硬上限，避免
+              // 慢机器在 preparation 已产生副作用后，仅因 5 分钟窗口耗尽而无法闭合预约。
+              subject: grantSubject, ttlMs: 15 * 60_000,
               finalizationId: input.finalizationId, requestDigest: input.requestDigest,
               approvalBinding: binding,
             })
@@ -644,6 +659,7 @@ export async function openRuntimeArtifactStoreAuthority(options: {
     options.homeDir, layout.authority, environment, trustedPython,
   )
   let authority: LocalApprovalAuthority | undefined
+  let leaseAuthority: LocalLeaseAuthority | undefined
   let setupError: unknown
   try {
     authority = await LocalApprovalAuthority.open({
@@ -655,6 +671,12 @@ export async function openRuntimeArtifactStoreAuthority(options: {
       approvalIdentities: [{ subject: options.subject, roles: ['e2e-approver'] }],
       manualIdentities: mergeManualIdentities(options.subject, options.manualIdentities),
     })
+    leaseAuthority = await LocalLeaseAuthority.open({
+      now: () => new Date(),
+      statePath: join(prepared.identity.realPath, 'lease.sqlite'),
+      expectedStateDirectory: prepared.identity,
+      testWorkspaceRoots: [options.installation.versionRoot],
+    })
   } catch (error) {
     setupError = error
   } finally {
@@ -663,8 +685,9 @@ export async function openRuntimeArtifactStoreAuthority(options: {
       setupError = setupError === undefined ? error : new AggregateError([setupError, error])
     }
   }
-  if (setupError !== undefined || authority === undefined) {
+  if (setupError !== undefined || authority === undefined || leaseAuthority === undefined) {
     authority?.close()
+    leaseAuthority?.close()
     throw setupError ?? authorityHostError('E2E_ARTIFACT_AUTHORITY_NOT_READY')
   }
   let credentialCount: number
@@ -720,13 +743,30 @@ export async function openRuntimeArtifactStoreAuthority(options: {
     verifyManualResult: (result) => closed
       ? { valid: false, code: 'E2E_MANUAL_RESULT_AUTHORITY_CLOSED', impact: 'safety-blocked' }
       : authority.verifyManualResult(result),
+    reserveExecutionLeases: async (input) => {
+      if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      return await leaseAuthority!.acquireBoundBatch(input.leases.map((lease) => ({
+        ...lease, runId: input.runId, exclusive: true,
+      })))
+    },
     finalizeLocalApprovalGrant: async (input) => {
       if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
+      await provisionWriteApprovalLeases({
+        leaseAuthority: leaseAuthority!, subject: input.subject,
+        runId: input.approvalBinding.runId,
+      })
       return await authority.finalizeLocalApprovalGrant(input)
     },
     recoverFinalizedGrant: async (input) => {
       if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
-      return await authority.recoverFinalizedGrant(input)
+      const recovered = await authority.recoverFinalizedGrant(input)
+      if (recovered !== undefined) {
+        await provisionWriteApprovalLeases({
+          leaseAuthority: leaseAuthority!, subject: input.subject,
+          runId: input.approvalBinding.runId,
+        })
+      }
+      return recovered
     },
     acknowledgeFinalizedGrant: async (input) => {
       if (closed) throw authorityHostError('E2E_ARTIFACT_AUTHORITY_CLOSED')
@@ -751,7 +791,10 @@ export async function openRuntimeArtifactStoreAuthority(options: {
     async close() {
       if (closed) return
       closed = true
-      authority.close()
+      const errors: unknown[] = []
+      try { authority.close() } catch (error) { errors.push(error) }
+      try { leaseAuthority!.close() } catch (error) { errors.push(error) }
+      if (errors.length > 0) throw new AggregateError(errors, 'E2E_ARTIFACT_AUTHORITY_CLOSE_FAILED')
     },
   }
 }

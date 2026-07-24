@@ -177,6 +177,7 @@ export class RuntimeFinalizationMaterialSealer {
     const step = records(testCase.steps)[0]
     if (!step || step.stepId !== action.stepId) throw sealerError('E2E_RUNTIME_FINALIZATION_STEP_BINDING_MISSING')
     const capabilities = approvalCapabilities(executionGrant)
+    const generationEnvelope = finalizationArtifactEnvelope(snapshot)
     const browserPreflight = createArtifact(snapshot, 'browser-preflight', {
       discoveryGrantId: discoveryGrant.grantId,
       authorityPreflightDigest: preflight.preflightDigest,
@@ -190,7 +191,7 @@ export class RuntimeFinalizationMaterialSealer {
       ],
       sandboxChecks: [{ id: 'TRUSTED-CHROME-EXECUTABLE', digest: preflight.browserExecutableDigest }],
       status: 'passed',
-    }, this.dependencies.authority)
+    }, this.dependencies.authority, generationEnvelope.createdAt, generationEnvelope.engineVersion)
     documents.set('browser-preflight', browserPreflight)
     const approvalInputTypes = [
       'project-policy', 'acceptance-scope', 'requirement-model', 'coverage-universe',
@@ -199,7 +200,8 @@ export class RuntimeFinalizationMaterialSealer {
     const runBundleContent = {
       runId: snapshot.runId,
       allInputRefs: approvalInputTypes.map((type) => ({
-        artifactId: artifactId(type), digest: digestApprovalProjection(type, external[type].content),
+        artifactId: external[type].artifactId,
+        digest: digestApprovalProjection(type, external[type].content),
       })),
       schedule: [{ ordinal: 0, caseId: read.caseId, stepIds: [text(step.stepId)], actionIds: [read.actionId] }],
       attemptPlans: [{ caseId: read.caseId, slots: 1 }],
@@ -208,7 +210,9 @@ export class RuntimeFinalizationMaterialSealer {
       runtimePolicyDigest: text(record(projectPolicy.runtimePolicy).digest),
       runtimeIsolationPolicyDigest: 'not-applicable',
     }
-    const runBundle = createArtifact(snapshot, 'run-bundle', runBundleContent, this.dependencies.authority)
+    const runBundle = resolveFrozenRunBundle(
+      snapshot, runBundleContent, this.dependencies.authority,
+    )
     documents.set('run-bundle', runBundle)
     const receipt = await this.dependencies.authority.issueApprovalFreshnessReceipt({
       grant: executionGrant,
@@ -395,6 +399,7 @@ export class RuntimeFinalizationMaterialSealer {
     const expectedEvidenceId = `EVIDENCE-${write.actionId}`
     if (targetFingerprints.length !== 1 || receipt.grantId !== executionGrant.grantId
       || receipt.capabilityId !== capability.capabilityId || receipt.actionId !== write.actionId
+      || canonicalizeJson(receipt.capability) !== canonicalizeJson(capability)
       || receipt.attemptContext.runId !== snapshot.runId || receipt.attemptContext.caseId !== write.caseId
       || receipt.status !== write.status || receipt.effectObservation !== write.effectObservation
       || receipt.runnerResultDigest !== write.resultDigest
@@ -406,7 +411,9 @@ export class RuntimeFinalizationMaterialSealer {
       || receipt.cleanup.status !== write.cleanup.status
       || receipt.cleanup.resultDigest !== write.cleanup.resultDigest
       || receipt.cleanup.leaseReceiptDigest !== write.cleanup.leaseReceiptDigest
-      || canonicalizeJson(receipt.evidenceIds) !== canonicalizeJson([expectedEvidenceId])) {
+      || !validWriteOutcomeEvidenceIds(receipt.evidenceIds,
+        receipt.gateway.executionSessionId, expectedEvidenceId,
+        capability.transport, capability.operation)) {
       throw sealerError('E2E_RUNTIME_FINALIZATION_WRITE_OUTCOME_BINDING_INVALID')
     }
     const gatewayAudit = record(facts.gatewayAudit, 'E2E_RUNTIME_GATEWAY_AUDIT_MISSING')
@@ -462,6 +469,7 @@ export class RuntimeFinalizationMaterialSealer {
       || testCase.cleanupPlanId !== cleanupPlan.cleanupPlanId) {
       throw sealerError('E2E_RUNTIME_FINALIZATION_CASE_ACTION_BINDING_MISSING')
     }
+    const generationEnvelope = finalizationArtifactEnvelope(snapshot)
     const browserPreflight = createArtifact(snapshot, 'browser-preflight', {
       discoveryGrantId: discoveryGrant.grantId,
       authorityPreflightDigest: preflight.preflightDigest,
@@ -476,7 +484,7 @@ export class RuntimeFinalizationMaterialSealer {
       ],
       sandboxChecks: [{ id: 'TRUSTED-CHROME-EXECUTABLE', digest: preflight.browserExecutableDigest }],
       status: 'passed',
-    }, this.dependencies.authority)
+    }, this.dependencies.authority, generationEnvelope.createdAt, generationEnvelope.engineVersion)
     documents.set('browser-preflight', browserPreflight)
     const approvalInputTypes = [
       'project-policy', 'acceptance-scope', 'requirement-model', 'coverage-universe',
@@ -485,7 +493,8 @@ export class RuntimeFinalizationMaterialSealer {
     const runBundleContent = {
       runId: snapshot.runId,
       allInputRefs: approvalInputTypes.map((type) => ({
-        artifactId: artifactId(type), digest: digestApprovalProjection(type, external[type].content),
+        artifactId: external[type].artifactId,
+        digest: digestApprovalProjection(type, external[type].content),
       })),
       schedule: [{ ordinal: 0, caseId: write.caseId, stepIds: [text(step.stepId)], actionIds: [write.actionId] }],
       attemptPlans: [{ caseId: write.caseId, slots: 1 }],
@@ -494,7 +503,9 @@ export class RuntimeFinalizationMaterialSealer {
       runtimePolicyDigest: text(record(projectPolicy.runtimePolicy).digest),
       runtimeIsolationPolicyDigest: 'not-applicable',
     }
-    const runBundle = createArtifact(snapshot, 'run-bundle', runBundleContent, this.dependencies.authority)
+    const runBundle = resolveFrozenRunBundle(
+      snapshot, runBundleContent, this.dependencies.authority,
+    )
     documents.set('run-bundle', runBundle)
     const freshness = await this.dependencies.authority.issueApprovalFreshnessReceipt({
       grant: executionGrant, currentSubject: executionGrant.subject,
@@ -907,6 +918,23 @@ export class RuntimeFinalizationMaterialSealer {
   }
 }
 
+function validWriteOutcomeEvidenceIds(
+  actual: string[],
+  executionSessionId: string,
+  sanitizedEvidenceId: string,
+  transport: string,
+  operation: string,
+): boolean {
+  if (transport === 'http' && operation === 'http-request') {
+    return canonicalizeJson(actual) === canonicalizeJson([sanitizedEvidenceId])
+  }
+  if (transport !== 'browser-local' || operation !== 'full-playwright') return false
+  const fullPlaywright = (['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
+    ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`))
+  fullPlaywright.push(`GATEWAY-${executionSessionId}`)
+  return canonicalizeJson(actual) === canonicalizeJson(fullPlaywright)
+}
+
 declare const runtimeFinalizationMaterialSealerBrand: unique symbol
 export interface RuntimeFinalizationMaterialSealerCapability {
   readonly [runtimeFinalizationMaterialSealerBrand]: true
@@ -961,10 +989,11 @@ function createArtifact(
   content: unknown,
   authority: RuntimeArtifactStoreAuthority,
   createdAt = snapshot.updatedAt,
+  engineVersion = '0.3.0',
 ): ArtifactDocument {
   const base = {
     artifactId: artifactId(type), artifactType: type, schemaVersion: schemaVersion(type),
-    engineVersion: '0.2.1', assetId: snapshot.assetId,
+    engineVersion, assetId: snapshot.assetId,
     prdRevision: snapshot.artifactDigests['prd-source']!, generationId: snapshot.runId,
     createdAt, contentDigest: '', signatures: [], dependencies: [],
     graph: { defines: [], references: [] }, content,
@@ -974,10 +1003,38 @@ function createArtifact(
   return signArtifact(unsigned, authority)
 }
 
+function finalizationArtifactEnvelope(
+  snapshot: RuntimeRunSnapshot,
+): Pick<ArtifactDocument, 'createdAt' | 'engineVersion'> {
+  const frozen = snapshot.frozenArtifacts['run-bundle']
+  if (frozen === undefined) return { createdAt: snapshot.updatedAt, engineVersion: '0.3.0' }
+  const parsed = ArtifactSchemaRegistry['run-bundle'].safeParse(frozen)
+  if (!parsed.success) throw sealerError('E2E_RUNTIME_FINALIZATION_RUN_BUNDLE_DRIFT')
+  return { createdAt: parsed.data.createdAt, engineVersion: parsed.data.engineVersion }
+}
+
 function signArtifact(artifact: ArtifactDocument, authority: RuntimeArtifactStoreAuthority): ArtifactDocument {
   return ArtifactSchemaRegistry[artifact.artifactType].parse({
     ...structuredClone(artifact), signatures: [authority.signArtifactDigest(artifact.contentDigest)],
   }) as ArtifactDocument
+}
+
+function resolveFrozenRunBundle(
+  snapshot: RuntimeRunSnapshot,
+  content: unknown,
+  authority: RuntimeArtifactStoreAuthority,
+): ArtifactDocument {
+  const frozen = snapshot.frozenArtifacts['run-bundle']
+  // 旧 Run 在 execution approval 阶段尚未持久化 run-bundle；仅为迁移兼容重建。
+  // 新 Run 一旦由 binder 冻结，Finalizer 必须签署原文档而不能另造 envelope。
+  if (frozen === undefined) return createArtifact(snapshot, 'run-bundle', content, authority)
+  const parsed = ArtifactSchemaRegistry['run-bundle'].safeParse(frozen)
+  if (!parsed.success
+    || digestApprovalProjection('run-bundle', parsed.data.content)
+      !== digestApprovalProjection('run-bundle', content)) {
+    throw sealerError('E2E_RUNTIME_FINALIZATION_RUN_BUNDLE_DRIFT')
+  }
+  return signArtifact(parsed.data as ArtifactDocument, authority)
 }
 
 function addResolvedExternalArtifacts(

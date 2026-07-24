@@ -504,6 +504,7 @@ export async function runCli(
             homeDir: dependencies.homeDir, projectRoot: request.projectRoot, installation,
             authorityHost: getAuthorityHost, writeProduction: writeProduction!.capability,
             freshnessAuthority: artifacts.createTrustedApprovalFreshnessClient(),
+            freshnessIssuer: artifacts,
             checkpointSigner: { signDigest: (digest) => artifacts.signDigest(digest) },
             checkpointAuthority: { material: artifacts.artifactVerifierMaterial,
               expectedPublicKeyDigest: artifacts.artifactVerifierMaterial.publicKeyDigest },
@@ -598,8 +599,8 @@ export async function runCli(
         finalizationMaterialSealer = authorizeRuntimeFinalizationMaterialSealer(
           new RuntimeFinalizationMaterialSealer({
             quarantine, authority: artifactAuthority,
-            runtimeVersion: RUNTIME_PACKAGE_VERSION, contractsVersion: '0.2.1',
-            engineVersion: '0.2.1', playwrightVersion: '1.61.1',
+            runtimeVersion: RUNTIME_PACKAGE_VERSION, contractsVersion: RUNTIME_PACKAGE_VERSION,
+            engineVersion: RUNTIME_PACKAGE_VERSION, playwrightVersion: '1.61.1',
           }),
         )
       }
@@ -611,6 +612,11 @@ export async function runCli(
         runStore,
         now: () => new Date(),
         approvalMode: configuredApprovalMode,
+        ...(request.command !== 'submit-candidate' ? {} : {
+          reserveExecutionLeases: async (input) => await (
+            await getArtifactAuthority()
+          ).reserveExecutionLeases(input),
+        }),
         ...(browserCapabilities === undefined ? {} : {
           preflightExecutor: browserCapabilities.preflight,
           readExecutor: browserCapabilities.read,
@@ -622,7 +628,7 @@ export async function runCli(
         ...(generationFinalizer === undefined ? {} : { generationFinalizer }),
         ...(finalizationMaterialSealer === undefined ? {} : { finalizationMaterialSealer }),
         ...(writeProduction === undefined ? {} : { writeProduction: writeProduction.capability }),
-        ...(!['open-approval', 'prepare-manual-result', 'finalize-manual-result-role']
+        ...(!['open-approval', 'confirm-approval', 'prepare-manual-result', 'finalize-manual-result-role']
           .includes(request.command) || configuredApprovalMode !== 'webauthn' ? {} : {
           authorityHostFactory: async () => {
             return await getAuthorityHost()

@@ -110,6 +110,7 @@ function convertToRealLegacySnapshot(snapshot: Record<string, any>, encryptionKe
   try {
     const privateKey = createPrivateKey({ key: plaintext, type: 'pkcs8', format: 'der' })
     for (const [, grant] of snapshot.grants as Array<[string, Record<string, any>]>) {
+      for (const action of grant.subject?.actions ?? []) delete action.resourceKey
       delete grant.approvalContext
       grant.subjectDigest = digestText('approval-subject/v1', canonicalizeJson(grant.subject))
       const { signature: _signature, ...payload } = grant
@@ -146,6 +147,8 @@ function convertWriteFinalizationToRealV23(
 } {
   const finalization = new Map(snapshot.grantFinalizations).get(finalizationId) as Record<string, any>
   const grant = new Map(snapshot.grants).get(finalization.grantId) as Record<string, any>
+  delete grant.subject.actions[0].resourceKey
+  delete finalization.subject.actions[0].resourceKey
   grant.subject.actions[0].requests[0].method = method
   grant.capabilities[0].requests[0].method = method
   finalization.subject.actions[0].requests[0].method = method
@@ -166,6 +169,7 @@ function convertWriteGrantToRealLegacy(
   snapshot: Record<string, any>, encryptionKey: Buffer, grantId: string, method: string,
 ): Record<string, any> {
   const grant = new Map(snapshot.grants).get(grantId) as Record<string, any>
+  delete grant.subject.actions[0].resourceKey
   grant.subject.actions[0].requests[0].method = method
   grant.capabilities[0].requests[0].method = method
   const subjectDigest = digestCanonicalGrantApprovalSubject('execution', grant.subject)
@@ -210,7 +214,8 @@ async function writeSubject(
     runBundleProjectionDigest: digest('run-bundle'), actor: 'operator', discoveryGrantId: discovery.grantId,
     preflightDigest,
     actions: [{
-      actionId: 'ACTION-WRITE', effect: 'reversible-write', dataLeaseId: leaseId, fencingToken,
+      actionId: 'ACTION-WRITE', effect: 'reversible-write', dataLeaseId: leaseId,
+      resourceKey: 'order:1', fencingToken,
       cleanupPlanDigest: digest('cleanup'), requests: [{
         intentId: 'INTENT-WRITE', method: 'POST', canonicalOrigin: 'https://example.test',
         exactPath: '/orders/1', query: [], payload: { kind: 'json', digest: digest('payload') },
@@ -225,6 +230,36 @@ const attemptContext = {
 }
 
 describe('SQLite 持久 Authority 状态', () => {
+  test('full-playwright 写 Grant 持久化后可以关闭并重新打开 Authority', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-full-playwright-reopen-'))
+    directories.push(directory)
+    const statePath = join(directory, 'authority.sqlite')
+    const options = {
+      issuer: 'authority', keyId: 'key-1', now, statePath, stateEncryptionKey, testWorkspaceRoots,
+      approvalIdentities: [approver], authenticateApproverSession: authenticatePersistentApprover,
+    }
+    const authority = await LocalApprovalAuthority.open(options)
+    const base = await writeSubject(authority, 'LEASE-FULL-PLAYWRIGHT', 1)
+    const action = base.actions[0]!
+    const subject: WriteApprovalSubjectV2 = {
+      ...base,
+      actions: [{
+        ...action,
+        transport: 'browser-local', operation: 'full-playwright',
+        programDigest: digest('full-playwright-program'),
+        cleanupProgramDigest: digest('full-playwright-cleanup-program'),
+      }],
+    }
+    const grant = await authority.issueWriteGrant({
+      subject, approver, approvalSessionRef: 'persistent-session', ttlMs: 60_000,
+    })
+    authority.close()
+
+    const reopened = await LocalApprovalAuthority.open(options)
+    await expect(reopened.verifyForSubject(grant, subject)).resolves.toEqual({ allowed: true })
+    reopened.close()
+  })
+
   test('current snapshot rejects a finalization outbox larger than the production cap', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-finalization-oversized-'))
     directories.push(directory)
@@ -465,7 +500,7 @@ describe('SQLite 持久 Authority 状态', () => {
     },
   )
 
-  test('2.2.0 snapshot preserves a current-compatible uppercase Write Grant and adds finalization sets', async () => {
+  test('2.2.0 migration revokes uppercase legacy Write Grant that lacks required resourceKey', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-22-migration-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')
     const options = {
@@ -486,18 +521,27 @@ describe('SQLite 持久 Authority 状态', () => {
     delete old.acknowledgedFinalizations
     delete old.reservationRpcBindings
     stripSnapshotFieldsIntroducedAfter27(old)
+    const legacyGrant = convertWriteGrantToRealLegacy(
+      old as Record<string, any>, stateEncryptionKey, grant.grantId, 'POST',
+    )
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
     database.close()
     await removeAuthorityAnchors(directory)
 
     const migrated = await LocalApprovalAuthority.open(options)
-    await expect(migrated.verify(grant)).resolves.toEqual({ allowed: true })
+    await expect(migrated.verify(legacyGrant as never)).resolves.toMatchObject({
+      allowed: false, code: 'E2E_APPROVAL_REVOKED',
+    })
     migrated.close()
     const migratedDatabase = new DatabaseSync(statePath)
     const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
-    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({
-      schemaVersion: '2.8.0', grantFinalizations: [], acknowledgedFinalizations: [], reservationRpcBindings: [],
+    const persisted = JSON.parse(migratedRow.snapshot) as Record<string, any>
+    expect(persisted).toMatchObject({
+      schemaVersion: '2.8.0', grantFinalizations: [], acknowledgedFinalizations: [],
+      reservationRpcBindings: [],
+      revoked: expect.arrayContaining([[grant.grantId, 'legacy-write-method-migration']]),
     })
+    expect(persisted.grants.some(([grantId]: [string]) => grantId === grant.grantId)).toBe(false)
     migratedDatabase.close()
   })
 
@@ -592,7 +636,7 @@ describe('SQLite 持久 Authority 状态', () => {
     migrated.close()
   })
 
-  test('2.3.0 snapshot preserves a current-compatible uppercase Write outbox and adds empty acknowledgements', async () => {
+  test('2.3.0 migration removes uppercase legacy Write outbox that lacks required resourceKey', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-23-migration-')); directories.push(directory)
     const statePath = join(directory, 'authority.sqlite')
     const options = {
@@ -618,6 +662,9 @@ describe('SQLite 持久 Authority 状态', () => {
     delete old.acknowledgedFinalizations
     delete old.reservationRpcBindings
     stripSnapshotFieldsIntroducedAfter27(old)
+    const legacy = convertWriteFinalizationToRealV23(
+      old, stateEncryptionKey, 'FINALIZE-MIGRATION-23', 'POST',
+    )
     database.prepare('UPDATE authority_snapshots SET snapshot = ?').run(JSON.stringify(old))
     database.close()
     await removeAuthorityAnchors(directory)
@@ -625,13 +672,20 @@ describe('SQLite 持久 Authority 状态', () => {
     const migrated = await LocalApprovalAuthority.open(options)
     await expect(migrated.recoverFinalizedGrant({
       finalizationId: 'FINALIZE-MIGRATION-23', requestDigest: digest('23-request'), subject, approvalBinding,
-    })).resolves.toEqual({ grant, approvalSessionRef: 'persistent-session' })
+    })).resolves.toBeUndefined()
+    await expect(migrated.verify(legacy.grant as never)).resolves.toMatchObject({
+      allowed: false, code: 'E2E_APPROVAL_REVOKED',
+    })
     migrated.close()
     const migratedDatabase = new DatabaseSync(statePath)
     const migratedRow = migratedDatabase.prepare('SELECT snapshot FROM authority_snapshots').get() as { snapshot: string }
-    expect(JSON.parse(migratedRow.snapshot)).toMatchObject({
-      schemaVersion: '2.8.0', acknowledgedFinalizations: [], reservationRpcBindings: [],
+    const persisted = JSON.parse(migratedRow.snapshot) as Record<string, any>
+    expect(persisted).toMatchObject({
+      schemaVersion: '2.8.0', grantFinalizations: [], acknowledgedFinalizations: [],
+      reservationRpcBindings: [],
+      revoked: expect.arrayContaining([[grant.grantId, 'legacy-write-method-migration']]),
     })
+    expect(persisted.grants.some(([grantId]: [string]) => grantId === grant.grantId)).toBe(false)
     migratedDatabase.close()
   })
 

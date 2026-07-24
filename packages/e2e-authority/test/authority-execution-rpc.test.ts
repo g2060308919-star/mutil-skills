@@ -197,7 +197,8 @@ function writeGrant(): { grant: SignedWriteGrant; subject: WriteApprovalSubject 
     caseDigest: digest, actionMapDigest: digest, policyDigest: digest, executionContractDigest: digest,
     runBundleProjectionDigest: digest, actor: 'runner', discoveryGrantId: 'DISCOVERY-1', preflightDigest: digest,
     environment: 'test', baseOrigin: 'https://test.example.com',
-    actions: [{ actionId: 'ACTION-1', effect: 'reversible-write', dataLeaseId: 'LEASE-1', fencingToken: 1,
+    actions: [{ actionId: 'ACTION-1', effect: 'reversible-write', dataLeaseId: 'LEASE-1',
+      resourceKey: 'order:1', fencingToken: 1,
       cleanupPlanDigest: digest, requests: [{ intentId: 'INTENT-1', method: 'POST',
         canonicalOrigin: 'https://test.example.com', exactPath: '/orders/1', query: [],
         payload: { kind: 'no-body' }, targetFingerprint: digest, maxRequests: 1, expectedOrder: 1 }] }],
@@ -378,6 +379,32 @@ test('read complete 必须使用创建 reservation 时完全相同的已认证�
 })
 
 describe('Authority execution RPC clients', () => {
+  test('browser-local write RPC 接受默认 local-caller 审批者', async () => {
+    const { rpc, credential, verifierMaterial } = setup()
+    const source = browserLocalWriteGrant()
+    const grant = {
+      ...source.grant,
+      approver: { kind: 'local-caller' as const },
+      approvalContext: { ...source.grant.approvalContext, subject: 'local-caller' },
+    }
+    rpc.updateClientRegistration('runner-process', { approvalContext: grant.approvalContext })
+    registerAuthorityExecutionRpcOperations(rpc, {
+      writeAuthority: {
+        async verifyForSubject() { return { allowed: true } },
+        async reserveForSubject() { throw new Error('not used') },
+        async complete() { return digest },
+        async markUnknown() { return digest },
+      },
+      leaseAuthority: { async verifyTarget() { return true } },
+    })
+    const clients = createAuthorityExecutionRpcClients({ credential, verifierMaterial,
+      approvalBinding: binding(grant.approvalContext), expectedPublicKeyDigest: verifierMaterial.publicKeyDigest,
+      transport: (request) => rpc.handle(request), now: () => NOW })
+
+    await expect(clients.writeApproval.verifyForSubject(grant, source.subject))
+      .resolves.toEqual({ allowed: true })
+  })
+
   test('browser-local write 使用独立认证 RPC reservation，并保持一次性 complete/unknown 语义', async () => {
     const { rpc, credential, verifierMaterial } = setup()
     const { grant, subject } = browserLocalWriteGrant()
@@ -422,30 +449,31 @@ describe('Authority execution RPC clients', () => {
         requests: [{ ...capability.requests[0]!, exactPath: '/other' }] }] },
     ] as unknown as SignedWriteGrant[]
     for (const [index, changedGrant] of changedGrants.entries()) {
-      await expect(clients.writeApproval.reserveForSubject({
+      await expect(clients.browserLocalAuthority.reserveForSubject({
         grant: changedGrant, currentSubject: subject, capabilityId: 'CAP-BROWSER-1', actionId: 'ACTION-1',
         attemptId: `MISMATCH-${index}`, attemptContext,
       })).rejects.toMatchObject({ code: 'E2E_RPC_WRITE_RESERVE_INPUT_INVALID' })
     }
 
-    const completed = await clients.writeApproval.reserveForSubject({
+    const completed = await clients.browserLocalAuthority.reserveForSubject({
       grant, currentSubject: subject, capabilityId: 'CAP-BROWSER-1', actionId: 'ACTION-1',
       attemptId: 'BROWSER-1', attemptContext,
     })
-    await clients.writeApproval.complete(completed.reservationId, digest)
+    await expect(clients.browserLocalAuthority.complete(completed.reservationId, digest)).resolves.toBe(digest)
     expect(reservations.get(completed.reservationId)).toBe('completed')
-    await expect(clients.writeApproval.reserveForSubject({
+    await expect(clients.browserLocalAuthority.reserveForSubject({
       grant, currentSubject: subject, capabilityId: 'CAP-BROWSER-1', actionId: 'ACTION-1',
       attemptId: 'BROWSER-REPLAY', attemptContext,
     })).rejects.toMatchObject({ code: 'E2E_RPC_OPERATION_FAILED' })
 
     const another = browserLocalWriteGrant()
     another.grant.grantId = 'GRANT-BROWSER-2'
-    const unknown = await clients.writeApproval.reserveForSubject({
+    const unknown = await clients.browserLocalAuthority.reserveForSubject({
       grant: another.grant, currentSubject: another.subject, capabilityId: 'CAP-BROWSER-1', actionId: 'ACTION-1',
       attemptId: 'BROWSER-2', attemptContext,
     })
-    await clients.writeApproval.markUnknown(unknown.reservationId, 'browser state ambiguous')
+    await expect(clients.browserLocalAuthority.markUnknown(unknown.reservationId, 'browser state ambiguous'))
+      .resolves.toBe(digest)
     expect(reservations.get(unknown.reservationId)).toBe('unknown')
 
     await expect(clients.gatewayAuthority.reserveForSubject({

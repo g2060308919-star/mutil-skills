@@ -213,6 +213,7 @@ export function createWriteApprovalProjection(input: {
   runtimePolicyDigest: string
   dataLeaseId: string
   resourceKey: string
+  resourceFingerprint: string
   cleanupPlanDigest: string
   runtimeIsolationPolicy: RuntimeIsolationPolicy
   decisions?: ReadOnlyGoldenDecisions
@@ -241,6 +242,7 @@ function writeApprovalContents(input: {
   runtimePolicyDigest: string
   dataLeaseId: string
   resourceKey: string
+  resourceFingerprint: string
   cleanupPlanDigest: string
   runtimeIsolationPolicy: RuntimeIsolationPolicy
   evidencePolicyDigest: string
@@ -297,7 +299,8 @@ function writeApprovalContents(input: {
     caseQueue: [{ ordinal: 0, caseId: 'CASE-WRITE-1' }],
     actionIntents: [{ actionId: 'ACTION-APPROVE', effect: 'reversible-write', intentDigest: d('write-intent'), requestIds: [] }],
     readHttpRequests: [],
-    dataNeeds: [{ leaseId: input.dataLeaseId, resourceKey: input.resourceKey, mode: 'write' }],
+    dataNeeds: [{ leaseId: input.dataLeaseId, resourceKey: input.resourceKey,
+      resourceFingerprint: input.resourceFingerprint, mode: 'write' }],
     manualProcedures: [], evidencePolicyDigest: input.evidencePolicyDigest,
     runtimeIsolation: null, unresolvedItems: [] }
   const approvalContents: Record<string, unknown> = {
@@ -865,7 +868,8 @@ function applyWriteGoldenScenario(
   const projected = writeApprovalContents({
     modelDigest: input.modelDigest, universe: input.universe, fixtureOrigin: input.fixtureOrigin,
     runtimePolicyDigest: input.gatewayAudit.policyDigest, dataLeaseId: write.dataLeaseId,
-    resourceKey: write.resourceKey, cleanupPlanDigest: write.cleanupPlanDigest,
+    resourceKey: write.resourceKey, resourceFingerprint: write.resourceDigest,
+    cleanupPlanDigest: write.cleanupPlanDigest,
     evidencePolicyDigest, runtimeIsolationPolicy: write.runtimeIsolationPolicy, decisions: input.decisions,
   })
   for (const type of [

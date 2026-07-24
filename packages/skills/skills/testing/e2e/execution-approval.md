@@ -2,7 +2,7 @@
 
 ## 适用状态
 
-`coverage-audited → discovery-approved`；`lease-reserved → awaiting-execution-approval → execution-approved`。
+`coverage-audited → discovery-approved`；纯只读为 `binding-draft → awaiting-execution-approval → execution-approved`；包含写 data need 时为 `binding-draft → lease-reserved → awaiting-execution-approval → execution-approved`。
 
 ## 必需 Artifact 与摘要
 
@@ -10,17 +10,19 @@
 
 ## 允许的语义输出
 
-Discovery/Execution ApprovalSubject 展示内容、待决定的 effect、环境/角色/数据缺失项。
+Discovery/Execution ApprovalSubject 展示内容、待决定的 effect、环境/角色/数据缺失项。Execution 还必须展示 Runtime 返回且受 `reviewDigest` 绑定的完整 `semanticReview`：PRD 原文 → Requirement → Rule → Oracle，并保留每项来源引用和 `oracleMapping`。
 
 ## 调用的确定性 API
 
-Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态。审批先调用 `open-approval`：`approved` 表示 Runtime 已完成签发；`confirmation-required` 表示必须停等用户明确同意后，使用原 challenge 调用 `confirm-approval`；`blocked` 不得继续。WebAuthn 模式才打开用户在场 session。不得把聊天中的 `approved: true` 当作审批，Skill 不得直接打开 Authority 或传递 secret value。
+Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态。审批先调用 `open-approval`：无论本地确认还是 WebAuthn，Execution 的第一阶段都必须返回 `confirmation-required.summary.semanticReview`；Skill 完整展示后停等用户明确同意，再使用原 challenge 调用 `confirm-approval`。`semanticReview` 缺失、空链或 digest 不合法一律阻断；WebAuthn 模式在语义确认后才打开用户在场 session，二者缺一不可。`approved` 表示 Runtime 已完成签发；`blocked` 不得继续。不得把聊天中的 `approved: true` 当作审批，Skill 不得直接打开 Authority 或传递 secret value。
 
 Runtime 内部必须调用 Contracts 计算 `approval projection`；使用 `LocalApprovalAuthority.open({ statePath, stateEncryptionKey, testWorkspaceRoots })` 打开持久 Authority。`stateEncryptionKey` 必须由 Git 外 Secret Provider 提供且恰为 32 bytes，`statePath` 必须位于全部测试工作区之外。本地模式把同一 Runtime 调用者记录为严格 `{kind:'local-caller'}`，对需要确认的主题持久化一次性 challenge，并在 Run lock 内重验项目、安装、workflow、subject 与 expiry 后消费；本地确认不验证自然人身份，也不证明职责分离。WebAuthn 增强模式才基于可信身份注册表和已认证会话签发。两种模式最终都由 Authority 签发短期 capability/grant 与专用 `freshness receipt`，Runtime 再调用 Engine `validateGeneration()`/`transition()`。freshness proof 使用独立签名 purpose/key，不能由通用 Artifact 签名代替。
 
 ## 执行步骤
 
-先读取 Run 冻结的 `approvalMode`。本地模式下，纯只读且非生产的已知主题可以直接签发；写入、注入、隐私和人工步骤返回 `confirmation-required`，Skill 展示 Runtime 的脱敏摘要并暂停，收到明确确认后调用 `confirm-approval`。生产、不可逆和未知 effect 始终阻断。WebAuthn 模式下，受信认证边界把当前 OS/SSO 主体映射到 Authority 配置的 `approvalIdentities`；签发调用必须提交 `approvalSessionRef`，Authority 重新认证会话主体，并与声明的 subject 和登记 roles 精确匹配。随后申请只读 DiscoveryCapability，冻结不含 capabilityId 的行为投影并签发 Grant；read 和 reversible-write 都必须使用 v2 subject，Run Bundle 投影必须覆盖输入引用、调度、尝试槽、secret、runtime policy、`runtimeIsolationPolicyDigest`，以及 capability 的 action/operation/effect/maxUses。可恢复写必须在服务端点和公钥确定后，把完整 `RuntimeIsolationPolicy` 写入 Execution Contract，再由 Run Bundle 固定其规范摘要；纯只读必须使用 `null/not-applicable`，不得夹带隐藏策略。把 Authority 返回的全部 capability 写入 Action Map 与 Run Bundle；最终化时让 receipt 同时绑定已批准投影和最终 Run Bundle 摘要。Builder 校验一次，Artifact Store staging 发布前动态复验一次当前 grant store、可信时钟、撤销状态、ready preflight、subject、最终 Run Bundle、隔离策略摘要与全部 capability。生产运行必须复用同一受保护的 `statePath` 和外部加密密钥；SQLite 中的五类私钥只保存 AES-256-GCM 密文，使 grant、撤销、nonce 使用计数、reservation 与 Attempt 日志在重启后仍可验证而私钥不以明文落盘。默认同目录本地 anchor 只检测 DB 单独回滚、篡改及崩溃不一致，不提供同 UID 整体回滚防护；需要该安全声明时必须配置独立可信单调 provider，否则验收报告不得标记这一威胁已覆盖。
+先读取 Run 冻结的 `approvalMode`。所有 Execution（包括纯只读，以及 WebAuthn 模式）都先返回 `confirmation-required`，因为调用者必须确认 PRD 语义链。Skill 按 PRD 原文、Requirement、Rule、Oracle、来源、映射依据的顺序完整展示 Runtime 摘要并暂停，收到明确确认后调用 `confirm-approval`。Runtime 消费 challenge 后把 `confirmationId + subjectDigest + reviewDigest + semanticReview` 保存为 `prd-semantic-confirmation` 可信事实。本地模式下，Discovery、Scope 等非 Execution 的纯只读非生产主题可以直接签发；生产、不可逆和未知 effect 始终阻断。WebAuthn 模式在语义确认后，由受信认证边界把当前 OS/SSO 主体映射到 Authority 配置的 `approvalIdentities`；签发调用必须提交 `approvalSessionRef`，Authority 重新认证会话主体，并与声明的 subject 和登记 roles 精确匹配。随后申请只读 DiscoveryCapability，冻结不含 capabilityId 的行为投影并签发 Grant；read、reversible-write 和 `full-playwright` 都必须使用 v2 subject，写 action 还必须把业务 `resourceKey` 与 lease、fencing、target fingerprint 一起纳入签名。Run Bundle 投影必须覆盖输入引用、调度、尝试槽、secret、runtime policy、`runtimeIsolationPolicyDigest`，以及 capability 的 action/operation/effect/maxUses。Authority 返回后 Runtime 按 `actionId + operation` 把全部真实 capabilityId 回填 Action Map，并在同一持久化边冻结最终 Run Bundle；任何缺失、歧义或投影漂移都失败关闭。可恢复写必须在服务端点和公钥确定后，把完整 `RuntimeIsolationPolicy` 写入 Execution Contract，再由 Run Bundle 固定其规范摘要；纯只读必须使用 `null/not-applicable`，不得夹带隐藏策略。最终化时让 receipt 同时绑定已批准投影和最终 Run Bundle 摘要。Builder 校验一次，Artifact Store staging 发布前动态复验一次当前 grant store、可信时钟、撤销状态、ready preflight、subject、最终 Run Bundle、隔离策略摘要与全部 capability。生产运行必须复用同一受保护的 `statePath` 和外部加密密钥；SQLite 中的五类私钥只保存 AES-256-GCM 密文，使 grant、撤销、nonce 使用计数、reservation 与 Attempt 日志在重启后仍可验证而私钥不以明文落盘。默认同目录本地 anchor 只检测 DB 单独回滚、篡改及崩溃不一致，不提供同 UID 整体回滚防护；需要该安全声明时必须配置独立可信单调 provider，否则验收报告不得标记这一威胁已覆盖。
+
+写 Execution Contract 冻结时，Runtime 必须使用 `leaseId + resourceKey + resourceFingerprint` 在单一 Authority 事务中原子预留整批 active Lease，并把含真实 fencing token 的 `reservedLeases` 返回 Skill。Skill 只能使用这些值组装审批主题；Authority 最终化 Grant 时只重新校验已预留 Lease，不创建、不激活、不延长租期。任一资源冲突时整批不得留下部分 active Lease。
 
 Project Policy、Execution Contract、Browser Evidence 与 sanitizer record 必须使用同一 evidence policy；Project Policy、Run Bundle、Gateway signed audit 与 Browser Preflight gateway check 必须使用同一 runtime policy。已执行 Action 的每项 required capability 都必须在 Gateway 签名 reservation 中恰好出现一次、actionId 一致且 `consumed=true`。
 

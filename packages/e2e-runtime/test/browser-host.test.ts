@@ -5,6 +5,7 @@ import {
   ControlledBrowserHost,
   chromiumLaunchOptions,
   getControlledBrowserSessionBinding,
+  isPlaywrightMainFrameRequest,
   type BrowserHostDriver,
   type BrowserProfileSupervisor,
 } from '../src/browser-host.js'
@@ -18,6 +19,34 @@ import { NodeBrowserProfileSupervisor } from '../src/browser-profile-supervisor.
 const digest = (character: string) => `sha256:${character.repeat(64)}`
 
 describe('Controlled Browser Host', () => {
+  test('Popup 主导航即使 Frame 尚未创建也按 sec-fetch-dest 分类，iframe 不冒充主页面', () => {
+    const request = (destination: string) => ({
+      frame: () => { throw new Error('Frame for this navigation request is not available') },
+      isNavigationRequest: () => true,
+      resourceType: () => 'document',
+    })
+    expect(isPlaywrightMainFrameRequest(request('document') as never, {
+      'sec-fetch-dest': 'document',
+    })).toBe(true)
+    // 真实 Chromium/Playwright 的 Popup 首次导航可能尚无 Frame，且 allHeaders()
+    // 不暴露 sec-fetch-dest；Playwright 自身的 navigation + document 分类仍须可用。
+    expect(isPlaywrightMainFrameRequest(request('document') as never, {})).toBe(true)
+    expect(isPlaywrightMainFrameRequest(request('iframe') as never, {
+      'sec-fetch-dest': 'iframe',
+    })).toBe(false)
+  })
+
+  test('多页面使用请求所属 Page 的 mainFrame，而不是固定初始 Page', () => {
+    const popupMainFrame = {}
+    const popupPage = { mainFrame: () => popupMainFrame }
+    const request = {
+      frame: () => Object.assign(popupMainFrame, { page: () => popupPage }),
+      isNavigationRequest: () => true,
+      resourceType: () => 'document',
+    }
+    expect(isPlaywrightMainFrameRequest(request as never, {})).toBe(true)
+  })
+
   test('生产 supervisor 在 Browser 启动前持有 owner lock，确认停止后删除 lock', async () => {
     const roots = await createRuntimeTestRoots()
     const profileDir = `${roots.source}/supervised-profile`

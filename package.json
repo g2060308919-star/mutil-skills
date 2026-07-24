@@ -1,6 +1,6 @@
 {
   "name": "mutil-skills",
-  "version": "0.0.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -13,7 +13,8 @@
     "generate:e2e-schemas": "npm run build && node scripts/generate-e2e-artifact-schemas.mjs",
     "lint:architecture": "node scripts/check-architecture.mjs",
     "e2e:golden": "vitest run --config vitest.e2e.config.ts",
-    "verify:e2e-release": "npm run build && npm pack --workspaces --pack-destination /private/tmp/mutil-skills-pack-qa && E2E_RUNTIME_RUN_PACKED_INSTALL=1 E2E_RUNTIME_PACKS_DIR=/private/tmp/mutil-skills-pack-qa npx vitest run scripts/e2e-runtime-package.test.ts && E2E_RUNTIME_RUN_CROSS_REPO=1 npm run e2e:golden"
+    "verify:e2e-pack": "npm run build && npm pack --workspaces --pack-destination /private/tmp/mutil-skills-pack-qa && E2E_RUNTIME_RUN_PACKED_INSTALL=1 E2E_RUNTIME_PACKS_DIR=/private/tmp/mutil-skills-pack-qa npx vitest run scripts/e2e-runtime-package.test.ts",
+    "verify:e2e-release": "npm run verify:e2e-pack && npx vitest run scripts/package-metadata.test.ts && E2E_RUNTIME_RELEASE_PACKS_DIR=/private/tmp/mutil-skills-pack-qa E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE=registry E2E_RUNTIME_RUN_CROSS_REPO=1 npm run e2e:golden"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",

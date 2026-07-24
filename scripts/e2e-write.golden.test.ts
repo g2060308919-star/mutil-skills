@@ -228,7 +228,8 @@ describe('PRD-driven reversible-write golden path', () => {
       }
       const approvalProjection = createWriteApprovalProjection({
         modelDigest, universe, fixtureOrigin, runtimePolicyDigest: gatewayPolicyDigest,
-        dataLeaseId: activeLease.leaseId, resourceKey: 'order:100', cleanupPlanDigest,
+        dataLeaseId: activeLease.leaseId, resourceKey: 'order:100', resourceFingerprint,
+        cleanupPlanDigest,
         runtimeIsolationPolicy, decisions,
       })
       if (decisions.lineageDecision.status !== 'approved') throw new Error('Golden lineage 未批准')
@@ -257,7 +258,7 @@ describe('PRD-driven reversible-write golden path', () => {
           environment: 'test', baseOrigin: fixtureOrigin, actor: 'operator',
           discoveryGrantId: discoveryGrant.grantId, preflightDigest: preflight.preflightDigest,
           actions: [{ actionId: 'ACTION-APPROVE', effect: 'reversible-write', dataLeaseId: activeLease.leaseId,
-            fencingToken: activeLease.fencingToken, cleanupPlanDigest, requests: [
+            resourceKey: 'order:100', fencingToken: activeLease.fencingToken, cleanupPlanDigest, requests: [
               { intentId: 'INTENT-APPROVE', method: 'POST', canonicalOrigin: fixtureOrigin,
                 exactPath: '/api/orders/100/approve', query: [['source', 'e2e']],
                 payload: { kind: 'json', digest: digestJsonHttpPayload(approvePayload) },
@@ -346,7 +347,8 @@ describe('PRD-driven reversible-write golden path', () => {
       })
       const compilerArtifacts = await createWriteGoldenCompilerArtifacts({
         modelDigest, universe, fixtureOrigin, runtimePolicyDigest: gatewayPolicyDigest,
-        dataLeaseId: activeLease.leaseId, resourceKey: 'order:100', cleanupPlanDigest,
+        dataLeaseId: activeLease.leaseId, resourceKey: 'order:100', resourceFingerprint,
+        cleanupPlanDigest,
         runtimeIsolationPolicy, decisions, authority: approvalAuthority, grant,
         discoveryGrantId: discoveryGrant.grantId, preflightDigest: preflight.preflightDigest,
         generationId: 'GENERATION-WRITE-1',
