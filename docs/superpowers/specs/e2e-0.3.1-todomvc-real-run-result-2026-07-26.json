@@ -1,0 +1,89 @@
+{
+  "schemaVersion": "1.0.0",
+  "reportType": "real-public-prd-run-projection",
+  "run": {
+    "runId": "RUN-CREATE-TODOMVC",
+    "assetId": "ASSET-TODOMVC-1",
+    "generationId": "RUN-CREATE-TODOMVC",
+    "attemptId": "ATTEMPT-e2610db8-02ab-460e-b8ee-7179c417819b",
+    "resultId": "RESULT-REAL-66c014dc30fce36047bf69eb43d34644d587ec9be0e9128001b5c209d0a63ffc",
+    "completedAt": "2026-07-26T10:40:19.794Z",
+    "status": "passed",
+    "verdict": "accepted"
+  },
+  "target": {
+    "url": "https://todomvc.com/examples/typescript-react/",
+    "title": "React • TodoMVC",
+    "browser": "system-google-chrome",
+    "executionMode": "real-environment"
+  },
+  "prd": {
+    "id": "PRD-TODOMVC-OFFICIAL",
+    "title": "TodoMVC 官方 Application Specification 验收",
+    "revisionCommit": "ff43b02e59dfa604386bb382034b2cd07c2bcd8a",
+    "revisionDigest": "sha256:519609854bc4d1b535cde7210943ceddf028218cafea8fb254943e1e656153ee",
+    "fixtureGitBlob": "d040877fd8895c4f18fa5190e4b8ee474ffa8ac4"
+  },
+  "formalCase": {
+    "caseId": "CASE-TODOMVC-FUNCTIONAL-1",
+    "stepId": "STEP-TODOMVC-FUNCTIONAL-1",
+    "actionId": "ACTION-TODOMVC-FUNCTIONAL-1",
+    "oracleId": "ORACLE-TODOMVC-FUNCTIONAL",
+    "status": "passed",
+    "oracleResult": "passed",
+    "effect": "reversible-write",
+    "effectObservation": "applied",
+    "actualDigest": "sha256:7346d7447fb4a9f5f574b9f5be0cd8c0c578bbf17cc6aee066b3f75ef60b4445",
+    "eventChainDigest": "sha256:175bd38928b0f8fd76396a704fcb0cd327d42e98f273b90bc7bd07f9d866225c"
+  },
+  "cleanup": {
+    "cleanupPlanId": "CLEANUP-TODOMVC-1",
+    "leaseId": "LEASE-TODOMVC-1",
+    "status": "verified-clean",
+    "resultDigest": "sha256:936ca301536d3a7be32f7ab2bbb322bad8e4e4ae50557a7638e369d513981348",
+    "leaseReceiptDigest": "sha256:3f4d3cbf88a072ad4e5ebe0facf7e30f2a9cc7e336b5ff558aeaf358b80fc403"
+  },
+  "gateway": {
+    "approvedExecutionSession": {
+      "received": 20,
+      "forwarded": 20,
+      "blocked": 0,
+      "executionSessionId": "sha256:9ded813923adf94a6f1404230b2a40184d62e6dfe3f8183b8f84102303fb342a"
+    },
+    "wholeLifecycleAudit": {
+      "forwarded": 20,
+      "blockedByDefaultDeny": 26,
+      "injected": 0,
+      "signedCountersDigest": "sha256:261feb4aa76190fe2a0f26491a0ade56c7e9c899e4e41443f32c5425d183e0af"
+    }
+  },
+  "evidence": {
+    "evidenceSetDigest": "sha256:ed67d3b6c6c4be4cebeef50ae5e0dd0be8a420a7085ea4458e3001a8d147ed62",
+    "publishedEvidenceId": "EVIDENCE-ACTION-TODOMVC-FUNCTIONAL-1",
+    "publishedEvidenceDigest": "sha256:d38e35d3dbda3be4e5a10a8e3109a44076e7d6a046364f70f6c70d7645fee410",
+    "capturedEvidenceIds": [
+      "BEFORE-SCREENSHOT",
+      "BEFORE-DOM",
+      "BEFORE-URL",
+      "BEFORE-TRACE",
+      "AFTER-SCREENSHOT",
+      "AFTER-DOM",
+      "AFTER-URL",
+      "AFTER-TRACE",
+      "CLEANUP-SCREENSHOT",
+      "CLEANUP-DOM",
+      "CLEANUP-URL",
+      "CLEANUP-TRACE",
+      "GATEWAY-sha256:9ded813923adf94a6f1404230b2a40184d62e6dfe3f8183b8f84102303fb342a"
+    ]
+  },
+  "runtime": {
+    "runtimeVersion": "0.3.1",
+    "engineVersion": "0.3.1",
+    "contractsVersion": "0.3.1",
+    "playwrightVersion": "1.61.1",
+    "sourceRepositoryIndependent": true,
+    "runtimeInstallationDigest": "sha256:d373488234914139ca6edebd002a3c016efb106386cc55af4dd842603173e5d0"
+  },
+  "projectionNotice": "本文件从保留的正式 .biztest final-report、browser-results、cleanup-results、gateway-audit 和 runtime provenance 投影；签名权威仍以原始 .biztest 资产为准。"
+}
