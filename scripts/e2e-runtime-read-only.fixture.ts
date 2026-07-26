@@ -502,6 +502,365 @@ export function runtimeFullPlaywrightFixture(input: {
   }
 }
 
+export function runtimeTodoMvcFullPlaywrightFixture(
+  input: Parameters<typeof runtimeFullPlaywrightFixture>[0],
+) {
+  const base = runtimeFullPlaywrightFixture(input)
+  const origin = new URL(input.url).origin
+  const targetFingerprint = d('todomvc-typescript-react-public-target')
+  const paths = [
+    '/examples/typescript-react/',
+    '/examples/typescript-react/node_modules/todomvc-common/base.css',
+    '/examples/typescript-react/node_modules/todomvc-app-css/index.css',
+    '/examples/typescript-react/node_modules/director/build/director.js',
+    '/examples/typescript-react/js/bundle.js',
+  ]
+  const requests = paths.map((exactPath, index) => ({
+    intentId: `TODOMVC-GET-${index + 1}`, method: 'GET', canonicalOrigin: origin, exactPath,
+    query: [] as Array<[string, string]>, payload: { kind: 'no-body' as const },
+    // 主文档必须先出现；CSS/JS 由浏览器并发调度，属于同一个无序首次出现阶段。
+    targetFingerprint, maxRequests: 4, expectedOrder: index === 0 ? 1 : 2,
+  }))
+  const originalExecution = base.frozenArtifacts['execution-contract'].content as any
+  const originalProgram = originalExecution.fullPlaywrightPrograms[0]
+  const source = [
+    `await page.goto('${input.url}')`,
+    "await expect(page).toHaveTitle('React • TodoMVC')",
+    "await expect(page.getByRole('heading', { name: 'todos' })).toBeVisible()",
+    "await expect(page.locator('.todo-list li')).toHaveCount(0)",
+    "await expect(page.locator('.main')).toHaveCount(0)",
+    "await expect(page.locator('.footer')).toHaveCount(0)",
+    "const input = page.locator('.new-todo')",
+    "await input.fill('  E2E-RUN-TODOMVC-A  ')", "await input.press('Enter')",
+    "await input.fill('E2E-RUN-TODOMVC-B')", "await input.press('Enter')",
+    "await input.fill('E2E-RUN-TODOMVC-C')", "await input.press('Enter')",
+    "await input.fill('   ')", "await input.press('Enter')",
+    "await expect(page.locator('.todo-list li')).toHaveCount(3)",
+    "const items = page.locator('.todo-list li')",
+    "await expect(items.locator('label')).toHaveText(['E2E-RUN-TODOMVC-A', 'E2E-RUN-TODOMVC-B', 'E2E-RUN-TODOMVC-C'])",
+    "await expect(page.locator('.todo-count')).toHaveText('3 items left')",
+    "await items.nth(0).locator('.toggle').check()",
+    "await expect(items.nth(0)).toHaveClass(/completed/)",
+    "await expect(page.locator('.todo-count')).toHaveText('2 items left')",
+    "await items.nth(0).locator('.toggle').uncheck()",
+    "await expect(page.locator('.todo-count')).toHaveText('3 items left')",
+    "await page.locator('.toggle-all').check()",
+    "await expect(page.locator('.todo-count')).toHaveText('0 items left')",
+    "await page.locator('.toggle-all').uncheck()",
+    "await expect(page.locator('.todo-count')).toHaveText('3 items left')",
+    "await items.nth(1).locator('.toggle').check()",
+    "await page.getByRole('link', { name: 'Completed' }).click()",
+    "await expect(page).toHaveURL(/#\\/completed$/)",
+    "await expect(page.locator('.todo-list label')).toHaveText(['E2E-RUN-TODOMVC-B'])",
+    "await page.getByRole('link', { name: 'Active' }).click()",
+    "await expect(page).toHaveURL(/#\\/active$/)",
+    "await expect(page.locator('.todo-list label')).toHaveText(['E2E-RUN-TODOMVC-A', 'E2E-RUN-TODOMVC-C'])",
+    "await page.getByRole('link', { name: 'All' }).click()",
+    "await expect(page).toHaveURL(/#\\/$/)",
+    "await page.locator('.todo-list li').nth(0).locator('label').dblclick()",
+    "await page.locator('.todo-list li').nth(0).locator('.edit').fill('E2E-RUN-TODOMVC-A-EDITED')",
+    "await page.locator('.todo-list li').nth(0).locator('.edit').press('Enter')",
+    "await expect(page.locator('.todo-list label').nth(0)).toHaveText('E2E-RUN-TODOMVC-A-EDITED')",
+    "await page.locator('.todo-list li').nth(2).locator('label').dblclick()",
+    "await page.locator('.todo-list li').nth(2).locator('.edit').fill('E2E-RUN-TODOMVC-C-DISCARDED')",
+    "await page.locator('.todo-list li').nth(2).locator('.edit').press('Escape')",
+    "await expect(page.locator('.todo-list label').nth(2)).toHaveText('E2E-RUN-TODOMVC-C')",
+    "await page.locator('.todo-list li').nth(2).locator('label').dblclick()",
+    "await page.locator('.todo-list li').nth(2).locator('.edit').fill('E2E-RUN-TODOMVC-C-BLUR')",
+    "await page.getByRole('heading', { name: 'todos' }).click()",
+    "await expect(page.locator('.todo-list label').nth(2)).toHaveText('E2E-RUN-TODOMVC-C-BLUR')",
+    "await page.locator('.todo-list li').nth(2).locator('label').dblclick()",
+    "await page.locator('.todo-list li').nth(2).locator('.edit').fill('   ')",
+    "await page.locator('.todo-list li').nth(2).locator('.edit').press('Enter')",
+    "await expect(page.locator('.todo-list li')).toHaveCount(2)",
+    "await page.locator('.todo-list li').nth(0).hover()",
+    "await page.locator('.todo-list li').nth(0).locator('.destroy').click()",
+    "await expect(page.locator('.todo-list label')).toHaveText(['E2E-RUN-TODOMVC-B'])",
+    "await input.fill('E2E-RUN-TODOMVC-PERSIST')", "await input.press('Enter')",
+    "await page.getByRole('link', { name: 'Completed' }).click()",
+    "await page.reload()",
+    "await expect(page).toHaveURL(/#\\/completed$/)",
+    "await expect(page.locator('.todo-list label')).toHaveText(['E2E-RUN-TODOMVC-B'])",
+    "const stored = await page.evaluate(() => window.localStorage.getItem('react-todos'))",
+    "const records = JSON.parse(stored || '[]')",
+    "expect(records.map(item => item.title)).toEqual(['E2E-RUN-TODOMVC-B', 'E2E-RUN-TODOMVC-PERSIST'])",
+    "expect(records.map(item => item.completed)).toEqual([true, false])",
+    "await page.getByRole('link', { name: 'All' }).click()",
+    "await expect(page).toHaveURL(/#\\/$/)",
+    "await page.locator('.toggle-all').check()",
+    "await page.getByRole('button', { name: 'Clear completed' }).click()",
+    "await expect(page.locator('.todo-list li')).toHaveCount(0)",
+    "await expect(page.locator('.main')).toHaveCount(0)",
+    "await expect(page.locator('.footer')).toHaveCount(0)",
+    "state.programCompleted = true",
+    "state.persistenceVerified = true",
+    "state.storageKeyDeviation = 'react-todos'",
+  ].join('\n')
+  const cleanupSource = [
+    `await page.goto('${input.url}')`,
+    "await expect(page).toHaveTitle('React • TodoMVC')",
+    "await expect(page.locator('.todo-list li')).toHaveCount(0)",
+    "const stored = await page.evaluate(() => window.localStorage.getItem('react-todos'))",
+    "expect(JSON.parse(stored || '[]')).toEqual([])",
+    "await page.reload()",
+    "await expect(page.locator('.todo-list li')).toHaveCount(0)",
+    "state.cleanupVerified = true",
+    "return 'verified-clean'",
+  ].join('\n')
+  const program = {
+    ...originalProgram,
+    caseId: 'CASE-TODOMVC-FUNCTIONAL-1',
+    stepId: 'STEP-TODOMVC-FUNCTIONAL-1',
+    actionId: 'ACTION-TODOMVC-FUNCTIONAL-1',
+    dataLeaseId: 'LEASE-TODOMVC-1',
+    cleanupPlanId: 'CLEANUP-TODOMVC-1',
+    timeoutMs: 60_000,
+    source,
+    sourceDigest: computeFullPlaywrightSourceDigest(source),
+    cleanupSource,
+    cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource),
+    networkRequests: requests,
+    networkRequestBodies: [],
+  }
+  const originalCleanupPlan = originalExecution.writeCleanupPlans[0]
+  const cleanupPlan = {
+    ...originalCleanupPlan,
+    cleanupPlanId: program.cleanupPlanId,
+    actionId: program.actionId,
+    leaseId: program.dataLeaseId,
+    cleanupProgramDigest: program.cleanupSourceDigest,
+    cleanupRequestIntentIds: [],
+    verificationProbes: [{
+      probeId: 'PROBE-TODOMVC-EMPTY', kind: 'browser-observation' as const,
+      expectedDigest: d('todomvc-empty-after-cleanup'),
+    }],
+  }
+  const cleanupPlanDigest = digestCleanupPlanDefinition(cleanupPlan)
+  const testCases = replaceArtifactContent(base.frozenArtifacts['test-cases'], {
+    cases: [{
+      caseId: program.caseId, revision: 1, obligationIds: ['COV-TODOMVC-FUNCTIONAL'],
+      title: 'TodoMVC 官方功能与持久化验收', actor: 'visitor', necessity: 'required', preconditions: [],
+      dataNeedIds: [program.dataLeaseId], steps: [{
+        stepId: program.stepId, ordinal: 0,
+        semanticAction: '新增、完成、过滤、编辑、删除、持久化并清理 Todo',
+        semanticTarget: 'TodoMVC 列表',
+        oracles: [{ oracleId: 'ORACLE-TODOMVC-FUNCTIONAL',
+          statement: '全部功能符合官方规格，reload 保持状态，cleanup reload 后列表为空' }],
+        evidenceKinds: ['screenshot', 'dom', 'trace', 'gateway-audit'],
+      }], mode: 'real-environment', effect: 'reversible-write', evidenceLevel: 'E2',
+      cleanupPlanId: program.cleanupPlanId, timeoutMs: 60_000,
+      retryPolicy: 'verified-not-applied-max-1', status: 'active',
+    }],
+    caseSetDigest: d('todomvc-case-set'),
+  })
+  const executionContract = replaceArtifactContent(base.frozenArtifacts['execution-contract'], {
+    ...originalExecution,
+    baseOrigin: origin,
+    identities: [{
+      identityId: 'IDENTITY-VISITOR', roleIds: ['visitor'], secretRef: 'SECRET-REF-LOCAL',
+    }],
+    caseQueue: [{ ordinal: 0, caseId: program.caseId }],
+    actionIntents: [{ actionId: program.actionId, effect: 'reversible-write',
+      intentDigest: program.sourceDigest, requestIds: [] }],
+    writeCleanupPlans: [cleanupPlan],
+    fullPlaywrightPrograms: [program],
+    dataNeeds: [{ leaseId: program.dataLeaseId, resourceKey: 'todomvc:react:session',
+      resourceFingerprint: targetFingerprint, mode: 'write' }],
+  })
+  const originalActionMap = base.frozenArtifacts['browser-action-map'].content as any
+  const actionMap = replaceArtifactContent(base.frozenArtifacts['browser-action-map'], {
+    ...originalActionMap,
+    executionProfile: 'full-playwright',
+    pageIdentities: [{ pageId: 'PAGE-TODOMVC-1', origin,
+      assertionDigest: d('todomvc-page-identity') }],
+    fullPlaywrightPrograms: [program],
+    actions: [{
+      caseId: program.caseId, stepId: program.stepId, actionId: program.actionId,
+      pageIdentityId: 'PAGE-TODOMVC-1', locatorCandidates: [],
+      playwrightAction: 'full-playwright/v1', waits: [],
+      oracleIds: ['ORACLE-TODOMVC-FUNCTIONAL'], effect: 'reversible-write',
+      capabilities: [{ operation: 'full-playwright', capabilityId: 'PENDING-TODOMVC-FULL' }],
+      requestIds: [],
+    }],
+    unmappedSteps: [], discoveredRisks: [],
+  })
+  const projectPolicy = replaceArtifactContent(base.semanticArtifacts['project-policy'], {
+    ...(base.semanticArtifacts['project-policy'].content as Record<string, unknown>),
+    originPolicies: [{ origin, allowRead: true, allowWrite: true }],
+  })
+  const prdRequest = replaceArtifactContent(base.semanticArtifacts['prd-request'], {
+    ...(base.semanticArtifacts['prd-request'].content as Record<string, unknown>),
+    title: 'TodoMVC 官方 Application Specification 验收',
+    userRequest: '依据官方 PRD 验证 TodoMVC 全部交互、持久化和清理',
+  })
+  const prdManifest = replaceArtifactContent(base.semanticArtifacts['prd-manifest'], {
+    ...(base.semanticArtifacts['prd-manifest'].content as Record<string, unknown>),
+    prdId: 'PRD-TODOMVC-OFFICIAL',
+    sources: [{ sourceId: 'PRD-TODOMVC-OFFICIAL', digest: input.prdRevision, byteLength: 1 }],
+  })
+  const acceptanceScope = replaceArtifactContent(base.semanticArtifacts['acceptance-scope'], {
+    ...(base.semanticArtifacts['acceptance-scope'].content as Record<string, unknown>),
+    includedReqCandidates: [{ reqId: 'REQ-TODOMVC-FUNCTIONAL',
+      sourceRefs: ['PRD-TODOMVC-OFFICIAL'] }],
+  })
+  const requirementModel = replaceArtifactContent(base.semanticArtifacts['requirement-model'], {
+    ...(base.semanticArtifacts['requirement-model'].content as Record<string, unknown>),
+    requirements: [{
+      reqId: 'REQ-TODOMVC-FUNCTIONAL', revision: 1, title: 'TodoMVC 完整功能验收',
+      actors: ['visitor'], entities: ['todo'], preconditions: [], rules: [{
+        ruleId: 'RULE-TODOMVC-FUNCTIONAL', category: 'business',
+        statement: '访客可以新增、完成、过滤、编辑、删除并清理 Todo',
+        sourceRefs: ['PRD-TODOMVC-OFFICIAL'], certainty: 'explicit',
+        oracleIds: ['ORACLE-TODOMVC-FUNCTIONAL'],
+      }], states: [], transitions: [], observableOutcomes: [{
+        oracleId: 'ORACLE-TODOMVC-FUNCTIONAL',
+        statement: '全部功能操作符合官方规格且 cleanup reload 后列表为空',
+      }], applicability: [], sourceRefs: ['PRD-TODOMVC-OFFICIAL'], status: 'active',
+    }],
+  })
+  const interactionFlow = replaceArtifactContent(base.semanticArtifacts['interaction-flow'], {
+    flows: [{
+      flowId: 'FLOW-TODOMVC-FUNCTIONAL',
+      nodes: [
+        { nodeId: 'NODE-TODOMVC-ENTRY', reqId: 'REQ-TODOMVC-FUNCTIONAL', kind: 'entry',
+          effect: 'reversible-write', oracleIds: ['ORACLE-TODOMVC-FUNCTIONAL'] },
+        { nodeId: 'NODE-TODOMVC-EXIT', reqId: 'REQ-TODOMVC-FUNCTIONAL', kind: 'exit',
+          effect: 'reversible-write', oracleIds: ['ORACLE-TODOMVC-FUNCTIONAL'] },
+      ],
+      edgeIds: ['EDGE-TODOMVC-FUNCTIONAL'], entryNodeId: 'NODE-TODOMVC-ENTRY',
+      exitNodeIds: ['NODE-TODOMVC-EXIT'],
+    }],
+  })
+  const coverageContent = structuredClone(
+    base.semanticArtifacts['coverage-universe'].content,
+  ) as Record<string, any>
+  coverageContent.obligations = [{
+    obligationId: 'COV-TODOMVC-FUNCTIONAL', reqId: 'REQ-TODOMVC-FUNCTIONAL',
+    ruleIds: ['RULE-TODOMVC-FUNCTIONAL'], nodeIds: ['NODE-TODOMVC-ENTRY', 'NODE-TODOMVC-EXIT'],
+    actor: 'visitor', transitionId: 'not-applicable', scenario: 'TodoMVC 官方完整功能验收',
+    necessity: 'required', applicabilityRuleId: 'RULE-TODOMVC-FUNCTIONAL',
+    disposition: { kind: 'automated' as const, caseIds: [program.caseId] },
+  }]
+  coverageContent.universeDigest = digestText('coverage-universe/v1', canonicalizeJson({
+    coveragePolicyDigest: coverageContent.coveragePolicyDigest,
+    pairwiseSeed: coverageContent.pairwiseSeed,
+    obligations: coverageContent.obligations,
+  }))
+  const coverageUniverse = replaceArtifactContent(
+    base.semanticArtifacts['coverage-universe'], coverageContent,
+  )
+  const designAudit = replaceArtifactContent(base.semanticArtifacts['design-audit'], {
+    ...(base.semanticArtifacts['design-audit'].content as Record<string, unknown>),
+    inputDigests: [requirementModel.contentDigest, coverageUniverse.contentDigest],
+  })
+  const decidedScope = (scopeReceipt?: DecisionReceipt) => {
+    const content = structuredClone(acceptanceScope.content) as Record<string, unknown>
+    if (scopeReceipt) content.scopeDecision = {
+      decisionId: 'SCOPE-1', status: 'approved', receipt: scopeReceipt,
+    }
+    return content
+  }
+  const bootstrapRequests = paths.map((exactPath, index) => ({
+    requestId: `TODOMVC-BOOTSTRAP-${index + 1}`, method: 'GET' as const,
+    url: new URL(exactPath, `${origin}/`).href, headers: [], bodyDigest: d('empty-body'),
+    redirectPolicy: { mode: 'deny' as const },
+  }))
+  const discoverySubject = (
+    decisions?: { scopeReceipt?: DecisionReceipt },
+  ): DiscoveryApprovalSubject => ({
+    schemaVersion: '1.1.0', assetId: input.assetId, prdRevision: input.prdRevision,
+    scopeDigest: digestApprovalProjection('acceptance-scope', decidedScope(decisions?.scopeReceipt)),
+    environment: 'test', baseOrigin: origin, actor: 'visitor',
+    expectedPageIdentity: { url: input.url, title: 'React • TodoMVC', heading: 'todos', ariaSignals: [] },
+    bootstrapIntentsDigest: digestText('todomvc-bootstrap/v1', canonicalizeJson(bootstrapRequests)),
+    requests: bootstrapRequests,
+    actions: [{ actionId: 'PREFLIGHT-TODOMVC-1', operation: 'local-navigation', maxUses: 1,
+      requestIds: [] }, {
+      actionId: 'PREFLIGHT-TODOMVC-RESOURCES', operation: 'http-request', maxUses: 1,
+      requestIds: bootstrapRequests.map((request) => request.requestId),
+    }],
+  })
+  const writeSubject = (discoveryGrantId: string, preflightDigest: string,
+    decisions?: { scopeReceipt?: DecisionReceipt }) => {
+    const scopeContent = decidedScope(decisions?.scopeReceipt)
+    const allInputRefs = [
+      ['project-policy', projectPolicy],
+      ['acceptance-scope', { ...acceptanceScope, content: scopeContent }],
+      ['requirement-model', requirementModel],
+      ['coverage-universe', coverageUniverse],
+      ['test-cases', testCases], ['execution-contract', executionContract],
+      ['browser-action-map', actionMap],
+    ].map(([artifactType, document]) => ({
+      artifactId: (document as ArtifactDocument).artifactId,
+      digest: digestApprovalProjection(artifactType as Parameters<typeof digestApprovalProjection>[0],
+        (document as ArtifactDocument).content),
+    }))
+    const runBundleProjection = {
+      runId: input.runId, allInputRefs,
+      schedule: [{ ordinal: 0, caseId: program.caseId, stepIds: [program.stepId],
+        actionIds: [program.actionId] }],
+      attemptPlans: [{ caseId: program.caseId, slots: 1 }],
+      signedCapabilities: [{ capabilityId: 'PENDING-TODOMVC-FULL', actionId: program.actionId,
+        operation: 'full-playwright', effect: 'reversible-write', maxUses: 1,
+        digest: d('pending-todomvc-full') }],
+      secretRefs: ['SECRET-REF-LOCAL'],
+      runtimePolicyDigest: ((projectPolicy.content as any).runtimePolicy as { digest: string }).digest,
+      runtimeIsolationPolicyDigest: 'not-applicable',
+    }
+    return {
+      schemaVersion: '2.0.0' as const, assetId: input.assetId, prdRevision: input.prdRevision,
+      executionDigest: d('todomvc-execution'),
+      scopeDigest: digestApprovalProjection('acceptance-scope', scopeContent),
+      requirementModelDigest: digestApprovalProjection('requirement-model', requirementModel.content),
+      coveragePolicyDigest: d('coverage-policy'),
+      universeDigest: (coverageUniverse.content as { universeDigest: string }).universeDigest,
+      caseDigest: digestApprovalProjection('test-cases', testCases.content),
+      actionMapDigest: digestApprovalProjection('browser-action-map', actionMap.content),
+      policyDigest: digestApprovalProjection('project-policy', projectPolicy.content),
+      executionContractDigest: digestApprovalProjection('execution-contract', executionContract.content),
+      runBundleProjectionDigest: digestApprovalProjection('run-bundle', runBundleProjection),
+      environment: 'test' as const, baseOrigin: origin, actor: 'visitor', discoveryGrantId,
+      preflightDigest, actions: [{
+        actionId: program.actionId, effect: 'reversible-write' as const,
+        dataLeaseId: program.dataLeaseId, resourceKey: 'todomvc:react:session', fencingToken: 1,
+        cleanupPlanDigest, transport: 'browser-local' as const,
+        operation: 'full-playwright' as const, programDigest: program.sourceDigest,
+        cleanupProgramDigest: program.cleanupSourceDigest, requests,
+      }],
+    }
+  }
+  const regressionManifest = replaceArtifactContent(base.regressionManifest, (() => {
+    const content = structuredClone(base.regressionManifest.content) as any
+    content.executionProfile = 'full-playwright'
+    content.caseMappings = content.caseMappings.map((item: any) => ({ ...item,
+      caseId: program.caseId, testTitle: 'TodoMVC 官方功能与持久化验收' }))
+    content.listResult.caseIds = [program.caseId]
+    content.listResult.attestation.executionProfile = 'full-playwright'
+    content.listResult.attestation.discoveredCaseIds = [program.caseId]
+    content.listResult.attestation.caseMappings = content.caseMappings
+    return content
+  })())
+  return {
+    ...base,
+    semanticArtifacts: { ...base.semanticArtifacts,
+      'project-policy': projectPolicy, 'prd-request': prdRequest, 'prd-manifest': prdManifest,
+      'acceptance-scope': acceptanceScope, 'requirement-model': requirementModel,
+      'interaction-flow': interactionFlow, 'coverage-universe': coverageUniverse,
+      'design-audit': designAudit },
+    frozenArtifacts: { 'test-cases': testCases, 'execution-contract': executionContract,
+      'browser-action-map': actionMap },
+    discoverySubject,
+    writeSubject,
+    regressionManifest,
+    expected: {
+      ...base.expected,
+      caseId: program.caseId,
+      actionId: program.actionId,
+      cleanupState: 'empty',
+    },
+  }
+}
+
 function replaceArtifactContent(document: ArtifactDocument, content: unknown): ArtifactDocument {
   const replaced = { ...structuredClone(document), content, contentDigest: '' }
   replaced.contentDigest = digestArtifactContent(

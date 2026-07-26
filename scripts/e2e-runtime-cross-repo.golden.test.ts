@@ -21,6 +21,10 @@ const publishedPackages = [
 ].sort()
 
 afterEach(async () => {
+  if (process.env.E2E_RUNTIME_PRESERVE_CROSS_REPO === '1') {
+    for (const root of roots.splice(0)) process.stderr.write(`E2E_RUNTIME_PRESERVED_ROOT:${root}\n`)
+    return
+  }
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })))
 })
 
@@ -42,6 +46,15 @@ describe('portable E2E runtime', () => {
       const project = join(canonicalRoot, 'user-project')
       const packs = join(canonicalRoot, 'packs')
       const result = await runCrossRepoRuntimeGolden({ home, project, packs })
+
+      if (process.env.E2E_RUNTIME_TODOMVC_ONLY === '1') {
+        expect(result.doctor.ready).toBe(true)
+        expect(result.todoMvc).toMatchObject({
+          executionProfile: 'full-playwright', status: 'passed', cleanupStatus: 'verified-clean',
+          report: { content: { verdict: 'accepted' } },
+        })
+        return
+      }
 
       expect(result.doctor.ready).toBe(true)
       expect(result.packageSource).toBe(process.env.E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE === 'registry'
@@ -69,6 +82,22 @@ describe('portable E2E runtime', () => {
       })
       expect(result.fullPlaywright.semanticReview.reviewDigest).toMatch(/^sha256:/)
       expect(result.fullPlaywright.semanticReview.prd.normalizedText).toContain('JSON Body')
+      if (process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === '1') {
+        expect(result.todoMvc).toMatchObject({
+          executionProfile: 'full-playwright', status: 'passed', cleanupStatus: 'verified-clean',
+          prdUrl: 'https://raw.githubusercontent.com/tastejs/todomvc/ff43b02e59dfa604386bb382034b2cd07c2bcd8a/app-spec.md',
+          targetUrl: 'https://todomvc.com/examples/typescript-react/',
+          report: { content: { verdict: 'accepted' } },
+          tracePath: [
+            'PRD-TODOMVC-OFFICIAL', 'REQ-TODOMVC-FUNCTIONAL', 'RULE-TODOMVC-FUNCTIONAL',
+            'ORACLE-TODOMVC-FUNCTIONAL', 'COV-TODOMVC-FUNCTIONAL',
+            'CASE-TODOMVC-FUNCTIONAL-1', 'ACTION-TODOMVC-FUNCTIONAL-1', 'accepted',
+          ],
+        })
+        expect(result.todoMvc?.prdRevision).toMatch(/^sha256:/)
+        expect(result.todoMvc?.semanticReview.reviewDigest).toMatch(/^sha256:/)
+        expect(result.todoMvc?.semanticReview.prd.normalizedText).toContain('# Application Specification')
+      }
       expect(result.tracePath).toEqual([
         'PRD-ORDER-1', 'REQ-ORDER-1', 'RULE-ORDER-1', 'COV-ORDER-1',
         'CASE-ORDER-1', 'ACTION-ORDER-1', 'EVIDENCE-ORDER-1', 'accepted',
@@ -77,6 +106,9 @@ describe('portable E2E runtime', () => {
       expect(published.some((path) => String(path).includes('quarantine'))).toBe(false)
       expect(await readFile(result.reportPath, 'utf8')).not.toContain(process.cwd())
       expect(await readFile(result.fullPlaywright.reportPath, 'utf8')).not.toContain(process.cwd())
+      if (result.todoMvc) {
+        expect(await readFile(result.todoMvc.reportPath, 'utf8')).not.toContain(process.cwd())
+      }
     },
     1_200_000,
   )

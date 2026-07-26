@@ -33,11 +33,11 @@ describe('package publishing metadata', () => {
     expect(skills.files).toContain('skills')
   })
 
-  test('根包和所有 workspace 统一使用 0.3.0，内部依赖全部精确同版', async () => {
+  test('根包和所有 workspace 统一使用 0.3.1，内部依赖全部精确同版', async () => {
     const root = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
       version?: string
     }
-    expect(root.version).toBe('0.3.0')
+    expect(root.version).toBe('0.3.1')
 
     for (const packageName of [...packages, ...e2ePackages]) {
     const pkg = JSON.parse(await readFile(
@@ -45,9 +45,9 @@ describe('package publishing metadata', () => {
       'utf8',
     )) as { version?: string; dependencies?: Record<string, string> }
 
-    expect(pkg.version, packageName).toBe('0.3.0')
+    expect(pkg.version, packageName).toBe('0.3.1')
     for (const [dependency, version] of Object.entries(pkg.dependencies ?? {})) {
-      if (dependency.startsWith('@mutil-skills/')) expect(version, dependency).toBe('0.3.0')
+      if (dependency.startsWith('@mutil-skills/')) expect(version, dependency).toBe('0.3.1')
       expect(version).not.toBe('latest')
       expect(version).not.toMatch(/^workspace:/)
     }

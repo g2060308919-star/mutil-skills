@@ -1473,6 +1473,49 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('execute-run 清理包装错误只公开嵌套首因固定码', async () => {
+    const fixture = await hostFixture({ executeReadOnlyRun: async () => {
+      throw Object.assign(new Error('generic cleanup wrapper'), {
+        code: 'E2E_RUNTIME_CLEANUP_FAILED',
+        cause: new AggregateError([Object.assign(new Error('private browser failure'), {
+          code: 'E2E_RUNTIME_BROWSER_TEST_CRASH',
+        })]),
+      })
+    } })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-NESTED-CRASH', fixture.roots.project),
+    ))
+    const projected = projectionFixture()
+    await fixture.store.beginRequest('SEED-NESTED-CRASH', digest('a'))
+    const lock = await fixture.store.acquireRunLock(created.projectIdentityDigest as string, created.runId as string)
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string, created.runId as string,
+      'SEED-NESTED-CRASH', digest('a'),
+      (snapshot) => ({ snapshot: {
+        ...snapshot,
+        artifactDigests: { ...snapshot.artifactDigests, ...Object.fromEntries(
+          Object.entries(projected.frozenArtifacts).map(([key, artifact]) => [key, artifact.contentDigest]),
+        ) },
+        frozenArtifacts: projected.frozenArtifacts,
+        trustedExecutionFacts: executionFactsFor(projected, snapshot),
+        workflow: { current: 'compiled', sequence: 9, eventChainDigest: digest('b') },
+      }, response: { seeded: true } }),
+      'test-seed-nested-crash', lock,
+    )
+    await lock.close()
+
+    const response = await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-EXECUTE-NESTED-CRASH'), command: 'execute-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    }))
+    expect(response).toMatchObject({ ok: false, error: {
+      code: 'E2E_RUNTIME_READ_EXECUTION_CRASHED',
+      message: expect.stringContaining('内部错误码 E2E_RUNTIME_BROWSER_TEST_CRASH'),
+    } })
+    expect(response.error?.message).not.toContain('private browser failure')
+    await fixture.store.close()
+  })
+
   test('resume-run 把 recover-write-attempt 接到生产 Host recovery coordinator，并闭合 resume request', async () => {
     const recover = vi.fn(async () => ({ status: 'blocked' as const,
       reasonCode: 'E2E_RUNTIME_WRITE_EFFECT_UNCERTAIN', browserCalls: 0 as const }))

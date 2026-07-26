@@ -80,8 +80,9 @@ test('local Authority adapter signs a subject-bound grant without inventing a We
     })
     const finalized = await session.finalize!(subject)
     expect(finalized.grant.approver).toEqual({ kind: 'local-caller' })
-    expect(Date.parse(finalized.grant.expiresAt) - Date.parse(finalized.grant.issuedAt))
-      .toBe(15 * 60_000)
+    const grantLifetime = Date.parse(finalized.grant.expiresAt) - Date.parse(finalized.grant.issuedAt)
+    expect(grantLifetime).toBeGreaterThan(0)
+    expect(grantLifetime).toBeLessThanOrEqual(15 * 60_000)
     expect(finalized.grant.approvalContext).toMatchObject({
       subject: 'local-caller', runId: snapshot.runId, subjectDigest, installationDigest,
     })

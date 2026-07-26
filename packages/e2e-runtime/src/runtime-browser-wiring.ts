@@ -31,6 +31,7 @@ import {
   type RuntimeFixedHttpRequest,
   type RuntimeHttpReadProbe,
   type SignedInjectionGrant,
+  type SignedDiscoveryGrant,
   type SignedGrant,
   type CapabilityReservation,
   type ApprovalFreshnessReceipt,
@@ -58,7 +59,7 @@ import {
   type SystemChromeSelection,
 } from './system-chrome.js'
 import { startGatewayProxyHostForRuntime } from './gateway-proxy-host.js'
-import { projectGatewayRules } from './gateway-rule-projector.js'
+import { projectGatewayRules, type ApprovedGatewayRequest } from './gateway-rule-projector.js'
 import { runtimeLayout } from './runtime-layout.js'
 import {
   inspectRuntimeCapabilityProof,
@@ -283,6 +284,67 @@ export function createAuditedRuntimeReadAuthority(
   })
 }
 
+export function projectDiscoveryPreflightRequests(grant: SignedDiscoveryGrant): {
+  navigation: Extract<SignedDiscoveryGrant['capabilities'][number], { transport: 'browser-local' }>
+  approvedRequests: ApprovedGatewayRequest[]
+  usesSignedRequestClosure: boolean
+} {
+  const navigation = grant.capabilities.filter((capability) => capability.operation === 'local-navigation')
+  if (navigation.length !== 1 || navigation[0]!.transport !== 'browser-local') {
+    throw new Error('E2E_RUNTIME_DISCOVERY_CAPABILITY_AMBIGUOUS')
+  }
+  const subject = grant.subject
+  if (subject.requests.length === 0) {
+    return {
+      navigation: navigation[0], usesSignedRequestClosure: false,
+      approvedRequests: [{
+        actionId: navigation[0].actionId, capabilityId: navigation[0].capabilityId,
+        method: 'GET', url: subject.expectedPageIdentity.url, maxUses: navigation[0].maxUses,
+        behavior: { kind: 'pass-through' },
+      }],
+    }
+  }
+  const requests = new Map(subject.requests.map((request) => [request.requestId, request]))
+  const mappings = new Map<string, { actionId: string; capabilityId: string; maxUses: number }>()
+  for (const action of subject.actions.filter((candidate) => candidate.operation === 'http-request')) {
+    const capabilities = grant.capabilities.filter((candidate): candidate is Extract<
+      SignedDiscoveryGrant['capabilities'][number], { transport: 'http' }
+    > => candidate.operation === 'http-request'
+      && candidate.actionId === action.actionId && candidate.transport === 'http')
+    if (capabilities.length !== 1
+      || canonicalizeJson(capabilities[0]!.requestIds) !== canonicalizeJson(action.requestIds)) {
+      throw new Error('E2E_RUNTIME_DISCOVERY_HTTP_CAPABILITY_MISMATCH')
+    }
+    for (const requestId of action.requestIds) {
+      if (mappings.has(requestId)) throw new Error('E2E_RUNTIME_DISCOVERY_REQUEST_DUPLICATE')
+      mappings.set(requestId, {
+        actionId: action.actionId, capabilityId: capabilities[0]!.capabilityId,
+        maxUses: capabilities[0]!.maxUses,
+      })
+    }
+  }
+  if (mappings.size !== requests.size
+    || !subject.requests.some((request) => request.method === 'GET'
+      && request.url === subject.expectedPageIdentity.url)) {
+    throw new Error('E2E_RUNTIME_DISCOVERY_REQUEST_CLOSURE_INCOMPLETE')
+  }
+  return {
+    navigation: navigation[0], usesSignedRequestClosure: true,
+    approvedRequests: subject.requests.map((request) => {
+      const mapping = mappings.get(request.requestId)
+      if (!mapping) throw new Error('E2E_RUNTIME_DISCOVERY_REQUEST_CAPABILITY_MISSING')
+      return {
+        ...mapping, requestId: request.requestId, method: request.method, url: request.url,
+        signedBodyDigest: request.bodyDigest,
+        headers: request.headers.map(({ name, value }) => ({ name, value })),
+        redirectRequestIds: request.redirectPolicy.mode === 'follow-approved'
+          ? [...request.redirectPolicy.requestIds] : [],
+        behavior: { kind: 'pass-through' as const },
+      }
+    }),
+  }
+}
+
 export function createProductionBrowserCapabilities(input: {
   homeDir: string
   browserHomeDir?: string
@@ -293,9 +355,8 @@ export function createProductionBrowserCapabilities(input: {
   const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
   const preflight = authorizeRuntimePreflight({
     prepare: async ({ snapshot, grant, attemptId }) => {
-    const navigation = grant.capabilities.filter((capability) => capability.operation === 'local-navigation')
-    if (navigation.length !== 1) throw new Error('E2E_RUNTIME_DISCOVERY_CAPABILITY_AMBIGUOUS')
-    const capability = navigation[0]!
+    const projection = projectDiscoveryPreflightRequests(grant)
+    const capability = projection.navigation
     const authorityHost = await input.authorityHost()
     const activated = await activateRuntimeGrant(authorityHost, grant)
     const authority = activated.consumeConnection((consumed) =>
@@ -305,11 +366,7 @@ export function createProductionBrowserCapabilities(input: {
         transport: createAuthenticatedRpcHttpTransport(consumed.endpoint),
         approvalBinding: consumed.approvalBinding,
       }))
-    const approvedRequests = [{
-      actionId: capability.actionId, capabilityId: capability.capabilityId,
-      method: 'GET', url: grant.subject.expectedPageIdentity.url, maxUses: capability.maxUses,
-      behavior: { kind: 'pass-through' as const },
-    }]
+    const approvedRequests = projection.approvedRequests
     let gateway: Awaited<ReturnType<typeof startGatewayProxyHostForRuntime>> | undefined
     let browser: Awaited<ReturnType<ControlledBrowserHost['open']>> | undefined
     let operationError: unknown
@@ -328,9 +385,24 @@ export function createProductionBrowserCapabilities(input: {
         homeDir: input.homeDir, runId: snapshot.runId,
         installation: await browserInstallation(), gateway,
       })
-      const rule = projectGatewayRules({ runId: snapshot.runId, approvedRequests }).rules[0]!
+      const rules = projectGatewayRules({ runId: snapshot.runId, approvedRequests }).rules
       const page = new PlaywrightPageAdapter(browser.page)
       const binding = getControlledBrowserSessionBinding(browser)
+      const navigate = async (url: string) => projection.usesSignedRequestClosure
+        ? await binding.executeWithCorrelations(rules.map((rule) => ({
+            requestId: rule.requestId!, ruleId: rule.ruleId, stepOrdinal: rule.stepOrdinal,
+            method: rule.method, url: rule.url, channel: 'http' as const, bodyDigest: rule.bodyDigest,
+            actionId: rule.actionId, capabilityId: rule.capabilityId,
+            signedBodyDigest: rule.signedBodyDigest!, redirectRequestIds: [...rule.redirectRequestIds],
+            navigation: rule.method === 'GET' && rule.url === grant.subject.expectedPageIdentity.url,
+            maxUses: rule.maxUses, headers: { ...rule.requestHeaders },
+          })), async () => await page.goto(url))
+        : await binding.executeWithCorrelation({
+            ruleId: rules[0]!.ruleId, stepOrdinal: rules[0]!.stepOrdinal,
+            method: rules[0]!.method, url: rules[0]!.url, channel: 'http',
+            bodyDigest: rules[0]!.bodyDigest, actionId: rules[0]!.actionId,
+            capabilityId: rules[0]!.capabilityId, headers: {},
+          }, async () => await page.goto(url))
       const outcome = await runBrowserPreflight({
         authorization: { grant, currentSubject: grant.subject, authority: {
           reserveForSubject: async (reservationInput) =>
@@ -341,11 +413,7 @@ export function createProductionBrowserCapabilities(input: {
         runtime: { sandboxHealthy: true, gatewayConnected: true },
         gatewayAudit: () => gateway!.handle.auditSummary(),
         page: {
-          goto: async (url) => await binding.executeWithCorrelation({
-            ruleId: rule.ruleId, stepOrdinal: rule.stepOrdinal, method: rule.method,
-            url: rule.url, channel: 'http', bodyDigest: rule.bodyDigest,
-            actionId: rule.actionId, capabilityId: rule.capabilityId, headers: {},
-          }, async () => await page.goto(url)),
+          goto: navigate,
           identity: async () => await page.identity(),
           containsText: async (text) => await page.containsText(text),
           screenshot: async () => await page.screenshot(),
@@ -1162,8 +1230,18 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
         throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TERMINAL_RECOVERY_REQUIRED')
       }
       const after = captured.get('after') ?? captured.get('cleanup')
-      if (!after || !publishedGatewayAudit || !gatewayAuditVerifierMaterial || !executionOutcomeVerifierMaterial) {
-        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_FINALIZATION_FACTS_MISSING')
+      if (!after) throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_AFTER_EVIDENCE_MISSING')
+      if (!publishedGatewayAudit) {
+        const terminalErrors = canonicalizeJson(result.finalization?.errors ?? [])
+        const safeTerminalCode = terminalErrors.match(/E2E_[A-Z0-9_]+/g)?.[0]
+        if (safeTerminalCode) throw writeWiringError(safeTerminalCode)
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_GATEWAY_PUBLICATION_MISSING')
+      }
+      if (!gatewayAuditVerifierMaterial) {
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_GATEWAY_VERIFIER_MISSING')
+      }
+      if (!executionOutcomeVerifierMaterial) {
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_OUTCOME_VERIFIER_MISSING')
       }
       const output: RuntimeWriteExecutionOutput = { caseId: result.caseId, actionId: result.actionId,
         status: result.status === 'safety-blocked' ? 'safety-blocked' : result.status,

@@ -60,6 +60,22 @@ describe('runReadOnlyCase', () => {
     expect(result).not.toHaveProperty('executionGrant')
   })
 
+  test('公开页面未暴露 data-e2e-role 时仍以已签 actor 执行，存在冲突 role 才阻断', async () => {
+    const page = fakePage()
+    page.identity = async () => ({
+      url: 'https://test.example.com/orders', title: '订单', headings: ['订单列表'],
+      ariaSignals: ['main:订单列表'],
+    })
+    const result = await runBrowserPreflight({
+      authorization: discoveryAuthorization(),
+      runtime: { sandboxHealthy: true, gatewayConnected: true },
+      gatewayAudit: { received: 1, forwarded: 1, blocked: 0, byIntent: { 'INTENT-DOCUMENT': 1 } },
+      page, attemptId: 'ATTEMPT-PREFLIGHT-PUBLIC', actionId: 'ACTION-PREFLIGHT',
+    })
+
+    expect(result).toMatchObject({ status: 'ready', observedIdentity: { headings: ['订单列表'] } })
+  })
+
   test('Discovery preflight 保留已认证 RPC 返回的固定错误码', async () => {
     const authorization = discoveryAuthorization()
     authorization.authority.reserveForSubject = async () => {

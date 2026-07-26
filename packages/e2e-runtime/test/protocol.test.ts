@@ -18,7 +18,7 @@ import {
 } from '../src/protocol.js'
 
 const digest = `sha256:${'0'.repeat(64)}`
-const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.3.0 -- repo-e2e install-runtime --version 0.3.0'
+const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.3.1 -- repo-e2e install-runtime --version 0.3.1'
 const doctorRequest = {
   schemaVersion: '1.0.0',
   requestId: 'REQ-1',
@@ -53,7 +53,7 @@ describe('Runtime protocol', () => {
     expect(response).toMatchObject({
       schemaVersion: '1.0.0',
       requestId: 'REQ-1',
-      runtime: { version: '0.3.0', installationDigest: digest },
+      runtime: { version: '0.3.1', installationDigest: digest },
       ok: false,
       error: {
         code: 'E2E_RUNTIME_NOT_INSTALLED',
@@ -243,7 +243,7 @@ describe('repo-e2e CLI protocol slice', () => {
     const exitCode = await runCli(['--version'], Readable.from([]), stdout.stream, stderr.stream)
 
     expect(exitCode).toBe(0)
-    expect(stdout.text()).toBe('0.3.0\n')
+    expect(stdout.text()).toBe('0.3.1\n')
     expect(stderr.text()).toBe('')
   })
 

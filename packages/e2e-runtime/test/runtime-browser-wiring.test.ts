@@ -8,6 +8,7 @@ import {
   issueRuntimeFullPlaywrightExecutionFreshness,
   renderRuntimeFullPlaywrightRequestBodies,
   persistRuntimeFullPlaywrightRecoveryEvidence,
+  projectDiscoveryPreflightRequests,
   restoreRuntimeFullPlaywrightRecoveryOutput,
   RuntimeFullPlaywrightTraceRecorder,
   runtimeFullPlaywrightRunnerResultDigest,
@@ -30,6 +31,40 @@ import { projectRuntimeFullPlaywrightSnapshot } from '../src/runtime-full-playwr
 import { runtimeFullPlaywrightProjectionFixture } from './runtime-full-playwright-projector.test.js'
 
 describe('Runtime browser production wiring cleanup', () => {
+  test('Discovery preflight 将已签 HTML 与静态资源请求完整投影到 Gateway', () => {
+    const emptyBody = digestText('test/v1', 'empty')
+    const target = 'https://example.test/app/'
+    const requests = [
+      { requestId: 'DOC', method: 'GET', url: target, headers: [], bodyDigest: emptyBody,
+        redirectPolicy: { mode: 'deny' } },
+      { requestId: 'JS', method: 'GET', url: `${target}app.js`, headers: [], bodyDigest: emptyBody,
+        redirectPolicy: { mode: 'deny' } },
+    ]
+    const projection = projectDiscoveryPreflightRequests({
+      subject: {
+        expectedPageIdentity: { url: target }, requests,
+        actions: [
+          { actionId: 'NAV', operation: 'local-navigation', requestIds: [] },
+          { actionId: 'BOOTSTRAP', operation: 'http-request', requestIds: ['DOC', 'JS'] },
+        ],
+      },
+      capabilities: [
+        { capabilityId: 'CAP-NAV', actionId: 'NAV', operation: 'local-navigation',
+          transport: 'browser-local', maxUses: 1 },
+        { capabilityId: 'CAP-HTTP', actionId: 'BOOTSTRAP', operation: 'http-request', transport: 'http',
+          requestIds: ['DOC', 'JS'], maxUses: 1 },
+      ],
+    } as never)
+
+    expect(projection.navigation).toMatchObject({ capabilityId: 'CAP-NAV', actionId: 'NAV' })
+    expect(projection.approvedRequests).toEqual([
+      expect.objectContaining({ actionId: 'BOOTSTRAP', capabilityId: 'CAP-HTTP',
+        requestId: 'DOC', method: 'GET', url: target, maxUses: 1, signedBodyDigest: emptyBody }),
+      expect.objectContaining({ actionId: 'BOOTSTRAP', capabilityId: 'CAP-HTTP',
+        requestId: 'JS', method: 'GET', url: `${target}app.js`, maxUses: 1, signedBodyDigest: emptyBody }),
+    ])
+  })
+
   test('full-playwright 持久结果使用 ExecutionOutcome 绑定的 runnerResultDigest', () => {
     const runnerResultDigest = digestText('test/v1', 'runner-result')
     const outcomeReceiptDigest = digestText('test/v1', 'outcome-receipt')

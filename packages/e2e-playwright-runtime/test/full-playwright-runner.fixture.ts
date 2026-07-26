@@ -374,7 +374,8 @@ describe('runFullPlaywrightCase', () => {
       'gateway-reserve',
       'fill:Name:Ada', 'press:Name:Enter', 'check:Enabled', 'click:link:Details', 'dblclick:#row',
       'hover:#remove', 'popup:page', 'new-context', 'new-page', 'request:http://127.0.0.1/api',
-      'expect', 'cleanup-page-close', 'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish',
+      'expect', 'cleanup-page-close', 'retire-program', 'retire-cleanup',
+      'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish',
     ])
     expect(result.evidence.map((item) => item.stage)).toEqual(expect.arrayContaining(['before', 'after', 'cleanup']))
     expect(result.outcome).toBeDefined()
@@ -388,6 +389,10 @@ describe('runFullPlaywrightCase', () => {
     const fixture = await readyFixture()
     const result = await runFullPlaywrightCase(fixture.input)
     expect(result.finalization?.state).toBe('completed')
+    expect(fixture.events.filter((event) => event.startsWith('retire-'))).toEqual([
+      'retire-program', 'retire-cleanup',
+    ])
+    expect(fixture.events.indexOf('retire-cleanup')).toBeLessThan(fixture.events.indexOf('gateway-freeze'))
     expect(fixture.events.filter((event) => event.startsWith('gateway-'))).toEqual([
       'gateway-reserve', 'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish',
     ])
@@ -539,7 +544,7 @@ describe('runFullPlaywrightCase', () => {
     const result = await runFullPlaywrightCase(fixture.input)
     expect(result).toMatchObject({ status: 'failed', effectObservation: 'unknown', retryAllowed: false,
       cleanup: { status: 'verified-clean' } })
-    expect(fixture.events).toEqual(['gateway-reserve', 'retire-program', 'cleanup-page-close',
+    expect(fixture.events).toEqual(['gateway-reserve', 'retire-program', 'cleanup-page-close', 'retire-cleanup',
       'gateway-freeze', 'gateway-terminal-unknown', 'gateway-publish'])
     expect(fixture.authority.getReservation(result.reservationId!)).toMatchObject({ status: 'unknown' })
     expect(await fixture.trustedLease.verifyTarget(fixture.active.leaseId, 1, d('target'))).toBe(false)
@@ -554,7 +559,7 @@ describe('runFullPlaywrightCase', () => {
     const result = await runFullPlaywrightCase(fixture.input)
     expect(result).toMatchObject({ status: 'failed', effectObservation: 'applied',
       primaryError: { present: true, type: 'undefined' }, cleanup: { status: 'verified-clean' } })
-    expect(fixture.events).toEqual(['gateway-reserve', 'cleanup-page-close',
+    expect(fixture.events).toEqual(['gateway-reserve', 'cleanup-page-close', 'retire-program', 'retire-cleanup',
       'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish'])
   })
 

@@ -1,6 +1,7 @@
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { expect, test, vi } from 'vitest'
 import { isoCBOR } from '@simplewebauthn/server/helpers'
 import {
@@ -13,7 +14,6 @@ import {
 import {
   RuntimeRequestEnvelopeSchema,
   canonicalizeJson,
-  digestArtifactContent,
   digestText,
 } from '@mutil-skills/e2e-contracts'
 import { RuntimeAuthorityHost } from '../src/authority-host.js'
@@ -43,22 +43,15 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
     }))
     const identity = await resolveProjectIdentity(roots.project)
     const normalizedText = '# 订单\n必须显示待审核订单。'
-    const requirementModel: Record<string, any> = {
-      artifactId: 'ARTIFACT-REQUIREMENT-MODEL', artifactType: 'requirement-model', schemaVersion: '1.0.0',
-      engineVersion: '0.3.0', assetId: 'ASSET-REAL-RECOVERY', prdRevision: digest('prd'),
-      generationId: 'RUN-REAL-RECOVERY', createdAt: fixedNow, contentDigest: '', signatures: [],
-      dependencies: [], graph: { defines: [], references: [] }, content: { modelRevision: 1,
-        requirements: [{ reqId: 'REQ-1', revision: 1, title: '订单列表', actors: ['operator'],
-          entities: ['order'], preconditions: [], rules: [{ ruleId: 'RULE-1', category: 'business',
-            statement: '显示待审核订单', sourceRefs: ['PRD-1'], certainty: 'explicit',
-            oracleIds: ['ORACLE-1'] }], states: [], transitions: [], observableOutcomes: [{
-            oracleId: 'ORACLE-1', statement: '页面显示待审核订单' }], applicability: [],
-          sourceRefs: ['PRD-1'], status: 'active' }], coupledDimensions: [],
-        applicabilityRules: ['RULE-1'], modelDecisionDigest: digest('model-decision') },
-    }
-    requirementModel.contentDigest = digestArtifactContent(
-      'artifact-content/1.0.0/requirement-model', requirementModel,
-    )
+    const fixtureModule = await import(pathToFileURL(join(
+      import.meta.dirname, '../../../scripts/e2e-runtime-read-only.fixture.ts',
+    )).href) as { runtimeFullPlaywrightFixture(input: Record<string, unknown>): any }
+    const { runtimeFullPlaywrightFixture } = fixtureModule
+    const fixture = runtimeFullPlaywrightFixture({
+      runId: 'RUN-REAL-RECOVERY', assetId: 'ASSET-REAL-RECOVERY', prdRevision: digest('prd'),
+      installationDigest, url: 'https://test.example.com/', now: new Date(fixedNow),
+    })
+    const frozenArtifacts = { ...fixture.semanticArtifacts, ...fixture.frozenArtifacts }
     const snapshot: RuntimeRunSnapshot = {
       schemaVersion: '1.1.0', runId: 'RUN-REAL-RECOVERY', assetId: 'ASSET-REAL-RECOVERY',
       projectIdentityDigest: identity.digest, runtimeInstallationDigest: installationDigest,
@@ -66,9 +59,14 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
         current: 'awaiting-execution-approval', sequence: 8,
         eventChainDigest: `sha256:${'8'.repeat(64)}`,
       },
-      artifactDigests: { 'prd-source': digest('prd'), scope: digest('scope'),
-        'requirement-model': requirementModel.contentDigest },
-      frozenArtifacts: { 'requirement-model': requirementModel as never },
+      artifactDigests: {
+        'prd-source': digest('prd'),
+        scope: fixture.semanticArtifacts['acceptance-scope'].contentDigest,
+        ...Object.fromEntries(Object.entries(frozenArtifacts).map(([type, artifact]) => [
+          type, (artifact as { contentDigest: string }).contentDigest,
+        ])),
+      },
+      frozenArtifacts,
       trustedExecutionFacts: { 'prd-source-snapshot': {
         schemaVersion: '1.0.0', sourceRef: 'inputs/prd.md', normalizedText,
         normalizedDigest: digestText('e2e-prd-normalized-source/v1', normalizedText),
@@ -97,19 +95,7 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
       id: credential.id, publicKey: credential.publicKey, counter: 0,
       transports: ['internal'], subject: approver.subject,
     })
-    const discoverySubject = {
-      schemaVersion: '1.1.0' as const, assetId: snapshot.assetId,
-      prdRevision: snapshot.artifactDigests['prd-source']!, scopeDigest: snapshot.artifactDigests.scope!,
-      environment: 'test' as const, baseOrigin: 'https://test.example.com', actor: 'operator',
-      expectedPageIdentity: {
-        url: 'https://test.example.com/orders/1', title: 'Order', heading: 'Order 1', ariaSignals: ['main'],
-      },
-      bootstrapIntentsDigest: digest('bootstrap'),
-      requests: [],
-      actions: [{
-        actionId: 'DISCOVERY-REAL', operation: 'local-navigation' as const, maxUses: 1 as const, requestIds: [],
-      }],
-    }
+    const discoverySubject = fixture.discoverySubject()
     const discovery = await seedAuthority.issueDiscoveryGrant({
       subject: discoverySubject, approvalSessionRef: 'seed-session', ttlMs: 120_000,
     })
@@ -126,36 +112,18 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
         url: discoverySubject.expectedPageIdentity.url,
         title: discoverySubject.expectedPageIdentity.title,
         headings: [discoverySubject.expectedPageIdentity.heading],
-        role: discoverySubject.actor, ariaSignals: ['main'],
+        role: discoverySubject.actor, ariaSignals: discoverySubject.expectedPageIdentity.ariaSignals,
       } },
     })
-    const grantSubject = {
-      schemaVersion: '2.0.0' as const, assetId: snapshot.assetId,
-      prdRevision: snapshot.artifactDigests['prd-source']!, executionDigest: digest('execution'),
-      scopeDigest: snapshot.artifactDigests.scope!, requirementModelDigest: digest('model'),
-      coveragePolicyDigest: digest('coverage'), universeDigest: digest('universe'),
-      caseDigest: digest('cases'), actionMapDigest: digest('actions'), policyDigest: digest('policy'),
-      executionContractDigest: digest('contract'), runBundleProjectionDigest: digest('bundle'),
-      environment: 'test' as const, baseOrigin: discoverySubject.baseOrigin, actor: discoverySubject.actor,
-      discoveryGrantId: discovery.grantId, preflightDigest,
-      actions: [{
-        actionId: 'ACTION-WRITE-REAL', effect: 'reversible-write' as const,
-        dataLeaseId: 'LEASE-REAL', resourceKey: 'order:1', fencingToken: 1,
-        cleanupPlanDigest: digest('cleanup'),
-        requests: [{
-          intentId: 'INTENT-WRITE-REAL', method: 'POST', canonicalOrigin: discoverySubject.baseOrigin,
-          exactPath: '/orders/1', query: [], payload: { kind: 'no-body' as const },
-          targetFingerprint: digest('target'), maxRequests: 1, expectedOrder: 1,
-        }],
-      }],
-    }
+    const grantSubject = fixture.writeSubject(discovery.grantId, preflightDigest)
     seedAuthority.close()
     const leaseAuthority = await LocalLeaseAuthority.open({
       now, statePath: leasePath, testWorkspaceRoots: [process.cwd()],
     })
+    const writeAction = grantSubject.actions[0]!
     await leaseAuthority.acquireBound({
-      leaseId: 'LEASE-REAL', runId: snapshot.runId, resourceKey: 'order:1',
-      resourceFingerprint: digest('target'), exclusive: true, ttlMs: 300_000,
+      leaseId: writeAction.dataLeaseId, runId: snapshot.runId, resourceKey: writeAction.resourceKey,
+      resourceFingerprint: writeAction.requests[0]!.targetFingerprint, exclusive: true, ttlMs: 300_000,
     })
     leaseAuthority.close()
     const request = RuntimeRequestEnvelopeSchema.parse({
@@ -233,7 +201,7 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
     currentAuthority = undefined
     currentAuthority = await startAuthority()
     const second = await runtime.handle(confirmedRequest, JSON.stringify(confirmedRequest))
-    expect(second).toMatchObject({
+    expect(second, JSON.stringify(second)).toMatchObject({
       ok: true,
       result: {
         signedGrant: { subject: grantSubject },
@@ -253,15 +221,16 @@ test('real Runtime recovers a child-committed Grant after Host1 closes without a
       now,
     })
     try {
-      await expect(clients.gatewayAuthority.verifyForSubject(result.signedGrant, grantSubject))
+      await expect(clients.browserLocalAuthority.verifyForSubject(result.signedGrant, grantSubject))
         .resolves.toEqual({ allowed: true })
-      await expect(clients.gatewayAuthority.reserveForSubject({
+      await expect(clients.browserLocalAuthority.reserveForSubject({
         grant: result.signedGrant, currentSubject: grantSubject,
         capabilityId: result.signedGrant.capabilities[0].capabilityId,
-        actionId: grantSubject.actions[0].actionId, attemptId: 'ATTEMPT-REAL-RECOVERY',
+        actionId: writeAction.actionId, attemptId: 'ATTEMPT-REAL-RECOVERY',
         attemptContext: {
           assetId: snapshot.assetId, generationId: snapshot.runId,
-          prdRevision: snapshot.artifactDigests['prd-source']!, runId: snapshot.runId, caseId: 'CASE-1',
+          prdRevision: snapshot.artifactDigests['prd-source']!, runId: snapshot.runId,
+          caseId: fixture.expected.caseId,
         },
       })).resolves.toMatchObject({ status: 'reserved', attemptId: 'ATTEMPT-REAL-RECOVERY' })
     } finally { clients.destroy() }

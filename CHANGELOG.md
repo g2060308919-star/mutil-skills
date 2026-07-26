@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.1] - 2026-07-26
+
+### Added
+
+- 新增固定 TodoMVC 官方 PRD 与 TypeScript+React 公网站点的完整 full-playwright Golden，覆盖表单、键盘、checkbox、路由、双击、Escape、blur、hover、持久化、Reload 和 Cleanup。
+- 新增浏览器网络请求的“有序阶段、阶段内无序”模型，使并发 CSS/JS 首次请求既可审计又不会被误判越序。
+
+### Fixed
+
+- Discovery preflight 使用签名请求的完整资源闭包，不再只批准主文档。
+- full-playwright 在 Gateway 冻结发布前关闭 program/cleanup 浏览器生命周期，避免成功请求残留 HTTPS tunnel 阻塞审计最终化。
+- Gateway 子进程只跟踪完整匹配并已授权的真实传输，并将上游完成事件绑定回原始授权 requestId。
+- Authority Grant 的有效期不再越过父 approval context；公开页缺少 `data-e2e-role` 时允许执行，但显式冲突仍 fail-closed。
+- TodoMVC 生成资产统一绑定 `visitor` actor，确保 PRD、Requirement、Case、审批、执行身份和最终报告闭合。
+
+### Changed
+
+- 根包、十四个 workspace、内部依赖、Skill 安装命令与 Runtime/Engine 常量统一升级到精确 `0.3.1`。
+
 ## [0.3.0] - 2026-07-24
 
 ### Added

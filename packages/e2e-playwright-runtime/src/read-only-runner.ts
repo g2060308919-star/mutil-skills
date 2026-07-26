@@ -110,7 +110,7 @@ export async function runBrowserPreflight(input: {
     } else if (observedIdentity.title !== expected.title || !observedIdentity.headings.includes(expected.heading)
       || expected.ariaSignals.some((signal) => !(observedIdentity.ariaSignals ?? []).includes(signal))) {
       result = { status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH', observedIdentity }
-    } else if (observedIdentity.role !== currentSubject.actor) {
+    } else if (observedIdentity.role !== undefined && observedIdentity.role !== currentSubject.actor) {
       result = { status: 'input-blocked', reasonCode: 'E2E_RUNTIME_ROLE_MISMATCH', observedIdentity }
     } else result = { status: 'ready', observedIdentity }
   } catch {

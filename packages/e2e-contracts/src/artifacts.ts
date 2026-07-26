@@ -113,9 +113,10 @@ export const FullPlaywrightProgramSchema = z.object({
   if (new Set(intentIds).size !== intentIds.length) {
     context.addIssue({ code: 'custom', message: 'full Playwright request intentId 必须唯一', path: ['networkRequests'] })
   }
-  if (new Set(expectedOrders).size !== expectedOrders.length) {
+  const orderStages = [...new Set(expectedOrders)].sort((left, right) => left - right)
+  if (orderStages.some((order, index) => order !== index + 1)) {
     context.addIssue({
-      code: 'custom', message: 'full Playwright request expectedOrder 必须唯一', path: ['networkRequests'],
+      code: 'custom', message: 'full Playwright request expectedOrder 阶段必须从 1 开始连续', path: ['networkRequests'],
     })
   }
   if (program.networkRequestBodies !== undefined) {

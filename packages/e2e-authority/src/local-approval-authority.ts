@@ -869,7 +869,7 @@ export class LocalApprovalAuthority {
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
-      expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
+      expiresAt: boundedGrantExpiresAt(issuedAt, request.ttlMs, approval.context),
       capabilities: subject.actions.map((action): DiscoveryCapability => action.operation === 'http-request'
         ? {
             capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'), transport: 'http',
@@ -938,7 +938,7 @@ export class LocalApprovalAuthority {
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
-      expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
+      expiresAt: boundedGrantExpiresAt(issuedAt, request.ttlMs, approval.context),
       capabilities: subject.actions.map((action): ReadCapability => action.operation === 'http-request'
         ? {
             capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'), transport: 'http',
@@ -1000,7 +1000,7 @@ export class LocalApprovalAuthority {
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
-      expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
+      expiresAt: boundedGrantExpiresAt(issuedAt, request.ttlMs, approval.context),
       capabilities: subject.actions.map((action): ReversibleWriteCapability => {
         const common = {
           capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'),
@@ -1053,7 +1053,7 @@ export class LocalApprovalAuthority {
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
-      expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
+      expiresAt: boundedGrantExpiresAt(issuedAt, request.ttlMs, approval.context),
       capabilities: subject.actions.map((action): InjectionCapability => ({
         capabilityId: randomUUID(),
         nonce: randomBytes(32).toString('hex'),
@@ -1108,7 +1108,7 @@ export class LocalApprovalAuthority {
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
-      expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
+      expiresAt: boundedGrantExpiresAt(issuedAt, request.ttlMs, approval.context),
       capabilities: subject.actions.map((action): WebSocketReadCapability => ({
         capabilityId: randomUUID(),
         nonce: randomBytes(32).toString('hex'),
@@ -1157,7 +1157,7 @@ export class LocalApprovalAuthority {
       subject,
       subjectDigest,
       issuedAt: issuedAt.toISOString(),
-      expiresAt: new Date(issuedAt.getTime() + request.ttlMs).toISOString(),
+      expiresAt: boundedGrantExpiresAt(issuedAt, request.ttlMs, approval.context),
       capabilities: subject.actions.map((action): SseReadCapability => ({
         capabilityId: randomUUID(), nonce: randomBytes(32).toString('hex'), transport: 'sse', effect: 'read',
         actionId: action.actionId, origin: action.origin, exactPath: action.exactPath,
@@ -2569,6 +2569,17 @@ function approvalContextMismatch(
   return undefined
 }
 
+function boundedGrantExpiresAt(
+  issuedAt: Date,
+  ttlMs: number,
+  approvalContext: CanonicalApprovalContext,
+): string {
+  return new Date(Math.min(
+    issuedAt.getTime() + ttlMs,
+    Date.parse(approvalContext.expiresAt),
+  )).toISOString()
+}
+
 function encryptPrivateKey(
   key: KeyObject,
   encryptionKey: Buffer,
@@ -3730,7 +3741,7 @@ function matchesReadyPreflight(
   return canonicalUrl(observed.url) === canonicalUrl(subject.expectedPageIdentity.url)
     && observed.title === subject.expectedPageIdentity.title
     && observed.headings.includes(subject.expectedPageIdentity.heading)
-    && observed.role === subject.actor
+    && (observed.role === undefined || observed.role === subject.actor)
     && subject.expectedPageIdentity.ariaSignals.every((signal) => (observed.ariaSignals ?? []).includes(signal))
 }
 

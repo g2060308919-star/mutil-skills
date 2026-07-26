@@ -182,6 +182,34 @@ describe('ReversibleWriteGateway', () => {
     await gateway.complete(digestText('outcome/v1', 'interleaved-complete'))
   })
 
+  test('同一 expectedOrder 阶段的 intent 首次出现允许无序，但下一阶段必须等待本阶段完整', async () => {
+    const { grant, capability } = fixture()
+    capability.requests = [
+      capability.requests[0]!,
+      { ...capability.requests[0]!, intentId: 'INTENT-CSS', exactPath: '/assets/app.css', expectedOrder: 2 },
+      { ...capability.requests[0]!, intentId: 'INTENT-JS', exactPath: '/assets/app.js', expectedOrder: 2 },
+      { ...capability.requests[0]!, intentId: 'INTENT-READY', exactPath: '/api/ready', expectedOrder: 3 },
+    ]
+    grant.capabilities = [capability]
+    const deps = dependencies()
+    const gateway = new ReversibleWriteGateway({ grant, currentSubject: grant.subject, capability,
+      attemptId: 'ATTEMPT-GROUPED', attemptContext, ...deps })
+
+    await expect(gateway.decide({ method: 'GET', url: 'https://test.example.com/api/orders/100' }))
+      .resolves.toMatchObject({ decision: 'forward', intentId: 'INTENT-LOAD' })
+    await expect(gateway.decide({ method: 'GET', url: 'https://test.example.com/assets/app.js' }))
+      .resolves.toMatchObject({ decision: 'forward', intentId: 'INTENT-JS' })
+    await expect(gateway.decide({ method: 'GET', url: 'https://test.example.com/api/ready' }))
+      .resolves.toMatchObject({ decision: 'block', code: 'E2E_GATEWAY_REQUEST_OUT_OF_ORDER' })
+    await expect(gateway.decide({ method: 'GET', url: 'https://test.example.com/assets/app.css' }))
+      .resolves.toMatchObject({ decision: 'forward', intentId: 'INTENT-CSS' })
+    await expect(gateway.decide({ method: 'GET', url: 'https://test.example.com/api/ready' }))
+      .resolves.toMatchObject({ decision: 'forward', intentId: 'INTENT-READY' })
+
+    expect(gateway.isRequestSequenceComplete()).toBe(true)
+    await gateway.complete(digestText('outcome/v1', 'grouped-complete'))
+  })
+
   test('records signed-publication inputs for every write decision and the completed reservation', async () => {
     const { grant, capability } = fixture()
     const deps = dependencies()

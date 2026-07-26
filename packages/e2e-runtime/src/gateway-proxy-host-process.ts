@@ -26,6 +26,8 @@ let childSequence = 0
 let closed = false
 let accepting = true
 const inFlightRequests = new Set<string>()
+const parentObservedTransports = new Set<string>()
+const locallySettledRequests = new Set<string>()
 const pending = new Map<string, {
   sequence: number
   operation: string
@@ -33,6 +35,7 @@ const pending = new Map<string, {
   reject(error: Error): void
 }>()
 const remainingUses = new Map<string, number>()
+const authorizedRequestIdsByRule = new Map<string, string[]>()
 
 void readBootstrapKey().then((key) => {
   sessionKey = key
@@ -113,11 +116,21 @@ async function handleParentRequest(operation: string, payload: unknown): Promise
 }
 
 async function registerRules(server: Mockttp, rules: ProjectedGatewayRule[]): Promise<void> {
-  await server.on('response', (response) => { inFlightRequests.delete(response.id) })
-  await server.on('abort', (request) => { inFlightRequests.delete(request.id) })
+  await server.on('response', (response) => {
+    inFlightRequests.delete(response.id)
+    parentObservedTransports.delete(response.id)
+    locallySettledRequests.delete(response.id)
+  })
+  await server.on('abort', (request) => {
+    inFlightRequests.delete(request.id)
+    parentObservedTransports.delete(request.id)
+    locallySettledRequests.delete(request.id)
+  })
   await server.on<{ downstreamAborted?: boolean }>('rule-event', (event) => {
     if (event.eventType !== 'passthrough-abort') return
     inFlightRequests.delete(event.requestId)
+    parentObservedTransports.delete(event.requestId)
+    locallySettledRequests.delete(event.requestId)
     void callParent('transport-unknown', {
       requestId: event.requestId,
       observation: event.eventData.downstreamAborted === true
@@ -143,9 +156,16 @@ async function registerRules(server: Mockttp, rules: ProjectedGatewayRule[]): Pr
       await builder.thenPassThrough({
         transformRequest: { updateHeaders: strippedHeaders() },
         beforeResponse: async (response, request) => {
+          const authorizedIds = authorizedRequestIdsByRule.get(rule.ruleId) ?? []
+          const exactIndex = authorizedIds.indexOf(request.id)
+          const requestId = exactIndex >= 0
+            ? authorizedIds.splice(exactIndex, 1)[0]!
+            : authorizedIds.shift()
+          if (!requestId) throw gatewayChildError('E2E_GATEWAY_TRANSPORT_REQUEST_ID_MISSING')
           await callParent('transport-complete', {
-            ruleId: rule.ruleId, requestId: request.id, status: response.statusCode,
+            ruleId: rule.ruleId, requestId, status: response.statusCode,
           })
+          parentObservedTransports.add(requestId)
         },
       })
     } else if (rule.behavior.kind === 'http-response') {
@@ -158,6 +178,7 @@ async function registerRules(server: Mockttp, rules: ProjectedGatewayRule[]): Pr
     if (!accepting || !isSseRequest(request)) return false
     inFlightRequests.add(request.id)
     await callParent('default-deny', snapshotRequest(request))
+    locallySettledRequests.add(request.id)
     return true
   }).thenCallback(() => {
     const disposition = sseUnsupportedDisposition()
@@ -171,6 +192,7 @@ async function registerRules(server: Mockttp, rules: ProjectedGatewayRule[]): Pr
     if (!accepting) return { statusCode: 503, body: 'E2E_GATEWAY_FROZEN' }
     inFlightRequests.add(request.id)
     await callParent('default-deny', snapshotRequest(request))
+    locallySettledRequests.add(request.id)
     return { statusCode: 403, body: 'E2E_GATEWAY_DEFAULT_DENY', headers: { 'content-type': 'text/plain' } }
   })
   await server.forAnyWebSocket().matching(async (request) => {
@@ -188,7 +210,6 @@ async function registerRules(server: Mockttp, rules: ProjectedGatewayRule[]): Pr
 
 async function ruleMatches(request: CompletedRequest, rule: ProjectedGatewayRule): Promise<boolean> {
   if (!accepting) return false
-  inFlightRequests.add(request.id)
   if (rule.channel !== 'websocket' && isSseRequest(request)) return false
   const token = request.headers['x-mutil-e2e-action-token']
   const actionId = request.headers['x-mutil-e2e-action-id']
@@ -209,18 +230,34 @@ async function ruleMatches(request: CompletedRequest, rule: ProjectedGatewayRule
     }) || Object.entries(rule.requestHeaders).some(([name, value]) => singleHeader(request.headers[name]) !== value)) return false
   const available = remainingUses.get(rule.ruleId) ?? 0
   if (available < 1) return false
+  // Mockttp evaluates one request against multiple rule matchers. Registering before the
+  // complete match caused HTTPS CONNECT and every rejected candidate to become phantom
+  // in-flight application traffic, so publication drain could never reach zero.
+  inFlightRequests.add(request.id)
   // 在首个 await 之前同步 claim，避免并发 matcher 同时穿透 maxUses。
   remainingUses.set(rule.ruleId, available - 1)
-  const result = await callParent('authorize', {
-    ruleId: rule.ruleId,
-    requestId: request.id,
-    channel: rule.channel,
-    method: request.method,
-    url: observedUrl,
-    bodyBase64Url: request.body.buffer.toString('base64url'),
-    ...(contentType === undefined ? {} : { contentType }),
-  })
-  return isRecord(result) && result.allowed === true
+  let allowed = false
+  try {
+    const result = await callParent('authorize', {
+      ruleId: rule.ruleId,
+      requestId: request.id,
+      channel: rule.channel,
+      method: request.method,
+      url: observedUrl,
+      bodyBase64Url: request.body.buffer.toString('base64url'),
+      ...(contentType === undefined ? {} : { contentType }),
+    })
+    allowed = isRecord(result) && result.allowed === true
+    if (allowed) {
+      const ids = authorizedRequestIdsByRule.get(rule.ruleId) ?? []
+      ids.push(request.id)
+      authorizedRequestIdsByRule.set(rule.ruleId, ids)
+    }
+    return allowed
+  } finally {
+    // Rejected/failed authorization never starts an upstream transport.
+    if (!allowed) inFlightRequests.delete(request.id)
+  }
 }
 
 function normalizeWebSocketProxyUrl(observed: string, approved: string): string {
@@ -245,7 +282,16 @@ function isSseRequest(request: Pick<CompletedRequest, 'headers' | 'method'>): bo
 async function waitForDrain(): Promise<void> {
   const deadline = Date.now() + 5_000
   while (inFlightRequests.size > 0) {
-    if (Date.now() >= deadline) throw gatewayChildError('E2E_GATEWAY_DRAIN_TIMEOUT')
+    if (Date.now() >= deadline) {
+      // A pass-through response may be fully observed and durably acknowledged by the trusted
+      // parent while an HTTPS client keeps the response-side connection event open. Only those
+      // parent-confirmed transports may be reconciled here; every other request remains a hard
+      // drain failure.
+      for (const requestId of parentObservedTransports) inFlightRequests.delete(requestId)
+      for (const requestId of locallySettledRequests) inFlightRequests.delete(requestId)
+      if (inFlightRequests.size === 0) return
+      throw gatewayChildError('E2E_GATEWAY_DRAIN_TIMEOUT')
+    }
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
 }

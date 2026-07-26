@@ -73,6 +73,21 @@ describe('FullPlaywrightProgram', () => {
     expect(FullPlaywrightProgramSchema.safeParse({ ...value, networkRequests: tooManyRequests }).success).toBe(false)
   })
 
+  test('full Playwright network request 支持连续阶段内无序，并拒绝阶段断档', () => {
+    const value = program()
+    const grouped = [
+      value.networkRequests[0]!,
+      { ...value.networkRequests[0]!, intentId: 'INTENT-CSS', exactPath: '/app.css', expectedOrder: 2 },
+      { ...value.networkRequests[0]!, intentId: 'INTENT-JS', exactPath: '/app.js', expectedOrder: 2 },
+    ]
+
+    expect(FullPlaywrightProgramSchema.safeParse({ ...value, networkRequests: grouped }).success).toBe(true)
+    expect(FullPlaywrightProgramSchema.safeParse({
+      ...value,
+      networkRequests: grouped.map((request, index) => index === 0 ? request : { ...request, expectedOrder: 3 }),
+    }).success).toBe(false)
+  })
+
   test('拒绝 source 或 cleanup digest 与冻结源码不一致', () => {
     const value = program()
     expect(FullPlaywrightProgramSchema.safeParse({ ...value, sourceDigest: digest('c') }).success).toBe(false)

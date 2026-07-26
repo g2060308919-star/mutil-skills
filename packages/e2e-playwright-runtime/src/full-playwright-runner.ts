@@ -227,7 +227,24 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   let cleanupValue: unknown
   let retireCaught = false
   let retireError: unknown
+  let programRetireAttempted = false
+  let cleanupRetireAttempted = false
   let infrastructureError: unknown
+
+  const recordRetireFailure = (error: unknown): void => {
+    if (!retireCaught) { retireCaught = true; retireError = error }
+    else retireError = new HostAggregateError([retireError, error], 'E2E_FULL_PLAYWRIGHT_RETIRE_FAILED')
+  }
+  const retireProgram = async (): Promise<void> => {
+    if (programRetireAttempted) return
+    programRetireAttempted = true
+    try { await session.retireProgram() } catch (error) { recordRetireFailure(error) }
+  }
+  const retireCleanup = async (): Promise<void> => {
+    if (cleanupRetireAttempted) return
+    cleanupRetireAttempted = true
+    try { await session.retireCleanup() } catch (error) { recordRetireFailure(error) }
+  }
 
   try { evidence.push(...await captureChecked(session, 'before')) }
   catch (error) {
@@ -241,9 +258,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     primaryCaught = true
     primaryError = error
     programTimedOut = isDeadline(error, 'program')
-    if (programTimedOut) {
-      try { await session.retireProgram() } catch (retireFailure) { retireCaught = true; retireError = retireFailure }
-    }
+    if (programTimedOut) await retireProgram()
   }
 
   try { evidence.push(...await captureChecked(session, 'after')) }
@@ -265,12 +280,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     cleanupCaught = true
     cleanupError = new HostError('E2E_FULL_PLAYWRIGHT_CLEANUP_NOT_VERIFIED')
   }
-  if (cleanupCaught) {
-    try { await session.retireCleanup() } catch (error) {
-      if (!retireCaught) { retireCaught = true; retireError = error }
-      else retireError = new HostAggregateError([retireError, error], 'E2E_FULL_PLAYWRIGHT_RETIRE_FAILED')
-    }
-  }
+  if (cleanupCaught) await retireCleanup()
   try { evidence.push(...await captureChecked(session, 'cleanup')) }
   catch (error) {
     infrastructureError ??= error
@@ -280,6 +290,11 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
       'evidence-capture-failed', infrastructureError)
   }
+
+  // No browser operation is permitted after cleanup evidence. Retiring both independent
+  // lifecycles here closes HTTPS CONNECT tunnels before Gateway freeze/publication; otherwise
+  // a successful public-site run can leave the audit drain waiting on live browser sockets.
+  await Promise.all([retireProgram(), retireCleanup()])
 
   let gateway: FullPlaywrightGatewayObservation
   try { gateway = await session.freezeGateway() }
@@ -300,7 +315,8 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
       'effect-observation-failed', error)
   }
-  const unknown = programTimedOut || cleanupCaught || gateway.summary.blocked > 0 || observedEffect === 'unknown'
+  const unknown = programTimedOut || cleanupCaught || retireCaught
+    || gateway.summary.blocked > 0 || observedEffect === 'unknown'
   const effectObservation = unknown ? 'unknown' as const : observedEffect
   const status = !primaryCaught && !unknown && effectObservation === 'applied' ? 'passed' as const : 'failed' as const
   const cleanupStatus = cleanupCaught ? (cleanupTimedOut ? 'unknown' as const : 'failed' as const)
@@ -337,6 +353,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   let publishedGateway: FullPlaywrightGatewayResult | undefined
   const unknownObservation = unknown
     ? programTimedOut ? 'full-playwright-program-timeout-effect-unknown'
+      : retireCaught ? 'full-playwright-browser-retire-failed-effect-unknown'
       : gateway.summary.blocked > 0 ? 'full-playwright-gateway-blocked-effect-unknown'
         : 'full-playwright-cleanup-unverified-effect-unknown'
     : undefined

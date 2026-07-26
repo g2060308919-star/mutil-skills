@@ -359,7 +359,7 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   const cleanupPlanDigest = digestCleanupPlanDefinition(cleanupPlan)
   const capability = { capabilityId: 'CAP-FULL-1', actionId: 'ACTION-WRITE-1', operation: 'full-playwright',
     effect: 'reversible-write', maxUses: 1, digest: digest('cap-full') }
-  const extraRequest = { ...request, intentId: 'INTENT-FULL-EXTRA', exactPath: '/extra', expectedOrder: 2 }
+  const extraRequest = { ...request, intentId: 'INTENT-FULL-EXTRA', exactPath: '/extra', expectedOrder: 1 }
   const extraProgram = { ...program, stepId: 'STEP-WRITE-EXTRA', actionId: 'ACTION-WRITE-EXTRA',
     cleanupPlanId: 'CLEANUP-EXTRA', networkRequests: [extraRequest] }
   const extraCleanupPlan = { ...cleanupPlan, cleanupPlanId: 'CLEANUP-EXTRA', actionId: 'ACTION-WRITE-EXTRA',

@@ -46,6 +46,18 @@ export interface CrossRepoRuntimeGoldenResult {
     report: { content: { verdict: string } }
     reportPath: string
   }
+  todoMvc?: {
+    executionProfile: 'full-playwright'
+    status: 'passed'
+    cleanupStatus: 'verified-clean'
+    prdUrl: string
+    targetUrl: string
+    prdRevision: string
+    semanticReview: { reviewDigest: string; prd: { normalizedText: string } }
+    report: { content: { verdict: string } }
+    reportPath: string
+    tracePath: string[]
+  }
   tracePath: string[]
   reportPath: string
 }
@@ -81,6 +93,8 @@ export async function runCrossRepoRuntimeGolden(input: {
     try {
       await cp(join(publicationSource, 'scripts', 'e2e-runtime-cross-repo-child.mjs'),
         join(harnessRoot, 'runner.mjs'))
+      await cp(join(publicationSource, 'scripts', 'e2e-todomvc-app-spec.fixture.md'),
+        join(harnessRoot, 'todomvc-app-spec.fixture.md'))
       await compileHarnessFixture(
         join(publicationSource, 'scripts', 'e2e-runtime-read-only.fixture.ts'),
         join(harnessRoot, 'fixture.js'),
@@ -103,6 +117,8 @@ export async function runCrossRepoRuntimeGolden(input: {
     expectedPackIntegrities = await releasePackIntegrities(releasePacksDir, RELEASE_PACKAGES)
     await cp(join(SOURCE_ROOT, 'scripts', 'e2e-runtime-cross-repo-child.mjs'),
       join(harnessRoot, 'runner.mjs'))
+    await cp(join(SOURCE_ROOT, 'scripts', 'e2e-todomvc-app-spec.fixture.md'),
+      join(harnessRoot, 'todomvc-app-spec.fixture.md'))
     await compileHarnessFixture(
       join(SOURCE_ROOT, 'scripts', 'e2e-runtime-read-only.fixture.ts'),
       join(harnessRoot, 'fixture.js'),
@@ -125,6 +141,8 @@ export async function runCrossRepoRuntimeGolden(input: {
   await Promise.all([
     cp(join(harnessRoot, 'runner.mjs'), join(input.project, 'runner.mjs')),
     cp(join(harnessRoot, 'fixture.js'), join(input.project, 'fixture.js')),
+    cp(join(harnessRoot, 'todomvc-app-spec.fixture.md'),
+      join(input.project, 'todomvc-app-spec.fixture.md')),
   ])
 
   const runtimePackageRoot = join(input.project, 'node_modules', '@mutil-skills', 'e2e-runtime')
@@ -434,6 +452,10 @@ function childRuntimeEnvironment(input: {
     TMPDIR: process.env.TMPDIR,
     E2E_PACKED_PROJECT: input.project,
     E2E_PACKED_RUNTIME_PACKAGE_ROOT: input.runtimePackageRoot,
+    ...(process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === undefined ? {}
+      : { E2E_RUNTIME_RUN_TODOMVC_PUBLIC: process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC }),
+    ...(process.env.E2E_RUNTIME_TODOMVC_ONLY === undefined ? {}
+      : { E2E_RUNTIME_TODOMVC_ONLY: process.env.E2E_RUNTIME_TODOMVC_ONLY }),
   }
 }
 
@@ -447,6 +469,19 @@ function assertAbsoluteDistinct(input: { home: string; project: string; packs: s
 function parseResult(value: unknown): CrossRepoRuntimeGoldenResult {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error('跨仓结果无效')
   const result = value as CrossRepoRuntimeGoldenResult
+  if (process.env.E2E_RUNTIME_TODOMVC_ONLY === '1') {
+    if (result.doctor?.ready !== true
+      || result.todoMvc?.executionProfile !== 'full-playwright'
+      || result.todoMvc.status !== 'passed'
+      || result.todoMvc.cleanupStatus !== 'verified-clean'
+      || !/^sha256:[a-f0-9]{64}$/.test(result.todoMvc.prdRevision)
+      || !/^sha256:[a-f0-9]{64}$/.test(result.todoMvc.semanticReview?.reviewDigest)
+      || result.todoMvc.report?.content?.verdict !== 'accepted'
+      || !Array.isArray(result.todoMvc.tracePath)) {
+      throw new Error('跨仓 TodoMVC 诊断结果不满足完整 Runtime Golden 契约')
+    }
+    return result
+  }
   if (result.doctor?.ready !== true
     || result.managedBrowserInstalled !== false
     || result.report?.content?.runtimeProvenance?.sourceRepositoryIndependent !== true
@@ -462,6 +497,14 @@ function parseResult(value: unknown): CrossRepoRuntimeGoldenResult {
     || result.fullPlaywright.jsonBodyVerified !== true
     || !/^sha256:[a-f0-9]{64}$/.test(result.fullPlaywright.semanticReview?.reviewDigest)
     || result.fullPlaywright.report?.content?.verdict !== 'accepted'
+    || (process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === '1'
+      && (result.todoMvc?.executionProfile !== 'full-playwright'
+        || result.todoMvc.status !== 'passed'
+        || result.todoMvc.cleanupStatus !== 'verified-clean'
+        || !/^sha256:[a-f0-9]{64}$/.test(result.todoMvc.prdRevision)
+        || !/^sha256:[a-f0-9]{64}$/.test(result.todoMvc.semanticReview?.reviewDigest)
+        || result.todoMvc.report?.content?.verdict !== 'accepted'
+        || !Array.isArray(result.todoMvc.tracePath)))
     || !Array.isArray(result.tracePath)
     || typeof result.reportPath !== 'string') {
     throw new Error('跨仓结果不满足完整 Runtime Golden 契约')

@@ -950,7 +950,8 @@ export class E2ERuntimeHost {
         },
         persistencePending: (cause) => runtimeHostError(
           'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING', 'safety',
-          'Authority 已最终化 Grant，但 Run Store outcome 尚未持久化；请求保持 pending 并可恢复', cause,
+          `Authority 已最终化 Grant，但 Run Store outcome 尚未持久化；请求保持 pending 并可恢复；内部错误码 ${safeExecutionCauseCode(cause) ?? 'E2E_RUNTIME_PERSISTENCE_FAILURE'}`,
+          cause,
         ),
       })
     }
@@ -2571,7 +2572,16 @@ function safeExecutionCauseCode(cause: unknown): string | undefined {
   // E2EError created across that package boundary is not guaranteed to satisfy instanceof.
   // Only project the fixed-format code; never expose the foreign error message or stack.
   if (typeof cause === 'object' && cause !== null && 'code' in cause
-    && typeof cause.code === 'string' && /^E2E_[A-Z0-9_]+$/.test(cause.code)) return cause.code
+    && typeof cause.code === 'string' && /^E2E_[A-Z0-9_]+$/.test(cause.code)) {
+    // Resource settlement deliberately wraps the operation error and every cleanup error.
+    // Prefer the nested fixed code so operators can distinguish the execution failure that
+    // triggered cleanup from the generic settlement wrapper without leaking raw messages.
+    if (cause.code === 'E2E_RUNTIME_CLEANUP_FAILED' && 'cause' in cause) {
+      const nested = safeExecutionCauseCode(cause.cause)
+      if (nested !== undefined) return nested
+    }
+    return cause.code
+  }
   if (cause instanceof AggregateError) {
     for (const error of cause.errors) {
       const code = safeExecutionCauseCode(error)
