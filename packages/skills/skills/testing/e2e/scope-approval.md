@@ -12,7 +12,7 @@
 ## 允许的语义输出
 
 纳入/排除候选、歧义、依赖、视觉边界、浏览器范围和版本化 Scope Decision Subject 展示摘要；
-标准输出为 `acceptance-scope`（Schema 2.0.0）及专用 DecisionReceipt 引用。
+标准输出为 `acceptance-scope`（Schema 2.0.0）及专用 DecisionReceipt 引用。每个 Clause 恰好一次处置为 `modeled`、`excluded`、`not-applicable` 或 `ambiguous`；后三类必须保留可审查理由，ambiguous 必须形成待决定项。
 
 ## 调用的确定性 API
 
@@ -24,13 +24,13 @@ Runtime 内部必须调用 Contracts 对六类范围事实做严格 `scope-decis
 
 ## 执行步骤
 
-先完成并验证 Lineage DecisionReceipt；按来源列出候选；集中请求具体决定；把答复绑定 decisionId；
+先完成并验证 Lineage DecisionReceipt；按 Clause Inventory 原顺序列出原文与 `sourceSpan`，逐条给出处置候选；集中请求具体决定；把答复绑定 decisionId；
 Authority 生成 checkedAt 和 nonce 并签发。首次构建与 staging 发布前都重建完整 subject，验证
 kind、status、decisionId、subject digest、purpose、key 和签名，成功后进入 `scope-approved`。
 
 ## 退出条件
 
-全部影响结论的歧义有签名决定或已排除，范围 artifact 与 PRD Revision 一致；approved/rejected
+Clause Inventory 与处置集合双向完全相等且每个 Clause 恰好一次；全部影响结论的歧义有签名决定或已排除，范围 artifact 与 PRD Revision 一致；approved/rejected
 必须有有效 receipt，pending 必须没有 receipt。
 每个 resolved 歧义必须把 `decisionId` 和非空 `resolution` 一并写入 Scope Decision Subject；只记录问题、
 状态或通用摘要而没有用户实际答案时不得批准。
@@ -42,7 +42,7 @@ kind、status、decisionId、subject digest、purpose、key 和签名，成功�
 
 ## 禁止行为
 
-不得把聊天中的“可以”、通用 Artifact 签名或旧 receipt 当作范围批准；不得先写 approved 再补签名；
+不得把聊天中的“可以”、通用 Artifact 签名或旧 receipt 当作范围批准；不得遗漏 Clause、重复处置、用大段 section 代替原子 Clause 或把 ambiguous 静默改成 excluded；不得先写 approved 再补签名；
 不得代用户回答歧义，不得在审批前确定 oracle、Case 或执行动作。
 
 ## 独立调用

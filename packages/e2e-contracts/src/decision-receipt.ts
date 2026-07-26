@@ -40,6 +40,16 @@ const DependencySchema = z.object({
   status: z.enum(['available', 'blocked']),
   digest: DigestSchema,
 }).strict()
+const ClauseDispositionSchema = z.discriminatedUnion('disposition', [
+  z.object({ clauseId: SafeIdSchema, disposition: z.literal('modeled'),
+    requirementIds: z.array(SafeIdSchema).min(1).max(1_000) }).strict(),
+  z.object({ clauseId: SafeIdSchema, disposition: z.literal('excluded'),
+    reason: NonEmptyTextSchema, decisionId: SafeIdSchema }).strict(),
+  z.object({ clauseId: SafeIdSchema, disposition: z.literal('not-applicable'),
+    reason: NonEmptyTextSchema, decisionId: SafeIdSchema }).strict(),
+  z.object({ clauseId: SafeIdSchema, disposition: z.literal('ambiguous'),
+    ambiguityId: SafeIdSchema }).strict(),
+])
 const SectionChangeSchema = z.object({
   sectionId: SafeIdSchema,
   kind: z.enum(['added', 'changed', 'removed']),
@@ -127,6 +137,7 @@ export const ScopeDecisionSubjectSchema = z.object({
     browserIds: z.array(SafeIdSchema).min(1),
     viewportIds: z.array(SafeIdSchema).min(1),
   }).strict(),
+  clauseDispositions: z.array(ClauseDispositionSchema).min(1).max(100_000),
 }).strict()
 
 export const LineageDecisionSubjectSchema = z.object({

@@ -1,6 +1,6 @@
 {
   "name": "@mutil-skills/e2e-report",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "files": [
     "dist/src"
@@ -15,6 +15,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@mutil-skills/e2e-contracts": "0.3.1"
+    "@mutil-skills/e2e-contracts": "0.4.0"
   }
 }

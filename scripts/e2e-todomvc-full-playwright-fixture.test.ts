@@ -9,6 +9,7 @@ import {
 } from '@mutil-skills/e2e-contracts'
 import { runtimeTodoMvcFullPlaywrightFixture } from './e2e-runtime-read-only.fixture.js'
 import { auditTrustedRegressionSourceSet } from '../packages/e2e-playwright-runtime/src/trusted-source-audit.js'
+import { auditSemanticCompleteness } from '../packages/e2e-engine/src/semantic-completeness.js'
 
 describe('TodoMVC full Playwright 公开目标 fixture', () => {
   test('本地 PRD Golden 与官方固定提交的 Git blob 完全一致', async () => {
@@ -51,12 +52,21 @@ describe('TodoMVC full Playwright 公开目标 fixture', () => {
       '/examples/typescript-react/js/bundle.js',
     ])
     expect(program.networkRequestBodies).toEqual([])
-    expect(program.networkRequests.every((request: any) => request.maxRequests === 4)).toBe(true)
+    expect(program.networkRequests.every((request: any) => request.maxRequests === 6)).toBe(true)
     expect(program.networkRequests.map((request: any) => request.expectedOrder)).toEqual([1, 2, 2, 2, 2])
-    expect((fixture.semanticArtifacts['requirement-model'].content as any).requirements[0]).toMatchObject({
-      reqId: 'REQ-TODOMVC-FUNCTIONAL',
-      title: 'TodoMVC 完整功能验收',
-    })
+    const manifest = fixture.semanticArtifacts['prd-manifest'].content as any
+    const scope = fixture.semanticArtifacts['acceptance-scope'].content as any
+    const model = fixture.semanticArtifacts['requirement-model'].content as any
+    const coverage = fixture.semanticArtifacts['coverage-universe'].content as any
+    expect(manifest.clauses).toHaveLength(35)
+    expect(scope.clauseDispositions).toHaveLength(35)
+    expect(model.requirements).toHaveLength(25)
+    expect(model.requirements.every((requirement: any) => requirement.rules.length === 1
+      && requirement.observableOutcomes.length === 1)).toBe(true)
+    expect(coverage.obligations).toHaveLength(25)
+    expect(program.oracleCheckpoints).toHaveLength(25)
+    expect(program.oracleCheckpoints.find((checkpoint: any) => checkpoint.oracleId === 'ORACLE-TODOMVC-F20'))
+      .toMatchObject({ expectedJson: '"todos-react"' })
   })
 
   test('生成的 program 与 cleanup 通过 full-playwright AST 安全审计', () => {
@@ -70,7 +80,9 @@ describe('TodoMVC full Playwright 公开目标 fixture', () => {
     const wrap = (source: string, kind: 'Run' | 'Cleanup') => Buffer.from([
       "import { test, expect } from '@playwright/test'",
       "test('trusted fragment', async ({ page, context, browser, request }, testInfo) => {",
-      '  const state = {} as Record<string, unknown>', `  const __biztest${kind}0 = async () => {`,
+      '  const state = {} as Record<string, unknown>',
+      '  const checkpoint = async (_input: { checkpointId: string; oracleId: string; actual: unknown }) => undefined',
+      `  const __biztest${kind}0 = async () => {`,
       source, '  }', `  await __biztest${kind}0()`, '})', '',
     ].join('\n'))
 
@@ -104,6 +116,18 @@ describe('TodoMVC full Playwright 公开目标 fixture', () => {
       'DISCOVERY-TODOMVC-1', digestText('test/v1', 'preflight'),
     ))
     const discovery = fixture.discoverySubject()
+
+    expect(auditSemanticCompleteness({
+      manifest: fixture.semanticArtifacts['prd-manifest'].content as Record<string, unknown>,
+      scope: fixture.semanticArtifacts['acceptance-scope'].content as Record<string, unknown>,
+      model: fixture.semanticArtifacts['requirement-model'].content as Record<string, unknown>,
+      flows: fixture.semanticArtifacts['interaction-flow'].content as Record<string, unknown>,
+      coverage, cases: testCases,
+    })).toMatchObject({ findings: [], coverageFacts: {
+      prdClauses: { covered: 35, total: 35 }, requirementDesign: { covered: 25, total: 25 },
+      rules: { covered: 25, total: 25 }, oracles: { covered: 25, total: 25 },
+      cases: { covered: 1, total: 1 },
+    } })
 
     expect(testCases.cases.map((item: any) => item.caseId)).toEqual([program.caseId])
     expect(coverage.obligations[0].disposition.caseIds).toEqual([program.caseId])

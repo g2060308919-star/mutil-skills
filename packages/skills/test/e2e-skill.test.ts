@@ -49,7 +49,7 @@ describe('E2E skill package', () => {
           'verified installation manifest + protocol major + safety probes',
         ],
         whenMissing: {
-          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.3.1',
+          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.4.0',
           terminalState: 'environment-blocked', reasonCode: 'E2E_RUNTIME_HOST_UNAVAILABLE',
         },
       }],
@@ -128,7 +128,7 @@ describe('E2E skill package', () => {
     expect(entry).toContain('默认流程不执行 `identity enroll`')
     expect(entry).toContain('`confirmation-required`')
     expect(entry).toContain('必须暂停并等待调用者明确确认')
-    expect(entry).toContain('@mutil-skills/e2e-runtime@0.3.1')
+    expect(entry).toContain('@mutil-skills/e2e-runtime@0.4.0')
     expect(approval).toContain('`confirm-approval`')
     expect(approval).toContain('本地确认不验证自然人身份，也不证明职责分离')
     expect(browser).toContain('系统 Google Chrome')
@@ -306,11 +306,53 @@ describe('E2E skill package', () => {
     const report = await readFile(new URL('../skills/testing/e2e/report-verdict.md', import.meta.url), 'utf8')
 
     expect(report).toContain('scope、lineage、execution')
-    expect(report).toContain('REQ→RULE→COV→CASE→STEP→EVIDENCE')
+    expect(report).toContain('CLAUSE→REQ→RULE→ORACLE→COV→CASE→STEP→CHECKPOINT→EVIDENCE')
     expect(report).toContain('traceabilityMatrix')
     expect(report).toContain('dispositions')
     expect(report).toContain('独立重算')
     expect(report).toContain('缺失、重复、额外或错绑')
+  })
+
+  test('P0 语义完整性要求 Clause 逐条处置、原子 Rule/Oracle 与多维 obligation 闭合', async () => {
+    const entry = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+    const intake = await readFile(new URL('../skills/testing/e2e/prd-intake.md', import.meta.url), 'utf8')
+    const scope = await readFile(new URL('../skills/testing/e2e/scope-approval.md', import.meta.url), 'utf8')
+    const model = await readFile(new URL('../skills/testing/e2e/requirement-oracles.md', import.meta.url), 'utf8')
+    const coverage = await readFile(new URL('../skills/testing/e2e/coverage-universe.md', import.meta.url), 'utf8')
+
+    expect(entry).toContain('Clause 原文与处置 → Requirement → Rule → Oracle')
+    expect(intake).toContain('Clause Inventory')
+    expect(intake).toContain('sourceSpan')
+    expect(intake).toContain('inventoryDigest')
+    expect(scope).toContain('每个 Clause 恰好一次')
+    for (const disposition of ['modeled', 'excluded', 'not-applicable', 'ambiguous']) {
+      expect(scope).toContain(`\`${disposition}\``)
+    }
+    expect(model).toContain('每个 modeled Clause')
+    expect(model).toContain('每条 Rule 恰好绑定一个 Oracle')
+    expect(model).toContain('`ruleId`')
+    expect(model).toContain('`sourceRefs`')
+    for (const field of ['clauseIds', 'ruleIds', 'oracleIds']) {
+      expect(coverage).toContain(`\`${field}\``)
+    }
+  })
+
+  test('P0 执行审批、Runtime checkpoint 与三格式报告展示同一条可追踪语义链', async () => {
+    const approval = await readFile(new URL('../skills/testing/e2e/execution-approval.md', import.meta.url), 'utf8')
+    const execution = await readFile(new URL('../skills/testing/e2e/browser-execution.md', import.meta.url), 'utf8')
+    const report = await readFile(new URL('../skills/testing/e2e/report-verdict.md', import.meta.url), 'utf8')
+
+    expect(approval).toContain('Clause 原文、sourceSpan、处置')
+    expect(approval).toContain('Clause 原文与处置 → Requirement → Rule → Oracle')
+    for (const field of ['checkpointId', 'oracleId', 'expectedJson', 'actualJson', 'evidenceIds']) {
+      expect(execution).toContain(`\`${field}\``)
+    }
+    expect(execution).toContain('每个冻结 checkpoint 恰好执行一次')
+    expect(execution).toContain('Host 复算')
+    expect(report).toContain('CLAUSE→REQ→RULE→ORACLE→COV→CASE→STEP→CHECKPOINT→EVIDENCE')
+    for (const file of ['final-report.json', 'final-report.md', 'final-report.html', 'manifest.json']) {
+      expect(report).toContain(`\`${file}\``)
+    }
   })
 
   test('E2E workflow files stay local and preserve the TDD skill', () => {

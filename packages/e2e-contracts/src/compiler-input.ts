@@ -17,6 +17,25 @@ export function computeFullPlaywrightCleanupSourceDigest(source: string): string
   return digestText('full-playwright-cleanup-source/v1', source)
 }
 
+export function digestOracleCheckpointValue(canonicalJson: string): string {
+  return digestText('oracle-checkpoint-value/v1', canonicalJson)
+}
+
+const CanonicalCheckpointJsonSchema = z.string().min(1).max(64 * 1024).refine((value) => {
+  try { return canonicalizeJson(JSON.parse(value)) === value } catch { return false }
+}, 'Oracle checkpoint value 必须是规范 JSON')
+
+export const OracleCheckpointPlanSchema = z.object({
+  checkpointId: SafeIdSchema,
+  oracleId: SafeIdSchema,
+  expectedJson: CanonicalCheckpointJsonSchema,
+  expectedDigest: DigestSchema,
+}).strict().superRefine((checkpoint, context) => {
+  if (checkpoint.expectedDigest !== digestOracleCheckpointValue(checkpoint.expectedJson)) {
+    context.addIssue({ code: 'custom', path: ['expectedDigest'], message: 'Oracle checkpoint 期望值摘要不匹配' })
+  }
+})
+
 export const AssertTextCompilerActionSchema = z.object({
   kind: z.literal('assertText'),
   actionId: SafeIdSchema,
@@ -45,6 +64,7 @@ const FullPlaywrightCompilerActionObjectSchema = z.object({
   cleanupPlanId: SafeIdSchema,
   timeoutMs: z.number().int().positive().max(3_600_000),
   cleanupTimeoutMs: z.number().int().positive().max(3_600_000),
+  oracleCheckpoints: z.array(OracleCheckpointPlanSchema).min(1).max(10_000),
 }).strict()
 
 function refineFullPlaywrightCompilerAction(
@@ -59,6 +79,14 @@ function refineFullPlaywrightCompilerAction(
       code: 'custom', message: 'cleanupSourceDigest 未绑定 full Playwright cleanupSource',
       path: ['cleanupSourceDigest'],
     })
+  }
+  const checkpointIds = action.oracleCheckpoints.map((checkpoint) => checkpoint.checkpointId)
+  const oracleIds = action.oracleCheckpoints.map((checkpoint) => checkpoint.oracleId)
+  if (!isUnique(checkpointIds)) {
+    context.addIssue({ code: 'custom', path: ['oracleCheckpoints'], message: 'checkpointId 必须唯一' })
+  }
+  if (!isUnique(oracleIds)) {
+    context.addIssue({ code: 'custom', path: ['oracleCheckpoints'], message: '每个 Action 的 oracleId 必须唯一' })
   }
 }
 

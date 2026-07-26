@@ -6,6 +6,9 @@ import {
   digestApprovalProjection,
   digestArtifactContent,
   digestCleanupPlanDefinition,
+  digestOracleCheckpointValue,
+  digestPrdClause,
+  digestPrdClauseInventory,
   digestText,
   type ArtifactDocument,
   type DecisionReceipt,
@@ -85,11 +88,18 @@ export function runtimeReadOnlyFixture(input: {
     timeoutPolicy: { id: 'TIMEOUT-POLICY', digest: d('timeout-policy') },
     runtimePolicy: { id: 'RUNTIME-POLICY', digest: runtimePolicyDigest },
   })
+  const orderClauseMaterial = {
+    clauseId: 'CLAUSE-ORDER-1', sourceId: 'PRD-ORDER-1', kind: 'functional' as const,
+    sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 11 },
+    originalText: '页面显示待审核订单', normalizedText: '页面显示待审核订单',
+  }
+  const orderClause = { ...orderClauseMaterial, textDigest: digestPrdClause(orderClauseMaterial) }
   const prdManifest = semanticArtifact(input, 'prd-manifest', '1.0.0', {
     prdId: 'PRD-ORDER-1', assetId: input.assetId, revision: input.prdRevision,
     normalizedPrdDigest: input.prdRevision,
     sources: [{ sourceId: 'PRD-ORDER-1', digest: input.prdRevision, byteLength: 1 }],
     attachments: [], sourceCacheIndexDigest: d('source-cache-index'),
+    clauses: [orderClause], clauseInventoryDigest: digestPrdClauseInventory([orderClause]),
   })
   const prdDiff = semanticArtifact(input, 'prd-diff', '2.0.0', {
     previousRevision: d('previous-prd'), currentRevision: input.prdRevision,
@@ -102,9 +112,11 @@ export function runtimeReadOnlyFixture(input: {
     candidateDigests: [d('model-candidate')], selectedDigest: d('model-candidate'),
   })
   const acceptanceScope = semanticArtifact(input, 'acceptance-scope', '2.0.0', {
-    includedReqCandidates: [{ reqId: 'REQ-ORDER-1', sourceRefs: ['PRD-ORDER-1'] }],
+    includedReqCandidates: [{ reqId: 'REQ-ORDER-1', sourceRefs: ['CLAUSE-ORDER-1'] }],
     exclusions: [], ambiguities: [], dependencies: [], visualScope: { required: false, refs: [] },
     browserScope: { browserIds: ['chromium'], viewportIds: ['desktop'] },
+    clauseDispositions: [{ clauseId: 'CLAUSE-ORDER-1', disposition: 'modeled',
+      requirementIds: ['REQ-ORDER-1'] }],
     scopeDecision: { decisionId: 'SCOPE-1', status: 'pending' },
   })
   const requirementModel = semanticArtifact(input, 'requirement-model', '1.0.0', {
@@ -112,10 +124,11 @@ export function runtimeReadOnlyFixture(input: {
     requirements: [{
       reqId: 'REQ-ORDER-1', revision: 1, title: '订单列表', actors: ['auditor'], entities: ['order'],
       preconditions: [], rules: [{ ruleId: 'RULE-ORDER-1', category: 'business',
-        statement: '显示待审核订单', sourceRefs: ['PRD-ORDER-1'], certainty: 'explicit',
+        statement: '显示待审核订单', sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit',
         oracleIds: ['ORACLE-1'] }],
       states: [], transitions: [], observableOutcomes: [{ oracleId: 'ORACLE-1',
-        statement: '页面显示待审核订单' }], applicability: [], sourceRefs: ['PRD-ORDER-1'], status: 'active',
+        ruleId: 'RULE-ORDER-1', statement: '页面显示待审核订单', sourceRefs: ['CLAUSE-ORDER-1'] }],
+      applicability: [], sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
     }],
     coupledDimensions: [], applicabilityRules: ['RULE-ORDER-1'], modelDecisionDigest: d('model-decision'),
   })
@@ -127,6 +140,7 @@ export function runtimeReadOnlyFixture(input: {
   }] })
   const obligations = [{
     obligationId: 'COV-ORDER-1', reqId: 'REQ-ORDER-1', ruleIds: ['RULE-ORDER-1'],
+    clauseIds: ['CLAUSE-ORDER-1'], oracleIds: ['ORACLE-1'],
     nodeIds: ['NODE-ORDER-ENTRY', 'NODE-ORDER-EXIT'], actor: 'auditor', transitionId: 'not-applicable',
     scenario: '订单列表显示待审核订单', necessity: 'required', applicabilityRuleId: 'RULE-ORDER-1',
     disposition: { kind: 'automated' as const, caseIds: ['CASE-ORDER-1'] },
@@ -313,6 +327,7 @@ export function runtimeFullPlaywrightFixture(input: {
     'await extra.close()',
     `const response = await request.post('${origin}/api', { data: { enabled: true, name: 'Ada' } })`,
     'await expect(response.ok()).toBeTruthy()',
+    "await checkpoint({ checkpointId: 'CHECKPOINT-FULL-1', oracleId: 'ORACLE-1', actual: true })",
     'state.programCompleted = true',
   ].join('\n')
   const cleanupSource = [
@@ -330,6 +345,8 @@ export function runtimeFullPlaywrightFixture(input: {
     source, sourceDigest: computeFullPlaywrightSourceDigest(source),
     cleanupSource, cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource),
     dataLeaseId: 'LEASE-FULL-1', cleanupPlanId: 'CLEANUP-FULL-1', timeoutMs: 30_000,
+    oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-FULL-1', oracleId: 'ORACLE-1',
+      expectedJson: 'true', expectedDigest: digestOracleCheckpointValue('true') }],
     networkRequests: requests,
     networkRequestBodies: [{ intentId: 'API', kind: 'json' as const, canonicalJson: jsonBody }],
   }
@@ -391,10 +408,11 @@ export function runtimeFullPlaywrightFixture(input: {
       entities: ['form'], preconditions: [], rules: [{
         ruleId: 'RULE-ORDER-1', category: 'business',
         statement: '表单写入后必须执行独立清理并通过 reload 验证',
-        sourceRefs: ['PRD-ORDER-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'],
+        sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'],
       }], states: [], transitions: [], observableOutcomes: [{
-        oracleId: 'ORACLE-1', statement: '写操作成功且清理后页面恢复 clean',
-      }], applicability: [], sourceRefs: ['PRD-ORDER-1'], status: 'active',
+        oracleId: 'ORACLE-1', ruleId: 'RULE-ORDER-1',
+        statement: '写操作成功且清理后页面恢复 clean', sourceRefs: ['CLAUSE-ORDER-1'],
+      }], applicability: [], sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
     }],
   })
   const coverageContent = structuredClone(
@@ -508,6 +526,60 @@ export function runtimeTodoMvcFullPlaywrightFixture(
   const base = runtimeFullPlaywrightFixture(input)
   const origin = new URL(input.url).origin
   const targetFingerprint = d('todomvc-typescript-react-public-target')
+  const modeledSpecs = [
+    ['F01', 84, 'When there are no todos, `#main` and `#footer` should be hidden.', '无 Todo 时隐藏主区和页脚'],
+    ['F02', 88, 'The input element should be focused when the page is loaded, preferably by using the `autofocus` input attribute.', '页面加载后新建输入框获得焦点'],
+    ['F03', 88, 'Pressing Enter creates the todo, appends it to the todo list, and clears the input.', '按 Enter 新建 Todo、追加列表并清空输入'],
+    ['F04', 88, "Make sure to `.trim()` the input and then check that it's not empty before creating a new todo.", '新建前 trim 且空白输入不创建 Todo'],
+    ['F05', 92, 'This checkbox toggles all the todos to the same state as itself.', '全选框统一切换全部 Todo 状态'],
+    ['F06', 92, 'The "Mark all as complete" checkbox should also be updated when single todo items are checked/unchecked.', '单项状态变化同步全选框'],
+    ['F07', 98, 'Clicking the checkbox marks the todo as complete by updating its `completed` value and toggling the class `completed` on its parent `<li>`', '单项勾选更新 completed 与 CSS class'],
+    ['F08', 100, 'Double-clicking the `<label>` activates editing mode, by toggling the `.editing` class on its `<li>`', '双击标签进入编辑模式'],
+    ['F09', 102, 'Hovering over the todo shows the remove button (`.destroy`)', '悬停显示删除按钮'],
+    ['F10', 106, 'When editing mode is activated it will hide the other controls and bring forward an input that contains the todo title, which should be focused (`.focus()`).', '编辑模式显示并聚焦包含标题的输入框'],
+    ['F11', 106, 'The edit should be saved on both blur and enter, and the `editing` class should be removed.', 'Enter 与 blur 均保存编辑并退出编辑态'],
+    ['F12', 106, "Make sure to `.trim()` the input and then check that it's not empty. If it's empty the todo should instead be destroyed.", '编辑值 trim 后为空则删除 Todo'],
+    ['F13', 106, 'If escape is pressed during the edit, the edit state should be left and any changes be discarded.', 'Escape 放弃编辑并丢弃变更'],
+    ['F14', 110, 'Displays the number of active todos in a pluralized form.', '计数器显示 active Todo 数量'],
+    ['F15', 110, 'Also make sure to pluralize the `item` word correctly: `0 items`, `1 item`, `2 items`.', '计数器正确处理单复数'],
+    ['F16', 114, 'Removes completed todos when clicked.', 'Clear completed 删除已完成 Todo'],
+    ['F17', 114, 'Should be hidden when there are no completed todos.', '无已完成 Todo 时隐藏 Clear completed'],
+    ['F18', 118, 'Your app should dynamically persist the todos to localStorage.', 'Todo 动态持久化到 localStorage'],
+    ['F19', 118, 'If possible, use the keys `id`, `title`, `completed` for each item.', '持久化项包含 id、title、completed'],
+    ['F20', 118, 'Make sure to use this format for the localStorage name: `todos-[framework]`.', 'localStorage 键名遵循 todos-[framework]'],
+    ['F21', 118, 'Editing mode should not be persisted.', '编辑模式不持久化'],
+    ['F22', 122, 'The following routes should be implemented: `#/` (all - default), `#/active` and `#/completed` (`#!/` is also allowed).', '实现 All、Active、Completed 路由'],
+    ['F23', 122, 'When the route changes, the todo list should be filtered on a model level and the `selected` class on the filter links should be toggled.', '路由切换过滤列表并同步 selected class'],
+    ['F24', 122, 'When an item is updated while in a filtered state, it should be updated accordingly.', '过滤状态下项目更新后列表同步变化'],
+    ['F25', 122, 'Make sure the active filter is persisted on reload.', 'reload 后保持当前过滤器'],
+  ] as const
+  const excludedSpecs = [
+    ['N01', 7, 'Our template should be used as the base when implementing a todo app.', '实现仓库与模板来源审查不属于浏览器功能验收'],
+    ['N02', 28, 'Try to follow this structure as close as possible while still keeping to the framework’s best practices.', '目录结构需源码审查'],
+    ['N03', 30, 'Components should be split up into separate files and placed into folders where it makes the most sense.', '组件拆分需源码审查'],
+    ['N04', 47, 'All examples must include a README describing the framework, the general implementation, and the build process if required.', 'README 需仓库审查'],
+    ['N05', 51, 'Unless it conflicts with the project\'s best practices, your example should use npm for package management.', '包管理需仓库审查'],
+    ['N06', 64, 'You should `.gitignore` everything in `node_modules` except the files actually used by your example.', 'gitignore 需仓库审查'],
+    ['N07', 68, 'Please try to keep the HTML as close to the template as possible.', '模板一致性需源码与视觉专项审查'],
+    ['N08', 72, 'Follow our code style.', '代码风格需静态审查'],
+    ['N09', 76, 'Apps should be written without any preprocessors (Sass/CoffeeScript/..) to reach the largest audience.', '构建技术选择需源码审查'],
+    ['N10', 78, 'We require apps to work in every browser we support.', '当前 Policy 仅批准 Chromium，跨浏览器另行验收'],
+  ] as const
+  const clause = (prefix: string, line: number, originalText: string, kind: 'functional' | 'non-functional') => {
+    const material = {
+      clauseId: `CLAUSE-TODOMVC-${prefix}`, sourceId: 'PRD-TODOMVC-OFFICIAL', kind,
+      sourceSpan: { startLine: line, startColumn: 1, endLine: line, endColumn: originalText.length + 1 },
+      originalText, normalizedText: originalText,
+    }
+    return { ...material, textDigest: digestPrdClause(material) }
+  }
+  const modeledClauses = modeledSpecs.map(([id, line, original]) => clause(id, line, original, 'functional'))
+  const excludedClauses = excludedSpecs.map(([id, line, original]) => clause(id, line, original, 'non-functional'))
+  const allClauses = [...modeledClauses, ...excludedClauses]
+  const requirementDefinitions = modeledSpecs.map(([id, _line, _original, title]) => ({
+    reqId: `REQ-TODOMVC-${id}`, ruleId: `RULE-TODOMVC-${id}`, oracleId: `ORACLE-TODOMVC-${id}`,
+    clauseId: `CLAUSE-TODOMVC-${id}`, title,
+  }))
   const paths = [
     '/examples/typescript-react/',
     '/examples/typescript-react/node_modules/todomvc-common/base.css',
@@ -519,10 +591,13 @@ export function runtimeTodoMvcFullPlaywrightFixture(
     intentId: `TODOMVC-GET-${index + 1}`, method: 'GET', canonicalOrigin: origin, exactPath,
     query: [] as Array<[string, string]>, payload: { kind: 'no-body' as const },
     // 主文档必须先出现；CSS/JS 由浏览器并发调度，属于同一个无序首次出现阶段。
-    targetFingerprint, maxRequests: 4, expectedOrder: index === 0 ? 1 : 2,
+    // program 初始加载 + 3 次 reload，cleanup 独立 Context 的初始加载 + reload，共最多 6 次。
+    targetFingerprint, maxRequests: 6, expectedOrder: index === 0 ? 1 : 2,
   }))
   const originalExecution = base.frozenArtifacts['execution-contract'].content as any
   const originalProgram = originalExecution.fullPlaywrightPrograms[0]
+  const verify = (id: string, actual = 'true') =>
+    `await checkpoint({ checkpointId: 'CHECKPOINT-TODOMVC-${id}', oracleId: 'ORACLE-TODOMVC-${id}', actual: ${actual} })`
   const source = [
     `await page.goto('${input.url}')`,
     "await expect(page).toHaveTitle('React • TodoMVC')",
@@ -530,52 +605,78 @@ export function runtimeTodoMvcFullPlaywrightFixture(
     "await expect(page.locator('.todo-list li')).toHaveCount(0)",
     "await expect(page.locator('.main')).toHaveCount(0)",
     "await expect(page.locator('.footer')).toHaveCount(0)",
+    verify('F01'),
     "const input = page.locator('.new-todo')",
+    'await expect(input).toBeFocused()', verify('F02'),
     "await input.fill('  E2E-RUN-TODOMVC-A  ')", "await input.press('Enter')",
     "await input.fill('E2E-RUN-TODOMVC-B')", "await input.press('Enter')",
     "await input.fill('E2E-RUN-TODOMVC-C')", "await input.press('Enter')",
     "await input.fill('   ')", "await input.press('Enter')",
     "await expect(page.locator('.todo-list li')).toHaveCount(3)",
     "const items = page.locator('.todo-list li')",
+    "const itemA = items.filter({ hasText: 'E2E-RUN-TODOMVC-A' })",
+    "const itemB = items.filter({ hasText: 'E2E-RUN-TODOMVC-B' })",
+    "const itemC = items.filter({ hasText: 'E2E-RUN-TODOMVC-C' })",
     "await expect(items.locator('label')).toHaveText(['E2E-RUN-TODOMVC-A', 'E2E-RUN-TODOMVC-B', 'E2E-RUN-TODOMVC-C'])",
     "await expect(page.locator('.todo-count')).toHaveText('3 items left')",
-    "await items.nth(0).locator('.toggle').check()",
-    "await expect(items.nth(0)).toHaveClass(/completed/)",
+    verify('F03'), verify('F04'), verify('F14'), verify('F15'),
+    "await itemA.locator('.toggle').check()",
+    "await expect(itemA).toHaveClass(/completed/)",
     "await expect(page.locator('.todo-count')).toHaveText('2 items left')",
-    "await items.nth(0).locator('.toggle').uncheck()",
+    "await itemA.locator('.toggle').uncheck()",
     "await expect(page.locator('.todo-count')).toHaveText('3 items left')",
+    verify('F06'), verify('F07'),
     "await page.locator('.toggle-all').check()",
     "await expect(page.locator('.todo-count')).toHaveText('0 items left')",
     "await page.locator('.toggle-all').uncheck()",
     "await expect(page.locator('.todo-count')).toHaveText('3 items left')",
-    "await items.nth(1).locator('.toggle').check()",
+    verify('F05'),
+    "await itemB.locator('.toggle').check()",
     "await page.getByRole('link', { name: 'Completed' }).click()",
     "await expect(page).toHaveURL(/#\\/completed$/)",
     "await expect(page.locator('.todo-list label')).toHaveText(['E2E-RUN-TODOMVC-B'])",
     "await page.getByRole('link', { name: 'Active' }).click()",
     "await expect(page).toHaveURL(/#\\/active$/)",
     "await expect(page.locator('.todo-list label')).toHaveText(['E2E-RUN-TODOMVC-A', 'E2E-RUN-TODOMVC-C'])",
+    // 在 Active 过滤器内完成后元素会立刻离开 DOM；click 验证用户动作，避免 check 的终态复读指向消失元素。
+    "await itemA.locator('.toggle').click()",
+    "await expect(page.locator('.todo-list label')).toHaveText(['E2E-RUN-TODOMVC-C'])",
+    verify('F24'),
     "await page.getByRole('link', { name: 'All' }).click()",
     "await expect(page).toHaveURL(/#\\/$/)",
-    "await page.locator('.todo-list li').nth(0).locator('label').dblclick()",
-    "await page.locator('.todo-list li').nth(0).locator('.edit').fill('E2E-RUN-TODOMVC-A-EDITED')",
-    "await page.locator('.todo-list li').nth(0).locator('.edit').press('Enter')",
+    "await itemA.locator('.toggle').uncheck()",
+    verify('F22'), verify('F23'),
+    "await itemA.locator('label').dblclick()",
+    "await expect(itemA).toHaveClass(/editing/)",
+    "await expect(itemA.locator('.edit')).toBeFocused()",
+    verify('F08'), verify('F10'),
+    "await itemA.locator('.edit').fill('E2E-RUN-TODOMVC-A-EDITED')",
+    "await itemA.locator('.edit').press('Enter')",
     "await expect(page.locator('.todo-list label').nth(0)).toHaveText('E2E-RUN-TODOMVC-A-EDITED')",
-    "await page.locator('.todo-list li').nth(2).locator('label').dblclick()",
-    "await page.locator('.todo-list li').nth(2).locator('.edit').fill('E2E-RUN-TODOMVC-C-DISCARDED')",
-    "await page.locator('.todo-list li').nth(2).locator('.edit').press('Escape')",
+    "await itemC.locator('label').dblclick()",
+    "await itemC.locator('.edit').fill('E2E-RUN-TODOMVC-C-DISCARDED')",
+    "await itemC.locator('.edit').press('Escape')",
     "await expect(page.locator('.todo-list label').nth(2)).toHaveText('E2E-RUN-TODOMVC-C')",
-    "await page.locator('.todo-list li').nth(2).locator('label').dblclick()",
-    "await page.locator('.todo-list li').nth(2).locator('.edit').fill('E2E-RUN-TODOMVC-C-BLUR')",
+    verify('F13'),
+    "await itemC.locator('label').dblclick()",
+    "await itemC.locator('.edit').fill('E2E-RUN-TODOMVC-C-BLUR')",
     "await page.getByRole('heading', { name: 'todos' }).click()",
     "await expect(page.locator('.todo-list label').nth(2)).toHaveText('E2E-RUN-TODOMVC-C-BLUR')",
-    "await page.locator('.todo-list li').nth(2).locator('label').dblclick()",
-    "await page.locator('.todo-list li').nth(2).locator('.edit').fill('   ')",
-    "await page.locator('.todo-list li').nth(2).locator('.edit').press('Enter')",
+    verify('F11'),
+    "const itemCBlur = items.filter({ hasText: 'E2E-RUN-TODOMVC-C-BLUR' })",
+    "await itemCBlur.locator('label').dblclick()",
+    "await itemCBlur.locator('.edit').fill('   ')",
+    "await itemCBlur.locator('.edit').press('Enter')",
     "await expect(page.locator('.todo-list li')).toHaveCount(2)",
+    verify('F12'),
     "await page.locator('.todo-list li').nth(0).hover()",
+    "await expect(page.locator('.todo-list li').nth(0).locator('.destroy')).toBeVisible()",
+    verify('F09'),
     "await page.locator('.todo-list li').nth(0).locator('.destroy').click()",
     "await expect(page.locator('.todo-list label')).toHaveText(['E2E-RUN-TODOMVC-B'])",
+    "await page.locator('.todo-list li').nth(0).locator('.toggle').uncheck()",
+    "await expect(page.locator('.todo-count')).toHaveText('1 item left')",
+    "await page.locator('.todo-list li').nth(0).locator('.toggle').check()",
     "await input.fill('E2E-RUN-TODOMVC-PERSIST')", "await input.press('Enter')",
     "await page.getByRole('link', { name: 'Completed' }).click()",
     "await page.reload()",
@@ -585,6 +686,18 @@ export function runtimeTodoMvcFullPlaywrightFixture(
     "const records = JSON.parse(stored || '[]')",
     "expect(records.map(item => item.title)).toEqual(['E2E-RUN-TODOMVC-B', 'E2E-RUN-TODOMVC-PERSIST'])",
     "expect(records.map(item => item.completed)).toEqual([true, false])",
+    verify('F18'), verify('F19'),
+    "await page.getByRole('link', { name: 'All' }).click()",
+    "await page.locator('.todo-list li').nth(1).locator('label').dblclick()",
+    "await page.locator('.todo-list li').nth(1).locator('.edit').fill('NOT-PERSISTED-EDIT')",
+    "await page.reload()",
+    "await expect(page.locator('.todo-list li.editing')).toHaveCount(0)",
+    "await expect(page.locator('.todo-list label').nth(1)).toHaveText('E2E-RUN-TODOMVC-PERSIST')",
+    verify('F21'),
+    "await page.getByRole('link', { name: 'Completed' }).click()",
+    "await page.reload()",
+    "await expect(page.locator('.todo-list label')).toHaveText(['E2E-RUN-TODOMVC-B'])",
+    verify('F25'),
     "await page.getByRole('link', { name: 'All' }).click()",
     "await expect(page).toHaveURL(/#\\/$/)",
     "await page.locator('.toggle-all').check()",
@@ -595,6 +708,8 @@ export function runtimeTodoMvcFullPlaywrightFixture(
     "state.programCompleted = true",
     "state.persistenceVerified = true",
     "state.storageKeyDeviation = 'react-todos'",
+    verify('F16'), verify('F17'),
+    verify('F20', "'react-todos'"),
   ].join('\n')
   const cleanupSource = [
     `await page.goto('${input.url}')`,
@@ -621,6 +736,12 @@ export function runtimeTodoMvcFullPlaywrightFixture(
     cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource),
     networkRequests: requests,
     networkRequestBodies: [],
+    oracleCheckpoints: requirementDefinitions.map((definition) => {
+      const expectedJson = definition.oracleId.endsWith('F20') ? canonicalizeJson('todos-react') : 'true'
+      return { checkpointId: `CHECKPOINT-TODOMVC-${definition.oracleId.slice(-3)}`,
+        oracleId: definition.oracleId, expectedJson,
+        expectedDigest: digestOracleCheckpointValue(expectedJson) }
+    }),
   }
   const originalCleanupPlan = originalExecution.writeCleanupPlans[0]
   const cleanupPlan = {
@@ -638,14 +759,16 @@ export function runtimeTodoMvcFullPlaywrightFixture(
   const cleanupPlanDigest = digestCleanupPlanDefinition(cleanupPlan)
   const testCases = replaceArtifactContent(base.frozenArtifacts['test-cases'], {
     cases: [{
-      caseId: program.caseId, revision: 1, obligationIds: ['COV-TODOMVC-FUNCTIONAL'],
+      caseId: program.caseId, revision: 1,
+      obligationIds: requirementDefinitions.map((definition) => `COV-${definition.reqId}`),
       title: 'TodoMVC 官方功能与持久化验收', actor: 'visitor', necessity: 'required', preconditions: [],
       dataNeedIds: [program.dataLeaseId], steps: [{
         stepId: program.stepId, ordinal: 0,
         semanticAction: '新增、完成、过滤、编辑、删除、持久化并清理 Todo',
         semanticTarget: 'TodoMVC 列表',
-        oracles: [{ oracleId: 'ORACLE-TODOMVC-FUNCTIONAL',
-          statement: '全部功能符合官方规格，reload 保持状态，cleanup reload 后列表为空' }],
+        oracles: requirementDefinitions.map((definition) => ({
+          oracleId: definition.oracleId, statement: definition.title,
+        })),
         evidenceKinds: ['screenshot', 'dom', 'trace', 'gateway-audit'],
       }], mode: 'real-environment', effect: 'reversible-write', evidenceLevel: 'E2',
       cleanupPlanId: program.cleanupPlanId, timeoutMs: 60_000,
@@ -678,7 +801,7 @@ export function runtimeTodoMvcFullPlaywrightFixture(
       caseId: program.caseId, stepId: program.stepId, actionId: program.actionId,
       pageIdentityId: 'PAGE-TODOMVC-1', locatorCandidates: [],
       playwrightAction: 'full-playwright/v1', waits: [],
-      oracleIds: ['ORACLE-TODOMVC-FUNCTIONAL'], effect: 'reversible-write',
+      oracleIds: requirementDefinitions.map((definition) => definition.oracleId), effect: 'reversible-write',
       capabilities: [{ operation: 'full-playwright', capabilityId: 'PENDING-TODOMVC-FULL' }],
       requestIds: [],
     }],
@@ -697,35 +820,46 @@ export function runtimeTodoMvcFullPlaywrightFixture(
     ...(base.semanticArtifacts['prd-manifest'].content as Record<string, unknown>),
     prdId: 'PRD-TODOMVC-OFFICIAL',
     sources: [{ sourceId: 'PRD-TODOMVC-OFFICIAL', digest: input.prdRevision, byteLength: 1 }],
+    clauses: allClauses,
+    clauseInventoryDigest: digestPrdClauseInventory(allClauses),
   })
   const acceptanceScope = replaceArtifactContent(base.semanticArtifacts['acceptance-scope'], {
     ...(base.semanticArtifacts['acceptance-scope'].content as Record<string, unknown>),
-    includedReqCandidates: [{ reqId: 'REQ-TODOMVC-FUNCTIONAL',
-      sourceRefs: ['PRD-TODOMVC-OFFICIAL'] }],
+    includedReqCandidates: requirementDefinitions.map((definition) => ({
+      reqId: definition.reqId, sourceRefs: [definition.clauseId],
+    })),
+    clauseDispositions: [
+      ...requirementDefinitions.map((definition) => ({
+        clauseId: definition.clauseId, disposition: 'modeled' as const,
+        requirementIds: [definition.reqId],
+      })),
+      ...excludedClauses.map((item) => ({ clauseId: item.clauseId, disposition: 'excluded' as const,
+        reason: excludedSpecs.find(([id]) => item.clauseId.endsWith(id))?.[3] ?? '非浏览器验收范围',
+        decisionId: `SCOPE-EXCLUDE-${item.clauseId.slice(-3)}` })),
+    ],
   })
   const requirementModel = replaceArtifactContent(base.semanticArtifacts['requirement-model'], {
     ...(base.semanticArtifacts['requirement-model'].content as Record<string, unknown>),
-    requirements: [{
-      reqId: 'REQ-TODOMVC-FUNCTIONAL', revision: 1, title: 'TodoMVC 完整功能验收',
+    requirements: requirementDefinitions.map((definition) => ({
+      reqId: definition.reqId, revision: 1, title: definition.title,
       actors: ['visitor'], entities: ['todo'], preconditions: [], rules: [{
-        ruleId: 'RULE-TODOMVC-FUNCTIONAL', category: 'business',
-        statement: '访客可以新增、完成、过滤、编辑、删除并清理 Todo',
-        sourceRefs: ['PRD-TODOMVC-OFFICIAL'], certainty: 'explicit',
-        oracleIds: ['ORACLE-TODOMVC-FUNCTIONAL'],
+        ruleId: definition.ruleId, category: 'business', statement: definition.title,
+        sourceRefs: [definition.clauseId], certainty: 'explicit', oracleIds: [definition.oracleId],
       }], states: [], transitions: [], observableOutcomes: [{
-        oracleId: 'ORACLE-TODOMVC-FUNCTIONAL',
-        statement: '全部功能操作符合官方规格且 cleanup reload 后列表为空',
-      }], applicability: [], sourceRefs: ['PRD-TODOMVC-OFFICIAL'], status: 'active',
-    }],
+        oracleId: definition.oracleId, ruleId: definition.ruleId,
+        statement: definition.title, sourceRefs: [definition.clauseId],
+      }], applicability: [], sourceRefs: [definition.clauseId], status: 'active',
+    })),
+    applicabilityRules: requirementDefinitions.map((definition) => definition.ruleId),
   })
   const interactionFlow = replaceArtifactContent(base.semanticArtifacts['interaction-flow'], {
     flows: [{
       flowId: 'FLOW-TODOMVC-FUNCTIONAL',
       nodes: [
-        { nodeId: 'NODE-TODOMVC-ENTRY', reqId: 'REQ-TODOMVC-FUNCTIONAL', kind: 'entry',
-          effect: 'reversible-write', oracleIds: ['ORACLE-TODOMVC-FUNCTIONAL'] },
-        { nodeId: 'NODE-TODOMVC-EXIT', reqId: 'REQ-TODOMVC-FUNCTIONAL', kind: 'exit',
-          effect: 'reversible-write', oracleIds: ['ORACLE-TODOMVC-FUNCTIONAL'] },
+        { nodeId: 'NODE-TODOMVC-ENTRY', reqId: requirementDefinitions[0]!.reqId, kind: 'entry',
+          effect: 'reversible-write', oracleIds: [requirementDefinitions[0]!.oracleId] },
+        { nodeId: 'NODE-TODOMVC-EXIT', reqId: requirementDefinitions.at(-1)!.reqId, kind: 'exit',
+          effect: 'reversible-write', oracleIds: [requirementDefinitions.at(-1)!.oracleId] },
       ],
       edgeIds: ['EDGE-TODOMVC-FUNCTIONAL'], entryNodeId: 'NODE-TODOMVC-ENTRY',
       exitNodeIds: ['NODE-TODOMVC-EXIT'],
@@ -734,13 +868,15 @@ export function runtimeTodoMvcFullPlaywrightFixture(
   const coverageContent = structuredClone(
     base.semanticArtifacts['coverage-universe'].content,
   ) as Record<string, any>
-  coverageContent.obligations = [{
-    obligationId: 'COV-TODOMVC-FUNCTIONAL', reqId: 'REQ-TODOMVC-FUNCTIONAL',
-    ruleIds: ['RULE-TODOMVC-FUNCTIONAL'], nodeIds: ['NODE-TODOMVC-ENTRY', 'NODE-TODOMVC-EXIT'],
-    actor: 'visitor', transitionId: 'not-applicable', scenario: 'TodoMVC 官方完整功能验收',
-    necessity: 'required', applicabilityRuleId: 'RULE-TODOMVC-FUNCTIONAL',
+  coverageContent.obligations = requirementDefinitions.map((definition, index) => ({
+    obligationId: `COV-${definition.reqId}`, reqId: definition.reqId,
+    clauseIds: [definition.clauseId], ruleIds: [definition.ruleId], oracleIds: [definition.oracleId],
+    nodeIds: index === 0 ? ['NODE-TODOMVC-ENTRY']
+      : index === requirementDefinitions.length - 1 ? ['NODE-TODOMVC-EXIT'] : [],
+    actor: 'visitor', transitionId: 'not-applicable', scenario: definition.title,
+    necessity: 'required', applicabilityRuleId: definition.ruleId,
     disposition: { kind: 'automated' as const, caseIds: [program.caseId] },
-  }]
+  }))
   coverageContent.universeDigest = digestText('coverage-universe/v1', canonicalizeJson({
     coveragePolicyDigest: coverageContent.coveragePolicyDigest,
     pairwiseSeed: coverageContent.pairwiseSeed,

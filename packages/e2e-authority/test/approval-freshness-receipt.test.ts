@@ -244,7 +244,9 @@ describe('LocalApprovalAuthority approval freshness receipt', () => {
     })
     const decisionSubject = projectScopeDecisionSubject({ includedReqCandidates: [], exclusions: [], ambiguities: [],
       dependencies: [], visualScope: { required: false, refs: [] },
-      browserScope: { browserIds: ['chrome'], viewportIds: ['desktop'] } })
+      browserScope: { browserIds: ['chrome'], viewportIds: ['desktop'] },
+      clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'excluded', reason: '测试处置',
+        decisionId: 'SCOPE-1' }] })
     const decision = fixture.authority.issueDecisionReceipt({ kind: 'scope', decisionId: 'SCOPE-1',
       decisionStatus: 'approved', decisionSubject,
       approver: { subject: 'scope-alice', roles: ['scope-approver'] } })

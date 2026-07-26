@@ -120,16 +120,30 @@ describe('ProjectPublisher', () => {
     expect(active.generationPath).not.toContain(join('.biztest', '.biztest'))
     expect(JSON.parse(await readFile(join(active.generationPath, 'run/final-report.json'), 'utf8')))
       .toMatchObject({ schemaVersion: '3.0.0' })
-    await expect(publisher.renderActiveReport({
+    const rendered = await publisher.renderActiveReport({
       assetId: 'ASSET-1',
       expectedGenerationId: 'GEN-1',
       expectedProjectIdentityDigest: completeGenerationFixture().provenance.projectIdentityDigest,
-    })).resolves.toMatchObject({
+    })
+    expect(rendered).toMatchObject({
       active: {
         generationId: 'GEN-1',
         generationDigest: expect.stringMatching(/^sha256:/),
       },
       rendered: { markdown: expect.stringContaining('Runtime 与隔离证明') },
+    })
+    const reportRoot = join(projectRoot, '.biztest', 'reports', 'ASSET-1', 'GEN-1')
+    expect(await readFile(join(reportRoot, 'final-report.json'), 'utf8')).toBe(rendered.rendered.json)
+    expect(await readFile(join(reportRoot, 'final-report.md'), 'utf8')).toBe(rendered.rendered.markdown)
+    expect(await readFile(join(reportRoot, 'final-report.html'), 'utf8')).toBe(rendered.rendered.html)
+    expect(JSON.parse(await readFile(join(reportRoot, 'manifest.json'), 'utf8'))).toMatchObject({
+      schemaVersion: '1.0.0', assetId: 'ASSET-1', generationId: 'GEN-1',
+      generationDigest: active.generationDigest,
+      files: {
+        json: { path: 'final-report.json', digest: expect.stringMatching(/^sha256:/) },
+        markdown: { path: 'final-report.md', digest: expect.stringMatching(/^sha256:/) },
+        html: { path: 'final-report.html', digest: expect.stringMatching(/^sha256:/) },
+      },
     })
     await expect(publisher.renderActiveReport({
       assetId: 'ASSET-1',

@@ -50,8 +50,8 @@ describe('portable E2E runtime', () => {
       if (process.env.E2E_RUNTIME_TODOMVC_ONLY === '1') {
         expect(result.doctor.ready).toBe(true)
         expect(result.todoMvc).toMatchObject({
-          executionProfile: 'full-playwright', status: 'passed', cleanupStatus: 'verified-clean',
-          report: { content: { verdict: 'accepted' } },
+          executionProfile: 'full-playwright', status: 'failed', cleanupStatus: 'verified-clean',
+          report: { content: { verdict: 'rejected' } },
         })
         return
       }
@@ -84,14 +84,14 @@ describe('portable E2E runtime', () => {
       expect(result.fullPlaywright.semanticReview.prd.normalizedText).toContain('JSON Body')
       if (process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === '1') {
         expect(result.todoMvc).toMatchObject({
-          executionProfile: 'full-playwright', status: 'passed', cleanupStatus: 'verified-clean',
+          executionProfile: 'full-playwright', status: 'failed', cleanupStatus: 'verified-clean',
           prdUrl: 'https://raw.githubusercontent.com/tastejs/todomvc/ff43b02e59dfa604386bb382034b2cd07c2bcd8a/app-spec.md',
           targetUrl: 'https://todomvc.com/examples/typescript-react/',
-          report: { content: { verdict: 'accepted' } },
+          report: { content: { verdict: 'rejected' } },
           tracePath: [
-            'PRD-TODOMVC-OFFICIAL', 'REQ-TODOMVC-FUNCTIONAL', 'RULE-TODOMVC-FUNCTIONAL',
-            'ORACLE-TODOMVC-FUNCTIONAL', 'COV-TODOMVC-FUNCTIONAL',
-            'CASE-TODOMVC-FUNCTIONAL-1', 'ACTION-TODOMVC-FUNCTIONAL-1', 'accepted',
+            'CLAUSE-TODOMVC-F20', 'REQ-TODOMVC-F20', 'RULE-TODOMVC-F20',
+            'ORACLE-TODOMVC-F20', 'COV-REQ-TODOMVC-F20',
+            'CASE-TODOMVC-FUNCTIONAL-1', 'ACTION-TODOMVC-FUNCTIONAL-1', 'rejected',
           ],
         })
         expect(result.todoMvc?.prdRevision).toMatch(/^sha256:/)

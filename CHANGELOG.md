@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.0] - 2026-07-26
+
+### Added
+
+- 新增完整 PRD Clause Inventory 与逐条处置模型，强制每个原文 Clause 恰好一次映射为 modeled、excluded、not-applicable 或 ambiguous。
+- 新增 `Clause → Requirement → Rule → Oracle → Obligation → Checkpoint → Evidence → Verdict` 原子追踪链，并在 JSON、Markdown、HTML 报告中持久化。
+- full-playwright 新增每个 Oracle 的执行期 checkpoint，逐项保存 expected/actual、状态以及 screenshot、DOM、URL、trace 四类证据。
+- TodoMVC 官方 PRD Golden 扩展为 35 个 Clause、25 个功能 Oracle 与 25 个真实浏览器 checkpoint，覆盖全部 PRD 功能语义。
+
+### Fixed
+
+- Engine 完整性审计现在拒绝未处置 Clause、空语义链、未计划或未执行 Oracle、孤立证据及 checkpoint/回执绑定漂移。
+- Finalizer 按证据集合校验执行回执，兼容真实 runner 的证据采集顺序，同时继续拒绝缺失、重复或额外证据。
+- generation audit 将签名 checkpoint 证据纳入 ExecutionOutcomeReceipt 上下文，避免正式执行结果在发布审计阶段被误判漂移。
+- 跨仓 Golden 为全新 HOME 的冷缓存 npm 安装提供独立 13 分钟故障边界；浏览器 child 仍保持原有 10 分钟执行边界。
+
+### Changed
+
+- E2E Skill 的语义确认升级为逐字展示 `PRD → Clause 原文/来源/处置 → Requirement → Rule → Oracle`，缺失任一链路时 fail-closed。
+- 根包、十四个 workspace、内部依赖、Skill 安装命令与 Runtime/Engine 常量统一升级到精确 `0.4.0`。
+
 ## [0.3.1] - 2026-07-26
 
 ### Added

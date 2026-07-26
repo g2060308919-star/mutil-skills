@@ -16,6 +16,7 @@ export interface FullPlaywrightControlledSessionBackend {
   cleanupBindings: FullPlaywrightBindings
   reserveCapability(): Promise<CapabilityReservation>
   capture(stage: FullPlaywrightEvidenceStage): Promise<FullPlaywrightEvidenceSummary[]>
+  captureCheckpoint(checkpointId: string): Promise<FullPlaywrightEvidenceSummary[]>
   retireProgram(): Promise<void>
   retireCleanup(): Promise<void>
   observeEffect(): 'proven-not-applied' | 'applied' | 'unknown'
@@ -213,6 +214,7 @@ export function authorizeFullPlaywrightControlledSession(
     cleanupBindings: backend.cleanupBindings,
     reserveCapability: backend.reserveCapability.bind(backend),
     capture: backend.capture.bind(backend),
+    captureCheckpoint: backend.captureCheckpoint.bind(backend),
     retireProgram: backend.retireProgram.bind(backend),
     retireCleanup: backend.retireCleanup.bind(backend),
     observeEffect: backend.observeEffect.bind(backend),
@@ -256,7 +258,7 @@ function validateControlledBackend(backend: FullPlaywrightControlledSessionBacke
     || !backend.terminal || !['releaseLease', 'quarantineLease', 'finalizeWriteOutcome',
       'markWriteUnknownWithOutcome', 'markWriteUnknown']
       .every((method) => typeof backend.terminal[method as keyof typeof backend.terminal] === 'function')
-    || !['reserveCapability', 'capture', 'retireProgram', 'retireCleanup', 'observeEffect',
+    || !['reserveCapability', 'capture', 'captureCheckpoint', 'retireProgram', 'retireCleanup', 'observeEffect',
       'freezeGateway', 'publishGateway']
       .every((method) => typeof backend[method as keyof FullPlaywrightControlledSessionBackend] === 'function')) {
     throw new Error('E2E_FULL_PLAYWRIGHT_CONTROLLED_SESSION_INVALID')

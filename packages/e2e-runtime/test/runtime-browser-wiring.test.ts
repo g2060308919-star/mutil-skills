@@ -22,6 +22,7 @@ import {
   computeFullPlaywrightSourceDigest,
   digestBytes,
   digestRuntimeHttpBodyTemplate,
+  digestOracleCheckpointValue,
   digestText,
 } from '@mutil-skills/e2e-contracts'
 import { systemChromeClosureDigest } from '../src/system-chrome.js'
@@ -132,13 +133,16 @@ describe('Runtime browser production wiring cleanup', () => {
   test('full Playwright trace 必须持久化真实 Playwright ZIP，不能用零字节引用占位', async () => {
     const roots = await createRuntimeTestRoots()
     const starts: unknown[] = []
+    const chunks: unknown[] = []
     const stops: string[] = []
     const tracing = {
       start: async (options: unknown) => { starts.push(options) },
-      stop: async ({ path }: { path: string }) => {
+      startChunk: async (options?: unknown) => { chunks.push(options) },
+      stopChunk: async ({ path }: { path: string }) => {
         stops.push(path)
         await writeFile(path, Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3, 4]))
       },
+      stop: async () => undefined,
     }
     try {
       const recorder = new RuntimeFullPlaywrightTraceRecorder({
@@ -149,7 +153,8 @@ describe('Runtime browser production wiring cleanup', () => {
       expect(evidence).toMatchObject({ kind: 'trace', stage: 'before', byteLength: 8,
         references: ['runtime-artifact://full-playwright-traces/ATTEMPT-TRACE-1/program-before.zip'] })
       expect(evidence.digest).toMatch(/^sha256:/)
-      expect(starts).toHaveLength(2)
+      expect(starts).toHaveLength(1)
+      expect(chunks).toHaveLength(2)
       expect(stops).toHaveLength(1)
       expect(await readFile(stops[0]!)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3, 4]))
     } finally { await rm(roots.root, { recursive: true, force: true }) }
@@ -198,6 +203,8 @@ describe('Runtime browser production wiring cleanup', () => {
       source, sourceDigest: computeFullPlaywrightSourceDigest(source), cleanupSource,
       cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource), dataLeaseId: 'LEASE-1',
       cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+      oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1',
+        expectedJson: 'true', expectedDigest: digestOracleCheckpointValue('true') }],
       networkRequests: [
         { intentId: 'JSON', method: 'POST', canonicalOrigin: 'https://example.test', exactPath: '/json', query: [],
           payload: { kind: 'json' as const, digest: digestText('http-json-payload/v1', canonicalizeJson(json)) },

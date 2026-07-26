@@ -31,6 +31,7 @@ const SECTION_TITLES = [
   '回归资产与独立执行',
   '剩余风险与建议动作',
   'Runtime 与隔离证明',
+  'PRD 原文到 Oracle 语义追踪',
 ] as const
 
 export function renderCompleteReport(input: unknown): RenderedCompleteReport {
@@ -181,6 +182,14 @@ function renderMarkdown(report: FinalReportArtifact): string {
       `- Isolation proof：${content.runtimeProvenance.isolationProofDigest}`,
       `- 源码仓库独立：${content.runtimeProvenance.sourceRepositoryIndependent ? '是' : '否'}`,
     ]),
+    markdownSection(SECTION_TITLES[16], [
+      table(['CLAUSE', '来源区间', 'PRD 原文', '处置', 'REQ', 'RULE', 'ORACLE'],
+        content.semanticTraceability.map((item) => [
+          item.clauseId,
+          `${item.sourceId}:${item.sourceSpan.startLine}:${item.sourceSpan.startColumn}-${item.sourceSpan.endLine}:${item.sourceSpan.endColumn}`,
+          item.originalText, item.disposition, item.requirementId ?? '无', item.ruleId ?? '无', item.oracleId ?? '无',
+        ])),
+    ]),
   ]
   return [
     `# ${text(content.title)}`,
@@ -264,6 +273,10 @@ function htmlSection(index: number, report: FinalReportArtifact): string {
     `Toolchain：Node ${content.regressionDetails.trustedCompiler.nodeVersion} · Playwright ${content.regressionDetails.trustedCompiler.playwrightVersion} · CLI ${content.regressionDetails.trustedCompiler.playwrightCliDigest}`,
   ])
   if (index === 14) return `${htmlFindingTable(content.risks)}<h3>建议动作</h3>${htmlList(content.recommendations)}`
+  if (index === 16) return htmlTable(['CLAUSE', '来源区间', 'PRD 原文', '处置', 'REQ', 'RULE', 'ORACLE'],
+    content.semanticTraceability.map((item) => [item.clauseId,
+      `${item.sourceId}:${item.sourceSpan.startLine}:${item.sourceSpan.startColumn}-${item.sourceSpan.endLine}:${item.sourceSpan.endColumn}`,
+      item.originalText, item.disposition, item.requirementId ?? '无', item.ruleId ?? '无', item.oracleId ?? '无']))
   return htmlList([
     `Runtime：${content.runtimeProvenance.runtimeVersion}`,
     `Runtime installation：${content.runtimeProvenance.runtimeInstallationDigest}`,
@@ -375,7 +388,9 @@ function findingTable(findings: Array<{ code: string; severity: string; ref: str
 
 function metricEntries(metrics: FinalReportArtifact['content']['metrics']): Array<[string, Metric]> {
   return [
+    ['PRD 条款处置覆盖', metrics.clauseDispositionCoverage],
     ['需求设计覆盖', metrics.requirementDesignCoverage], ['规则覆盖', metrics.ruleCoverage],
+    ['Oracle 覆盖', metrics.oracleCoverage], ['Case 设计覆盖', metrics.caseDesignCoverage],
     ['关键节点覆盖', metrics.criticalNodeCoverage], ['角色覆盖', metrics.roleCoverage],
     ['状态转换覆盖', metrics.stateTransitionCoverage], ['场景类别覆盖', metrics.scenarioCategoryCoverage],
     ['自动化处置覆盖', metrics.automationDispositionCoverage], ['执行覆盖', metrics.executionCoverage],

@@ -48,7 +48,7 @@ export interface CrossRepoRuntimeGoldenResult {
   }
   todoMvc?: {
     executionProfile: 'full-playwright'
-    status: 'passed'
+    status: 'failed'
     cleanupStatus: 'verified-clean'
     prdUrl: string
     targetUrl: string
@@ -131,7 +131,10 @@ export async function runCrossRepoRuntimeGolden(input: {
   await exec('npm', [
     'install', '--ignore-scripts', '--omit=dev', '--no-bin-links', '--no-audit', '--no-fund',
     '--save-exact', ...installSpecs,
-  ], input.project, installEnvironment(input.home, npmCache), 600_000)
+  // 全新 HOME 的 Registry/Pack Golden 需要下载完整 Runtime 闭包。冷缓存网络下
+  // 10 分钟不足以区分“安装失败”和“registry 较慢”，因此给安装阶段独立预留
+  // 13 分钟；child 执行仍保持原有 10 分钟故障边界。
+  ], input.project, installEnvironment(input.home, npmCache), 780_000)
   const installedReleasePackages = await verifyInstalledReleasePackages(
     input.project, RELEASE_PACKAGES, expectedPackIntegrities,
   )
@@ -472,11 +475,11 @@ function parseResult(value: unknown): CrossRepoRuntimeGoldenResult {
   if (process.env.E2E_RUNTIME_TODOMVC_ONLY === '1') {
     if (result.doctor?.ready !== true
       || result.todoMvc?.executionProfile !== 'full-playwright'
-      || result.todoMvc.status !== 'passed'
+      || result.todoMvc.status !== 'failed'
       || result.todoMvc.cleanupStatus !== 'verified-clean'
       || !/^sha256:[a-f0-9]{64}$/.test(result.todoMvc.prdRevision)
       || !/^sha256:[a-f0-9]{64}$/.test(result.todoMvc.semanticReview?.reviewDigest)
-      || result.todoMvc.report?.content?.verdict !== 'accepted'
+      || result.todoMvc.report?.content?.verdict !== 'rejected'
       || !Array.isArray(result.todoMvc.tracePath)) {
       throw new Error('跨仓 TodoMVC 诊断结果不满足完整 Runtime Golden 契约')
     }
@@ -499,11 +502,11 @@ function parseResult(value: unknown): CrossRepoRuntimeGoldenResult {
     || result.fullPlaywright.report?.content?.verdict !== 'accepted'
     || (process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === '1'
       && (result.todoMvc?.executionProfile !== 'full-playwright'
-        || result.todoMvc.status !== 'passed'
+        || result.todoMvc.status !== 'failed'
         || result.todoMvc.cleanupStatus !== 'verified-clean'
         || !/^sha256:[a-f0-9]{64}$/.test(result.todoMvc.prdRevision)
         || !/^sha256:[a-f0-9]{64}$/.test(result.todoMvc.semanticReview?.reviewDigest)
-        || result.todoMvc.report?.content?.verdict !== 'accepted'
+        || result.todoMvc.report?.content?.verdict !== 'rejected'
         || !Array.isArray(result.todoMvc.tracePath)))
     || !Array.isArray(result.tracePath)
     || typeof result.reportPath !== 'string') {

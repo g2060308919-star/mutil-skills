@@ -48,7 +48,9 @@ function input(overrides: Partial<VerdictInput> = {}): VerdictInput {
     evidenceAudit: { status: 'complete', total: 1, complete: 1, reasonCodes: [] },
     cleanupAudit: { status: 'complete', total: 0, complete: 0, reasonCodes: [] },
     coverageFacts: {
+      prdClauses: { covered: 1, total: 1 },
       requirementDesign: { covered: 1, total: 1 }, rules: { covered: 1, total: 1 },
+      oracles: { covered: 1, total: 1 }, cases: { covered: 1, total: 1 },
       criticalNodes: { covered: 1, total: 1 }, roles: { covered: 1, total: 1 },
       stateTransitions: { covered: 0, total: 0 }, scenarioCategories: { covered: 1, total: 1 },
     },
@@ -247,6 +249,17 @@ describe('computeVerdict complete truth table', () => {
     }), dependencies)
     expect(result.verdict).toBe('artifact-blocked')
     expect(result.reasonCodes).toEqual(expect.arrayContaining(['VERDICT_ARTIFACT_BLOCKED', 'VERDICT_MIGRATION_REQUIRED']))
+  })
+
+  test('任一 P0 语义覆盖维度不完整时不能 accepted', () => {
+    for (const dimension of ['prdClauses', 'requirementDesign', 'rules', 'oracles', 'cases'] as const) {
+      const base = input()
+      const result = computeVerdict(input({ coverageFacts: {
+        ...base.coverageFacts, [dimension]: { covered: 0, total: 1 },
+      } }), dependencies)
+      expect(result.verdict, dimension).toBe('artifact-blocked')
+      expect(result.reasonCodes, dimension).toContain('VERDICT_SEMANTIC_COVERAGE_INCOMPLETE')
+    }
   })
 
   test('maps incomplete gateway, evidence, cleanup, input, declined, and manual-required states to incomplete', () => {

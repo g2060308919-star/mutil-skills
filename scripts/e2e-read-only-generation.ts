@@ -1,5 +1,6 @@
 import {
   canonicalizeJson, digestArtifactContent, digestBytes, digestText,
+  digestPrdClause, digestPrdClauseInventory,
   digestApprovalProjection,
   type CoverageUniverse, type SanitizerPolicy, type SignedDiscoveryGrant, type SignedReadGrant, type SignedWriteGrant,
   type ApproverIdentity, type PrivacyReviewReceipt,
@@ -51,9 +52,11 @@ export interface GoldenBlockedRegressionCase {
 
 function goldenScopeFacts() {
   return {
-    includedReqCandidates: [{ reqId: 'REQ-ORDER-1', sourceRefs: ['PRD-ORDER-1'] }], exclusions: [], ambiguities: [],
+    includedReqCandidates: [{ reqId: 'REQ-ORDER-1', sourceRefs: ['CLAUSE-ORDER-1'] }], exclusions: [], ambiguities: [],
     dependencies: [], visualScope: { required: true, refs: ['PAGE-ORDERS'] },
     browserScope: { browserIds: ['CHROMIUM'], viewportIds: ['DESKTOP'] },
+    clauseDispositions: [{ clauseId: 'CLAUSE-ORDER-1', disposition: 'modeled' as const,
+      requirementIds: ['REQ-ORDER-1'] }],
   }
 }
 
@@ -63,11 +66,16 @@ function goldenLineageFacts(currentRevision: string) {
 }
 
 function goldenPrdManifest(revision: string) {
+  const material = { clauseId: 'CLAUSE-ORDER-1', sourceId: 'PRD-ORDER-1', kind: 'functional' as const,
+    sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 10 },
+    originalText: '显示待审核订单', normalizedText: '显示待审核订单' }
+  const clauses = [{ ...material, textDigest: digestPrdClause(material) }]
   return {
     prdId: 'PRD-ORDER-1', assetId: 'PRODUCT-PRD-1', revision,
     normalizedPrdDigest: revision,
     sources: [{ sourceId: 'PRD-ORDER-1', digest: revision, byteLength: 1 }],
-    attachments: [], sourceCacheIndexDigest: d('source-cache-index'),
+    attachments: [], sourceCacheIndexDigest: d('source-cache-index'), clauses,
+    clauseInventoryDigest: digestPrdClauseInventory(clauses),
   }
 }
 
@@ -124,11 +132,12 @@ function readOnlyApprovalContents(input: ReadOnlyApprovalFactsInput): Record<str
   const model = {
     modelRevision: 1, coupledDimensions: [], applicabilityRules: ['actor:auditor'], modelDecisionDigest: input.modelDigest,
     requirements: [{ reqId: 'REQ-ORDER-1', revision: 1, title: '展示订单列表', actors: ['auditor'], entities: ['order'],
-      preconditions: [], states: [], transitions: [], sourceRefs: ['prd:审核流程'], status: 'active',
-      observableOutcomes: [{ oracleId: 'ORACLE-ORDER-VISIBLE', statement: '显示待审核订单' }],
+      preconditions: [], states: [], transitions: [], sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
+      observableOutcomes: [{ oracleId: 'ORACLE-ORDER-VISIBLE', ruleId: 'RULE-ORDER-1',
+        statement: '显示待审核订单', sourceRefs: ['CLAUSE-ORDER-1'] }],
       applicability: [{ dimension: 'actor', value: 'auditor', required: true }],
       rules: [{ ruleId: 'RULE-ORDER-1', category: 'business', statement: '显示待审核订单',
-        sourceRefs: ['prd:1'], certainty: 'explicit' }] }],
+        sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit', oracleIds: ['ORACLE-ORDER-VISIBLE'] }] }],
   }
   const coverage = { ...input.universe,
     obligations: input.universe.obligations.map(({ kind: _kind, ...obligation }) => obligation) }
@@ -269,11 +278,12 @@ function writeApprovalContents(input: {
       entities: ['order'], preconditions: ['订单待审核'],
       states: [{ stateId: 'pending', title: '待审核' }, { stateId: 'approved', title: '已批准' }],
       transitions: [{ transitionId: 'TRANSITION-APPROVE', from: 'pending', action: '批准订单', to: 'approved' }],
-      sourceRefs: ['prd:审核流程'], status: 'active',
-      observableOutcomes: [{ oracleId: 'ORACLE-ORDER-APPROVED', statement: '订单显示已批准' }],
+      sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
+      observableOutcomes: [{ oracleId: 'ORACLE-ORDER-APPROVED', ruleId: 'RULE-ORDER-1',
+        statement: '订单显示已批准', sourceRefs: ['CLAUSE-ORDER-1'] }],
       applicability: [{ dimension: 'actor', value: 'operator', required: true }],
       rules: [{ ruleId: 'RULE-ORDER-1', category: 'business', statement: '授权操作员可以批准待审核订单',
-        sourceRefs: ['prd:1'], certainty: 'explicit' }] }],
+        sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit', oracleIds: ['ORACLE-ORDER-APPROVED'] }] }],
   }
   const coverage = { ...input.universe,
     obligations: input.universe.obligations.map(({ kind: _kind, ...obligation }) => obligation) }
@@ -522,9 +532,9 @@ export async function createReadOnlyGoldenGenerationInput(input: {
       userRequest: '验证订单列表展示待审核订单', testWorkspaceId: 'WORKSPACE-GOLDEN', secretRefs: [],
     }),
     'prd-manifest': draft('prd/prd-manifest.json', {
-      prdId: 'PRD-ORDER-1', assetId: context.assetId, revision: context.prdRevision,
+      ...goldenPrdManifest(context.prdRevision), assetId: context.assetId,
       normalizedPrdDigest: d('normalized-prd'),
-      sources: [{ sourceId: 'SOURCE-PRD', digest: d('source-prd'), byteLength: 18 }], attachments: [],
+      sources: [{ sourceId: 'PRD-ORDER-1', digest: d('source-prd'), byteLength: 18 }],
       sourceCacheIndexDigest: d('source-cache'),
     }),
     'prd-diff': draft('prd/prd-diff.json', {
@@ -544,11 +554,12 @@ export async function createReadOnlyGoldenGenerationInput(input: {
       modelRevision: 1, coupledDimensions: [], applicabilityRules: ['actor:auditor'],
       modelDecisionDigest: input.modelDigest, requirements: [{
         reqId: 'REQ-ORDER-1', revision: 1, title: '展示订单列表', actors: ['auditor'], entities: ['order'],
-        preconditions: [], states: [], transitions: [], sourceRefs: ['prd:审核流程'], status: 'active',
-        observableOutcomes: [{ oracleId: 'ORACLE-ORDER-VISIBLE', statement: '显示待审核订单' }],
+        preconditions: [], states: [], transitions: [], sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
+        observableOutcomes: [{ oracleId: 'ORACLE-ORDER-VISIBLE', ruleId: 'RULE-ORDER-1',
+          statement: '显示待审核订单', sourceRefs: ['CLAUSE-ORDER-1'] }],
         applicability: [{ dimension: 'actor', value: 'auditor', required: true }],
         rules: [{ ruleId: 'RULE-ORDER-1', category: 'business', statement: '显示待审核订单',
-          sourceRefs: ['prd:1'], certainty: 'explicit' }],
+          sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit', oracleIds: ['ORACLE-ORDER-VISIBLE'] }],
       }],
     }),
     'interaction-flow': draft('design/interaction-flow.json', { flows: [{

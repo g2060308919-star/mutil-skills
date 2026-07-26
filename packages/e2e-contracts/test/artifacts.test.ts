@@ -10,6 +10,7 @@ import {
   canonicalizeJson,
   digestBytes,
   digestRuntimeHttpBodyTemplate,
+  digestOracleCheckpointValue,
   digestText,
 } from '../src/index.js'
 
@@ -30,6 +31,8 @@ function program() {
     dataLeaseId: 'LEASE-1',
     cleanupPlanId: 'CLEANUP-1',
     timeoutMs: 30_000,
+    oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', expectedJson: 'true',
+      expectedDigest: digestOracleCheckpointValue('true') }],
     networkRequests: [{
       intentId: 'INTENT-1', method: 'POST', canonicalOrigin: 'https://example.test',
       exactPath: '/api/todos', query: [], payload: { kind: 'json' as const, digest: digest('a') },
@@ -59,7 +62,8 @@ describe('FullPlaywrightProgram', () => {
     const value = program()
     expect(FullPlaywrightProgramSchema.parse(value)).toEqual(value)
     for (const field of [
-      'caseId', 'stepId', 'actionId', 'cleanupSource', 'dataLeaseId', 'cleanupPlanId', 'timeoutMs', 'networkRequests',
+      'caseId', 'stepId', 'actionId', 'cleanupSource', 'dataLeaseId', 'cleanupPlanId', 'timeoutMs',
+      'oracleCheckpoints', 'networkRequests',
     ] as const) {
       expect(FullPlaywrightProgramSchema.safeParse({ ...value, [field]: undefined }).success, field).toBe(false)
     }
@@ -71,6 +75,9 @@ describe('FullPlaywrightProgram', () => {
       ...value.networkRequests[0]!, intentId: `INTENT-${index}`, expectedOrder: index + 1,
     }))
     expect(FullPlaywrightProgramSchema.safeParse({ ...value, networkRequests: tooManyRequests }).success).toBe(false)
+    expect(FullPlaywrightProgramSchema.safeParse({ ...value,
+      oracleCheckpoints: [{ ...value.oracleCheckpoints[0], expectedJson: '{ "value": true }' }],
+    }).success).toBe(false)
   })
 
   test('full Playwright network request 支持连续阶段内无序，并拒绝阶段断档', () => {

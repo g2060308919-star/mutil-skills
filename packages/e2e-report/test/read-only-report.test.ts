@@ -10,8 +10,11 @@ const verdict: VerdictResult = {
   businessFailuresObserved: [],
   advisoryFailures: [],
   metrics: {
+    clauseDispositionCoverage: { status: 'value', numerator: 1, denominator: 1, percentage: 100 },
     requirementDesignCoverage: { status: 'value', numerator: 1, denominator: 1, percentage: 100 },
     ruleCoverage: { status: 'value', numerator: 1, denominator: 1, percentage: 100 },
+    oracleCoverage: { status: 'value', numerator: 1, denominator: 1, percentage: 100 },
+    caseDesignCoverage: { status: 'value', numerator: 1, denominator: 1, percentage: 100 },
     criticalNodeCoverage: { status: 'value', numerator: 1, denominator: 1, percentage: 100 },
     roleCoverage: { status: 'value', numerator: 1, denominator: 1, percentage: 100 },
     stateTransitionCoverage: { status: 'not-applicable', numerator: 0, denominator: 0, reason: '没有状态转换' },

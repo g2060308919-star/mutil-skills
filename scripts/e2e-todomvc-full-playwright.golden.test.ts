@@ -15,9 +15,12 @@ import { runtimeTodoMvcFullPlaywrightFixture } from './e2e-runtime-read-only.fix
 const runPublicGolden = process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === '1'
 const targetUrl = 'https://todomvc.com/examples/typescript-react/'
 const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+const reportProgress = (message: string) => {
+  if (process.env.E2E_RUNTIME_GOLDEN_PROGRESS === '1') process.stderr.write(`TODOMVC_GOLDEN:${message}\n`)
+}
 
 test.runIf(runPublicGolden)(
-  '官方 TodoMVC PRD：完整浏览器功能、持久化与 cleanup 经受控 full-playwright 通过',
+  '官方 TodoMVC PRD：完整功能覆盖并准确拒绝 localStorage 键名偏差',
   async () => {
     const traceRoot = await mkdtemp(join(tmpdir(), 'e2e-todomvc-full-trace-'))
     await mkdir(traceRoot, { recursive: true, mode: 0o700 })
@@ -36,7 +39,7 @@ test.runIf(runPublicGolden)(
     const fixture = runtimeTodoMvcFullPlaywrightFixture({
       runId: 'RUN-TODOMVC-PUBLIC', assetId: 'ASSET-TODOMVC-PUBLIC',
       prdRevision: digestText('todomvc-prd/v1', 'ff43b02e59dfa604386bb382034b2cd07c2bcd8a'),
-      installationDigest: digestText('runtime-installation/v1', '0.3.1'),
+      installationDigest: digestText('runtime-installation/v1', '0.4.0'),
       url: targetUrl, now: new Date('2026-07-26T00:00:00.000Z'),
     })
     const execution = fixture.frozenArtifacts['execution-contract'].content as any
@@ -77,11 +80,12 @@ test.runIf(runPublicGolden)(
     await Promise.all([programTrace.start(), cleanupTrace.start()])
     const state: Record<string, unknown> = {}
     const capture = async (stage: FullPlaywrightEvidenceStage) => {
+      reportProgress(`stage:${stage}:start`)
       const page = stage === 'cleanup' ? cleanupPage : programPage
       const screenshot = await page.screenshot()
       const dom = await page.content()
       const url = page.url()
-      return [
+      const evidence = [
         { evidenceId: `${stage.toUpperCase()}-SHOT`, stage, kind: 'screenshot' as const,
           byteLength: screenshot.byteLength,
           digest: digestBytes('runtime-evidence/screenshot/v1', screenshot) },
@@ -91,12 +95,35 @@ test.runIf(runPublicGolden)(
           byteLength: Buffer.byteLength(url), digest: digestText('runtime-evidence/url/v1', url) },
         await (stage === 'cleanup' ? cleanupTrace : programTrace).capture(stage, stage === 'before'),
       ]
+      reportProgress(`stage:${stage}:done`)
+      return evidence
+    }
+    const captureCheckpoint = async (checkpointId: string) => {
+      reportProgress(`checkpoint:${checkpointId}:start`)
+      const screenshot = await programPage.screenshot()
+      const dom = await programPage.content()
+      const url = programPage.url()
+      const evidence = [
+        { evidenceId: `${checkpointId}-SHOT`, stage: 'checkpoint' as const, checkpointId,
+          kind: 'screenshot' as const, byteLength: screenshot.byteLength,
+          digest: digestBytes('runtime-evidence/screenshot/v1', screenshot) },
+        { evidenceId: `${checkpointId}-DOM`, stage: 'checkpoint' as const, checkpointId,
+          kind: 'dom' as const, byteLength: Buffer.byteLength(dom),
+          digest: digestText('runtime-evidence/dom/v1', dom) },
+        { evidenceId: `${checkpointId}-URL`, stage: 'checkpoint' as const, checkpointId,
+          kind: 'url' as const, byteLength: Buffer.byteLength(url),
+          digest: digestText('runtime-evidence/url/v1', url) },
+        { ...await programTrace.capture('checkpoint', true, checkpointId), checkpointId },
+      ]
+      reportProgress(`checkpoint:${checkpointId}:done`)
+      return evidence
     }
     try {
       const ready = await readyFixture({
         source: program.source, cleanupSource: program.cleanupSource,
         programTimeoutMs: 60_000, cleanupTimeoutMs: 30_000,
         networkRequests: program.networkRequests, networkRequestBodies: [],
+        oracleCheckpoints: program.oracleCheckpoints,
         programBindings: {
           page: programPage, context: programContext, browser: programBrowser,
           request: programContext.request, expect: playwrightExpect,
@@ -107,7 +134,7 @@ test.runIf(runPublicGolden)(
           request: cleanupContext.request, expect: playwrightExpect,
           testInfo: { title: 'TodoMVC official PRD cleanup' }, state,
         },
-        capture,
+        capture, captureCheckpoint,
         finalizeGateway: () => {
           const audit = recorder.finalize()
           return { executionSessionId: 'GW-SESSION-1', policyDigest: audit.policyDigest,
@@ -116,22 +143,40 @@ test.runIf(runPublicGolden)(
         issueOutcome: (binding) => signer.issueExecutionOutcomeReceipt(binding),
       })
       const result = await runFullPlaywrightCase(ready.input)
+      reportProgress(`result:${JSON.stringify({ status: result.status,
+        effectObservation: result.effectObservation, cleanup: result.cleanup,
+        primaryError: result.primaryError, checkpointCount: result.oracleCheckpoints.length,
+        blocked: counts.blocked, state })}`)
 
-      expect(result, JSON.stringify(result)).toMatchObject({
-        status: 'passed', effectObservation: 'applied', cleanup: { status: 'verified-clean' },
+      expect(result.status, JSON.stringify(result)).toBe('failed')
+      expect(result.effectObservation).toBe('applied')
+      expect(result.cleanup.status).toBe('verified-clean')
+      expect(result.primaryError).toMatchObject({ message: 'E2E_ORACLE_CHECKPOINT_FAILED' })
+      expect(result.oracleCheckpoints).toHaveLength(25)
+      expect(result.oracleCheckpoints.find((checkpoint) =>
+        checkpoint.oracleId === 'ORACLE-TODOMVC-F20')).toMatchObject({
+        status: 'failed', expectedJson: '"todos-react"', actualJson: '"react-todos"',
       })
       expect(counts.blocked).toBe(0)
       expect(state).toMatchObject({
         programCompleted: true, persistenceVerified: true, cleanupVerified: true,
         storageKeyDeviation: 'react-todos',
       })
+      reportProgress('cleanup-assertion:start')
       expect(await cleanupPage.locator('.todo-list li').count()).toBe(0)
+      reportProgress('cleanup-assertion:done')
     } finally {
+      reportProgress('close:program-context:start')
       await programContext.close()
+      reportProgress('close:program-context:done')
       await cleanupContext.close()
+      reportProgress('close:cleanup-context:done')
       await programBrowser.close()
+      reportProgress('close:program-browser:done')
       await cleanupBrowser.close()
+      reportProgress('close:cleanup-browser:done')
       await rm(traceRoot, { recursive: true, force: true })
+      reportProgress('close:trace-root:done')
     }
   },
   180_000,

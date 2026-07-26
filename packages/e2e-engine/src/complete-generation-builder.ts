@@ -43,6 +43,7 @@ import {
 } from './generation-audit.js'
 import { computeVerdict, type VerdictDependencies } from './verdict.js'
 import { deriveBrowserCannotClaim } from './browser-claims.js'
+import { auditSemanticCompleteness } from './semantic-completeness.js'
 import { deriveRuntimeProvenanceCannotClaim } from './runtime-provenance-claims.js'
 import { auditPersistedAttemptFacts, createPersistedAttemptVerdictDependencies,
   type PersistedAttemptProjection } from './persisted-attempt-audit.js'
@@ -443,9 +444,14 @@ function renderFinalReport(
         return {
           stepId: step.stepId, action: step.semanticAction,
           expected: step.oracles.map((oracle) => oracle.statement).join('；'),
-          actual: stepResult?.actualDigest ?? '未产生终态执行事实',
+          actual: stepResult?.oracleCheckpoints?.map((checkpoint) =>
+            `${checkpoint.oracleId}: ${checkpoint.actualJson}`).join('；')
+            || stepResult?.actualDigest || '未产生终态执行事实',
           oracle: stepResult?.oracleResult ?? 'not-evaluated', status: stepResult?.status ?? 'not-executed',
           evidenceLinks,
+          ...(stepResult?.oracleCheckpoints === undefined ? {} : {
+            oracleCheckpoints: stepResult.oracleCheckpoints,
+          }),
         }
       }),
     }))
@@ -463,6 +469,22 @@ function renderFinalReport(
   const diffContent = content('prd-diff')
   const gateway = content('gateway-audit')
   const reportGateway = projectReportGatewayAudit(gateway)
+  const semanticAudit = auditSemanticCompleteness({
+    manifest: content('prd-manifest'), scope: content('acceptance-scope'),
+    model: content('requirement-model'), flows: content('interaction-flow'),
+    coverage: content('coverage-universe'), cases: content('test-cases'),
+  })
+  const clausesById = new Map(content('prd-manifest').clauses.map((clause) => [clause.clauseId, clause]))
+  const semanticTraceability: FinalReportContent['semanticTraceability'] = semanticAudit.traceability.map((row) => {
+    const clause = clausesById.get(row.clauseId)
+    if (!clause) throw new Error(`E2E_COMPLETE_GENERATION_REPORT_CLAUSE_MISSING:${row.clauseId}`)
+    return {
+      ...row,
+      sourceId: clause.sourceId,
+      sourceSpan: clause.sourceSpan,
+      originalText: clause.originalText,
+    }
+  })
   const executionApprovalStatus = grantContent.grants.some((grant) => grant.status === 'revoked')
     ? 'revoked' as const : grantContent.grants.some((grant) => grant.status === 'expired')
       ? 'expired' as const : grantContent.grants.some((grant) => grant.status === 'denied')
@@ -548,7 +570,7 @@ function renderFinalReport(
     ])].sort(),
     verdictInputDigest: digestText('verdict-input/v2', canonicalizeJson(verdictInput)),
     scope: scopeContent.includedReqCandidates.map((item) => ({ id: item.reqId, digest: artifact('acceptance-scope').contentDigest })),
-    traceability, realResults, injectionResults,
+    traceability, semanticTraceability, realResults, injectionResults,
     manualResults: content('manual-results').results.map((item) => ({
       id: item.manualResultId, digest: item.authorityProof.signedDigest,
       ...item.authorityProof.approvalAssurance,

@@ -9,11 +9,11 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 
 ## 默认首次使用流程
 
-1. 缺少 Runtime 时，只提示用户显式安装精确 `0.3.1`。
+1. 缺少 Runtime 时，只提示用户显式安装精确 `0.4.0`。
 2. 运行 `~/.mutil-skills/bin/repo-e2e configure-browser --system`，验证并选择系统 Google Chrome；只有系统 Chrome 不可用且用户明确选择兜底时，才运行 `install-browser` 安装托管 Chromium。
 3. 运行 `~/.mutil-skills/bin/repo-e2e configure-approval --mode local-confirmation`。默认流程不执行 `identity enroll`；WebAuthn 是用户显式选择的增强模式。
 4. 运行 `~/.mutil-skills/bin/repo-e2e doctor --json`；仅在 `ready:true` 后创建 Run。
-5. Execution Approval 必须取得 Runtime 返回的 `semanticReview`，按“PRD 原文 → Requirement → Rule → Oracle”完整展示；随后 Runtime 返回 `confirmation-required` 时，必须暂停并等待调用者明确确认，不得替用户确认，也不得继续执行后续边。
+5. Execution Approval 必须取得 Runtime 返回的 `semanticReview`，按“PRD 原文 → Clause 原文与处置 → Requirement → Rule → Oracle”完整展示；随后 Runtime 返回 `confirmation-required` 时，必须暂停并等待调用者明确确认，不得替用户确认，也不得继续执行后续边。
 6. Runtime 完成最终化与报告渲染后，交付 `.biztest` 中的同代资产、脱敏证据和报告路径。
 
 ## Runtime 能力门
@@ -24,7 +24,7 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 | --- | --- | --- |
 | Runtime Host | `doctor --json` 返回经过验证的 installation manifest、protocol major 和 safety probes | `environment-blocked / E2E_RUNTIME_HOST_UNAVAILABLE`，仅建议精确版本安装 |
 
-缺失时只展示以下精确建议，不得自行执行：`npm exec --yes --package=@mutil-skills/e2e-runtime@0.3.1 -- repo-e2e install-runtime --version 0.3.1`。不得探测、导入或建议安装 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Report、Store 等低层包。
+缺失时只展示以下精确建议，不得自行执行：`npm exec --yes --package=@mutil-skills/e2e-runtime@0.4.0 -- repo-e2e install-runtime --version 0.4.0`。不得探测、导入或建议安装 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Report、Store 等低层包。
 
 ## 固定 Runtime JSON 调用协议
 
@@ -63,7 +63,7 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 
 - Skill 不计算 SHA、覆盖率、审批有效性、verdict 或发布状态；只调用 Runtime Host，由 Runtime 内部协调 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Store 与 Report。
 - 本地确认的 approver 只能表述为 `local-caller`，`identityVerified=false` 且 `separationOfDutiesVerified=false`；不得把默认调用者确认描述为已验证自然人身份或职责分离。
-- `create-run` 必须由 Runtime 冻结有界 PRD 原文快照；Execution Approval 摘要必须携带同一原文、Requirement、Rule、Oracle、来源引用、映射依据与 `reviewDigest`。Skill 只能逐项原样展示，禁止摘要、截断、重排或自行补写；没有该字段、摘要漂移或存在空链时不得确认或执行。
+- `create-run` 必须由 Runtime 冻结有界 PRD 原文快照；`prd-manifest` 必须列出完整 Clause Inventory，`acceptance-scope` 必须让每个 Clause 恰好一次处于 modeled、excluded、not-applicable 或 ambiguous。Execution Approval 摘要必须携带同一原文、Clause 原文与处置、Requirement、Rule、Oracle、来源引用、映射依据与 `reviewDigest`。Skill 只能逐项原样展示，禁止摘要、截断、重排或自行补写；没有该字段、摘要漂移、Clause 未处置或存在空链时不得确认或执行。
 - DiscoveryCapability 只允许冻结的静态导航和 DOM 读取；Execution Approval 前不执行 Case。
 - 真实链路不加载注入规则；正式注入只由浏览器外 Safety Gateway 执行并签名计数。
 - 写操作绑定 capability、attempt、DataLease 与 cleanup；每个写 action 必须生成、跨进程验签并落库一份结构化 `ExecutionOutcomeReceipt`，Authority reservation 的 outcomeDigest 必须等于回执 signedDigest；effect unknown 不自动重试。
@@ -74,4 +74,4 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 
 ## 对用户的阶段输出
 
-每次回复给出当前状态、已验证 artifact/digest、下一条合法边、需要的最小输入或决定，以及当前不能宣称的内容。Execution Approval 回复必须先逐字展示 PRD 原文，再按 Requirement → Rule → Oracle 展示来源链并说明 `oracleMapping=explicit|requirement-level`，最后单独请求确认。最终结论只转述 Engine 复算结果；Firefox/WebKit 未执行时明确限定为 Chromium 验收。
+每次回复给出当前状态、已验证 artifact/digest、下一条合法边、需要的最小输入或决定，以及当前不能宣称的内容。Execution Approval 回复必须先逐字展示 PRD 原文，再逐条展示 Clause 原文、`sourceSpan` 与处置，然后按 Requirement → Rule → Oracle 展示来源链并说明 `oracleMapping=explicit`，最后单独请求确认。最终结论只转述 Engine 复算结果；Firefox/WebKit 未执行时明确限定为 Chromium 验收。

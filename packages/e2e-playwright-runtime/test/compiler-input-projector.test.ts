@@ -88,6 +88,8 @@ describe('Artifact → Compiler Input Projector', () => {
       cleanupSource: FULL_PLAYWRIGHT_CLEANUP_SOURCE,
       cleanupSourceDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, cleanupTimeoutMs: 30_000,
+      oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1',
+        expectedJson: 'true', expectedDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/) }],
     }])
   })
 

@@ -45,7 +45,7 @@ describe('Registry 发布闭包校验', () => {
 
     await writeFile(driftedPath, JSON.stringify({
       ...runtime,
-      dependencies: { ...runtime.dependencies, '@mutil-skills/core': '0.3.1' },
+      dependencies: { ...runtime.dependencies, '@mutil-skills/core': '0.4.0' },
     }))
     await expect(verifyInstalledReleasePackages(project, manifests))
       .rejects.toThrow('Registry 包内部依赖清单不一致')

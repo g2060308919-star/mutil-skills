@@ -84,14 +84,34 @@ function projectPrdSemanticReview(
   )
   const parsedModel = ArtifactSchemaRegistry['requirement-model']
     .safeParse(snapshot.frozenArtifacts['requirement-model'])
-  if (!parsedSource.success || !parsedModel.success) {
+  const parsedManifest = ArtifactSchemaRegistry['prd-manifest']
+    .safeParse(snapshot.frozenArtifacts['prd-manifest'])
+  const parsedScope = ArtifactSchemaRegistry['acceptance-scope']
+    .safeParse(snapshot.frozenArtifacts['acceptance-scope'])
+  if (!parsedSource.success || !parsedModel.success
+    || !parsedManifest.success || !parsedScope.success) {
     throw new Error('E2E_RUNTIME_PRD_SEMANTIC_REVIEW_MISSING')
   }
   const source = parsedSource.data
   const model = parsedModel.data.content
+  const dispositionByClause = new Map(parsedScope.data.content.clauseDispositions
+    .map((disposition) => [disposition.clauseId, disposition]))
+  const clauses = parsedManifest.data.content.clauses.map((clause) => {
+    const disposition = dispositionByClause.get(clause.clauseId)
+    if (disposition === undefined) throw new Error('E2E_RUNTIME_PRD_SEMANTIC_REVIEW_INCOMPLETE')
+    return {
+      ...structuredClone(disposition),
+      sourceId: clause.sourceId,
+      kind: clause.kind,
+      sourceSpan: structuredClone(clause.sourceSpan),
+      originalText: clause.originalText,
+      normalizedText: clause.normalizedText,
+    }
+  })
   const requirements = model.requirements.map((requirement) => {
     const outcomes = requirement.observableOutcomes.map((oracle) => ({
-      oracleId: oracle.oracleId, statement: oracle.statement,
+      oracleId: oracle.oracleId, ruleId: oracle.ruleId, statement: oracle.statement,
+      sourceRefs: [...oracle.sourceRefs],
     }))
     const outcomeById = new Map(outcomes.map((oracle) => [oracle.oracleId, oracle]))
     return {
@@ -119,6 +139,7 @@ function projectPrdSemanticReview(
       normalizedDigest: source.normalizedDigest,
       byteLength: source.byteLength,
     },
+    clauses,
     requirements,
   }
   return PrdSemanticReviewSchema.parse({

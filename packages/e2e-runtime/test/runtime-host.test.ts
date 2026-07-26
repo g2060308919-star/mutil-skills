@@ -9,6 +9,8 @@ import {
   digestApprovalProjection,
   digestArtifactContent,
   digestBytes,
+  digestPrdClause,
+  digestPrdClauseInventory,
   digestText,
   type ArtifactDocument,
   type ApprovalGrantSubject,
@@ -143,6 +145,7 @@ describe('E2ERuntimeHost', () => {
         terminalVerdict: 'accepted' as const,
       },
       rendered: { json: '{}\n', markdown: '# report\n', html: '<h1>report</h1>\n' },
+      reportDirectory: '/project/.biztest/reports/ASSET-1/RUN-REQUEST-REPORT-CREATE',
     }))
     const fixture = await hostFixture({
       projectPublisherFactory: () => ({ renderActiveReport }),
@@ -621,8 +624,28 @@ describe('E2ERuntimeHost', () => {
       requestId: 'REQUEST-FORMAL-PRD', projectRoot: fixture.roots.project,
       runId, expectedState: 'created', artifactType: 'prd-request', candidate: requestCandidate,
     }))
+    const prdText = '# Product\nA stable PRD.'
+    const clauseInput = {
+      clauseId: 'CLAUSE-1', sourceId: 'PRD-BODY', kind: 'functional' as const,
+      sourceSpan: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 13 },
+      originalText: 'A stable PRD.', normalizedText: 'A stable PRD.',
+    }
+    const clause = { ...clauseInput, textDigest: digestPrdClause(clauseInput) }
+    const manifest = semanticCandidate('prd-manifest', '1.0.0', binding, {
+      prdId: 'PRD-BODY', assetId: binding.assetId, revision: binding.prdRevision,
+      normalizedPrdDigest: binding.prdRevision,
+      sources: [{ sourceId: 'PRD-BODY', digest: binding.prdRevision,
+        byteLength: Buffer.byteLength(prdText) }], attachments: [],
+      sourceCacheIndexDigest: digest('e'), clauses: [clause],
+      clauseInventoryDigest: digestPrdClauseInventory([clause]),
+    })
+    await handleSuccess(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-FORMAL-MANIFEST', projectRoot: fixture.roots.project,
+      runId, expectedState: 'source-frozen', artifactType: 'prd-manifest', candidate: manifest,
+    }))
     const acceptance = semanticCandidate('acceptance-scope', '2.0.0', binding, {
-      includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['inputs/prd.md'] }],
+      includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['CLAUSE-1'] }],
+      clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] }],
       exclusions: [], ambiguities: [], dependencies: [], visualScope: { required: false, refs: [] },
       browserScope: { browserIds: ['chromium'], viewportIds: ['desktop'] },
       scopeDecision: { decisionId: 'SCOPE-1', status: 'pending' },
@@ -641,9 +664,11 @@ describe('E2ERuntimeHost', () => {
       modelRevision: 1, requirements: [{
         reqId: 'REQ-1', revision: 1, title: '订单列表', actors: ['auditor'], entities: ['order'],
         preconditions: [], rules: [{ ruleId: 'RULE-1', category: 'business',
-          statement: '显示待审核订单', sourceRefs: ['inputs/prd.md'], certainty: 'explicit' }],
+          statement: '显示待审核订单', sourceRefs: ['CLAUSE-1'], certainty: 'explicit',
+          oracleIds: ['ORACLE-1'] }],
         states: [], transitions: [], observableOutcomes: [{ oracleId: 'ORACLE-1',
-          statement: '页面显示待审核订单' }], applicability: [], sourceRefs: ['inputs/prd.md'], status: 'active',
+          ruleId: 'RULE-1', statement: '页面显示待审核订单', sourceRefs: ['CLAUSE-1'] }],
+        applicability: [], sourceRefs: ['CLAUSE-1'], status: 'active',
       }], coupledDimensions: [], applicabilityRules: ['RULE-1'], modelDecisionDigest: digest('1'),
     })
     await handleSuccess(fixture.host, submitCandidateRequest({
@@ -1911,7 +1936,7 @@ function rebindArtifact(
 }
 
 function semanticCandidate(
-  artifactType: 'acceptance-scope' | 'requirement-model' | 'coverage-universe',
+  artifactType: 'prd-manifest' | 'acceptance-scope' | 'requirement-model' | 'coverage-universe',
   schemaVersion: string,
   binding: { assetId: string; generationId: string; prdRevision: string },
   content: unknown,

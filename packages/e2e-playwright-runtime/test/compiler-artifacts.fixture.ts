@@ -1,6 +1,7 @@
 import { generateKeyPairSync, sign } from 'node:crypto'
 import { canonicalizeJson, digestApprovalProjection, digestArtifactContent,
   digestBytes, digestCanonicalGrantApprovalSubject, digestCleanupPlanDefinition, digestDecisionSubject, digestText,
+  digestOracleCheckpointValue, digestPrdClause, digestPrdClauseInventory,
   computeFullPlaywrightCleanupSourceDigest, computeFullPlaywrightSourceDigest, projectLineageDecisionSubject,
   projectScopeDecisionSubject, type DecisionReceipt,
   type DecisionReceiptVerificationBinding } from '@mutil-skills/e2e-contracts'
@@ -56,6 +57,7 @@ export function approvedCompilerArtifacts(options: {
   const stepId = effect === 'read' ? 'STEP-READ-1' : 'STEP-WRITE-1'
   const scopeFacts = {
     includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['prd:1'] }], exclusions: [], ambiguities: [],
+    clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] }],
     dependencies: [], visualScope: { required: false, refs: [] },
     browserScope: { browserIds: ['CHROMIUM'], viewportIds: ['DESKTOP'] },
   }
@@ -111,12 +113,19 @@ export function approvedCompilerArtifacts(options: {
     purpose: 'approval-freshness-receipt/v1', issuer: 'FIXTURE', keyId: 'FIXTURE-KEY', algorithm: 'Ed25519',
     signedDigest: digestText('approval-freshness-receipt/v1', canonicalizeJson(receiptBody)), signature: 'fixture-proof',
   } }
+  const clauseInput = {
+    clauseId: 'CLAUSE-1', sourceId: 'PRD-1', kind: 'functional' as const,
+    sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 1 },
+    originalText: 'x', normalizedText: 'x',
+  }
+  const clause = { ...clauseInput, textDigest: digestPrdClause(clauseInput) }
   const contents: Record<string, unknown> = {
     'prd-manifest': {
       prdId: 'PRD-1', assetId: context.assetId, revision: context.prdRevision,
       normalizedPrdDigest: context.prdRevision,
       sources: [{ sourceId: 'PRD-1', digest: context.prdRevision, byteLength: 1 }],
       attachments: [], sourceCacheIndexDigest: digest('source-cache'),
+      clauses: [clause], clauseInventoryDigest: digestPrdClauseInventory([clause]),
     },
     'prd-diff': { ...lineageFacts,
       lineageReview: { decisionId: 'LINEAGE-FIXTURE', status: 'approved', receipt: lineageReceipt } },
@@ -137,14 +146,18 @@ export function approvedCompilerArtifacts(options: {
       modelRevision: 1, coupledDimensions: [], applicabilityRules: ['actor:USER'], modelDecisionDigest: digest('model'),
       requirements: [{ reqId: 'REQ-1', revision: 1, title: '订单状态', actors: ['USER'], entities: ['ORDER'],
         preconditions: effect === 'read' ? [] : ['待审核'], rules: [{ ruleId: 'RULE-1', category: 'business',
-          statement: '订单状态必须可见', sourceRefs: ['prd:1'], certainty: 'explicit' }],
+          statement: '订单状态必须可见', sourceRefs: ['CLAUSE-1'], certainty: 'explicit',
+          oracleIds: ['ORACLE-1'] }],
         states: [], transitions: [], observableOutcomes: [{ oracleId: 'ORACLE-1',
-          statement: effect === 'read' ? '待审核' : '已批准' }],
-        applicability: [{ dimension: 'actor', value: 'USER', required: true }], sourceRefs: ['prd:1'], status: 'active' }],
+          ruleId: 'RULE-1', statement: effect === 'read' ? '待审核' : '已批准',
+          sourceRefs: ['CLAUSE-1'] }],
+        applicability: [{ dimension: 'actor', value: 'USER', required: true }],
+        sourceRefs: ['CLAUSE-1'], status: 'active' }],
     },
     'coverage-universe': {
       coveragePolicyDigest: digest('coverage-policy'), pairwiseSeed: 1, universeDigest: digest('universe'),
-      obligations: [{ obligationId, reqId: 'REQ-1', ruleIds: ['RULE-1'], nodeIds: ['NODE-1'], actor: 'USER',
+      obligations: [{ obligationId, reqId: 'REQ-1', clauseIds: ['CLAUSE-1'],
+        ruleIds: ['RULE-1'], oracleIds: ['ORACLE-1'], nodeIds: ['NODE-1'], actor: 'USER',
         transitionId: 'not-applicable', scenario: '订单状态', necessity: 'required', applicabilityRuleId: 'actor:USER',
         disposition: { kind: 'automated', caseIds: [caseId] } }],
     },
@@ -268,7 +281,8 @@ export function approvedCompilerArtifactsWithBlockedCase(): unknown[] {
   const content = (artifactType: string) => (artifacts.find((candidate) =>
     (candidate as Record<string, unknown>).artifactType === artifactType) as { content: Record<string, unknown> }).content
   ;(content('coverage-universe').obligations as Array<Record<string, unknown>>).push({
-    obligationId: 'COV-BLOCKED-1', reqId: 'REQ-1', ruleIds: ['RULE-1'], nodeIds: ['NODE-2'], actor: 'USER',
+    obligationId: 'COV-BLOCKED-1', reqId: 'REQ-1', clauseIds: ['CLAUSE-1'],
+    ruleIds: ['RULE-1'], oracleIds: ['ORACLE-1'], nodeIds: ['NODE-2'], actor: 'USER',
     transitionId: 'not-applicable', scenario: 'Canvas 内容', necessity: 'required', applicabilityRuleId: 'actor:USER',
     disposition: { kind: 'automated', caseIds: ['CASE-BLOCKED'] },
   })
@@ -309,6 +323,7 @@ export const FULL_PLAYWRIGHT_SOURCE = [
   "await page.evaluate(() => document.body.setAttribute('data-full-playwright', 'enabled'))",
   "await context.addInitScript(() => { window.localStorage.setItem('approved', 'true') })",
   "await expect(page.getByText('todo-fixed')).toBeVisible()",
+  "await checkpoint({ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', actual: true })",
 ].join('\n')
 
 export const FULL_PLAYWRIGHT_CLEANUP_SOURCE = [
@@ -336,6 +351,10 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   const cleanupSource = options.cleanupSource ?? FULL_PLAYWRIGHT_CLEANUP_SOURCE
   const sourceDigest = options.sourceDigest ?? computeFullPlaywrightSourceDigest(source)
   const cleanupSourceDigest = computeFullPlaywrightCleanupSourceDigest(cleanupSource)
+  const oracleCheckpoints = [{
+    checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', expectedJson: 'true',
+    expectedDigest: digestOracleCheckpointValue('true'),
+  }]
   const request = {
     intentId: 'INTENT-FULL-1', method: 'POST', canonicalOrigin: 'https://example.test', exactPath: '/todos', query: [],
     payload: { kind: 'json', digest: digest('full-request-body') }, targetFingerprint: digest('full-target'),
@@ -344,7 +363,8 @@ export function approvedFullPlaywrightCompilerArtifacts(options: {
   const program = {
     schemaVersion: 'full-playwright/v1', caseId: 'CASE-WRITE-1', stepId: 'STEP-WRITE-1',
     actionId: 'ACTION-WRITE-1', source, sourceDigest, cleanupSource, cleanupSourceDigest,
-    dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, networkRequests: [request],
+    dataLeaseId: 'LEASE-1', cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+    oracleCheckpoints, networkRequests: [request],
   }
   const executionSource = options.executionSource ?? source
   const executionProgram = { ...program, source: executionSource,

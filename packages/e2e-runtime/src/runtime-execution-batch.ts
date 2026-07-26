@@ -1,4 +1,11 @@
-import { canonicalizeJson, deriveExecutionResultId, digestText, E2EError } from '@mutil-skills/e2e-contracts'
+import {
+  OracleCheckpointResultSchema,
+  canonicalizeJson,
+  deriveExecutionResultId,
+  digestText,
+  E2EError,
+  type OracleCheckpointResult,
+} from '@mutil-skills/e2e-contracts'
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 const DIGEST = /^sha256:[a-f0-9]{64}$/
@@ -20,6 +27,7 @@ export interface RuntimeWriteExecutionOutput {
     resultDigest: string
     leaseReceiptDigest: string
   }
+  oracleCheckpoints?: OracleCheckpointResult[]
   /** 仅允许在执行器到 Host 的短生命周期边界存在；Host 必须先写 Quarantine 并在持久化前剥离。 */
   evidence?: { screenshot: Uint8Array; dom: Uint8Array }
   finalizationFacts?: RuntimeExecutionFinalizationFacts
@@ -154,7 +162,9 @@ export class RuntimeExecutionBatch {
 export function parseRuntimeWriteExecutionOutput(value: unknown): RuntimeWriteExecutionOutput {
   const finalizationKeys = plain(value) && Object.hasOwn(value, 'finalizationFacts') ? ['finalizationFacts'] : []
   const evidenceKeys = plain(value) && Object.hasOwn(value, 'evidence') ? ['evidence'] : []
-  if (!plain(value) || !exact(value, ['actionId', 'caseId', 'cleanup', 'effectObservation', 'gatewayCommit', 'resultDigest', 'status', ...evidenceKeys, ...finalizationKeys])
+  const checkpointKeys = plain(value) && Object.hasOwn(value, 'oracleCheckpoints') ? ['oracleCheckpoints'] : []
+  if (!plain(value) || !exact(value, ['actionId', 'caseId', 'cleanup', 'effectObservation', 'gatewayCommit',
+    'resultDigest', 'status', ...checkpointKeys, ...evidenceKeys, ...finalizationKeys])
     || !safeId(value.caseId) || !safeId(value.actionId)
     || !['passed', 'failed', 'environment-blocked', 'safety-blocked'].includes(String(value.status))
     || !['proven-not-applied', 'applied', 'unknown'].includes(String(value.effectObservation))
@@ -168,10 +178,17 @@ export function parseRuntimeWriteExecutionOutput(value: unknown): RuntimeWriteEx
     || value.effectObservation === 'applied' && value.status === 'passed' && value.cleanup.status !== 'verified-clean'
     || value.effectObservation === 'unknown' && value.cleanup.status === 'verified-clean'
     || value.evidence !== undefined && !parseEphemeralEvidence(value.evidence)
+    || value.oracleCheckpoints !== undefined && !zodCheckpoints(value.oracleCheckpoints)
     || value.finalizationFacts !== undefined && !parseFinalizationFacts(value.finalizationFacts)) {
     throw batchError('E2E_RUNTIME_WRITE_EXECUTOR_OUTPUT_INVALID')
   }
   return structuredClone(value) as unknown as RuntimeWriteExecutionOutput
+}
+
+function zodCheckpoints(value: unknown): boolean {
+  return Array.isArray(value) && value.length > 0 && value.length <= 10_000
+    && value.every((checkpoint) => OracleCheckpointResultSchema.safeParse(checkpoint).success)
+    && new Set(value.map((checkpoint) => plain(checkpoint) ? checkpoint.checkpointId : undefined)).size === value.length
 }
 
 function parseEphemeralEvidence(value: unknown): value is NonNullable<RuntimeWriteExecutionOutput['evidence']> {

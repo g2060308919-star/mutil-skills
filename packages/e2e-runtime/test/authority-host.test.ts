@@ -1,7 +1,7 @@
 import { link, lstat, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { Readable, Writable } from 'node:stream'
 import { expect, test, vi } from 'vitest'
-import { canonicalizeJson, digestArtifactContent, digestText,
+import { canonicalizeJson, digestArtifactContent, digestPrdClause, digestPrdClauseInventory, digestText,
   RuntimeRequestEnvelopeSchema, type RuntimeRequestEnvelope } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, getTrustedApprovalFreshnessClientKind } from '@mutil-skills/e2e-authority'
 import {
@@ -629,7 +629,7 @@ test('Runtime Host finalizes a Grant and journals the traceable Grant plus four-
     }))
     const identity = await resolveProjectIdentity(roots.project)
     const snapshot = {
-      ...runSnapshot(), projectIdentityDigest: identity.digest,
+      ...executionReviewSnapshot(), projectIdentityDigest: identity.digest,
       workflow: {
         current: 'awaiting-execution-approval' as const, sequence: 8,
         eventChainDigest: `sha256:${'8'.repeat(64)}`,
@@ -691,7 +691,7 @@ test('Runtime Host keeps a finalized request pending when Run Store persistence 
     }))
     const identity = await resolveProjectIdentity(roots.project)
     const snapshot = {
-      ...runSnapshot(), projectIdentityDigest: identity.digest,
+      ...executionReviewSnapshot(), projectIdentityDigest: identity.digest,
       workflow: {
         current: 'awaiting-execution-approval' as const, sequence: 8,
         eventChainDigest: `sha256:${'8'.repeat(64)}`,
@@ -770,7 +770,7 @@ test('Runtime Host holds the Run lock across recover registration and outcome pe
     }))
     const identity = await resolveProjectIdentity(roots.project)
     const snapshot = {
-      ...runSnapshot(), projectIdentityDigest: identity.digest,
+      ...executionReviewSnapshot(), projectIdentityDigest: identity.digest,
       workflow: {
         current: 'awaiting-execution-approval' as const, sequence: 8,
         eventChainDigest: `sha256:${'8'.repeat(64)}`,
@@ -1456,6 +1456,7 @@ test('default rpc production wiring starts a real Authority child and closes it 
 
 function runSnapshot(): RuntimeRunSnapshot {
   const normalizedText = '# 订单\n必须显示待审核订单。'
+  const normalizedDigest = digestText('e2e-prd-normalized-source/v1', normalizedText)
   const requirementModel: Record<string, unknown> = {
     artifactId: 'ARTIFACT-REQUIREMENT-MODEL', artifactType: 'requirement-model', schemaVersion: '1.0.0',
     engineVersion: '0.3.0', assetId: 'ASSET-1', prdRevision: `sha256:${'3'.repeat(64)}`,
@@ -1464,9 +1465,10 @@ function runSnapshot(): RuntimeRunSnapshot {
     content: { modelRevision: 1, requirements: [{
       reqId: 'REQ-1', revision: 1, title: '订单列表', actors: ['auditor'], entities: ['order'],
       preconditions: [], rules: [{ ruleId: 'RULE-1', category: 'business', statement: '显示待审核订单',
-        sourceRefs: ['PRD-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'] }], states: [], transitions: [],
-      observableOutcomes: [{ oracleId: 'ORACLE-1', statement: '页面显示待审核订单' }],
-      applicability: [], sourceRefs: ['PRD-1'], status: 'active',
+        sourceRefs: ['CLAUSE-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'] }], states: [], transitions: [],
+      observableOutcomes: [{ oracleId: 'ORACLE-1', ruleId: 'RULE-1', statement: '页面显示待审核订单',
+        sourceRefs: ['CLAUSE-1'] }],
+      applicability: [], sourceRefs: ['CLAUSE-1'], status: 'active',
     }], coupledDimensions: [], applicabilityRules: ['RULE-1'],
     modelDecisionDigest: `sha256:${'4'.repeat(64)}` },
   }
@@ -1483,11 +1485,70 @@ function runSnapshot(): RuntimeRunSnapshot {
     frozenArtifacts: { 'requirement-model': requirementModel as never },
     trustedExecutionFacts: { 'prd-source-snapshot': {
       schemaVersion: '1.0.0', sourceRef: 'inputs/prd.md', normalizedText,
-      normalizedDigest: digestText('e2e-prd-normalized-source/v1', normalizedText),
+      normalizedDigest,
       byteLength: Buffer.byteLength(normalizedText),
     } },
     requestResponses: {}, createdAt: '2026-07-16T00:00:00.000Z', updatedAt: '2026-07-16T00:00:00.000Z',
   }
+}
+
+function executionReviewSnapshot(): RuntimeRunSnapshot {
+  const snapshot = runSnapshot()
+  const source = snapshot.trustedExecutionFacts['prd-source-snapshot'] as {
+    normalizedText: string; normalizedDigest: string
+  }
+  const { prdManifest, acceptanceScope } = semanticReviewArtifacts(
+    source.normalizedText, source.normalizedDigest,
+  )
+  return {
+    ...snapshot,
+    artifactDigests: {
+      ...snapshot.artifactDigests,
+      'prd-manifest': prdManifest.contentDigest as string,
+      'acceptance-scope': acceptanceScope.contentDigest as string,
+    },
+    frozenArtifacts: {
+      ...snapshot.frozenArtifacts,
+      'prd-manifest': prdManifest as never,
+      'acceptance-scope': acceptanceScope as never,
+    },
+  }
+}
+
+function semanticReviewArtifacts(normalizedText: string, normalizedDigest: string) {
+  const clauseInput = {
+    clauseId: 'CLAUSE-1', sourceId: 'PRD-1', kind: 'functional' as const,
+    sourceSpan: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 11 },
+    originalText: '必须显示待审核订单。', normalizedText: '必须显示待审核订单。',
+  }
+  const clause = { ...clauseInput, textDigest: digestPrdClause(clauseInput) }
+  const artifact = (artifactType: string, schemaVersion: string, content: unknown) => {
+    const document: Record<string, unknown> = {
+      artifactId: `ARTIFACT-${artifactType.toUpperCase()}`, artifactType, schemaVersion,
+      engineVersion: '0.3.0', assetId: 'ASSET-1', prdRevision: `sha256:${'3'.repeat(64)}`,
+      generationId: 'RUN-1', createdAt: '2026-07-16T00:00:00.000Z', contentDigest: '',
+      signatures: [], dependencies: [], graph: { defines: [], references: [] }, content,
+    }
+    document.contentDigest = digestArtifactContent(
+      `artifact-content/${schemaVersion}/${artifactType}`, document,
+    )
+    return document
+  }
+  const prdManifest = artifact('prd-manifest', '1.0.0', {
+    prdId: 'PRD-1', assetId: 'ASSET-1', revision: `sha256:${'3'.repeat(64)}`,
+    normalizedPrdDigest: normalizedDigest,
+    sources: [{ sourceId: 'PRD-1', digest: normalizedDigest, byteLength: Buffer.byteLength(normalizedText) }],
+    attachments: [], sourceCacheIndexDigest: `sha256:${'5'.repeat(64)}`, clauses: [clause],
+    clauseInventoryDigest: digestPrdClauseInventory([clause]),
+  })
+  const acceptanceScope = artifact('acceptance-scope', '2.0.0', {
+    includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['CLAUSE-1'] }], exclusions: [],
+    ambiguities: [], dependencies: [], visualScope: { required: false, refs: [] },
+    browserScope: { browserIds: ['chromium'], viewportIds: ['desktop'] },
+    clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] }],
+    scopeDecision: { decisionId: 'SCOPE-1', status: 'pending' },
+  })
+  return { prdManifest, acceptanceScope }
 }
 
 async function semanticConfirmRequest(

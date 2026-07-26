@@ -1,6 +1,7 @@
-import { lstat, readFile, realpath } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
-import { ArtifactSchemaRegistry, E2EError } from '@mutil-skills/e2e-contracts'
+import { randomUUID } from 'node:crypto'
+import { ArtifactSchemaRegistry, E2EError, digestBytes } from '@mutil-skills/e2e-contracts'
 import {
   LocalArtifactStore,
   createCompletePublicationAuditor,
@@ -84,6 +85,7 @@ export class ProjectPublisher {
   }): Promise<{
     active: Pick<ActiveGeneration, 'generationId' | 'generationDigest' | 'terminalVerdict'>
     rendered: RenderedCompleteReport
+    reportDirectory: string
   }> {
     await this.assertProjectBoundary()
     const store = new LocalArtifactStore(this.storeRoot, {
@@ -110,14 +112,77 @@ export class ProjectPublisher {
       'E2E_PROJECT_ACTIVE_REPORT_BINDING_MISMATCH', 'active final-report 与项目、资产或 Run 绑定不一致',
       parsed.success ? undefined : parsed.error,
     )
+    const rendered = renderCompleteReport(parsed.data)
+    const reportDirectory = await this.persistRenderedReport({
+      assetId: input.assetId, generationId: active.generationId,
+      generationDigest: active.generationDigest, rendered,
+    })
     return {
       active: {
         generationId: active.generationId,
         generationDigest: active.generationDigest,
         terminalVerdict: active.terminalVerdict,
       },
-      rendered: renderCompleteReport(parsed.data),
+      rendered,
+      reportDirectory,
     }
+  }
+
+  private async persistRenderedReport(input: {
+    assetId: string
+    generationId: string
+    generationDigest: string
+    rendered: RenderedCompleteReport
+  }): Promise<string> {
+    if (!/^[A-Za-z0-9._:-]{1,256}$/.test(input.assetId)
+      || !/^[A-Za-z0-9._:-]{1,256}$/.test(input.generationId)) {
+      throw publisherError('E2E_PROJECT_REPORT_PATH_INVALID', '报告 asset/generation ID 不能安全落盘')
+    }
+    const reportsRoot = join(this.artifactRoot, 'reports')
+    await mkdir(reportsRoot, { recursive: true, mode: 0o700 })
+    if (await realpath(reportsRoot) !== reportsRoot) {
+      throw publisherError('E2E_PROJECT_REPORT_PATH_INVALID', '报告目录不得通过符号链接逃逸项目边界')
+    }
+    const assetRoot = join(reportsRoot, input.assetId)
+    await mkdir(assetRoot, { recursive: true, mode: 0o700 })
+    if (await realpath(assetRoot) !== assetRoot) {
+      throw publisherError('E2E_PROJECT_REPORT_PATH_INVALID', '报告资产目录不得通过符号链接逃逸项目边界')
+    }
+    const finalRoot = join(assetRoot, input.generationId)
+    const temporaryRoot = join(assetRoot, `.${input.generationId}.tmp-${randomUUID()}`)
+    const files = {
+      json: { path: 'final-report.json', text: input.rendered.json },
+      markdown: { path: 'final-report.md', text: input.rendered.markdown },
+      html: { path: 'final-report.html', text: input.rendered.html },
+    } as const
+    const manifest = {
+      schemaVersion: '1.0.0', assetId: input.assetId, generationId: input.generationId,
+      generationDigest: input.generationDigest,
+      files: Object.fromEntries(Object.entries(files).map(([kind, file]) => [kind, {
+        path: file.path,
+        digest: digestBytes(`rendered-report/${kind}/v1`, Buffer.from(file.text, 'utf8')),
+        byteLength: Buffer.byteLength(file.text, 'utf8'),
+      }])),
+    }
+    await mkdir(temporaryRoot, { mode: 0o700 })
+    try {
+      await Promise.all(Object.values(files).map((file) =>
+        writeFile(join(temporaryRoot, file.path), file.text, { encoding: 'utf8', mode: 0o600, flag: 'wx' })))
+      await writeFile(join(temporaryRoot, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`,
+        { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+      try {
+        await rename(temporaryRoot, finalRoot)
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error
+        const existing = await readFile(join(finalRoot, 'manifest.json'), 'utf8').catch(() => '')
+        if (existing !== `${JSON.stringify(manifest, null, 2)}\n`) {
+          throw publisherError('E2E_PROJECT_REPORT_OUTPUT_CONFLICT', '同一 generation 已存在不同摘要的报告视图')
+        }
+      }
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true })
+    }
+    return finalRoot
   }
 
   async readActiveGeneration(
@@ -173,6 +238,11 @@ function normalizePlatformAlias(path: string): string {
 
 function isMissing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error
+    && ['EEXIST', 'ENOTEMPTY'].includes(String(error.code))
 }
 
 function publisherError(code: string, message: string, cause?: unknown): E2EError {

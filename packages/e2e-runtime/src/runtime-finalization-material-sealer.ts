@@ -413,7 +413,8 @@ export class RuntimeFinalizationMaterialSealer {
       || receipt.cleanup.leaseReceiptDigest !== write.cleanup.leaseReceiptDigest
       || !validWriteOutcomeEvidenceIds(receipt.evidenceIds,
         receipt.gateway.executionSessionId, expectedEvidenceId,
-        capability.transport, capability.operation)) {
+        capability.transport, capability.operation,
+        write.oracleCheckpoints?.flatMap((checkpoint) => checkpoint.evidenceIds) ?? [])) {
       throw sealerError('E2E_RUNTIME_FINALIZATION_WRITE_OUTCOME_BINDING_INVALID')
     }
     const gatewayAudit = record(facts.gatewayAudit, 'E2E_RUNTIME_GATEWAY_AUDIT_MISSING')
@@ -568,6 +569,7 @@ export class RuntimeFinalizationMaterialSealer {
           ...(stepStatus === 'unable' ? { oracleResult: 'not-evaluated', evidenceIds: [] } : {
             actualDigest: write.resultDigest, oracleResult: write.status === 'passed' ? 'passed' : 'failed',
             evidenceIds: [expectedEvidenceId],
+            ...(write.oracleCheckpoints === undefined ? {} : { oracleCheckpoints: write.oracleCheckpoints }),
           }) }], effectObservation: write.effectObservation,
         gatewayAuditRef: artifactId('gateway-audit'),
         evidenceRefs: stepStatus === 'unable' ? [] : [expectedEvidenceId],
@@ -924,6 +926,7 @@ function validWriteOutcomeEvidenceIds(
   sanitizedEvidenceId: string,
   transport: string,
   operation: string,
+  oracleCheckpointEvidenceIds: string[],
 ): boolean {
   if (transport === 'http' && operation === 'http-request') {
     return canonicalizeJson(actual) === canonicalizeJson([sanitizedEvidenceId])
@@ -931,8 +934,10 @@ function validWriteOutcomeEvidenceIds(
   if (transport !== 'browser-local' || operation !== 'full-playwright') return false
   const fullPlaywright = (['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
     ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`))
+  fullPlaywright.push(...oracleCheckpointEvidenceIds)
   fullPlaywright.push(`GATEWAY-${executionSessionId}`)
-  return canonicalizeJson(actual) === canonicalizeJson(fullPlaywright)
+  return new Set(actual).size === actual.length
+    && canonicalizeJson([...actual].sort()) === canonicalizeJson([...fullPlaywright].sort())
 }
 
 declare const runtimeFinalizationMaterialSealerBrand: unique symbol
@@ -989,7 +994,7 @@ function createArtifact(
   content: unknown,
   authority: RuntimeArtifactStoreAuthority,
   createdAt = snapshot.updatedAt,
-  engineVersion = '0.3.1',
+  engineVersion = '0.4.0',
 ): ArtifactDocument {
   const base = {
     artifactId: artifactId(type), artifactType: type, schemaVersion: schemaVersion(type),
@@ -1007,7 +1012,7 @@ function finalizationArtifactEnvelope(
   snapshot: RuntimeRunSnapshot,
 ): Pick<ArtifactDocument, 'createdAt' | 'engineVersion'> {
   const frozen = snapshot.frozenArtifacts['run-bundle']
-  if (frozen === undefined) return { createdAt: snapshot.updatedAt, engineVersion: '0.3.1' }
+  if (frozen === undefined) return { createdAt: snapshot.updatedAt, engineVersion: '0.4.0' }
   const parsed = ArtifactSchemaRegistry['run-bundle'].safeParse(frozen)
   if (!parsed.success) throw sealerError('E2E_RUNTIME_FINALIZATION_RUN_BUNDLE_DRIFT')
   return { createdAt: parsed.data.createdAt, engineVersion: parsed.data.engineVersion }

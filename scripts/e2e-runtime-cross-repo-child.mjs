@@ -477,10 +477,13 @@ async function executeTodoMvcGolden(input) {
   })
   const review = approval.semanticReview
   if (!review || review.prd?.normalizedText !== prd
-    || review.requirements?.[0]?.reqId !== 'REQ-TODOMVC-FUNCTIONAL'
-    || review.requirements[0]?.rules?.[0]?.ruleId !== 'RULE-TODOMVC-FUNCTIONAL'
-    || review.requirements[0]?.rules?.[0]?.oracles?.[0]?.oracleId !== 'ORACLE-TODOMVC-FUNCTIONAL'
-    || review.requirements[0]?.rules?.[0]?.oracleMapping !== 'explicit') {
+    || review.clauses?.length !== 35
+    || review.clauses.filter((clause) => clause.disposition === 'modeled').length !== 25
+    || review.clauses.filter((clause) => clause.disposition === 'excluded').length !== 10
+    || review.requirements?.length !== 25
+    || review.requirements.some((requirement) => requirement.rules?.length !== 1
+      || requirement.rules[0]?.oracles?.length !== 1
+      || requirement.rules[0]?.oracleMapping !== 'explicit')) {
     throw new Error('E2E_RUNTIME_TODOMVC_SEMANTIC_CONFIRMATION_INCOMPLETE')
   }
   await submit(runId, 'SUBMIT-TODOMVC-REGRESSION', 'execution-approved', 'regression-manifest',
@@ -488,13 +491,17 @@ async function executeTodoMvcGolden(input) {
   const executed = await invoke('EXECUTE-TODOMVC', 'execute-run', { runId })
   const executionResult = requiredRecord(executed, 'result')
   const executionCleanup = requiredRecord(executionResult, 'cleanup')
-  if (executed.status !== 'passed' || executionCleanup.status !== 'verified-clean') {
+  const failedOracle = executionResult.oracleCheckpoints?.find((checkpoint) =>
+    checkpoint.oracleId === 'ORACLE-TODOMVC-F20')
+  if (executed.status !== 'failed' || executionCleanup.status !== 'verified-clean'
+    || failedOracle?.status !== 'failed' || failedOracle.expectedJson !== '"todos-react"'
+    || failedOracle.actualJson !== '"react-todos"') {
     throw new Error(`todomvc execution:${safeCode(executed.status)}:${safeCode(executionCleanup.status)}:`
-      + `${safeCode(executionResult.reasonCode)}:${safeCode(executionResult.primaryError?.message)}:`
-      + `${safeCode(executionResult.cleanupError?.message)}`)
+      + `${safeCode(failedOracle?.status)}:${safeCode(failedOracle?.expectedJson)}:`
+      + `${safeCode(failedOracle?.actualJson)}`)
   }
   const finalized = await invoke('FINALIZE-TODOMVC', 'finalize-run', { runId })
-  if (finalized.terminalVerdict !== 'accepted') {
+  if (finalized.terminalVerdict !== 'rejected') {
     throw new Error(`todomvc finalization:${safeCode(finalized.terminalVerdict)}`)
   }
   await invoke('REPORT-TODOMVC', 'render-report', { runId })
@@ -507,8 +514,8 @@ async function executeTodoMvcGolden(input) {
     cleanupStatus: executionCleanup.status,
     semanticReview: review, report, reportPath,
     tracePath: [
-      'PRD-TODOMVC-OFFICIAL', 'REQ-TODOMVC-FUNCTIONAL', 'RULE-TODOMVC-FUNCTIONAL',
-      'ORACLE-TODOMVC-FUNCTIONAL', 'COV-TODOMVC-FUNCTIONAL',
+      'CLAUSE-TODOMVC-F20', 'REQ-TODOMVC-F20', 'RULE-TODOMVC-F20',
+      'ORACLE-TODOMVC-F20', 'COV-REQ-TODOMVC-F20',
       fixture.expected.caseId, fixture.expected.actionId, report.content.verdict,
     ],
   }

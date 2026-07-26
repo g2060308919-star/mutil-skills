@@ -1143,6 +1143,7 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
           generationId: projection.generationId, prdRevision: projection.grant.subject.prdRevision,
           runId: snapshot.runId, caseId: projection.caseId, stepId: projection.stepId,
           actionId: projection.actionId, capabilityId: projection.capability.capabilityId,
+          programArtifactDigest: digestText('full-playwright-program/v1', canonicalizeJson(projection.program)),
           programDigest: projection.program.sourceDigest, cleanupProgramDigest: projection.program.cleanupSourceDigest,
           cleanupPlanDigest: digestCleanupPlanDefinition(projection.cleanupPlan),
           leaseId: projection.capability.dataLeaseId, fencingToken: projection.capability.fencingToken,
@@ -1158,6 +1159,7 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
           projection.capability.capabilityId,
         ),
         capture: async (stage) => {
+          if (stage === 'checkpoint') throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_CHECKPOINT_PATH_REQUIRED')
           const session = stage === 'cleanup' ? cleanupBrowser! : programBrowser!
           const adapter = new PlaywrightPageAdapter(session.page)
           const screenshot = await adapter.screenshot()
@@ -1168,6 +1170,18 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
             runtimeFullEvidence(stage, 'screenshot', screenshot), runtimeFullEvidence(stage, 'dom', dom),
             runtimeFullEvidence(stage, 'url', Buffer.from(url, 'utf8')),
             await (stage === 'cleanup' ? cleanupTrace : programTrace).capture(stage, stage === 'before'),
+          ]
+        },
+        captureCheckpoint: async (checkpointId) => {
+          const adapter = new PlaywrightPageAdapter(programBrowser!.page)
+          const screenshot = await adapter.screenshot()
+          const dom = Buffer.from(await adapter.domSnapshot(), 'utf8')
+          const url = programBrowser!.page.url()
+          return [
+            runtimeFullEvidence('checkpoint', 'screenshot', screenshot, checkpointId),
+            runtimeFullEvidence('checkpoint', 'dom', dom, checkpointId),
+            runtimeFullEvidence('checkpoint', 'url', Buffer.from(url, 'utf8'), checkpointId),
+            await programTrace.capture('checkpoint', true, checkpointId),
           ]
         },
         retireProgram: async () => await programBrowser!.close(),
@@ -1247,6 +1261,7 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
         status: result.status === 'safety-blocked' ? 'safety-blocked' : result.status,
         effectObservation: result.effectObservation,
         resultDigest: runtimeFullPlaywrightRunnerResultDigest(result),
+        oracleCheckpoints: result.oracleCheckpoints,
         gatewayCommit: { reservationId: result.reservationId,
           reservationReceiptDigest: result.finalization.authorityReceiptDigest ?? result.finalization.terminalIntentDigest,
           outcomeReceiptDigest: result.outcome?.signedDigest ?? result.resultDigest, committed: true as const },
@@ -1431,8 +1446,10 @@ function canonicalFullPlaywrightIntentUrl(intent: {
 }
 
 function runtimeFullEvidence(stage: FullPlaywrightEvidenceStage,
-  kind: 'screenshot' | 'dom' | 'url' | 'trace', bytes: Uint8Array) {
-  return { evidenceId: `${stage.toUpperCase()}-${kind.toUpperCase()}`, stage, kind,
+  kind: 'screenshot' | 'dom' | 'url' | 'trace', bytes: Uint8Array, checkpointId?: string) {
+  const identity = checkpointId === undefined ? stage.toUpperCase() : checkpointId
+  return { evidenceId: `${identity}-${kind.toUpperCase()}`, stage, kind,
+    ...(checkpointId === undefined ? {} : { checkpointId }),
     byteLength: bytes.byteLength, digest: digestBytes(`runtime-evidence/${kind}/v1`, bytes) }
 }
 
@@ -1463,30 +1480,42 @@ export class RuntimeFullPlaywrightTraceRecorder {
   async start(): Promise<void> {
     if (this.#active) throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TRACE_ALREADY_ACTIVE')
     await this.#context.tracing.start({ screenshots: true, snapshots: true, sources: false })
+    await this.#context.tracing.startChunk()
     this.#active = true
   }
 
-  async capture(stage: FullPlaywrightEvidenceStage, restart: boolean): Promise<ReturnType<typeof runtimeFullEvidence>
+  async capture(stage: FullPlaywrightEvidenceStage, restart: boolean,
+    checkpointId?: string): Promise<ReturnType<typeof runtimeFullEvidence>
     & { references: string[] }> {
     if (!this.#active || (this.#lifecycle === 'program' ? stage === 'cleanup' : stage !== 'cleanup')) {
       throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TRACE_STAGE_INVALID')
     }
+    if ((stage === 'checkpoint') !== (checkpointId !== undefined)
+      || checkpointId !== undefined && !/^[A-Za-z0-9._:-]{1,256}$/.test(checkpointId)) {
+      throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TRACE_CHECKPOINT_INVALID')
+    }
+    const fileIdentity = checkpointId === undefined ? stage : `checkpoint-${checkpointId}`
     const relativePath = join('full-playwright-traces', this.#attemptId,
-      `${this.#lifecycle}-${stage}.zip`)
+      `${this.#lifecycle}-${fileIdentity}.zip`)
     const directory = join(this.#stateRoot, 'full-playwright-traces', this.#attemptId)
     await mkdir(directory, { recursive: true, mode: 0o700 })
     const path = join(this.#stateRoot, relativePath)
-    await this.#context.tracing.stop({ path })
+    await this.#context.tracing.stopChunk({ path })
     this.#active = false
     const bytes = await readFile(path)
     if (bytes.byteLength < 4 || bytes.byteLength > MAX_FULL_PLAYWRIGHT_TRACE_BYTES
       || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
       throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TRACE_INVALID')
     }
-    const evidence = runtimeFullEvidence(stage, 'trace', bytes)
-    if (restart) await this.start()
+    const evidence = runtimeFullEvidence(stage, 'trace', bytes, checkpointId)
+    if (restart) {
+      await this.#context.tracing.startChunk()
+      this.#active = true
+    } else {
+      await this.#context.tracing.stop()
+    }
     return { ...evidence,
-      references: [`runtime-artifact://full-playwright-traces/${this.#attemptId}/${this.#lifecycle}-${stage}.zip`] }
+      references: [`runtime-artifact://full-playwright-traces/${this.#attemptId}/${this.#lifecycle}-${fileIdentity}.zip`] }
   }
 }
 

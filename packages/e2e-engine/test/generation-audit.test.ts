@@ -156,7 +156,9 @@ describe('最终结论独立复算', () => {
     evidenceAudit: { status: 'complete', total: 1, complete: 1, reasonCodes: [] },
     cleanupAudit: { status: 'complete', total: 0, complete: 0, reasonCodes: [] },
     coverageFacts: {
+      prdClauses: { covered: 1, total: 1 },
       requirementDesign: { covered: 1, total: 1 }, rules: { covered: 1, total: 1 },
+      oracles: { covered: 1, total: 1 }, cases: { covered: 1, total: 1 },
       criticalNodes: { covered: 1, total: 1 }, roles: { covered: 1, total: 1 },
       stateTransitions: { covered: 0, total: 0 }, scenarioCategories: { covered: 1, total: 1 },
     },
@@ -298,22 +300,30 @@ describe('业务资产闭包审计', () => {
     },
   }
   const semanticArtifacts: SemanticArtifact[] = [
+    { artifactId: 'PRD', artifactType: 'prd-manifest', content: { clauses: [{ clauseId: 'CLAUSE-1' }] } },
     { artifactId: 'POLICY', artifactType: 'project-policy', content: {
       browserMatrix: [{ browserId: 'CHROMIUM', channel: 'chrome', required: true }],
     } },
     { artifactId: 'EXECUTION', artifactType: 'execution-contract', content: {
       browserMatrix: [{ browserId: 'CHROMIUM', channel: 'chrome', viewportId: 'DESKTOP' }],
     } },
-    { artifactId: 'SCOPE', artifactType: 'acceptance-scope', content: { includedReqCandidates: [{ reqId: 'REQ-1' }] } },
+    { artifactId: 'SCOPE', artifactType: 'acceptance-scope', content: {
+      includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['CLAUSE-1'] }],
+      clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] }],
+    } },
     { artifactId: 'MODEL', artifactType: 'requirement-model', content: { requirements: [
-      { reqId: 'REQ-1', status: 'active', rules: [{ ruleId: 'RULE-1' }] },
+      { reqId: 'REQ-1', status: 'active', sourceRefs: ['CLAUSE-1'], actors: [], transitions: [],
+        rules: [{ ruleId: 'RULE-1', sourceRefs: ['CLAUSE-1'], oracleIds: ['ORACLE-1'] }],
+        observableOutcomes: [{ oracleId: 'ORACLE-1', ruleId: 'RULE-1', sourceRefs: ['CLAUSE-1'] }] },
     ] } },
     { artifactId: 'COVERAGE', artifactType: 'coverage-universe', content: { obligations: [{
-      obligationId: 'COV-1', reqId: 'REQ-1', ruleIds: ['RULE-1'], necessity: 'required',
+      obligationId: 'COV-1', reqId: 'REQ-1', clauseIds: ['CLAUSE-1'], ruleIds: ['RULE-1'],
+      oracleIds: ['ORACLE-1'], necessity: 'required',
       disposition: { kind: 'automated', caseIds: ['CASE-1'] },
     }] } },
     { artifactId: 'CASES', artifactType: 'test-cases', content: { cases: [{
-      caseId: 'CASE-1', obligationIds: ['COV-1'], steps: [{ stepId: 'STEP-1' }], status: 'active', evidenceLevel: 'E1',
+      caseId: 'CASE-1', obligationIds: ['COV-1'], steps: [{ stepId: 'STEP-1',
+        oracles: [{ oracleId: 'ORACLE-1' }] }], status: 'active', evidenceLevel: 'E1',
     }] } },
     { artifactId: 'MAP', artifactType: 'browser-action-map', content: { actions: [{
       caseId: 'CASE-1', stepId: 'STEP-1', actionId: 'ACTION-1', oracleIds: ['ORACLE-1'], effect: 'read',
@@ -655,7 +665,9 @@ describe('业务资产闭包审计', () => {
       safetyFindings: [], artifactFindings: [], migrationFindings: [],
       environmentFindings: [], automationFindings: [],
       coverageFacts: {
+        prdClauses: { covered: 1, total: 1 },
         requirementDesign: { covered: 1, total: 1 }, rules: { covered: 1, total: 1 },
+        oracles: { covered: 1, total: 1 }, cases: { covered: 1, total: 1 },
         criticalNodes: { covered: 0, total: 0 }, roles: { covered: 0, total: 0 },
         stateTransitions: { covered: 0, total: 0 }, scenarioCategories: { covered: 0, total: 0 },
       },

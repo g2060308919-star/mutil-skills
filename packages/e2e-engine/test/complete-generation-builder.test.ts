@@ -330,6 +330,12 @@ describe('完整 generation builder', () => {
       reqId: 'REQ-1', ruleId: 'RULE-1', obligationId: 'COV-1', caseId: 'CASE-1',
       stepId: 'STEP-1', evidenceId: 'EVIDENCE-1', evidencePath: 'evidence/case-1.json',
     }])
+    expect(report.semanticTraceability).toEqual([{
+      clauseId: 'CLAUSE-1', sourceId: 'SOURCE-1',
+      sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 12 },
+      originalText: '首页标题必须可见', disposition: 'modeled',
+      requirementId: 'REQ-1', ruleId: 'RULE-1', oracleId: 'ORACLE-1',
+    }])
   })
 
   test('FinalReport dispositions 从 scope exclusion 事实投影，不编造状态', () => {
@@ -912,8 +918,15 @@ describe('完整 generation builder', () => {
       'approval-capability/v1', canonicalizeJson(capability),
     )
     caseResult.stepResults[0].evidenceIds = [`EVIDENCE-${receipt.actionId}`]
-    receipt.evidenceIds = (['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
-      ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`))
+    const checkpointEvidence = ['SCREENSHOT', 'DOM', 'URL', 'TRACE']
+      .map((kind) => `CHECKPOINT-1-${kind}`)
+    caseResult.stepResults[0].oracleCheckpoints = [{ evidenceIds: checkpointEvidence }]
+    receipt.evidenceIds = [
+      ...['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `BEFORE-${kind}`),
+      ...checkpointEvidence,
+      ...(['AFTER', 'CLEANUP'] as const).flatMap((stage) =>
+        ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`)),
+    ]
     receipt.evidenceIds.push(`GATEWAY-${receipt.gateway.executionSessionId}`)
     receipt.evidenceSetDigest = digestText(
       'execution-outcome-evidence-set/v1', canonicalizeJson([...receipt.evidenceIds].sort()),

@@ -7,6 +7,7 @@ import {
   digestApprovalProjection,
   digestArtifactContent,
   digestCleanupPlanDefinition,
+  digestOracleCheckpointValue,
   digestText,
   type ArtifactDocument,
   type SignedWriteGrant,
@@ -21,7 +22,7 @@ import type { RuntimeRunSnapshot } from '../src/run-store.js'
 const d = (value: string) => digestText('runtime-full-playwright-projector-test/v1', value)
 
 export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
-  const source = "await page.goto('https://test.example.com/app')\nstate.changed = true"
+  const source = "await page.goto('https://test.example.com/app')\nawait checkpoint({ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', actual: true })\nstate.changed = true"
   const cleanupSource = "await page.goto('https://test.example.com/reset')\nreturn 'verified-clean'"
   const requests = [
     { intentId: 'DOCUMENT', method: 'GET', canonicalOrigin: 'https://test.example.com', exactPath: '/app',
@@ -35,7 +36,10 @@ export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
     schemaVersion: 'full-playwright/v1' as const, caseId: 'CASE-1', stepId: 'STEP-1', actionId: 'ACTION-1',
     source, sourceDigest: computeFullPlaywrightSourceDigest(source), cleanupSource,
     cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource), dataLeaseId: 'LEASE-1',
-    cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, networkRequests: requests,
+    cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+    oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1',
+      expectedJson: 'true', expectedDigest: digestOracleCheckpointValue('true') }],
+    networkRequests: requests,
   }
   const cleanupPlan = {
     schemaVersion: '2.0.0' as const, transport: 'browser-local' as const, cleanupPlanId: 'CLEANUP-1',

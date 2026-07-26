@@ -10,6 +10,7 @@ import {
   digestArtifactContent,
   digestBytes,
   digestText,
+  digestOracleCheckpointValue,
   type ArtifactDocument,
 } from '@mutil-skills/e2e-contracts'
 import { appendAttemptEvent, buildCompleteGeneration } from '@mutil-skills/e2e-engine'
@@ -195,10 +196,12 @@ describe('RuntimeFinalizationMaterialSealer', () => {
     ])
   })
 
-  test('full-playwright 的十三项签名原始证据可通过正式 finalization，发布证据仍使用净化 ID', async () => {
+  test('full-playwright 的阶段与 Oracle checkpoint 签名原始证据可通过正式 finalization', async () => {
     const sessionId = 'SESSION-WRITE-1'
     const rawEvidenceIds = [
-      ...(['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
+      ...['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `BEFORE-${kind}`),
+      ...['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `CHECKPOINT-1-${kind}`),
+      ...(['AFTER', 'CLEANUP'] as const).flatMap((stage) =>
         ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`)),
       `GATEWAY-${sessionId}`,
     ]
@@ -216,6 +219,7 @@ describe('RuntimeFinalizationMaterialSealer', () => {
     const fullIds = [
       ...(['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
         ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`)),
+      ...['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `CHECKPOINT-1-${kind}`),
       'GATEWAY-SESSION-WRITE-1',
     ]
     await expect(sealPrepared(writeSnapshot({ capabilityMode: 'full-playwright' })))
@@ -228,6 +232,7 @@ describe('RuntimeFinalizationMaterialSealer', () => {
     const fullIds = [
       ...(['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
         ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`)),
+      ...['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `CHECKPOINT-1-${kind}`),
       'GATEWAY-SESSION-WRITE-1',
     ]
     await expect(sealPrepared(writeSnapshot({ capabilityMode: 'full-playwright',
@@ -827,13 +832,15 @@ function writeSnapshot(options: {
   executionContent.evidencePolicyDigest = evidencePolicyDigest
   if (options.capabilityMode === 'full-playwright') {
     const fixed = grant.capabilities[0]
-    const source = "state.programCompleted = true"
+    const source = "await checkpoint({ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', actual: true })\nstate.programCompleted = true"
     const cleanupSource = "return 'verified-clean'"
     const program = {
       schemaVersion: 'full-playwright/v1', caseId: 'CASE-1', stepId: 'STEP-1', actionId: 'ACTION-1',
       source, sourceDigest: computeFullPlaywrightSourceDigest(source), cleanupSource,
       cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource),
       dataLeaseId: fixed.dataLeaseId, cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+      oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', expectedJson: 'true',
+        expectedDigest: digestOracleCheckpointValue('true') }],
       networkRequests: [], networkRequestBodies: [],
     }
     const fullCleanupPlan = {
@@ -982,6 +989,12 @@ function writeSnapshot(options: {
       browserMeasurements: {}, isolationMeasurements: {},
     },
   })
+  if (options.capabilityMode === 'full-playwright') writeResult.oracleCheckpoints = [{
+    checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', expectedJson: 'true', actualJson: 'true',
+    expectedDigest: digestOracleCheckpointValue('true'), actualDigest: digestOracleCheckpointValue('true'),
+    status: 'passed', evidenceIds: ['CHECKPOINT-1-SCREENSHOT', 'CHECKPOINT-1-DOM',
+      'CHECKPOINT-1-URL', 'CHECKPOINT-1-TRACE'],
+  }]
   return {
     snapshot: {
       schemaVersion: '1.4.0', runId, assetId: 'ASSET-1',

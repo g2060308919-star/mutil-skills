@@ -1,4 +1,5 @@
 import { canonicalizeJson, digestApprovalProjection, digestArtifactContent, digestBytes, digestText,
+  digestPrdClause, digestPrdClauseInventory,
   deriveExecutionResultId,
   canonicalGrantApprovalSubjectDigest,
   digestCleanupPlanDefinition,
@@ -196,6 +197,10 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
   const attemptCase = { caseId: 'CASE-1', retryPolicy: 'read-automation-max-2' as const, initialChainDigest,
     events: [attemptStarted.event, attemptTerminal.event], selection: {
       status: 'selected' as const, attemptId, slot: 0, eventChainDigest } }
+  const clauseMaterial = { clauseId: 'CLAUSE-1', sourceId: 'SOURCE-1', kind: 'functional' as const,
+    sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 12 },
+    originalText: '首页标题必须可见', normalizedText: '首页标题必须可见' }
+  const clause = { ...clauseMaterial, textDigest: digestPrdClause(clauseMaterial) }
   const drafts: any = {
     'project-policy': draft('design/project-policy.json', {
       policyVersion: '1.0.0', environments: [{ environmentId: 'TEST', baseOrigin: 'https://example.test' }],
@@ -218,6 +223,7 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       normalizedPrdDigest: d('normalized-prd'),
       sources: [{ sourceId: 'SOURCE-1', digest: d('source'), byteLength: 7 }], attachments: [],
       sourceCacheIndexDigest: d('source-cache'),
+      clauses: [clause], clauseInventoryDigest: digestPrdClauseInventory([clause]),
     }),
     'prd-diff': draft('prd/prd-diff.json', {
       previousRevision: d('previous-prd'), currentRevision: context.prdRevision, sectionChanges: [],
@@ -231,9 +237,10 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       candidateDigests: [d('candidate')], selectedDigest: d('candidate'),
     }),
     'acceptance-scope': draft('design/acceptance-scope.json', {
-      includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['PRD-1'] }], exclusions: [], ambiguities: [],
+      includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['CLAUSE-1'] }], exclusions: [], ambiguities: [],
       dependencies: [], visualScope: { required: false, refs: [] },
       browserScope: { browserIds: ['CHROMIUM'], viewportIds: ['DESKTOP'] },
+      clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] }],
       scopeDecision: { decisionId: 'SCOPE-1', status: 'pending' },
     }),
     'requirement-model': draft('design/requirement-model.json', {
@@ -241,9 +248,10 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       modelDecisionDigest: d('model-decision'), requirements: [{
         reqId: 'REQ-1', revision: 1, title: '读取首页', actors: ['USER'], entities: ['PAGE'],
         preconditions: [], rules: [{ ruleId: 'RULE-1', category: 'business', statement: '首页可见',
-          sourceRefs: ['PRD-1'], certainty: 'explicit' }], states: [], transitions: [],
-        observableOutcomes: [{ oracleId: 'ORACLE-1', statement: '标题可见' }], applicability: [],
-        sourceRefs: ['PRD-1'], status: 'active',
+          sourceRefs: ['CLAUSE-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'] }], states: [], transitions: [],
+        observableOutcomes: [{ oracleId: 'ORACLE-1', ruleId: 'RULE-1', statement: '标题可见',
+          sourceRefs: ['CLAUSE-1'] }], applicability: [],
+        sourceRefs: ['CLAUSE-1'], status: 'active',
       }],
     }),
     'interaction-flow': draft('design/interaction-flow.json', { flows: [{
@@ -254,7 +262,8 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
     }] }),
     'coverage-universe': draft('design/coverage-universe.json', {
       coveragePolicyDigest: d('coverage-policy'), pairwiseSeed: 1, universeDigest: d('universe'),
-      obligations: [{ obligationId: 'COV-1', reqId: 'REQ-1', ruleIds: ['RULE-1'],
+      obligations: [{ obligationId: 'COV-1', reqId: 'REQ-1', clauseIds: ['CLAUSE-1'],
+        ruleIds: ['RULE-1'], oracleIds: ['ORACLE-1'],
         nodeIds: ['NODE-ENTRY', 'NODE-EXIT'], actor: 'USER', transitionId: 'not-applicable',
         scenario: '读取首页', necessity: 'required', applicabilityRuleId: 'APPLICABILITY-1',
         disposition: { kind: 'automated', caseIds: ['CASE-1'] } }],

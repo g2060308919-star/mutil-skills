@@ -56,10 +56,10 @@ describe('资产 JSON Schema 生成器', () => {
     const required: Record<string, string[]> = {
       'project-policy': ['policyVersion', 'environments', 'originPolicies', 'browserMatrix', 'coveragePolicy', 'evidencePolicy', 'retentionPolicy', 'riskPolicy', 'timeoutPolicy', 'runtimePolicy'],
       'prd-request': ['productSpace', 'title', 'sourceDescriptors', 'userRequest', 'testWorkspaceId', 'secretRefs'],
-      'prd-manifest': ['prdId', 'assetId', 'revision', 'normalizedPrdDigest', 'sources', 'attachments', 'sourceCacheIndexDigest'],
+      'prd-manifest': ['prdId', 'assetId', 'revision', 'normalizedPrdDigest', 'sources', 'attachments', 'sourceCacheIndexDigest', 'clauses', 'clauseInventoryDigest'],
       'prd-diff': ['previousRevision', 'currentRevision', 'sectionChanges', 'lineageMappings', 'lineageReview', 'impactedEntityIds'],
       'semantic-generation': ['modelProvider', 'modelId', 'modelVersion', 'systemPromptDigest', 'toolOutputDigests', 'sampling', 'candidateDigests', 'selectedDigest'],
-      'acceptance-scope': ['includedReqCandidates', 'exclusions', 'ambiguities', 'dependencies', 'visualScope', 'browserScope', 'scopeDecision'],
+      'acceptance-scope': ['includedReqCandidates', 'exclusions', 'ambiguities', 'dependencies', 'visualScope', 'browserScope', 'clauseDispositions', 'scopeDecision'],
       'requirement-model': ['modelRevision', 'requirements', 'coupledDimensions', 'applicabilityRules', 'modelDecisionDigest'],
       'interaction-flow': ['flows'],
       'coverage-universe': ['coveragePolicyDigest', 'pairwiseSeed', 'obligations', 'universeDigest'],

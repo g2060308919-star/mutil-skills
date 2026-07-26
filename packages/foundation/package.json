@@ -1,6 +1,6 @@
 {
   "name": "@mutil-skills/foundation",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "files": [
     "dist/src"
@@ -12,7 +12,7 @@
     }
   },
   "dependencies": {
-    "@mutil-skills/template": "0.3.1",
+    "@mutil-skills/template": "0.4.0",
     "vitest": "^3.2.0"
   }
 }

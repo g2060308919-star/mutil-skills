@@ -18,6 +18,8 @@ const scope = {
   dependencies: [{ dependencyId: 'DEP-1', status: 'available' as const, digest: digest('1') }],
   visualScope: { required: true, refs: ['FIGMA-1'] },
   browserScope: { browserIds: ['chrome'], viewportIds: ['desktop'] },
+  clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled' as const,
+    requirementIds: ['REQ-1'] }],
 }
 
 const lineage = {
@@ -61,6 +63,7 @@ describe('Scope/Lineage DecisionReceipt contract', () => {
       { ...scope, dependencies: [{ ...scope.dependencies[0]!, digest: digest('8') }] },
       { ...scope, visualScope: { ...scope.visualScope, required: false } },
       { ...scope, browserScope: { ...scope.browserScope, browserIds: ['firefox'] } },
+      { ...scope, clauseDispositions: [{ ...scope.clauseDispositions[0]!, requirementIds: ['REQ-X'] }] },
     ]
     for (const mutation of mutations) {
       expect(digestDecisionSubject(projectScopeDecisionSubject(mutation))).not.toBe(baseline)

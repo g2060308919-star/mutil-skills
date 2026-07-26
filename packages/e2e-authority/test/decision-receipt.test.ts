@@ -11,6 +11,7 @@ import { createDecisionReceiptVerifier, LocalApprovalAuthority } from '../src/in
 const d = (value: string) => digestText('test/v1', value)
 const scopeSubject = projectScopeDecisionSubject({
   includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['prd.md#req-1'] }], exclusions: [], ambiguities: [],
+  clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] }],
   dependencies: [{ dependencyId: 'DEP-1', status: 'available', digest: d('dependency') }],
   visualScope: { required: true, refs: ['DESIGN-1'] },
   browserScope: { browserIds: ['chrome'], viewportIds: ['desktop'] },
