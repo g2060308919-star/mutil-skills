@@ -22,6 +22,7 @@ import {
   type SignedGrant,
 } from '@mutil-skills/e2e-contracts'
 import {
+  E2E_ENGINE_VERSION,
   LocalSanitizerAuthority,
   PatternPrivacyScanner,
 } from '@mutil-skills/e2e-engine'
@@ -994,7 +995,7 @@ function createArtifact(
   content: unknown,
   authority: RuntimeArtifactStoreAuthority,
   createdAt = snapshot.updatedAt,
-  engineVersion = '0.4.0',
+  engineVersion = E2E_ENGINE_VERSION,
 ): ArtifactDocument {
   const base = {
     artifactId: artifactId(type), artifactType: type, schemaVersion: schemaVersion(type),
@@ -1012,7 +1013,7 @@ function finalizationArtifactEnvelope(
   snapshot: RuntimeRunSnapshot,
 ): Pick<ArtifactDocument, 'createdAt' | 'engineVersion'> {
   const frozen = snapshot.frozenArtifacts['run-bundle']
-  if (frozen === undefined) return { createdAt: snapshot.updatedAt, engineVersion: '0.4.0' }
+  if (frozen === undefined) return { createdAt: snapshot.updatedAt, engineVersion: E2E_ENGINE_VERSION }
   const parsed = ArtifactSchemaRegistry['run-bundle'].safeParse(frozen)
   if (!parsed.success) throw sealerError('E2E_RUNTIME_FINALIZATION_RUN_BUNDLE_DRIFT')
   return { createdAt: parsed.data.createdAt, engineVersion: parsed.data.engineVersion }

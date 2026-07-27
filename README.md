@@ -23,12 +23,17 @@ npm run lint:architecture
 E2E 发布先运行 `npm run verify:e2e-pack` 验证本地 tarball；发布全部 workspace 后运行
 `npm run verify:e2e-release`。后者固定从 npm Registry 安装全部十四个包，并在全新 HOME、
 系统 Chrome 和正式 RPC 下完成跨仓 Golden；两道门都要求零 skipped test，本地 tarball
-通过不能替代公开发布验收。发布门使用独立临时工作区；可通过 `E2E_RUNTIME_NPM_CACHE`
+通过不能替代公开发布验收。正式 Golden 的业务报告必须为 `accepted`；TodoMVC 公共实现
+相对官方 PRD 的已知偏差由 `npm run verify:e2e-public-diagnostic` 单独验证，不会被包装成
+“业务 Golden 全绿”。发布门失败会明确分类为 `environment`、`business`、`safety` 或
+`release-internal`，便于区分运行环境、业务 Oracle 和门禁自身故障。发布门使用独立临时工作区；可通过 `E2E_RUNTIME_NPM_CACHE`
 显式复用只含公共 tarball 的 npm 内容缓存，不复用 HOME、Runtime 状态或浏览器 Profile。
 
 Telemetry hook 使用 `install-hooks --runtime all` 显式安装，使用 `uninstall-hooks --runtime all` 卸载；安装后 runtime 位于用户目录，不依赖当前 checkout。第一期默认不保存或上传事件，详细口径见 [统计说明](./docs/telemetry-hook-statistics-guide.md)。
 
 本实现统一使用的包 scope 是 `@mutil-skills/*`。
+仓库和每个发布包均按根目录 `LICENSE` 中的 MIT License 授权，并在 npm 元数据中声明
+`license: MIT`。
 
 ## PRD 驱动 E2E 验收
 

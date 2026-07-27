@@ -52,7 +52,16 @@ describe('portable E2E runtime', () => {
         return
       }
 
-      expect(result.doctor.ready).toBe(true)
+      if (result.doctor.ready !== true) {
+        const blocked = Object.values(result.doctor.probes ?? {})
+          .filter((probe): probe is { status: string; reasonCode?: string } => (
+            typeof probe === 'object' && probe !== null && 'status' in probe
+          ))
+          .filter((probe) => probe.status !== 'passed')
+          .map((probe) => probe.reasonCode ?? probe.status)
+          .join(',')
+        throw new Error(`E2E_RELEASE_ENVIRONMENT:E2E_RUNTIME_DOCTOR_NOT_READY:${blocked}`)
+      }
       expect(result.packageSource).toBe(process.env.E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE === 'registry'
         ? 'npm-registry' : 'workspace-tarballs')
       expect(result.verifiedPublishedPackages).toEqual(
@@ -62,7 +71,9 @@ describe('portable E2E runtime', () => {
         browserSource: 'system-chrome', approvalMode: 'local-confirmation',
       })
       expect(result.managedBrowserInstalled).toBe(false)
-      expect(result.report.content.verdict).toBe('accepted')
+      if (result.report.content.verdict !== 'accepted') {
+        throw new Error(`E2E_RELEASE_BUSINESS:REPORT_VERDICT_${result.report.content.verdict}`)
+      }
       expect(result.report.content.approvalAssurance).toEqual({
         approvalMode: 'local-confirmation',
         identityVerified: false,
@@ -71,6 +82,13 @@ describe('portable E2E runtime', () => {
       expect(result.report.content.runtimeProvenance.sourceRepositoryIndependent).toBe(true)
       expect(result.publishedRegression).toMatchObject({ exitCode: 0 })
       expect(result.publishedRegression.gatewayAuditDigest).toMatch(/^sha256:/)
+      if (result.fullPlaywright.status !== 'passed'
+        || result.fullPlaywright.cleanupStatus !== 'verified-clean'
+        || result.fullPlaywright.reloadVerified !== true
+        || result.fullPlaywright.jsonBodyVerified !== true
+        || result.fullPlaywright.report.content.verdict !== 'accepted') {
+        throw new Error('E2E_RELEASE_BUSINESS:FULL_PLAYWRIGHT_NOT_ACCEPTED')
+      }
       expect(result.fullPlaywright).toMatchObject({
         executionProfile: 'full-playwright', status: 'passed', cleanupStatus: 'verified-clean',
         reloadVerified: true, jsonBodyVerified: true,

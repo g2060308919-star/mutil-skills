@@ -15,6 +15,9 @@
 - Finalizer 按证据集合校验执行回执，兼容真实 runner 的证据采集顺序，同时继续拒绝缺失、重复或额外证据。
 - generation audit 将签名 checkpoint 证据纳入 ExecutionOutcomeReceipt 上下文，避免正式执行结果在发布审计阶段被误判漂移。
 - 跨仓 Golden 为全新 HOME 的冷缓存 npm 安装提供独立 13 分钟故障边界；浏览器 child 仍保持原有 10 分钟执行边界。
+- 正式 pack/Registry Golden 与“预期发现 TodoMVC 实现偏差”的公共诊断分离，正式门只接受零跳过、业务 accepted。
+- 发布门按环境、业务和门禁内部错误分类，Runtime doctor 复验当前 Gateway helper 路径，固定 launcher 在安装时 Node 消失时返回可操作 reasonCode。
+- 仓库及十四个发布包补齐 MIT `LICENSE`、`license` 与精确 Node 支持范围；非 E2E 包不再被无依据提高到 Runtime 的 Node 下限。
 
 ### Changed
 

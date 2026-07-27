@@ -8,6 +8,8 @@ import {
   type WorkflowTransitionEvent,
 } from '@mutil-skills/e2e-contracts'
 
+export const E2E_ENGINE_VERSION = '0.4.0'
+
 const allowedTransitions: Readonly<Record<WorkflowNode, readonly WorkflowNode[]>> = {
   created: ['source-frozen'],
   'source-frozen': ['awaiting-scope-approval'],
@@ -255,7 +257,7 @@ function recordWorkflowEvent(input: {
     next: input.next,
     reason: input.reason,
     timestamp,
-    engineVersion: input.engineVersion ?? '0.4.0',
+    engineVersion: input.engineVersion ?? E2E_ENGINE_VERSION,
     commitVerified: input.commitVerified === true,
     previousChainDigest: input.state.eventChainDigest,
   }

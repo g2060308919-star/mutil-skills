@@ -2,10 +2,11 @@ import { spawn } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { classifyReleaseFailures, releaseChildEnvironment } from './e2e-release-support.mjs'
 
 const mode = process.argv[2]
-if (mode !== 'pack' && mode !== 'registry') {
-  process.stderr.write('用法：node scripts/run-e2e-release.mjs <pack|registry>\n')
+if (mode !== 'pack' && mode !== 'registry' && mode !== 'diagnostic') {
+  process.stderr.write('用法：node scripts/run-e2e-release.mjs <pack|registry|diagnostic>\n')
   process.exitCode = 2
 } else {
   await run(mode)
@@ -25,6 +26,7 @@ async function run(releaseMode) {
   ])
   let completed = false
   try {
+    if (releaseMode === 'registry') await verifyReleaseTruth(sourceRoot)
     const npmEnvironment = {
       npm_config_cache: npmCache,
       npm_config_loglevel: 'error',
@@ -54,12 +56,9 @@ async function run(releaseMode) {
       reportPath: join(root, 'workspace-golden-results.json'),
       files: ['scripts/e2e-runtime-cross-repo.golden.test.ts'],
       config: 'vitest.e2e.config.ts',
-      env: {
-        E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE: 'workspace',
-        E2E_RUNTIME_RUN_CROSS_REPO: '1',
-        E2E_RUNTIME_RUN_TODOMVC_PUBLIC: '1',
-        E2E_RUNTIME_NPM_CACHE: npmCache,
-      },
+      env: releaseMode === 'diagnostic'
+        ? diagnosticEnvironment(npmCache)
+        : goldenEnvironment('workspace', npmCache),
     })
 
     if (releaseMode === 'registry') {
@@ -69,13 +68,7 @@ async function run(releaseMode) {
         reportPath: join(root, 'registry-golden-results.json'),
         files: ['scripts/e2e-runtime-cross-repo.golden.test.ts'],
         config: 'vitest.e2e.config.ts',
-        env: {
-          E2E_RUNTIME_RELEASE_PACKS_DIR: packs,
-          E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE: 'registry',
-          E2E_RUNTIME_RUN_CROSS_REPO: '1',
-          E2E_RUNTIME_RUN_TODOMVC_PUBLIC: '1',
-          E2E_RUNTIME_NPM_CACHE: npmCache,
-        },
+        env: goldenEnvironment('registry', npmCache, packs),
       })
     }
     completed = true
@@ -84,6 +77,7 @@ async function run(releaseMode) {
       mode: releaseMode,
       skippedTests: 0,
       packageSource: releaseMode === 'registry' ? 'npm-registry' : 'workspace-tarballs',
+      ...(releaseMode === 'diagnostic' ? { diagnosticVerdict: 'rejected-as-detected' } : {}),
     })}\n`)
   } catch (error) {
     process.stderr.write(`${JSON.stringify({
@@ -102,6 +96,23 @@ async function run(releaseMode) {
       await rm(root, { recursive: true, force: true })
     }
     if (!completed) process.stderr.write('正式发布门禁未通过；不得发布或标记 release。\n')
+  }
+}
+
+function goldenEnvironment(packageSource, npmCache, packs) {
+  return {
+    ...(packs === undefined ? {} : { E2E_RUNTIME_RELEASE_PACKS_DIR: packs }),
+    E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE: packageSource,
+    E2E_RUNTIME_RUN_CROSS_REPO: '1',
+    E2E_RUNTIME_NPM_CACHE: npmCache,
+  }
+}
+
+function diagnosticEnvironment(npmCache) {
+  return {
+    ...goldenEnvironment('workspace', npmCache),
+    E2E_RUNTIME_RUN_TODOMVC_PUBLIC: '1',
+    E2E_RUNTIME_TODOMVC_ONLY: '1',
   }
 }
 
@@ -124,15 +135,16 @@ async function runVitestWithoutSkips(input) {
     })
   }))
   if (report.success !== true || report.numFailedTests !== 0 || report.numPendingTests !== 0) {
+    const failures = collectFailures(report)
     throw releaseError({
       phase: input.phase,
       code: report.numPendingTests > 0 ? 'E2E_RELEASE_GOLDEN_SKIPPED'
         : exitCode !== 0 ? 'E2E_RELEASE_GOLDEN_FAILED' : 'E2E_RELEASE_RESULT_INVALID',
-      category: goldenPhase(input.phase) ? 'business-or-runtime' : 'environment',
+      category: classifyReleaseFailures(input.phase, failures),
       remediation: report.numPendingTests > 0
         ? '移除或启用全部 skip/conditional test，正式发布门必须是零跳过'
         : '查看对应 JSON test report 中的失败用例与 Runtime reasonCode',
-      failures: collectFailures(report),
+      failures,
     })
   }
 }
@@ -143,7 +155,7 @@ async function execute(phase, command, args, cwd, extraEnvironment, allowNonZero
       cwd,
       shell: false,
       stdio: 'inherit',
-      env: { ...process.env, ...extraEnvironment },
+      env: releaseChildEnvironment(process.env, extraEnvironment),
     })
     child.once('error', rejectPromise)
     child.once('close', resolvePromise)
@@ -153,7 +165,7 @@ async function execute(phase, command, args, cwd, extraEnvironment, allowNonZero
   if (code !== 0 && !allowNonZero) throw releaseError({
     phase,
     code: 'E2E_RELEASE_COMMAND_FAILED',
-    category: goldenPhase(phase) ? 'business-or-runtime' : 'environment',
+    category: 'environment',
   })
   return code
 }
@@ -173,6 +185,41 @@ function collectFailures(report) {
 
 function goldenPhase(phase) {
   return phase.includes('golden')
+}
+
+async function verifyReleaseTruth(sourceRoot) {
+  const manifest = JSON.parse(await readFile(join(sourceRoot, 'package.json'), 'utf8'))
+  const tag = `v${manifest.version}`
+  const [status, tagCommit, headCommit, remoteTag] = await Promise.all([
+    capture('release/git-truth', 'git', ['status', '--porcelain'], sourceRoot),
+    capture('release/tag', 'git', ['rev-list', '-n', '1', tag], sourceRoot),
+    capture('release/tag', 'git', ['rev-parse', 'HEAD'], sourceRoot),
+    capture('release/tag', 'git', ['ls-remote', '--tags', 'origin', `refs/tags/${tag}^{}`], sourceRoot),
+  ])
+  const remoteTagCommit = remoteTag.split(/\s+/u)[0] ?? ''
+  if (status !== '' || tagCommit !== headCommit || remoteTagCommit !== headCommit) throw releaseError({
+    phase: 'release/tag',
+    code: status !== '' ? 'E2E_RELEASE_WORKTREE_DIRTY' : 'E2E_RELEASE_TAG_MISMATCH',
+    category: 'release-internal',
+    remediation: `提交全部发布输入，并创建、推送指向当前提交的不可变 ${tag} 标签后再运行 Registry Golden`,
+  })
+}
+
+async function capture(phase, command, args, cwd) {
+  return await new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, { cwd, shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.once('error', rejectPromise)
+    child.once('close', (code) => code === 0
+      ? resolvePromise(stdout.trim())
+      : rejectPromise(new Error(`${command} exited ${code}`)))
+  }).catch((cause) => {
+    throw releaseError({
+      phase, code: 'E2E_RELEASE_TAG_UNAVAILABLE', category: 'release-internal', cause,
+      remediation: '确认当前提交已有同版本 Git tag 后重试',
+    })
+  })
 }
 
 function releaseError(input) {

@@ -52,6 +52,7 @@ export interface RuntimeProbeContext {
   approvalMode: ApprovalMode
   systemChromeVersionReader?: (executablePath: string) => Promise<string>
   environment: RuntimeEnvironment
+  gatewayPathInspector: (installation: RuntimeInstallation, homeDir: string) => Promise<void>
 }
 
 export interface RuntimeEnvironment {
@@ -68,6 +69,7 @@ export interface RunRuntimeDoctorOptions {
   probes?: Partial<Record<RuntimeDoctorProbeName, RuntimeProbe>>
   systemChromeVersionReader?: (executablePath: string) => Promise<string>
   environment?: RuntimeEnvironment
+  gatewayPathInspector?: (installation: RuntimeInstallation, homeDir: string) => Promise<void>
 }
 
 export interface AggregateDoctorReportInput {
@@ -104,6 +106,7 @@ export async function runRuntimeDoctor(options: RunRuntimeDoctorOptions): Promis
       nodeVersion: process.versions.node,
       tempDir: tmpdir(),
     },
+    gatewayPathInspector: options.gatewayPathInspector ?? inspectGatewayRuntimePaths,
   }
   const probes: Record<string, RuntimeDoctorProbe> = {}
   for (const name of RUNTIME_DOCTOR_PROBE_NAMES) {
@@ -112,13 +115,13 @@ export async function runRuntimeDoctor(options: RunRuntimeDoctorOptions): Promis
         await (options.probes?.[name] ?? DEFAULT_RUNTIME_PROBES[name])(context),
       )
     } catch (error) {
-      const reasonCode = publicEnvironmentReasonCode(error)
+      const reasonCode = publicProbeFailureReasonCode(error)
       probes[name] = {
         status: 'blocked',
         reasonCode: reasonCode ?? 'E2E_RUNTIME_DOCTOR_PROBE_FAILED',
         remediation: reasonCode === undefined
           ? '重新运行 doctor；若问题持续，重新安装 Runtime'
-          : '修复该环境探针后重新运行 doctor',
+          : '修复该探针后重新运行 doctor',
       }
     }
   }
@@ -239,7 +242,7 @@ function supportedNodeVersion(version: string): boolean {
   return major > 22 || (major === 22 && minor >= 13)
 }
 
-function publicEnvironmentReasonCode(error: unknown): string | undefined {
+function publicProbeFailureReasonCode(error: unknown): string | undefined {
   const code = typeof error === 'object' && error !== null && 'code' in error
     && typeof error.code === 'string' ? error.code : undefined
   return code !== undefined && /^E2E_[A-Z0-9_]+$/.test(code) ? code : undefined
@@ -480,6 +483,7 @@ function capabilityProofProbe(kind: 'gateway' | 'isolation'): RuntimeProbe {
   return async (context) => {
     const { homeDir, installation } = context
     try {
+      if (kind === 'gateway') await context.gatewayPathInspector(installation, homeDir)
       const proof = await inspectRuntimeCapabilityProof({
         homeDir, runtimeInstallationDigest: installation.installationDigest,
       })
@@ -509,6 +513,40 @@ function capabilityProofProbe(kind: 'gateway' | 'isolation'): RuntimeProbe {
           : 'Capability proof 已损坏或与当前 Runtime 不匹配；保留现场并重新运行真实受控会话',
       }
     }
+  }
+}
+
+async function inspectGatewayRuntimePaths(
+  installation: RuntimeInstallation,
+  homeDir: string,
+): Promise<void> {
+  const inspected = await inspectRuntimeInstallation({ homeDir })
+  if (inspected.installationDigest !== installation.installationDigest
+    || inspected.versionRoot !== installation.versionRoot
+    || inspected.entrypoint !== installation.entrypoint) {
+    throw doctorError('E2E_GATEWAY_PATH_UNAVAILABLE')
+  }
+  const runtimePackageRoot = join(installation.versionRoot, 'node_modules', '@mutil-skills', 'e2e-runtime')
+  await Promise.all([
+    requireCanonicalRuntimeFile(join(runtimePackageRoot, 'dist', 'src', 'gateway-proxy-host-process.js'), installation.versionRoot),
+    requireCanonicalRuntimeFile(join(runtimePackageRoot, 'scripts', 'gateway-ca-openat.py'), installation.versionRoot),
+    requireCanonicalRuntimeFile(join(runtimePackageRoot, 'scripts', 'authority-child-fchdir.py'), installation.versionRoot),
+  ])
+}
+
+async function requireCanonicalRuntimeFile(candidate: string, versionRoot: string): Promise<void> {
+  try {
+    const [root, resolved, metadata] = await Promise.all([
+      realpath(versionRoot), realpath(candidate), lstat(candidate),
+    ])
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+      || !resolved.startsWith(`${root}/`)
+      || (typeof process.getuid === 'function' && metadata.uid !== process.getuid())) {
+      throw doctorError('E2E_GATEWAY_PATH_UNAVAILABLE')
+    }
+  } catch (cause) {
+    if (cause instanceof Error && 'code' in cause && cause.code === 'E2E_GATEWAY_PATH_UNAVAILABLE') throw cause
+    throw doctorError('E2E_GATEWAY_PATH_UNAVAILABLE')
   }
 }
 

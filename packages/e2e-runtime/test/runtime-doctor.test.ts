@@ -153,6 +153,7 @@ describe('Runtime doctor', () => {
 
     const report = await runRuntimeDoctor({
       installation, homeDir: roots.home, probes, systemChromeVersionReader: readVersion,
+      gatewayPathInspector: async () => undefined,
     })
 
     expect(report.browserSource).toBe('system-chrome')
@@ -160,6 +161,33 @@ describe('Runtime doctor', () => {
     expect(report.probes.gateway?.status).toBe('passed')
     expect(report.probes.isolation?.status).toBe('passed')
     expect(report.ready).toBe(true)
+  })
+
+  test('Gateway probe revalidates current installed paths instead of trusting cached proof alone', async () => {
+    let inspected = false
+    const probes = Object.fromEntries(RUNTIME_DOCTOR_PROBE_NAMES
+      .filter((name) => name !== 'gateway')
+      .map((name) => [name, passedProbe(`E2E_${name.replaceAll('-', '_').toUpperCase()}_OK`)]))
+
+    const report = await runRuntimeDoctor({
+      installation,
+      homeDir: '/safe/home',
+      probes,
+      gatewayPathInspector: async (candidate, homeDir) => {
+        expect(candidate).toBe(installation)
+        expect(homeDir).toBe('/safe/home')
+        inspected = true
+        const error = new Error('E2E_GATEWAY_PATH_UNAVAILABLE') as Error & { code: string }
+        error.code = 'E2E_GATEWAY_PATH_UNAVAILABLE'
+        throw error
+      },
+    })
+
+    expect(inspected).toBe(true)
+    expect(report.probes.gateway).toMatchObject({
+      status: 'blocked',
+      reasonCode: 'E2E_GATEWAY_PATH_UNAVAILABLE',
+    })
   })
 
   test('真实 Authority、Artifact、Quarantine 与 Report 探针不再是永久占位', async () => {
@@ -252,7 +280,7 @@ describe('Runtime doctor', () => {
     expect(report.probes.gateway).toEqual({
       status: 'blocked',
       reasonCode: 'E2E_GATEWAY_PATH_UNAVAILABLE',
-      remediation: '修复该环境探针后重新运行 doctor',
+      remediation: '修复该探针后重新运行 doctor',
     })
     expect(JSON.stringify(report)).not.toContain('private path omitted')
   })

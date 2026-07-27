@@ -27,6 +27,7 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { generateCACertificate, generateSPKIFingerprint } from 'mockttp'
+import { RUNTIME_PACKAGE_VERSION } from './protocol.js'
 import {
   projectGatewayRules,
   assertGatewayModePolicy,
@@ -218,7 +219,8 @@ async function startGatewayProxyHostInternal(options: GatewayProxyStartOptions):
   })
   const canaryRule = canaryProjection.rules[0]!
   const signer = options.policyObjects?.auditSigner ?? LocalGatewayAuditSigner.create({
-    issuer: 'e2e-runtime-gateway', keyId: 'gateway-v1', instanceId: options.runId, version: '0.4.0',
+    issuer: 'e2e-runtime-gateway', keyId: 'gateway-v1', instanceId: options.runId,
+    version: RUNTIME_PACKAGE_VERSION,
   })
   const recorder = signer.createRecorder(projection.policyDigest)
   const factoryPolicies = options.policyObjects?.factory?.({

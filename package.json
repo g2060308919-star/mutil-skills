@@ -18,7 +18,8 @@
     "lint:architecture": "node scripts/check-architecture.mjs",
     "e2e:golden": "vitest run --config vitest.e2e.config.ts",
     "verify:e2e-pack": "node scripts/run-e2e-release.mjs pack",
-    "verify:e2e-release": "node scripts/run-e2e-release.mjs registry"
+    "verify:e2e-release": "node scripts/run-e2e-release.mjs registry",
+    "verify:e2e-public-diagnostic": "node scripts/run-e2e-release.mjs diagnostic"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
