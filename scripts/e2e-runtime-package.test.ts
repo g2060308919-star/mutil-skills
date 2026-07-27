@@ -198,7 +198,9 @@ describe('E2E Runtime npm tarball', () => {
       temporaryRoots.push(root)
       const project = join(root, 'blank-project')
       const home = join(root, 'home')
-      const npmCache = join(root, 'npm-cache')
+      // HOME/项目必须全新；npm cache 只保存公共内容寻址 tarball，可由发布门显式复用，
+      // 避免冷网络把 Runtime 环境失败误判成业务失败。
+      const npmCache = process.env.E2E_RUNTIME_NPM_CACHE ?? join(root, 'npm-cache')
       await Promise.all([
         mkdir(project, { recursive: true, mode: 0o700 }),
         mkdir(home, { recursive: true, mode: 0o700 }),
@@ -215,7 +217,7 @@ describe('E2E Runtime npm tarball', () => {
       ], {
         cwd: project,
         env: packedInstallEnvironment({ home, npmCache }),
-        timeout: 300_000,
+        timeout: 780_000,
         maxBuffer: 10 * 1024 * 1024,
       })
 
@@ -248,7 +250,7 @@ describe('E2E Runtime npm tarball', () => {
         stdout: expect.stringContaining('"ready":false'),
       })
     },
-    360_000,
+    840_000,
   )
 })
 

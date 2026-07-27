@@ -5,8 +5,10 @@ import {
   canonicalizeJson,
   digestText,
 } from '@mutil-skills/e2e-contracts'
-import { lstat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { constants } from 'node:fs'
+import { access, lstat, realpath } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { isAbsolute, join } from 'node:path'
 import { inspectRuntimeInstallation, type RuntimeInstallation } from './runtime-discovery.js'
 import { discoverTrustedPython } from './trusted-python.js'
 import { inspectChromiumInstallation } from './browser-installer.js'
@@ -28,6 +30,7 @@ export const RUNTIME_DOCTOR_PROBE_NAMES = [
   'installation',
   'version-closure',
   'source-independence',
+  'environment',
   'authority',
   'approval-presence',
   'gateway',
@@ -48,6 +51,13 @@ export interface RuntimeProbeContext {
   authorityInspection?: Promise<RuntimeAuthorityInspection>
   approvalMode: ApprovalMode
   systemChromeVersionReader?: (executablePath: string) => Promise<string>
+  environment: RuntimeEnvironment
+}
+
+export interface RuntimeEnvironment {
+  platform: NodeJS.Platform
+  nodeVersion: string
+  tempDir: string
 }
 
 export type RuntimeProbe = (context: RuntimeProbeContext) => Promise<RuntimeDoctorProbe>
@@ -57,6 +67,7 @@ export interface RunRuntimeDoctorOptions {
   homeDir: string
   probes?: Partial<Record<RuntimeDoctorProbeName, RuntimeProbe>>
   systemChromeVersionReader?: (executablePath: string) => Promise<string>
+  environment?: RuntimeEnvironment
 }
 
 export interface AggregateDoctorReportInput {
@@ -88,6 +99,11 @@ export async function runRuntimeDoctor(options: RunRuntimeDoctorOptions): Promis
     ...(options.systemChromeVersionReader === undefined ? {} : {
       systemChromeVersionReader: options.systemChromeVersionReader,
     }),
+    environment: options.environment ?? {
+      platform: process.platform,
+      nodeVersion: process.versions.node,
+      tempDir: tmpdir(),
+    },
   }
   const probes: Record<string, RuntimeDoctorProbe> = {}
   for (const name of RUNTIME_DOCTOR_PROBE_NAMES) {
@@ -95,11 +111,14 @@ export async function runRuntimeDoctor(options: RunRuntimeDoctorOptions): Promis
       probes[name] = RuntimeDoctorProbeSchema.parse(
         await (options.probes?.[name] ?? DEFAULT_RUNTIME_PROBES[name])(context),
       )
-    } catch {
+    } catch (error) {
+      const reasonCode = publicEnvironmentReasonCode(error)
       probes[name] = {
         status: 'blocked',
-        reasonCode: 'E2E_RUNTIME_DOCTOR_PROBE_FAILED',
-        remediation: '重新运行 doctor；若问题持续，重新安装 Runtime',
+        reasonCode: reasonCode ?? 'E2E_RUNTIME_DOCTOR_PROBE_FAILED',
+        remediation: reasonCode === undefined
+          ? '重新运行 doctor；若问题持续，重新安装 Runtime'
+          : '修复该环境探针后重新运行 doctor',
       }
     }
   }
@@ -139,6 +158,7 @@ const DEFAULT_RUNTIME_PROBES: Record<RuntimeDoctorProbeName, RuntimeProbe> = {
   installation: verifiedInstallationProbe('E2E_RUNTIME_INSTALLATION_OK'),
   'version-closure': verifiedInstallationProbe('E2E_RUNTIME_VERSION_CLOSURE_OK'),
   'source-independence': verifiedInstallationProbe('E2E_RUNTIME_SOURCE_INDEPENDENCE_OK'),
+  environment: runtimeEnvironmentProbe,
   authority: authorityProbe,
   'approval-presence': approvalPresenceProbe,
   gateway: capabilityProofProbe('gateway'),
@@ -169,6 +189,60 @@ const DEFAULT_RUNTIME_PROBES: Record<RuntimeDoctorProbeName, RuntimeProbe> = {
   'artifact-fs': artifactAuthorityProbe,
   quarantine: quarantineProbe,
   report: reportProbe,
+}
+
+async function runtimeEnvironmentProbe(context: RuntimeProbeContext): Promise<RuntimeDoctorProbe> {
+  const environment = context.environment
+  if (environment.platform !== 'darwin' && environment.platform !== 'linux') return {
+    status: 'blocked',
+    reasonCode: 'E2E_RUNTIME_PLATFORM_UNSUPPORTED',
+    remediation: '当前 Runtime 仅支持 macOS 与 Linux',
+  }
+  if (!supportedNodeVersion(environment.nodeVersion)) return {
+    status: 'blocked',
+    reasonCode: 'E2E_RUNTIME_NODE_VERSION_UNSUPPORTED',
+    remediation: '安装 Node.js 22.13.0 或更高版本后重新安装 Runtime',
+  }
+  try {
+    if (!isAbsolute(environment.tempDir)) throw new Error('E2E_RUNTIME_TEMP_DIRECTORY_UNAVAILABLE')
+    const [canonical, metadata] = await Promise.all([
+      realpath(environment.tempDir),
+      lstat(environment.tempDir),
+      access(environment.tempDir, constants.R_OK | constants.W_OK | constants.X_OK),
+    ])
+    if (!isAbsolute(canonical) || !metadata.isDirectory()) {
+      throw new Error('E2E_RUNTIME_TEMP_DIRECTORY_UNAVAILABLE')
+    }
+  } catch {
+    return {
+      status: 'blocked',
+      reasonCode: 'E2E_RUNTIME_TEMP_DIRECTORY_UNAVAILABLE',
+      remediation: '配置当前用户可读、可写、可进入的绝对 TMPDIR 后重新运行 doctor',
+    }
+  }
+  return {
+    status: 'passed',
+    reasonCode: 'E2E_RUNTIME_ENVIRONMENT_OK',
+    proofDigest: digestText('runtime-doctor-environment/v1', canonicalizeJson({
+      platform: environment.platform,
+      nodeVersion: environment.nodeVersion,
+    })),
+    remediation: '无需处理',
+  }
+}
+
+function supportedNodeVersion(version: string): boolean {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:-|$)/.exec(version)
+  if (match === null) return false
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  return major > 22 || (major === 22 && minor >= 13)
+}
+
+function publicEnvironmentReasonCode(error: unknown): string | undefined {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    && typeof error.code === 'string' ? error.code : undefined
+  return code !== undefined && /^E2E_[A-Z0-9_]+$/.test(code) ? code : undefined
 }
 
 interface RuntimeAuthorityInspection {

@@ -22,5 +22,9 @@
   },
   "scripts": {
     "test": "vitest run"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
   }
 }

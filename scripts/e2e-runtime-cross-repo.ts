@@ -68,6 +68,16 @@ export async function runCrossRepoRuntimeGolden(input: {
   packs: string
 }): Promise<CrossRepoRuntimeGoldenResult> {
   assertAbsoluteDistinct(input)
+  await Promise.all([
+    mkdir(input.home, { recursive: true, mode: 0o700 }),
+    mkdir(input.project, { recursive: true, mode: 0o700 }),
+    mkdir(input.packs, { recursive: true, mode: 0o700 }),
+  ])
+  input = {
+    home: await realpath(input.home),
+    project: await realpath(input.project),
+    packs: await realpath(input.packs),
+  }
   const root = dirname(input.packs)
   const publicationSource = join(root, 'publication-source')
   const unavailableSource = join(root, 'publication-source.unavailable')
@@ -78,9 +88,6 @@ export async function runCrossRepoRuntimeGolden(input: {
   const packageSource = process.env.E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE === 'registry'
     ? 'npm-registry' as const : 'workspace-tarballs' as const
   await Promise.all([
-    mkdir(input.home, { recursive: true, mode: 0o700 }),
-    mkdir(input.project, { recursive: true, mode: 0o700 }),
-    mkdir(input.packs, { recursive: true, mode: 0o700 }),
     mkdir(harnessRoot, { recursive: true, mode: 0o700 }),
     mkdir(npmCache, { recursive: true, mode: 0o700 }),
   ])

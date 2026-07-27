@@ -65,9 +65,10 @@ describe('Runtime doctor', () => {
       expect(report.probes[name]?.proofDigest).toBeUndefined()
     }
     for (const name of RUNTIME_DOCTOR_PROBE_NAMES.slice(3)
-      .filter((name) => !['authority', 'artifact-fs', 'chromium'].includes(name))) {
+      .filter((name) => !['environment', 'authority', 'artifact-fs', 'chromium'].includes(name))) {
       expect(['not-installed', 'blocked']).toContain(report.probes[name]?.status)
     }
+    expect(report.probes.environment?.status).toBe('passed')
     expect(['not-installed', 'blocked']).toContain(report.probes.chromium?.status)
     for (const name of ['authority', 'artifact-fs'] as const) {
       expect(['not-installed', 'blocked']).toContain(report.probes[name]?.status)
@@ -99,6 +100,26 @@ describe('Runtime doctor', () => {
     expect(RuntimeDoctorReportSchema.parse(report)).toEqual(report)
     expect(calls).toEqual(RUNTIME_DOCTOR_PROBE_NAMES)
     expect(report.ready).toBe(true)
+  })
+
+  test('在任何业务探针前明确报告不支持的 Node，而不是产生底层 sqlite 失败', async () => {
+    const probes = Object.fromEntries(RUNTIME_DOCTOR_PROBE_NAMES
+      .filter((name) => name !== 'environment')
+      .map((name) => [name, passedProbe(`E2E_${name.replaceAll('-', '_').toUpperCase()}_OK`)]))
+
+    const report = await runRuntimeDoctor({
+      installation,
+      homeDir: '/safe/home',
+      probes,
+      environment: { platform: 'darwin', nodeVersion: '20.19.5', tempDir: '/tmp' },
+    })
+
+    expect(report.probes.environment).toEqual({
+      status: 'blocked',
+      reasonCode: 'E2E_RUNTIME_NODE_VERSION_UNSUPPORTED',
+      remediation: '安装 Node.js 22.13.0 或更高版本后重新安装 Runtime',
+    })
+    expect(report.ready).toBe(false)
   })
 
   test('system Chrome selection makes browser, Gateway and isolation probes pass without managed Chromium', async () => {
@@ -215,6 +236,25 @@ describe('Runtime doctor', () => {
     expect(gatewayRan).toBe(true)
     expect(JSON.stringify(report)).not.toContain('/Users/person')
     expect(report.ready).toBe(false)
+  })
+
+  test('保留可安全公开的环境 reasonCode，避免把 Gateway 路径错误压成通用失败', async () => {
+    const report = await runRuntimeDoctor({
+      installation,
+      homeDir: '/safe/home',
+      probes: {
+        gateway: async () => {
+          throw Object.assign(new Error('private path omitted'), { code: 'E2E_GATEWAY_PATH_UNAVAILABLE' })
+        },
+      },
+    })
+
+    expect(report.probes.gateway).toEqual({
+      status: 'blocked',
+      reasonCode: 'E2E_GATEWAY_PATH_UNAVAILABLE',
+      remediation: '修复该环境探针后重新运行 doctor',
+    })
+    expect(JSON.stringify(report)).not.toContain('private path omitted')
   })
 
   test('doctor --json writes only a schema-valid canonical report to stdout', async () => {

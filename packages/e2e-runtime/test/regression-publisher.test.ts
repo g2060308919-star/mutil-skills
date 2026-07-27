@@ -1,4 +1,3 @@
-import { existsSync } from 'node:fs'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,12 +12,13 @@ import {
   compilerArtifactVerification,
 } from '../../e2e-playwright-runtime/test/compiler-artifacts.fixture.js'
 import { RegressionPublisher } from '../src/regression-publisher.js'
+import { realMacSandboxAvailable } from './platform-capabilities.js'
 
 const roots: string[] = []
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))))
 
 describe('RegressionPublisher', () => {
-  test.runIf(process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec'))(
+  test.runIf(realMacSandboxAvailable)(
     '真实 macOS sandbox 在 Git 外 staging 仍能从已安装可信闭包解析 Playwright', async () => {
       const tempParent = await mkdtemp(join(tmpdir(), 'e2e-regression-publisher-real-')); roots.push(tempParent)
       const publisher = await RegressionPublisher.create({

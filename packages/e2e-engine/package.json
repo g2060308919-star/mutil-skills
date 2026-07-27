@@ -17,5 +17,9 @@
   },
   "dependencies": {
     "@mutil-skills/e2e-contracts": "0.4.0"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
   }
 }

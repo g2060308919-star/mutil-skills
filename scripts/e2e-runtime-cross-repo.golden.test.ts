@@ -1,17 +1,12 @@
-import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { runCrossRepoRuntimeGolden } from './e2e-runtime-cross-repo.js'
+import { discoverSystemChrome } from '../packages/e2e-runtime/src/system-chrome.js'
 
 const roots: string[] = []
 const crossRepoRequested = process.env.E2E_RUNTIME_RUN_CROSS_REPO === '1'
-const systemChromeExecutable = process.env.E2E_RUNTIME_SYSTEM_CHROME_EXECUTABLE
-  ?? (process.platform === 'darwin'
-    ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-    : '/usr/bin/google-chrome-stable')
-const runRealGolden = crossRepoRequested && existsSync(systemChromeExecutable)
 const publishedPackages = [
   '@mutil-skills/cli', '@mutil-skills/core', '@mutil-skills/e2e-authority',
   '@mutil-skills/e2e-contracts', '@mutil-skills/e2e-engine', '@mutil-skills/e2e-gateway',
@@ -29,13 +24,14 @@ afterEach(async () => {
 })
 
 describe('portable E2E runtime', () => {
-  test.runIf(crossRepoRequested && !runRealGolden)(
-    '发行门禁要求本机存在受支持的系统 Google Chrome',
-    () => { throw new Error('E2E_RUNTIME_SYSTEM_CHROME_REQUIRED') },
-  )
-  test.skipIf(!runRealGolden)(
+  test.skipIf(!crossRepoRequested)(
     'runs from packed artifacts in a blank project without source paths',
     async () => {
+      if (process.env.E2E_RUNTIME_SYSTEM_CHROME_EXECUTABLE === undefined) {
+        await discoverSystemChrome().catch((cause) => {
+          throw Object.assign(new Error('E2E_RUNTIME_SYSTEM_CHROME_REQUIRED'), { cause })
+        })
+      }
       const root = await mkdtemp(join(tmpdir(), 'mutil-e2e-cross-repo-'))
       roots.push(root)
       // macOS 的 tmpdir() 通常位于 /var，而 /var 是指向 /private/var 的系统符号链接。

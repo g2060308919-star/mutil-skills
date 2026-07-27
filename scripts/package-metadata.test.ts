@@ -33,11 +33,11 @@ describe('package publishing metadata', () => {
     expect(skills.files).toContain('skills')
   })
 
-  test('根包和所有 workspace 统一使用 0.4.0，内部依赖全部精确同版', async () => {
+  test('根 package.json 是唯一版本真相，所有 workspace 与内部依赖精确同版', async () => {
     const root = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
       version?: string
     }
-    expect(root.version).toBe('0.4.0')
+    expect(root.version).toMatch(/^\d+\.\d+\.\d+$/)
 
     for (const packageName of [...packages, ...e2ePackages]) {
     const pkg = JSON.parse(await readFile(
@@ -45,12 +45,53 @@ describe('package publishing metadata', () => {
       'utf8',
     )) as { version?: string; dependencies?: Record<string, string> }
 
-    expect(pkg.version, packageName).toBe('0.4.0')
+    expect(pkg.version, packageName).toBe(root.version)
     for (const [dependency, version] of Object.entries(pkg.dependencies ?? {})) {
-      if (dependency.startsWith('@mutil-skills/')) expect(version, dependency).toBe('0.4.0')
+      if (dependency.startsWith('@mutil-skills/')) expect(version, dependency).toBe(root.version)
       expect(version).not.toBe('latest')
       expect(version).not.toMatch(/^workspace:/)
     }
+    }
+  })
+
+  test('Runtime、README 与 Skill 都指向根版本及同版不可变 Git tag', async () => {
+    const [rootText, runtimeProtocol, readme, skill, manifestText] = await Promise.all([
+      readFile(new URL('../package.json', import.meta.url), 'utf8'),
+      readFile(new URL('../packages/e2e-runtime/src/protocol.ts', import.meta.url), 'utf8'),
+      readFile(new URL('../README.md', import.meta.url), 'utf8'),
+      readFile(new URL('../packages/skills/skills/testing/e2e/SKILL.md', import.meta.url), 'utf8'),
+      readFile(new URL('../packages/skills/skills/testing/e2e/skill.manifest.json', import.meta.url), 'utf8'),
+    ])
+    const version = (JSON.parse(rootText) as { version: string }).version
+    const manifest = JSON.parse(manifestText) as {
+      source: { url: string; rawUrl: string; ref: string }
+      requires: Array<{ whenMissing: { version: string } }>
+    }
+    const install = `npm exec --yes --package=@mutil-skills/e2e-runtime@${version} -- repo-e2e install-runtime --version ${version}`
+
+    expect(runtimeProtocol).toContain(`RUNTIME_PACKAGE_VERSION = '${version}'`)
+    expect(readme).toContain(install)
+    expect(skill).toContain(install)
+    expect(manifest.requires[0]?.whenMissing.version).toBe(version)
+    expect(manifest.source.ref).toBe(`v${version}`)
+    expect(manifest.source.url).toContain(`/blob/v${version}/`)
+    expect(manifest.source.rawUrl).toContain(`/v${version}/`)
+  })
+
+  test('仓库和全部发布包明确声明 MIT，并声明可实际运行的 Node 下限', async () => {
+    const rootLicense = await readFile(new URL('../LICENSE', import.meta.url), 'utf8')
+    expect(rootLicense).toContain('MIT License')
+    expect(rootLicense).toContain('Copyright (c) 2026')
+
+    for (const packageName of [...packages, ...e2ePackages]) {
+      const [manifestText, packageLicense] = await Promise.all([
+        readFile(new URL(`../packages/${packageName}/package.json`, import.meta.url), 'utf8'),
+        readFile(new URL(`../packages/${packageName}/LICENSE`, import.meta.url), 'utf8'),
+      ])
+      const pkg = JSON.parse(manifestText) as { license?: string; engines?: { node?: string } }
+      expect(pkg.license, packageName).toBe('MIT')
+      expect(pkg.engines?.node, packageName).toBe('>=22.13.0')
+      expect(packageLicense.trimEnd(), packageName).toBe(rootLicense.trimEnd())
     }
   })
 
@@ -101,11 +142,19 @@ describe('package publishing metadata', () => {
       'utf8',
     )) as { scripts?: Record<string, string> }
 
-    expect(root.scripts?.['verify:e2e-pack']).toContain('npm pack --workspaces')
-    expect(root.scripts?.['verify:e2e-release']).toContain('npm run verify:e2e-pack')
-    expect(root.scripts?.['verify:e2e-release']).toContain('scripts/package-metadata.test.ts')
-    expect(root.scripts?.['verify:e2e-release']).toContain('E2E_RUNTIME_RELEASE_PACKS_DIR=')
-    expect(root.scripts?.['verify:e2e-release']).toContain('E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE=registry')
-    expect(root.scripts?.['verify:e2e-release']).toContain('E2E_RUNTIME_RUN_CROSS_REPO=1')
+    expect(root.scripts?.['verify:e2e-pack']).toBe('node scripts/run-e2e-release.mjs pack')
+    expect(root.scripts?.['verify:e2e-release']).toBe('node scripts/run-e2e-release.mjs registry')
+    expect(JSON.stringify(root.scripts)).not.toContain('/private/tmp')
+
+    const runner = await readFile(new URL('./run-e2e-release.mjs', import.meta.url), 'utf8')
+    expect(runner).toContain("mkdtemp(join(tmpdir(), 'mutil-e2e-release-'))")
+    expect(runner).toContain('process.env.E2E_RUNTIME_NPM_CACHE')
+    expect(runner).toContain('E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE: \'registry\'')
+    expect(runner).toContain("E2E_RUNTIME_RUN_CROSS_REPO: '1'")
+    expect(runner).toContain("E2E_RUNTIME_RUN_TODOMVC_PUBLIC: '1'")
+    expect(runner).toContain("phase: 'prepublish/workspace-golden'")
+    expect(runner).toContain("E2E_RUNTIME_GOLDEN_PACKAGE_SOURCE: 'workspace'")
+    expect(runner).toContain('numPendingTests')
+    expect(runner).toContain('collectFailures(report)')
   })
 })

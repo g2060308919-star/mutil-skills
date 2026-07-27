@@ -22,7 +22,9 @@ npm run lint:architecture
 
 E2E 发布先运行 `npm run verify:e2e-pack` 验证本地 tarball；发布全部 workspace 后运行
 `npm run verify:e2e-release`。后者固定从 npm Registry 安装全部十四个包，并在全新 HOME、
-系统 Chrome 和正式 RPC 下完成跨仓 Golden；本地 tarball 通过不能替代公开发布验收。
+系统 Chrome 和正式 RPC 下完成跨仓 Golden；两道门都要求零 skipped test，本地 tarball
+通过不能替代公开发布验收。发布门使用独立临时工作区；可通过 `E2E_RUNTIME_NPM_CACHE`
+显式复用只含公共 tarball 的 npm 内容缓存，不复用 HOME、Runtime 状态或浏览器 Profile。
 
 Telemetry hook 使用 `install-hooks --runtime all` 显式安装，使用 `uninstall-hooks --runtime all` 卸载；安装后 runtime 位于用户目录，不依赖当前 checkout。第一期默认不保存或上传事件，详细口径见 [统计说明](./docs/telemetry-hook-statistics-guide.md)。
 
@@ -34,14 +36,16 @@ E2E Skill 负责从 PRD 编排需求、审批、受控浏览器执行、证据�
 
 首次使用按以下顺序准备：
 
-1. 使用你的 Agent Skill 安装器安装 `packages/skills/skills/testing/e2e` 中的 E2E Skill。
-2. 用户显式安装精确版本 Runtime：
+1. 安装 Node.js 22.13.0 或更高版本。Runtime 仅支持 macOS/Linux；`doctor` 会在业务执行前
+   分别报告 Node、平台、临时目录、Chrome 与 Gateway 等环境问题。
+2. 使用你的 Agent Skill 安装器安装 `packages/skills/skills/testing/e2e` 中的 E2E Skill。
+3. 用户显式安装精确版本 Runtime：
 
    ```bash
    npm exec --yes --package=@mutil-skills/e2e-runtime@0.4.0 -- repo-e2e install-runtime --version 0.4.0
    ```
 
-3. 验证并选择本机系统 Google Chrome。Runtime 只使用 Chrome executable，并为每次 Run 创建全新的一次性 Profile：
+4. 验证并选择本机系统 Google Chrome。Runtime 只使用 Chrome executable，并为每次 Run 创建全新的一次性 Profile：
 
    ```bash
    ~/.mutil-skills/bin/repo-e2e configure-browser --system
@@ -49,7 +53,7 @@ E2E Skill 负责从 PRD 编排需求、审批、受控浏览器执行、证据�
 
    如果系统 Chrome 不可用，用户可以显式运行 `~/.mutil-skills/bin/repo-e2e install-browser` 安装并选择托管 Chromium 作为兜底。
 
-4. 使用默认本地确认模式：
+5. 使用默认本地确认模式：
 
    ```bash
    ~/.mutil-skills/bin/repo-e2e configure-approval --mode local-confirmation
@@ -57,19 +61,19 @@ E2E Skill 负责从 PRD 编排需求、审批、受控浏览器执行、证据�
 
    默认模式无需身份登记。需要验证自然人身份和职责分离时，显式改用 `webauthn`，再运行 `identity enroll` 登记审批身份。
 
-5. 运行环境诊断；只有 `ready: true` 才能开始受信验收：
+6. 运行环境诊断；只有 `ready: true` 才能开始受信验收：
 
    ```bash
    ~/.mutil-skills/bin/repo-e2e doctor --json
    ```
 
-6. 进入用户项目，让 Agent 调用 E2E Skill 并提供 PRD 路径。所有状态转换都通过固定 launcher 的 JSON stdin/stdout RPC 完成，不从用户项目解析 Runtime package。
-7. 验收完成后，在该项目的 `.biztest` 目录查看可追踪测试资产、脱敏证据与最终报告；Git 外原始证据不会作为报告资产发布。
+7. 进入用户项目，让 Agent 调用 E2E Skill 并提供 PRD 路径。所有状态转换都通过固定 launcher 的 JSON stdin/stdout RPC 完成，不从用户项目解析 Runtime package。
+8. 验收完成后，在该项目的 `.biztest` 目录查看可追踪测试资产、脱敏证据与最终报告；Git 外原始证据不会作为报告资产发布。
 
 ### 运行边界
 
 - Runtime Host、Approval Authority 和 Safety Gateway 都是按需启动的本地临时进程，不是需要部署或维护的远程后端。
-- 0.3 默认支持 macOS/Linux 上经过验证的系统 Google Chrome，并保留托管 Chromium 兜底；未执行 Firefox/WebKit 时，报告不能宣称跨浏览器通过。
+- 当前版本默认支持 macOS/Linux 上经过验证的系统 Google Chrome，并保留托管 Chromium 兜底；未执行 Firefox/WebKit 时，报告不能宣称跨浏览器通过。
 - 首个版本只对显式审批闭包内的 HTTP/HTTPS、逐跳 Redirect 和 Beacon 提供生产执行。WebSocket 与 SSE 在缺少转发前逐帧/流终态桥时固定 `safety-blocked`，不会连接上游，也不能被报告为已覆盖。
 - Runtime 安装、浏览器选择和产生副作用的确认都必须由用户显式触发。Doctor 不会代替用户安装或修复环境。
 - 每个 Run 的一次性 Chrome Profile 与日常 Profile 完全分离：不会读取或改变日常 Cookie、历史、扩展、缓存、账号登录或已打开页面；浏览器正常关闭后删除，异常残留由 Runtime recovery 按 owner marker 清理。

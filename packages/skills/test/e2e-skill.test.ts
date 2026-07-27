@@ -54,8 +54,9 @@ describe('E2E skill package', () => {
         },
       }],
       source: {
-        url: 'https://github.com/g2060308919-star/mutil-skills/blob/main/packages/skills/skills/testing/e2e/SKILL.md',
-        rawUrl: 'https://raw.githubusercontent.com/g2060308919-star/mutil-skills/main/packages/skills/skills/testing/e2e/SKILL.md',
+        url: 'https://github.com/g2060308919-star/mutil-skills/blob/v0.4.0/packages/skills/skills/testing/e2e/SKILL.md',
+        rawUrl: 'https://raw.githubusercontent.com/g2060308919-star/mutil-skills/v0.4.0/packages/skills/skills/testing/e2e/SKILL.md',
+        ref: 'v0.4.0',
       },
     })
   })

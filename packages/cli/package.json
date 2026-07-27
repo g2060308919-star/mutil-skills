@@ -25,5 +25,9 @@
     "@mutil-skills/schema": "0.4.0",
     "@mutil-skills/skills": "0.4.0",
     "@mutil-skills/template": "0.4.0"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
   }
 }
