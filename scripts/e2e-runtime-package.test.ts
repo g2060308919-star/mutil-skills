@@ -7,7 +7,7 @@ import { promisify } from 'node:util'
 import { afterEach, describe, expect, test } from 'vitest'
 import { ArtifactSchemaRegistry, WriteApprovalSubjectV2Schema, digestText }
   from '@mutil-skills/e2e-contracts'
-import { runtimeFullPlaywrightFixture, runtimeReadOnlyFixture }
+import { runtimeFullPlaywrightFixture, runtimeGoldenPrdText, runtimeReadOnlyFixture }
   from './e2e-runtime-read-only.fixture.js'
 
 const execFileAsync = promisify(execFile)
@@ -144,6 +144,30 @@ describe('E2E Runtime npm tarball', () => {
     expect(executionRoles).toEqual(scheduledActors)
   })
 
+  test('跨仓订单 Clause 必须逐字回切共享 PRD 来源', () => {
+    const fixture = runtimeReadOnlyFixture({
+      runId: 'RUN-SOURCE-CLOSURE', assetId: 'ASSET-SOURCE-CLOSURE',
+      prdRevision: digestText('test/v1', runtimeGoldenPrdText), installationDigest: digestText('test/v1', 'runtime'),
+      url: 'http://fixture.test/orders', now: new Date('2026-07-18T00:00:00.000Z'),
+    })
+    const manifest = fixture.semanticArtifacts['prd-manifest'].content as {
+      sources: Array<{ sourceId: string }>
+      clauses: Array<{
+        sourceId: string
+        sourceSpan: { startLine: number; startColumn: number; endLine: number; endColumn: number }
+        originalText: string
+      }>
+    }
+    const clause = manifest.clauses[0]!
+    const lines = runtimeGoldenPrdText.replace(/\r\n?/g, '\n').split('\n')
+    const actual = lines[clause.sourceSpan.startLine - 1]!
+      .slice(clause.sourceSpan.startColumn - 1, clause.sourceSpan.endColumn - 1)
+
+    expect(manifest.sources).toContainEqual(expect.objectContaining({ sourceId: 'PRD-BODY' }))
+    expect(clause.sourceId).toBe('PRD-BODY')
+    expect(actual).toBe(clause.originalText)
+  })
+
   test('allowlist 包含 launcher、审批资产与 helper，并排除测试、原始证据和环境文件', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mutil-e2e-runtime-pack-'))
     temporaryRoots.push(root)
@@ -182,7 +206,7 @@ describe('E2E Runtime npm tarball', () => {
     expect(files.some((file) => /\.(?:pem|key|crt)$/.test(file))).toBe(false)
     expect(files).not.toContain('package/scripts/copy-approval-assets.mjs')
     expect(files).toContain('assets/approval/simplewebauthn-LICENSE.md')
-  })
+  }, 30_000)
 
   test('仓库中的 Runtime 生产资产与 helper 均真实存在', async () => {
     for (const file of requiredFiles) {

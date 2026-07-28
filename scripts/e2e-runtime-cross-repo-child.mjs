@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   runtimeFullPlaywrightFixture,
+  runtimeGoldenPrdText,
   runtimeReadOnlyFixture,
   runtimeTodoMvcFullPlaywrightFixture,
 } from './fixture.js'
@@ -103,15 +104,7 @@ await Promise.all([
   writeFile(join(projectRoot, '.biztest', 'project.json'), `${JSON.stringify({
     schemaVersion: '1.0.0', projectId: 'RUNTIME-CROSS-REPO-GOLDEN',
   })}\n`, { mode: 0o600 }),
-  writeFile(join(projectRoot, 'inputs', 'prd.md'), [
-    '# 订单验收',
-    '',
-    '审计员应能看到待审核订单。',
-    '审计员可以填写姓名、按键提交、勾选启用状态并打开详情弹窗。',
-    '系统必须支持独立多页面，并以 JSON Body 提交写请求。',
-    '写操作完成后必须执行 Cleanup，再 Reload 页面确认状态恢复为 clean。',
-    '',
-  ].join('\n'), { mode: 0o600 }),
+  writeFile(join(projectRoot, 'inputs', 'prd.md'), runtimeGoldenPrdText, { mode: 0o600 }),
   writeFile(join(projectRoot, 'inputs', 'policy.json'), `${JSON.stringify({
     schemaVersion: '1.0.0', environment: 'test', browser: 'chromium',
   })}\n`, { mode: 0o600 }),

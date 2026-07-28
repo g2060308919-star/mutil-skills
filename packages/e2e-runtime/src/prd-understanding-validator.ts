@@ -288,6 +288,7 @@ function sourceTextAtSpan(
   text: string,
   span: { startLine: number; startColumn: number; endLine: number; endColumn: number },
 ): string {
+  // SourceSpan uses 1-based positions with an end-exclusive column, matching Clause producers.
   const lines = text.replace(/\r\n?/g, '\n').split('\n')
   if (span.startLine > lines.length || span.endLine > lines.length) {
     throw understandingError('E2E_RUNTIME_UNDERSTANDING_SOURCE_SPAN_INVALID', '来源区间超出冻结原文')
@@ -295,12 +296,12 @@ function sourceTextAtSpan(
   const selected = lines.slice(span.startLine - 1, span.endLine)
   const first = Array.from(selected[0] ?? '')
   const last = Array.from(selected.at(-1) ?? '')
-  if (span.startColumn > first.length + 1 || span.endColumn > last.length) {
+  if (span.startColumn > first.length + 1 || span.endColumn > last.length + 1) {
     throw understandingError('E2E_RUNTIME_UNDERSTANDING_SOURCE_SPAN_INVALID', '来源列区间超出冻结原文')
   }
-  if (selected.length === 1) return first.slice(span.startColumn - 1, span.endColumn).join('')
+  if (selected.length === 1) return first.slice(span.startColumn - 1, span.endColumn - 1).join('')
   selected[0] = first.slice(span.startColumn - 1).join('')
-  selected[selected.length - 1] = last.slice(0, span.endColumn).join('')
+  selected[selected.length - 1] = last.slice(0, span.endColumn - 1).join('')
   return selected.join('\n')
 }
 

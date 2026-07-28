@@ -19,6 +19,16 @@ import {
 
 const d = (label: string) => digestText('runtime-real-golden/v1', label)
 
+export const runtimeGoldenPrdText = [
+  '# 订单验收',
+  '',
+  '审计员应能看到待审核订单。',
+  '审计员可以填写姓名、按键提交、勾选启用状态并打开详情弹窗。',
+  '系统必须支持独立多页面，并以 JSON Body 提交写请求。',
+  '写操作完成后必须执行 Cleanup，再 Reload 页面确认状态恢复为 clean。',
+  '',
+].join('\n')
+
 interface RuntimeUnderstandingInput {
   prdRevision: string
   understandingContractDigest?: string
@@ -133,16 +143,19 @@ export function runtimeReadOnlyFixture(input: {
     timeoutPolicy: { id: 'TIMEOUT-POLICY', digest: d('timeout-policy') },
     runtimePolicy: { id: 'RUNTIME-POLICY', digest: runtimePolicyDigest },
   })
+  const orderClauseText = runtimeGoldenPrdText.split('\n')[2]!
   const orderClauseMaterial = {
-    clauseId: 'CLAUSE-ORDER-1', sourceId: 'PRD-ORDER-1', kind: 'functional' as const,
-    sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 11 },
-    originalText: '页面显示待审核订单', normalizedText: '页面显示待审核订单',
+    clauseId: 'CLAUSE-ORDER-1', sourceId: 'PRD-BODY', kind: 'functional' as const,
+    sourceSpan: { startLine: 3, startColumn: 1, endLine: 3, endColumn: orderClauseText.length + 1 },
+    originalText: orderClauseText, normalizedText: orderClauseText,
   }
   const orderClause = { ...orderClauseMaterial, textDigest: digestPrdClause(orderClauseMaterial) }
+  const frozenPrdSource = input.sourceBundle?.find((source) => source.sourceId === 'PRD-BODY')
   const prdManifest = semanticArtifact(input, 'prd-manifest', '1.0.0', {
     prdId: 'PRD-ORDER-1', assetId: input.assetId, revision: input.prdRevision,
     normalizedPrdDigest: input.prdRevision,
-    sources: [{ sourceId: 'PRD-ORDER-1', digest: input.prdRevision, byteLength: 1 }],
+    sources: [{ sourceId: 'PRD-BODY', digest: frozenPrdSource?.digest ?? input.prdRevision,
+      byteLength: frozenPrdSource?.byteLength ?? Buffer.byteLength(runtimeGoldenPrdText, 'utf8') }],
     attachments: [], sourceCacheIndexDigest: d('source-cache-index'),
     clauses: [orderClause], clauseInventoryDigest: digestPrdClauseInventory([orderClause]),
   })

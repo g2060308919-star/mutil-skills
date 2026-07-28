@@ -1,0 +1,55 @@
+name: Publish npm packages
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout immutable release tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js 24 with npm OIDC
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Check architecture
+        run: npm run lint:architecture
+
+      - name: Run full test suite
+        run: npm test
+
+      - name: Run prepublish package and Golden gates
+        run: npm run verify:e2e-pack
+
+      - name: Publish all workspaces with npm Trusted Publishing
+        run: node scripts/npm-trusted-publishing.mjs
+
+      - name: Verify installed Registry release Golden
+        run: npm run verify:e2e-release

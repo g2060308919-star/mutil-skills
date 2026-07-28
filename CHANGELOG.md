@@ -6,11 +6,16 @@
 
 - E2E Skill 支持单次消费外部 `$understand-prd`，并在其不可用时使用互斥的内置等价流程生成唯一 requirements contract。
 - Runtime 冻结契约原文、严格 machine view、执行来源 origin/relevance 与唯一 prepared projection，建立 Contract → Clause → Requirement/Rule/Flow → Oracle 的可验证追踪链。
+- 新增 GitHub Actions OIDC/npm Trusted Publishing 发布链，按内部依赖拓扑发布十四个 workspace，并以 tarball SHA-512 支持安全幂等重跑。
 
 ### Changed
 
 - `prd-request` 升级到 `2.0.0`，Runtime 快照升级到 `1.6.0`；旧 Run 不伪造新增契约事实，需要时明确新建 Run。
 - Runtime RPC、execution projection、Source Bundle 与 trusted facts 增加分层总量上限；阶段门在 supplemental artifacts 齐备前 fail-closed。
+
+### Fixed
+
+- SourceSpan 统一为 1-based、end-exclusive 列语义；跨仓 Golden 的订单 Clause 现在从共享 PRD 原文生成并由 Runtime 逐字回切验证。
 
 ## [0.4.0] - 2026-07-26
 

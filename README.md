@@ -29,6 +29,14 @@ E2E 发布先运行 `npm run verify:e2e-pack` 验证本地 tarball；发布全�
 `release-internal`，便于区分运行环境、业务 Oracle 和门禁自身故障。发布门使用独立临时工作区；可通过 `E2E_RUNTIME_NPM_CACHE`
 显式复用只含公共 tarball 的 npm 内容缓存，不复用 HOME、Runtime 状态或浏览器 Profile。
 
+正式 npm 发布由 [`.github/workflows/publish.yml`](./.github/workflows/publish.yml) 在精确版本
+Tag（`v<package.json.version>`）上执行。工作流使用 GitHub Actions OIDC 与 npm Trusted
+Publishing，不读取 `NPM_TOKEN`/`NODE_AUTH_TOKEN`：先运行类型、架构、全量测试和 workspace
+Golden，再按内部依赖拓扑逐包发布；相同版本只有 Registry SHA-512 与本地 tarball 完全一致时
+才允许幂等跳过，最后从 Registry 重装并运行正式 Golden。每个 `@mutil-skills/*` 包只需在 npm
+Settings 中一次性登记 GitHub Trusted Publisher：仓库 `g2060308919-star/mutil-skills`、工作流
+文件 `publish.yml`、允许 `npm publish`。之后发布不再需要逐包浏览器认证。
+
 Telemetry hook 使用 `install-hooks --runtime all` 显式安装，使用 `uninstall-hooks --runtime all` 卸载；安装后 runtime 位于用户目录，不依赖当前 checkout。第一期默认不保存或上传事件，详细口径见 [统计说明](./docs/telemetry-hook-statistics-guide.md)。
 
 本实现统一使用的包 scope 是 `@mutil-skills/*`。

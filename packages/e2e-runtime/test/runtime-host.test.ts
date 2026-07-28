@@ -60,7 +60,7 @@ const UNDERSTANDING_CONTRACT_MACHINE_VIEW = {
     nodeId: 'REQ-1', kind: 'REQ' as const, statement: 'A stable PRD.',
     provenance: { kind: 'source-fact' as const, anchors: [{
       sourceId: 'PRD-BODY', sourceSpan: {
-        startLine: 2, startColumn: 1, endLine: 2, endColumn: 13,
+        startLine: 2, startColumn: 1, endLine: 2, endColumn: 14,
       }, quote: 'A stable PRD.', quoteDigest: digestPrdUnderstandingQuote('A stable PRD.'),
     }] },
     responsibility: 'Product', upstreamNodeIds: [], downstreamNodeIds: [],
@@ -897,7 +897,7 @@ describe('E2ERuntimeHost', () => {
     const prdText = '# Product\nA stable PRD.'
     const clauseInput = {
       clauseId: 'CLAUSE-1', sourceId: 'PRD-BODY', kind: 'functional' as const,
-      sourceSpan: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 13 },
+      sourceSpan: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 14 },
       originalText: 'A stable PRD.', normalizedText: 'A stable PRD.',
     }
     const clause = { ...clauseInput, textDigest: digestPrdClause(clauseInput) }

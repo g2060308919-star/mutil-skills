@@ -12,6 +12,8 @@ const e2ePackages = [
   'e2e-runtime',
 ] as const
 
+const repositoryUrl = 'https://github.com/g2060308919-star/mutil-skills.git'
+
 describe('package publishing metadata', () => {
   test.each(packages)('%s package includes build output and excludes tests by files allowlist', async (packageName) => {
     const pkg = JSON.parse(await readFile(new URL(`../packages/${packageName}/package.json`, import.meta.url), 'utf8')) as {
@@ -108,6 +110,47 @@ describe('package publishing metadata', () => {
       )
       expect(packageLicense.trimEnd(), packageName).toBe(rootLicense.trimEnd())
     }
+  })
+
+  test('全部发布包声明同一 GitHub 来源并固定为 public，供 npm Trusted Publishing 校验', async () => {
+    const root = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
+      repository?: { type?: string; url?: string }
+    }
+    expect(root.repository).toEqual({ type: 'git', url: repositoryUrl })
+
+    for (const packageName of [...packages, ...e2ePackages]) {
+      const pkg = JSON.parse(await readFile(
+        new URL(`../packages/${packageName}/package.json`, import.meta.url),
+        'utf8',
+      )) as {
+        repository?: { type?: string; url?: string; directory?: string }
+        publishConfig?: { access?: string }
+      }
+      expect(pkg.repository, packageName).toEqual({
+        type: 'git',
+        url: repositoryUrl,
+        directory: `packages/${packageName}`,
+      })
+      expect(pkg.publishConfig, packageName).toEqual({ access: 'public' })
+    }
+  })
+
+  test('GitHub OIDC 发布工作流具有强门禁且不读取长期 npm token', async () => {
+    const workflow = await readFile(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8')
+
+    expect(workflow).toContain('id-token: write')
+    expect(workflow).toContain('contents: read')
+    expect(workflow).toContain("node-version: '24'")
+    expect(workflow).toContain('package-manager-cache: false')
+    expect(workflow).toContain('npm ci')
+    expect(workflow).toContain('npm run typecheck')
+    expect(workflow).toContain('npm run lint:architecture')
+    expect(workflow).toContain('npm test')
+    expect(workflow).toContain('npm run verify:e2e-pack')
+    expect(workflow).toContain('node scripts/npm-trusted-publishing.mjs')
+    expect(workflow).toContain('npm run verify:e2e-release')
+    expect(workflow).not.toContain('NODE_AUTH_TOKEN')
+    expect(workflow).not.toContain('NPM_TOKEN')
   })
 
   test('Runtime package 只发布生产入口、审批资产和固定 helper', async () => {
