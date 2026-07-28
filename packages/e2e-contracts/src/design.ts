@@ -8,6 +8,8 @@ export const RuleCategorySchema = z.enum(['business', 'permission', 'validation'
 
 export const RuleSchema = z.object({
   ruleId: NonEmptyStringSchema,
+  contractNodeIds: z.array(NonEmptyStringSchema).min(1)
+    .refine((values) => new Set(values).size === values.length, 'contractNodeId 必须唯一').optional(),
   category: RuleCategorySchema,
   statement: NonEmptyStringSchema,
   sourceRefs: z.array(NonEmptyStringSchema).min(1),
@@ -17,6 +19,8 @@ export const RuleSchema = z.object({
 
 export const RequirementSchema = z.object({
   reqId: NonEmptyStringSchema,
+  contractNodeIds: z.array(NonEmptyStringSchema).min(1)
+    .refine((values) => new Set(values).size === values.length, 'contractNodeId 必须唯一').optional(),
   revision: z.number().int().positive(),
   title: NonEmptyStringSchema,
   actors: z.array(NonEmptyStringSchema).min(1),
@@ -35,6 +39,12 @@ export const RequirementSchema = z.object({
     ruleId: NonEmptyStringSchema,
     statement: NonEmptyStringSchema,
     sourceRefs: z.array(NonEmptyStringSchema).min(1),
+    contractAcceptanceCriteria: z.array(z.object({
+      nodeId: NonEmptyStringSchema,
+      criterionIndex: z.number().int().nonnegative(),
+    }).strict()).min(1).refine((values) => new Set(values.map((value) =>
+      `${value.nodeId}:${value.criterionIndex}`)).size === values.length,
+    '同一 Oracle 的契约验收条件引用必须唯一').optional(),
   }).strict()).min(1),
   applicability: z.array(z.object({
     dimension: NonEmptyStringSchema,

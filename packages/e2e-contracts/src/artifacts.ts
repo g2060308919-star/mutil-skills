@@ -11,6 +11,7 @@ import {
   canonicalizeJson, digestBytes, digestText,
 } from './common.js'
 import { RequirementModelSchema } from './design.js'
+import { PrdUnderstandingProjectionSchema } from './prd-understanding.js'
 import { ManualResultSchema } from './manual-result.js'
 import { ApprovalAssuranceSchema } from './approval-assurance.js'
 import { SanitizationRecordSchema } from './privacy.js'
@@ -393,14 +394,17 @@ const projectPolicyContent = z.object({
   runtimePolicy: IdDigestSchema,
 }).strict()
 
-const prdRequestContent = z.object({
+export const PrdRequestContentSchema = z.object({
   productSpace: SafeIdSchema,
   title: NonEmptyTextSchema,
   sourceDescriptors: z.array(z.object({ sourceId: SafeIdSchema, kind: z.enum(['file', 'url', 'text']), ref: NonEmptyTextSchema }).strict()).min(1).max(1_000),
   userRequest: NonEmptyTextSchema,
   testWorkspaceId: SafeIdSchema,
   secretRefs: z.array(SafeIdSchema).max(1_000),
+  understanding: PrdUnderstandingProjectionSchema,
 }).strict()
+
+const prdRequestContent = PrdRequestContentSchema
 
 export const PrdSourceSpanSchema = z.object({
   startLine: z.number().int().positive(),
@@ -551,6 +555,8 @@ const requirementModelContent = RequirementModelSchema
 const interactionFlowContent = z.object({
   flows: z.array(z.object({
     flowId: SafeIdSchema,
+    contractNodeIds: z.array(SafeIdSchema).min(1).max(10_000)
+      .refine((values) => new Set(values).size === values.length, 'contractNodeId 必须唯一').optional(),
     nodes: z.array(z.object({ nodeId: SafeIdSchema, reqId: SafeIdSchema, kind: z.enum(['entry', 'page', 'action', 'decision', 'state', 'feedback', 'exit']), effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']), oracleIds: z.array(SafeIdSchema) }).strict()).min(2),
     edgeIds: z.array(SafeIdSchema).min(1), entryNodeId: SafeIdSchema, exitNodeIds: z.array(SafeIdSchema).min(1),
   }).strict()).max(100_000),
@@ -1513,7 +1519,9 @@ function createArtifactSchema<T extends ArtifactType>(
         ? z.literal('2.1.0')
         : artifactType === 'final-report'
           ? z.literal('3.0.0')
-          : artifactType === 'generation-manifest'
+      : artifactType === 'generation-manifest'
+            ? z.literal('2.0.0')
+          : artifactType === 'prd-request'
             ? z.literal('2.0.0')
         : artifactType === 'cleanup-results'
       || artifactType === 'approval-grants' || artifactType === 'browser-preflight'
@@ -1552,6 +1560,13 @@ export function parseArtifactDocument(candidate: unknown): ArtifactDocument {
     throw new E2EError({
       code: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED', category: 'artifact', retryable: false,
       message: `E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED: ${typeResult.data.artifactType} 必须携带严格 Runtime provenance`,
+    })
+  }
+  if (typeResult.data.artifactType === 'prd-request'
+    && (!versionResult.success || versionResult.data.schemaVersion !== '2.0.0')) {
+    throw new E2EError({
+      code: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED', category: 'artifact', retryable: false,
+      message: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED: prd-request 必须迁移到 understand-prd 契约投影 v2',
     })
   }
   if ((typeResult.data.artifactType === 'execution-contract'

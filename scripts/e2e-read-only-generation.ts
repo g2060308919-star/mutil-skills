@@ -1,6 +1,6 @@
 import {
   canonicalizeJson, digestArtifactContent, digestBytes, digestText,
-  digestPrdClause, digestPrdClauseInventory,
+  digestPrdClause, digestPrdClauseInventory, digestPrdUnderstandingProjection,
   digestApprovalProjection,
   type CoverageUniverse, type SanitizerPolicy, type SignedDiscoveryGrant, type SignedReadGrant, type SignedWriteGrant,
   type ApproverIdentity, type PrivacyReviewReceipt,
@@ -34,6 +34,28 @@ const base = () => ({ dependencies: [], graph: { defines: [], references: [] } }
 const draft = (relativePath: string, content: unknown, files?: Array<{ relativePath: string; base64: string }>) => ({
   ...base(), relativePath, content, ...(files ? { files } : {}),
 })
+
+function goldenUnderstandingProjection(prdRevision: string) {
+  const value = {
+    schemaVersion: '1.0.0' as const, contractId: 'CONTRACT-ORDER-GOLDEN', contractVersion: 1,
+    contractStatus: 'confirmed-by-caller' as const, sourceRevision: prdRevision,
+    contractSourceDigest: d('understanding-contract'),
+    sources: [{ sourceId: 'SOURCE-PRD', kind: 'file' as const, ref: 'golden:prd',
+      origin: { kind: 'text' as const, ref: 'golden:prd' },
+      relevance: 'target' as const, digest: d('understanding-source'), byteLength: 1 }],
+    nodes: [{ nodeId: 'REQ-ORDER-1', kind: 'REQ' as const, statement: '验证订单验收行为',
+      provenance: { kind: 'confirmed-decision' as const, decisionId: 'DECISION-ORDER-GOLDEN',
+        decisionRef: 'fixture:order-golden' }, responsibility: '订单页面',
+      upstreamNodeIds: [], downstreamNodeIds: [], acceptanceCriteria: ['订单验收行为符合预期'] }],
+    pendingQuestions: [], route: { skillName: 'e2e' as const, steps: [{ stepId: 'E2E-ORDER-1',
+      inputNodeIds: ['REQ-ORDER-1'], output: 'E2E Golden 报告', constraints: [],
+      dependencyStepIds: [], completionCondition: 'REQ-ORDER-1 已覆盖' }] },
+    authorization: { status: 'confirmed-by-caller' as const, contractVersion: 1,
+      authorizedNodeIds: ['REQ-ORDER-1'], confirmedAt: createdAt },
+    projectionDigest: '',
+  }
+  return { ...value, projectionDigest: digestPrdUnderstandingProjection(value) }
+}
 
 type GoldenDecision = { decisionId: string; status: 'pending' }
   | { decisionId: string; status: 'approved' | 'rejected'; receipt: DecisionReceipt }
@@ -530,6 +552,7 @@ export async function createReadOnlyGoldenGenerationInput(input: {
       productSpace: 'ORDER-AUDIT', title: '订单列表 E2E 验收',
       sourceDescriptors: [{ sourceId: 'SOURCE-PRD', kind: 'text', ref: 'golden:prd' }],
       userRequest: '验证订单列表展示待审核订单', testWorkspaceId: 'WORKSPACE-GOLDEN', secretRefs: [],
+      understanding: goldenUnderstandingProjection(context.prdRevision),
     }),
     'prd-manifest': draft('prd/prd-manifest.json', {
       ...goldenPrdManifest(context.prdRevision), assetId: context.assetId,
@@ -893,6 +916,7 @@ function applyWriteGoldenScenario(
     sourceDescriptors: [{ sourceId: 'SOURCE-PRD', kind: 'text', ref: 'golden:prd' }],
     userRequest: '验证操作员批准订单后系统可确认副作用并恢复测试数据',
     testWorkspaceId: 'WORKSPACE-GOLDEN', secretRefs: [],
+    understanding: goldenUnderstandingProjection(input.modelDigest),
   }
   drafts['interaction-flow'].content = { flows: [{
     flowId: 'FLOW-ORDER-APPROVAL', nodes: [
@@ -1093,6 +1117,7 @@ function predictedContentDigest(context: {
 function artifactSchemaVersion(artifactType: string): string {
   if (artifactType === 'browser-action-map') return '2.1.0'
   if (artifactType === 'execution-contract') return '1.1.0'
+  if (artifactType === 'prd-request') return '2.0.0'
   return ['approval-grants', 'browser-preflight', 'run-bundle',
     'project-policy', 'browser-evidence', 'acceptance-scope', 'prd-diff'].includes(artifactType) ? '2.0.0' : '1.0.0'
 }

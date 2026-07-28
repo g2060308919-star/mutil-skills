@@ -79,8 +79,8 @@ export interface RuntimeTrustedFactCapability {
 }
 
 export interface RuntimeRunSnapshot {
-  /** 1.1–1.4 仅作为显式迁移输入兼容；Store 读取与写回始终规范化为 1.5。 */
-  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0'
+  /** 1.1–1.5 仅作为显式迁移输入兼容；Store 读取与写回始终规范化为 1.6。 */
+  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0'
   runId: string
   assetId: string
   projectIdentityDigest: string
@@ -1452,7 +1452,7 @@ export class RuntimeRunStore {
         const snapshot = parseStoreSnapshot(serialized)
         let changed = false
         for (const [key, raw] of Object.entries(snapshot.runs)) {
-          if (isPlainRecord(raw) && raw.schemaVersion === '1.5.0') continue
+          if (isPlainRecord(raw) && raw.schemaVersion === '1.6.0') continue
           const rows = snapshot.journals[key]
           if (!Array.isArray(rows) || rows.length === 0) {
             throw journalIntegrityError('legacy Run 缺少可验证 journal，拒绝迁移')

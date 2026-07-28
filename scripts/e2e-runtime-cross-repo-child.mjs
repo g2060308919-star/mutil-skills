@@ -13,6 +13,32 @@ import {
 const homeDir = requiredEnvironment('HOME')
 const projectRoot = requiredEnvironment('E2E_PACKED_PROJECT')
 const runtimePackageRoot = requiredEnvironment('E2E_PACKED_RUNTIME_PACKAGE_ROOT')
+const understandingContractHeader = {
+  schemaVersion: '1.0.0', contractId: 'CONTRACT-RUNTIME-GOLDEN', contractVersion: 1,
+  contractStatus: 'confirmed-by-caller', authorization: {
+    status: 'confirmed-by-caller', contractVersion: 1, confirmedAt: '2026-07-17T00:00:00.000Z',
+  },
+}
+const runtimeContractMachineView = {
+  schemaVersion: '1.0.0', nodes: [{
+    nodeId: 'REQ-ORDER-1', kind: 'REQ', statement: '验证订单验收行为',
+    provenance: { kind: 'confirmed-decision', decisionId: 'DECISION-GOLDEN-1',
+      decisionRef: 'fixture:runtime-golden' },
+    responsibility: '订单页面', upstreamNodeIds: [], downstreamNodeIds: [],
+    acceptanceCriteria: ['订单验收行为符合预期'],
+  }],
+  pendingQuestions: [], route: { skillName: 'e2e', steps: [{
+    stepId: 'E2E-GOLDEN-1', inputNodeIds: ['REQ-ORDER-1'], output: 'E2E Golden 报告',
+    constraints: [], dependencyStepIds: [], completionCondition: 'REQ-ORDER-1 已覆盖',
+  }] }, authorizedNodeIds: ['REQ-ORDER-1'],
+}
+const understandingContractText = [
+  '---', 'schemaVersion: 1.0.0', 'contractId: CONTRACT-RUNTIME-GOLDEN',
+  'contractVersion: 1', 'contractStatus: confirmed-by-caller',
+  'confirmationStatus: confirmed-by-caller', 'confirmationContractVersion: 1',
+  'confirmedAt: 2026-07-17T00:00:00.000Z', '---', '# Runtime Golden Requirements Contract',
+  '<!-- e2e-contract-machine-view:v1', JSON.stringify(runtimeContractMachineView), '-->',
+].join('\n')
 const installedPackage = async (name) => await import(pathToFileURL(
   join(runtimePackageRoot, '..', name, 'dist', 'src', 'index.js'),
 ).href)
@@ -89,6 +115,8 @@ await Promise.all([
   writeFile(join(projectRoot, 'inputs', 'policy.json'), `${JSON.stringify({
     schemaVersion: '1.0.0', environment: 'test', browser: 'chromium',
   })}\n`, { mode: 0o600 }),
+  writeFile(join(projectRoot, 'inputs', 'understanding-contract.md'), understandingContractText,
+    { mode: 0o600 }),
 ])
 
 const installation = await inspectRuntimeInstallation({ homeDir })
@@ -226,7 +254,10 @@ try {
     process.stdout.write(`${JSON.stringify({ doctor, todoMvc })}\n`)
   } else {
   const created = await invoke('CREATE-CROSS-REPO', 'create-run', {
-    assetId: 'ASSET-ORDER-1', prdSource: { kind: 'file', path: 'inputs/prd.md' },
+    assetId: 'ASSET-ORDER-1', prdSource: { kind: 'file', path: 'inputs/prd.md',
+      origin: { kind: 'file', ref: 'inputs/prd.md' } },
+    understandingContract: { header: understandingContractHeader,
+      source: { kind: 'file', path: 'inputs/understanding-contract.md' } },
     projectPolicyPath: 'inputs/policy.json',
   })
   runId = requiredString(created, 'runId')
@@ -235,8 +266,11 @@ try {
     prdRevision: requiredString(created, 'prdRevision'),
     installationDigest: installation.installationDigest, url: fixtureUrl, now: new Date(),
     evidencePolicyDigest: runtimeProductionSanitizerPolicyDigest(),
+    understandingContractDigest: requiredString(created, 'understandingContractDigest'),
+    sourceBundle: requiredArray(created, 'sourceBundle'),
   })
 
+  await prepareUnderstanding(runId, 'PREPARE-UNDERSTANDING', fixture.semanticArtifacts['prd-request'])
   await submit(runId, 'SUBMIT-PRD', 'created', 'prd-request', fixture.semanticArtifacts['prd-request'])
   for (const artifactType of ['project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation']) {
     await submit(runId, `SUBMIT-${artifactType}`, 'source-frozen', artifactType,
@@ -331,7 +365,10 @@ async function executeFullPlaywrightGolden(input) {
   resetObserved = false
   rootReadsAfterReset = 0
   const created = await invoke('CREATE-FULL-PLAYWRIGHT', 'create-run', {
-    assetId: 'ASSET-FULL-1', prdSource: { kind: 'file', path: 'inputs/prd.md' },
+    assetId: 'ASSET-FULL-1', prdSource: { kind: 'file', path: 'inputs/prd.md',
+      origin: { kind: 'file', ref: 'inputs/prd.md' } },
+    understandingContract: { header: understandingContractHeader,
+      source: { kind: 'file', path: 'inputs/understanding-contract.md' } },
     projectPolicyPath: 'inputs/policy.json',
   })
   runId = requiredString(created, 'runId')
@@ -339,7 +376,10 @@ async function executeFullPlaywrightGolden(input) {
     runId, assetId: requiredString(created, 'assetId'), prdRevision: requiredString(created, 'prdRevision'),
     installationDigest: input.installation.installationDigest, url: input.fixtureUrl, now: new Date(),
     evidencePolicyDigest: runtimeProductionSanitizerPolicyDigest(),
+    understandingContractDigest: requiredString(created, 'understandingContractDigest'),
+    sourceBundle: requiredArray(created, 'sourceBundle'),
   })
+  await prepareUnderstanding(runId, 'PREPARE-FULL-UNDERSTANDING', fixture.semanticArtifacts['prd-request'])
   await submit(runId, 'SUBMIT-FULL-PRD', 'created', 'prd-request', fixture.semanticArtifacts['prd-request'])
   for (const artifactType of ['project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation']) {
     await submit(runId, `SUBMIT-FULL-${artifactType}`, 'source-frozen', artifactType,
@@ -426,9 +466,21 @@ async function executeTodoMvcGolden(input) {
     throw new Error('E2E_RUNTIME_TODOMVC_PRD_CONTENT_INVALID')
   }
   await writeFile(join(projectRoot, 'inputs', 'prd.md'), prd, { mode: 0o600 })
+  const preview = runtimeTodoMvcFullPlaywrightFixture({
+    runId: 'RUN-CREATE-TODOMVC', assetId: 'ASSET-TODOMVC-1',
+    prdRevision: `sha256:${'0'.repeat(64)}`,
+    installationDigest: input.installation.installationDigest, url: targetUrl, now: new Date(),
+    evidencePolicyDigest: runtimeProductionSanitizerPolicyDigest(),
+  })
+  const todoMachineView = contractMachineViewFromPrdRequest(preview.semanticArtifacts['prd-request'])
+  await writeFile(join(projectRoot, 'inputs', 'understanding-contract.md'),
+    understandingContractTextFor(todoMachineView), { mode: 0o600 })
 
   const created = await invoke('CREATE-TODOMVC', 'create-run', {
-    assetId: 'ASSET-TODOMVC-1', prdSource: { kind: 'file', path: 'inputs/prd.md' },
+    assetId: 'ASSET-TODOMVC-1', prdSource: { kind: 'file', path: 'inputs/prd.md',
+      origin: { kind: 'url', ref: 'https://github.com/tastejs/todomvc/blob/ff43b02e59dfa604386bb382034b2cd07c2bcd8a/app-spec.md' } },
+    understandingContract: { header: understandingContractHeader,
+      source: { kind: 'file', path: 'inputs/understanding-contract.md' } },
     projectPolicyPath: 'inputs/policy.json',
   })
   runId = requiredString(created, 'runId')
@@ -436,7 +488,10 @@ async function executeTodoMvcGolden(input) {
     runId, assetId: requiredString(created, 'assetId'), prdRevision: requiredString(created, 'prdRevision'),
     installationDigest: input.installation.installationDigest, url: targetUrl, now: new Date(),
     evidencePolicyDigest: runtimeProductionSanitizerPolicyDigest(),
+    understandingContractDigest: requiredString(created, 'understandingContractDigest'),
+    sourceBundle: requiredArray(created, 'sourceBundle'),
   })
+  await prepareUnderstanding(runId, 'PREPARE-TODOMVC-UNDERSTANDING', fixture.semanticArtifacts['prd-request'])
   await submit(runId, 'SUBMIT-TODOMVC-PRD', 'created', 'prd-request', fixture.semanticArtifacts['prd-request'])
   for (const artifactType of ['project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation']) {
     await submit(runId, `SUBMIT-TODOMVC-${artifactType}`, 'source-frozen', artifactType,
@@ -857,6 +912,32 @@ async function submit(run, requestId, expectedState, artifactType, candidate) {
   })
 }
 
+async function prepareUnderstanding(run, requestId, prdRequest) {
+  const understanding = requiredRecord(requiredRecord(prdRequest, 'content'), 'understanding')
+  const { projectionDigest: _projectionDigest, ...projection } = understanding
+  return await invoke(requestId, 'prepare-prd-understanding', { runId: run, projection })
+}
+
+function contractMachineViewFromPrdRequest(prdRequest) {
+  const understanding = requiredRecord(requiredRecord(prdRequest, 'content'), 'understanding')
+  return {
+    schemaVersion: '1.0.0', nodes: requiredArray(understanding, 'nodes'),
+    pendingQuestions: requiredArray(understanding, 'pendingQuestions'),
+    route: requiredRecord(understanding, 'route'),
+    authorizedNodeIds: requiredArray(requiredRecord(understanding, 'authorization'), 'authorizedNodeIds'),
+  }
+}
+
+function understandingContractTextFor(machineView) {
+  return [
+    '---', 'schemaVersion: 1.0.0', 'contractId: CONTRACT-RUNTIME-GOLDEN',
+    'contractVersion: 1', 'contractStatus: confirmed-by-caller',
+    'confirmationStatus: confirmed-by-caller', 'confirmationContractVersion: 1',
+    'confirmedAt: 2026-07-17T00:00:00.000Z', '---', '# Runtime Golden Requirements Contract',
+    '<!-- e2e-contract-machine-view:v1', JSON.stringify(machineView), '-->',
+  ].join('\n')
+}
+
 async function approve(requestId, payload) {
   const opened = await invoke(requestId, 'open-approval', payload)
   if (opened.status !== 'confirmation-required') return opened
@@ -936,6 +1017,12 @@ function requiredString(record, key) {
 function requiredRecord(record, key) {
   const value = record?.[key]
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`missing ${key}`)
+  return value
+}
+
+function requiredArray(record, key) {
+  const value = record?.[key]
+  if (!Array.isArray(value)) throw new Error(`missing ${key}`)
   return value
 }
 

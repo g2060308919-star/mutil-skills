@@ -1,5 +1,6 @@
 import { canonicalizeJson, digestApprovalProjection, digestArtifactContent, digestBytes, digestText,
   digestPrdClause, digestPrdClauseInventory,
+  digestPrdUnderstandingProjection, digestPrdUnderstandingQuote,
   deriveExecutionResultId,
   canonicalGrantApprovalSubjectDigest,
   digestCleanupPlanDefinition,
@@ -17,6 +18,30 @@ const d = (value: string) => digestText('fixture/v1', value)
 const context = {
   assetId: 'ASSET-1', generationId: 'GEN-1', prdRevision: d('prd'),
   engineVersion: '1.0.0', createdAt: '2026-07-12T00:00:00.000Z', fencingToken: 7,
+}
+
+function fixtureUnderstandingProjection(statement: string) {
+  const value = {
+    schemaVersion: '1.0.0' as const, contractId: 'CONTRACT-FIXTURE', contractVersion: 1,
+    contractStatus: 'confirmed-by-caller' as const, sourceRevision: context.prdRevision,
+    contractSourceDigest: d('understanding-contract'),
+    sources: [{ sourceId: 'SOURCE-1', kind: 'file' as const, ref: 'fixture',
+      origin: { kind: 'text' as const, ref: 'fixture' },
+      relevance: 'target' as const, digest: d('source'), byteLength: 7 }],
+    nodes: [{ nodeId: 'REQ-1', kind: 'REQ' as const, statement,
+      provenance: { kind: 'source-fact' as const, anchors: [{ sourceId: 'SOURCE-1',
+        sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 12 },
+        quote: statement, quoteDigest: digestPrdUnderstandingQuote(statement) }] },
+      responsibility: '首页', upstreamNodeIds: [], downstreamNodeIds: [],
+      acceptanceCriteria: ['首页标题可见'] }],
+    pendingQuestions: [], route: { skillName: 'e2e' as const, steps: [{ stepId: 'E2E-1',
+      inputNodeIds: ['REQ-1'], output: 'E2E 报告', constraints: [], dependencyStepIds: [],
+      completionCondition: 'REQ-1 已覆盖' }] },
+    authorization: { status: 'confirmed-by-caller' as const, contractVersion: 1,
+      authorizedNodeIds: ['REQ-1'], confirmedAt: '2026-07-12T00:00:00.000Z' },
+    projectionDigest: '',
+  }
+  return { ...value, projectionDigest: digestPrdUnderstandingProjection(value) }
 }
 const provenance: RuntimeProvenance = {
   runtimeVersion: '0.0.0', runtimeInstallationDigest: d('runtime-installation'), protocolVersion: '1.0.0',
@@ -217,6 +242,7 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       productSpace: 'PRODUCT', title: '最小完整 PRD',
       sourceDescriptors: [{ sourceId: 'SOURCE-1', kind: 'text', ref: 'fixture' }],
       userRequest: '验证只读页面', testWorkspaceId: 'WORKSPACE-1', secretRefs: [],
+      understanding: fixtureUnderstandingProjection(clauseMaterial.originalText),
     }),
     'prd-manifest': draft('prd/prd-manifest.json', {
       prdId: 'PRD-1', assetId: context.assetId, revision: context.prdRevision,
@@ -806,6 +832,7 @@ function predictedContentDigest(artifactType: string, artifactDraft: any): strin
 function predictedContentDigestFor(contextValue: BuildCompleteGenerationInput['context'], artifactType: string, artifactDraft: any): string {
   const schemaVersion = artifactType === 'browser-action-map' ? '2.1.0'
     : artifactType === 'execution-contract' ? '1.1.0'
+      : artifactType === 'prd-request' ? '2.0.0'
       : ['approval-grants', 'browser-preflight', 'run-bundle', 'project-policy']
           .includes(artifactType) ? '2.0.0' : '1.0.0'
   const envelope = {

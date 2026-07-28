@@ -5,6 +5,7 @@ import { parseSkillManifest } from '../../schema/src/index.js'
 import { listSkills, resolveSkill, resolveSkillDirectory } from '../src/index.js'
 
 const workflowFiles = [
+  'prd-understanding.md',
   'prd-intake.md',
   'scope-approval.md',
   'requirement-oracles.md',
@@ -101,6 +102,35 @@ describe('E2E skill package', () => {
 
     expect(text).toMatch(/^---\nname: e2e\ndescription: [\p{Script=Han}]/u)
     expect(text).not.toContain('description: Use when')
+  })
+
+  test('只调用一次 understand-prd，并把同一已确认契约投影交给 Runtime 校验', async () => {
+    const entry = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+    const adapter = await readFile(new URL('../skills/testing/e2e/prd-understanding.md', import.meta.url), 'utf8')
+    const intake = await readFile(new URL('../skills/testing/e2e/prd-intake.md', import.meta.url), 'utf8')
+
+    expect(entry).toContain('`$understand-prd`')
+    expect(entry).toContain('恰好调用一次')
+    expect(entry).toContain('若该外部 Skill 不可用')
+    expect(entry).toContain('两条路径互斥')
+    expect(entry).toContain('[prd-understanding.md](prd-understanding.md)')
+    expect(entry).toContain('不得再次运行 `$understand-prd`')
+    for (const text of [adapter, intake]) {
+      expect(text).toContain('sourceRevision')
+      expect(text).toContain('projectionDigest')
+      expect(text).toContain('confirmed-by-caller')
+      expect(text).toContain('Runtime')
+    }
+    expect(adapter).toContain('source-fact')
+    expect(adapter).toContain('confirmed-decision')
+    expect(adapter).toContain('pendingQuestions')
+    expect(adapter).toContain('understandingContractDigest')
+    expect(adapter).toContain('唯一不可变 prepared projection')
+    expect(adapter).toContain('contractNodeIds')
+    expect(adapter).toContain('contractAcceptanceCriteria')
+    expect(adapter).toContain('e2e-contract-machine-view:v1')
+    expect(adapter).toContain('Execution Approval')
+    expect(adapter).toContain('不是第二次 PRD 理解')
   })
 
   test('入口使用严格成功投影并把恢复、报告渲染建模为真实 Runtime 命令', async () => {

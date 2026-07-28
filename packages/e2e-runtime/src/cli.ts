@@ -959,7 +959,18 @@ class SingleJsonResponseWriter {
 
 async function readBytes(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = []
-  for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  let byteLength = 0
+  for await (const chunk of stream) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    byteLength += bytes.byteLength
+    if (byteLength > 4 * 1024 * 1024) throw new E2EError({
+      code: 'E2E_RUNTIME_REQUEST_TOO_LARGE',
+      category: 'input',
+      message: 'Runtime RPC request 超过 4 MiB',
+      retryable: false,
+    })
+    chunks.push(bytes)
+  }
   return Buffer.concat(chunks)
 }
 

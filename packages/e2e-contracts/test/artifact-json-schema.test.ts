@@ -55,7 +55,7 @@ describe('资产 JSON Schema 生成器', () => {
   test('每类 payload 完整覆盖 Spec 38.2 的必填字段', () => {
     const required: Record<string, string[]> = {
       'project-policy': ['policyVersion', 'environments', 'originPolicies', 'browserMatrix', 'coveragePolicy', 'evidencePolicy', 'retentionPolicy', 'riskPolicy', 'timeoutPolicy', 'runtimePolicy'],
-      'prd-request': ['productSpace', 'title', 'sourceDescriptors', 'userRequest', 'testWorkspaceId', 'secretRefs'],
+      'prd-request': ['productSpace', 'title', 'sourceDescriptors', 'userRequest', 'testWorkspaceId', 'secretRefs', 'understanding'],
       'prd-manifest': ['prdId', 'assetId', 'revision', 'normalizedPrdDigest', 'sources', 'attachments', 'sourceCacheIndexDigest', 'clauses', 'clauseInventoryDigest'],
       'prd-diff': ['previousRevision', 'currentRevision', 'sectionChanges', 'lineageMappings', 'lineageReview', 'impactedEntityIds'],
       'semantic-generation': ['modelProvider', 'modelId', 'modelVersion', 'systemPromptDigest', 'toolOutputDigests', 'sampling', 'candidateDigests', 'selectedDigest'],

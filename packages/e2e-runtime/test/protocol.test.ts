@@ -68,6 +68,7 @@ describe('Runtime protocol', () => {
   test.each([
     'E2E_RUNTIME_PACKAGE_VERSION_SKEW',
     'E2E_RUNTIME_STATE_MIGRATION_REQUIRED',
+    'E2E_RUNTIME_UNDERSTANDING_MIGRATION_REQUIRED',
   ])('%s 在公开协议中固定映射为 migration-required', (code) => {
     const response = runtimeErrorResponse('REQ-MIGRATION', new E2EError({
       code,
@@ -332,6 +333,21 @@ describe('repo-e2e CLI protocol slice', () => {
       },
     })
     expect(stdout.text()).not.toContain('stack')
+    expect(stderr.text()).toBe('')
+  })
+
+  test('rejects rpc stdin above 4 MiB before JSON parsing or Host dispatch', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    const exitCode = await runCli(
+      ['rpc'], Readable.from([Buffer.alloc(4 * 1024 * 1024 + 1, 0x20)]),
+      stdout.stream, stderr.stream,
+    )
+    expect(exitCode).toBe(2)
+    expect(RuntimeResponseEnvelopeSchema.parse(JSON.parse(stdout.text()))).toMatchObject({
+      requestId: 'UNKNOWN', ok: false,
+      error: { code: 'E2E_RUNTIME_REQUEST_TOO_LARGE', category: 'input' },
+    })
     expect(stderr.text()).toBe('')
   })
 

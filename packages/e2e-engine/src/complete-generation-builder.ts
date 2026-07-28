@@ -385,6 +385,7 @@ function createArtifact(
       : artifactType === 'generation-manifest' ? '2.0.0'
       : artifactType === 'execution-contract' ? '1.1.0'
       : artifactType === 'browser-action-map' ? '2.1.0'
+      : artifactType === 'prd-request' ? '2.0.0'
       : ['cleanup-results', 'approval-grants', 'browser-preflight',
       'run-bundle', 'project-policy', 'browser-evidence',
       'acceptance-scope', 'prd-diff', 'regression-manifest', 'workflow-events', 'browser-results'].includes(artifactType) ? '2.0.0' : '1.0.0',

@@ -9,6 +9,7 @@ import {
   digestOracleCheckpointValue,
   digestPrdClause,
   digestPrdClauseInventory,
+  digestPrdUnderstandingProjection,
   digestText,
   type ArtifactDocument,
   type DecisionReceipt,
@@ -17,6 +18,48 @@ import {
 } from '@mutil-skills/e2e-contracts'
 
 const d = (label: string) => digestText('runtime-real-golden/v1', label)
+
+interface RuntimeUnderstandingInput {
+  prdRevision: string
+  understandingContractDigest?: string
+  sourceBundle?: Array<{
+    sourceId: string
+    kind: 'file'
+    ref: string
+    mediaType: string
+    origin: { kind: 'file' | 'url' | 'text'; ref: string }
+    relevance: 'target' | 'necessary-dependency'
+    digest: string
+    byteLength: number
+  }>
+}
+
+function understandingProjection(input: RuntimeUnderstandingInput) {
+  const value = {
+    schemaVersion: '1.0.0' as const, contractId: 'CONTRACT-RUNTIME-GOLDEN', contractVersion: 1,
+    contractStatus: 'confirmed-by-caller' as const, sourceRevision: input.prdRevision,
+    contractSourceDigest: input.understandingContractDigest ?? d('understanding-contract'),
+    sources: input.sourceBundle?.map((source) => ({
+      sourceId: source.sourceId, kind: source.kind, ref: source.ref,
+      origin: source.origin,
+      relevance: source.relevance,
+      digest: source.digest, byteLength: source.byteLength,
+    })) ?? [{ sourceId: 'PRD-BODY', kind: 'file' as const, ref: 'inputs/prd.md',
+      origin: { kind: 'file' as const, ref: 'inputs/prd.md' }, relevance: 'target' as const,
+      digest: d('understanding-source'), byteLength: 1 }],
+    nodes: [{ nodeId: 'REQ-ORDER-1', kind: 'REQ' as const, statement: '验证订单验收行为',
+      provenance: { kind: 'confirmed-decision' as const, decisionId: 'DECISION-GOLDEN-1',
+        decisionRef: 'fixture:runtime-golden' }, responsibility: '订单页面',
+      upstreamNodeIds: [], downstreamNodeIds: [], acceptanceCriteria: ['订单验收行为符合预期'] }],
+    pendingQuestions: [], route: { skillName: 'e2e' as const, steps: [{ stepId: 'E2E-GOLDEN-1',
+      inputNodeIds: ['REQ-ORDER-1'], output: 'E2E Golden 报告', constraints: [],
+      dependencyStepIds: [], completionCondition: 'REQ-ORDER-1 已覆盖' }] },
+    authorization: { status: 'confirmed-by-caller' as const, contractVersion: 1,
+      authorizedNodeIds: ['REQ-ORDER-1'], confirmedAt: '2026-07-17T00:00:00.000Z' },
+    projectionDigest: '',
+  }
+  return { ...value, projectionDigest: digestPrdUnderstandingProjection(value) }
+}
 
 export function runtimeReadOnlyFixture(input: {
   runId: string
@@ -27,6 +70,8 @@ export function runtimeReadOnlyFixture(input: {
   now: Date
   evidencePolicyDigest?: string
   runtimePolicyDigest?: string
+  understandingContractDigest?: string
+  sourceBundle?: RuntimeUnderstandingInput['sourceBundle']
 }) {
   const origin = new URL(input.url).origin
   const evidencePolicyDigest = input.evidencePolicyDigest ?? d('evidence-policy')
@@ -122,18 +167,21 @@ export function runtimeReadOnlyFixture(input: {
   const requirementModel = semanticArtifact(input, 'requirement-model', '1.0.0', {
     modelRevision: 1,
     requirements: [{
-      reqId: 'REQ-ORDER-1', revision: 1, title: '订单列表', actors: ['auditor'], entities: ['order'],
+      reqId: 'REQ-ORDER-1', contractNodeIds: ['REQ-ORDER-1'], revision: 1,
+      title: '订单列表', actors: ['auditor'], entities: ['order'],
       preconditions: [], rules: [{ ruleId: 'RULE-ORDER-1', category: 'business',
+        contractNodeIds: ['REQ-ORDER-1'],
         statement: '显示待审核订单', sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit',
         oracleIds: ['ORACLE-1'] }],
       states: [], transitions: [], observableOutcomes: [{ oracleId: 'ORACLE-1',
-        ruleId: 'RULE-ORDER-1', statement: '页面显示待审核订单', sourceRefs: ['CLAUSE-ORDER-1'] }],
+        ruleId: 'RULE-ORDER-1', statement: '页面显示待审核订单', sourceRefs: ['CLAUSE-ORDER-1'],
+        contractAcceptanceCriteria: [{ nodeId: 'REQ-ORDER-1', criterionIndex: 0 }] }],
       applicability: [], sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
     }],
     coupledDimensions: [], applicabilityRules: ['RULE-ORDER-1'], modelDecisionDigest: d('model-decision'),
   })
   const interactionFlow = semanticArtifact(input, 'interaction-flow', '1.0.0', { flows: [{
-    flowId: 'FLOW-ORDER-1', nodes: [
+    flowId: 'FLOW-ORDER-1', contractNodeIds: ['REQ-ORDER-1'], nodes: [
       { nodeId: 'NODE-ORDER-ENTRY', reqId: 'REQ-ORDER-1', kind: 'entry', effect: 'read', oracleIds: ['ORACLE-1'] },
       { nodeId: 'NODE-ORDER-EXIT', reqId: 'REQ-ORDER-1', kind: 'exit', effect: 'read', oracleIds: ['ORACLE-1'] },
     ], edgeIds: ['EDGE-ORDER-1'], entryNodeId: 'NODE-ORDER-ENTRY', exitNodeIds: ['NODE-ORDER-EXIT'],
@@ -261,10 +309,11 @@ export function runtimeReadOnlyFixture(input: {
   return {
     semanticArtifacts: {
       'project-policy': projectPolicy,
-      'prd-request': semanticArtifact(input, 'prd-request', '1.0.0', {
+      'prd-request': semanticArtifact(input, 'prd-request', '2.0.0', {
         productSpace: 'PRODUCT', title: '订单验收 PRD',
         sourceDescriptors: [{ sourceId: 'PRD-BODY', kind: 'file', ref: 'inputs/prd.md' }],
         userRequest: '验证订单列表展示待审核订单', testWorkspaceId: 'WORKSPACE-1', secretRefs: [],
+        understanding: understandingProjection(input),
       }),
       'prd-manifest': prdManifest,
       'prd-diff': prdDiff,
@@ -293,6 +342,8 @@ export function runtimeFullPlaywrightFixture(input: {
   now: Date
   evidencePolicyDigest?: string
   runtimePolicyDigest?: string
+  understandingContractDigest?: string
+  sourceBundle?: RuntimeUnderstandingInput['sourceBundle']
 }) {
   const base = runtimeReadOnlyFixture(input)
   const origin = new URL(input.url).origin
@@ -404,14 +455,16 @@ export function runtimeFullPlaywrightFixture(input: {
   const requirementModel = replaceArtifactContent(base.semanticArtifacts['requirement-model'], {
     ...(base.semanticArtifacts['requirement-model'].content as Record<string, unknown>),
     requirements: [{
-      reqId: 'REQ-ORDER-1', revision: 1, title: '完整浏览器交互与清理', actors: ['auditor'],
+      reqId: 'REQ-ORDER-1', contractNodeIds: ['REQ-ORDER-1'], revision: 1,
+      title: '完整浏览器交互与清理', actors: ['auditor'],
       entities: ['form'], preconditions: [], rules: [{
-        ruleId: 'RULE-ORDER-1', category: 'business',
+        ruleId: 'RULE-ORDER-1', contractNodeIds: ['REQ-ORDER-1'], category: 'business',
         statement: '表单写入后必须执行独立清理并通过 reload 验证',
         sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'],
       }], states: [], transitions: [], observableOutcomes: [{
         oracleId: 'ORACLE-1', ruleId: 'RULE-ORDER-1',
         statement: '写操作成功且清理后页面恢复 clean', sourceRefs: ['CLAUSE-ORDER-1'],
+        contractAcceptanceCriteria: [{ nodeId: 'REQ-ORDER-1', criterionIndex: 0 }],
       }], applicability: [], sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
     }],
   })
@@ -811,10 +864,32 @@ export function runtimeTodoMvcFullPlaywrightFixture(
     ...(base.semanticArtifacts['project-policy'].content as Record<string, unknown>),
     originPolicies: [{ origin, allowRead: true, allowWrite: true }],
   })
+  const baseUnderstanding = (base.semanticArtifacts['prd-request'].content as any).understanding
+  const todoContractNodeIds = requirementDefinitions.map((definition) => definition.reqId)
+  const todoUnderstandingMaterial = {
+    ...baseUnderstanding,
+    nodes: requirementDefinitions.map((definition) => ({
+      nodeId: definition.reqId, kind: 'REQ' as const, statement: definition.title,
+      provenance: { kind: 'confirmed-decision' as const,
+        decisionId: `DECISION-${definition.reqId}`, decisionRef: 'fixture:todomvc-official-prd' },
+      responsibility: 'TodoMVC 页面', upstreamNodeIds: [], downstreamNodeIds: [],
+      acceptanceCriteria: [definition.title],
+    })),
+    route: { skillName: 'e2e' as const, steps: [{ stepId: 'E2E-TODOMVC-ALL',
+      inputNodeIds: todoContractNodeIds, output: 'TodoMVC 完整 E2E 报告', constraints: [],
+      dependencyStepIds: [], completionCondition: '全部 TodoMVC 契约节点均有 Oracle 与测试证据' }] },
+    authorization: { ...baseUnderstanding.authorization, authorizedNodeIds: todoContractNodeIds },
+    projectionDigest: '',
+  }
+  const todoUnderstanding = {
+    ...todoUnderstandingMaterial,
+    projectionDigest: digestPrdUnderstandingProjection(todoUnderstandingMaterial),
+  }
   const prdRequest = replaceArtifactContent(base.semanticArtifacts['prd-request'], {
     ...(base.semanticArtifacts['prd-request'].content as Record<string, unknown>),
     title: 'TodoMVC 官方 Application Specification 验收',
     userRequest: '依据官方 PRD 验证 TodoMVC 全部交互、持久化和清理',
+    understanding: todoUnderstanding,
   })
   const prdManifest = replaceArtifactContent(base.semanticArtifacts['prd-manifest'], {
     ...(base.semanticArtifacts['prd-manifest'].content as Record<string, unknown>),
@@ -841,13 +916,15 @@ export function runtimeTodoMvcFullPlaywrightFixture(
   const requirementModel = replaceArtifactContent(base.semanticArtifacts['requirement-model'], {
     ...(base.semanticArtifacts['requirement-model'].content as Record<string, unknown>),
     requirements: requirementDefinitions.map((definition) => ({
-      reqId: definition.reqId, revision: 1, title: definition.title,
+      reqId: definition.reqId, contractNodeIds: [definition.reqId], revision: 1, title: definition.title,
       actors: ['visitor'], entities: ['todo'], preconditions: [], rules: [{
-        ruleId: definition.ruleId, category: 'business', statement: definition.title,
+        ruleId: definition.ruleId, contractNodeIds: [definition.reqId],
+        category: 'business', statement: definition.title,
         sourceRefs: [definition.clauseId], certainty: 'explicit', oracleIds: [definition.oracleId],
       }], states: [], transitions: [], observableOutcomes: [{
         oracleId: definition.oracleId, ruleId: definition.ruleId,
         statement: definition.title, sourceRefs: [definition.clauseId],
+        contractAcceptanceCriteria: [{ nodeId: definition.reqId, criterionIndex: 0 }],
       }], applicability: [], sourceRefs: [definition.clauseId], status: 'active',
     })),
     applicabilityRules: requirementDefinitions.map((definition) => definition.ruleId),
@@ -855,6 +932,7 @@ export function runtimeTodoMvcFullPlaywrightFixture(
   const interactionFlow = replaceArtifactContent(base.semanticArtifacts['interaction-flow'], {
     flows: [{
       flowId: 'FLOW-TODOMVC-FUNCTIONAL',
+      contractNodeIds: todoContractNodeIds,
       nodes: [
         { nodeId: 'NODE-TODOMVC-ENTRY', reqId: requirementDefinitions[0]!.reqId, kind: 'entry',
           effect: 'reversible-write', oracleIds: [requirementDefinitions[0]!.oracleId] },

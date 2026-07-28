@@ -1,5 +1,10 @@
 import { z } from 'zod'
 import { ArtifactTypeSchema } from './artifacts.js'
+import {
+  PrdUnderstandingContractHeaderSchema,
+  PrdUnderstandingProjectionDraftSchema,
+  PrdUnderstandingProjectionSchema,
+} from './prd-understanding.js'
 import { WorkflowNodeSchema, WorkflowStateSchema } from './workflow.js'
 import { ApprovalGrantSubjectSchema, canonicalGrantApprovalType } from './approval-subject.js'
 import { ManualResultDraftSchema } from './manual-result.js'
@@ -52,8 +57,32 @@ const commandSchemas = [
     projectRoot: z.string().min(1),
     payload: z.object({
       assetId: SafeIdSchema,
-      prdSource: z.object({ kind: z.literal('file'), path: z.string().min(1) }).strict(),
+      prdSource: z.object({
+        kind: z.literal('file'), path: z.string().min(1),
+        origin: z.object({ kind: z.enum(['file', 'url', 'text']), ref: z.string().min(1) }).strict(),
+      }).strict(),
+      supportingSources: z.array(z.object({
+        sourceId: SafeIdSchema,
+        kind: z.literal('file'),
+        path: z.string().min(1),
+        mediaType: z.string().min(1).max(256),
+        origin: z.object({ kind: z.enum(['file', 'url', 'text']), ref: z.string().min(1) }).strict(),
+        relevance: z.literal('necessary-dependency'),
+      }).strict()).max(100).optional(),
+      understandingContract: z.object({
+        header: PrdUnderstandingContractHeaderSchema,
+        source: z.object({ kind: z.literal('file'), path: z.string().min(1) }).strict(),
+      }).strict(),
       projectPolicyPath: z.string().min(1),
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('prepare-prd-understanding'),
+    projectRoot: z.string().min(1),
+    payload: z.object({
+      runId: SafeIdSchema,
+      projection: PrdUnderstandingProjectionDraftSchema,
     }).strict(),
   }).strict(),
   z.object({
@@ -188,7 +217,8 @@ export const RuntimeDoctorReportSchema = z.object({
 
 export const RuntimeStatusNextEdgeSchema = z.object({
   command: z.enum([
-    'submit-candidate', 'open-approval', 'confirm-approval', 'run-preflight', 'prepare-manual-result',
+    'prepare-prd-understanding', 'submit-candidate', 'open-approval', 'confirm-approval',
+    'run-preflight', 'prepare-manual-result',
     'finalize-manual-result-role', 'execute-run', 'resume-run', 'finalize-run', 'render-report',
   ]),
   from: WorkflowNodeSchema,
@@ -209,6 +239,33 @@ export const RuntimeStatusResultSchema = z.object({
   verifiedDigests: z.record(DigestSchema),
   minimumMissingInput: z.array(z.string().min(1)).max(32),
   pendingDecision: JsonValueSchema.optional(),
+}).strict()
+
+export const RuntimeCreateRunResultSchema = z.object({
+  runId: SafeIdSchema,
+  assetId: SafeIdSchema,
+  projectIdentityDigest: DigestSchema,
+  generationId: SafeIdSchema,
+  prdRevision: DigestSchema,
+  sourceRevision: DigestSchema,
+  understandingContractDigest: DigestSchema,
+  sourceBundle: z.array(z.object({
+    sourceId: SafeIdSchema,
+    kind: z.literal('file'),
+    ref: z.string().min(1),
+    mediaType: z.string().min(1).max(256),
+    origin: z.object({ kind: z.enum(['file', 'url', 'text']), ref: z.string().min(1) }).strict(),
+    relevance: z.enum(['target', 'necessary-dependency']),
+    digest: DigestSchema,
+    byteLength: z.number().int().positive().max(16 * 1024 * 1024),
+  }).strict()).min(1).max(101),
+  workflow: WorkflowStateSchema,
+}).strict()
+
+export const RuntimePreparePrdUnderstandingResultSchema = z.object({
+  runId: SafeIdSchema,
+  sourceRevision: DigestSchema,
+  understanding: PrdUnderstandingProjectionSchema,
 }).strict()
 
 export const RuntimeResponseEnvelopeSchema = z.object({
@@ -237,6 +294,10 @@ export type RuntimeDoctorProbe = z.infer<typeof RuntimeDoctorProbeSchema>
 export type RuntimeDoctorReport = z.infer<typeof RuntimeDoctorReportSchema>
 export type RuntimeStatusNextEdge = z.infer<typeof RuntimeStatusNextEdgeSchema>
 export type RuntimeStatusResult = z.infer<typeof RuntimeStatusResultSchema>
+export type RuntimeCreateRunResult = z.infer<typeof RuntimeCreateRunResultSchema>
+export type RuntimePreparePrdUnderstandingResult = z.infer<
+  typeof RuntimePreparePrdUnderstandingResultSchema
+>
 
 function isPlainJsonObject(value: unknown): value is Record<string, JsonValue> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)

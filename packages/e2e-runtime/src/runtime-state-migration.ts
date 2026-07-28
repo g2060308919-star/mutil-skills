@@ -20,7 +20,10 @@ import { RuntimeReadExecutionRecordSchema } from './runtime-read-result.js'
 import {
   PendingLocalApprovalConfirmationSchema,
   PrdSemanticConfirmationSchema,
+  PrdSourceBundleSnapshotSchema,
   PrdSourceSnapshotSchema,
+  PrdUnderstandingContractFactSchema,
+  PrdUnderstandingPreparedFactSchema,
 } from './local-approval-confirmations.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -91,10 +94,21 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     'signed-discovery-grant', 'signed-execution-grant', 'browser-preflight',
     'finalization-material', 'finalization-execution-facts', 'quarantined-evidence',
     'manual-results-by-id',
-    'approval-mode', 'pending-local-approval', 'prd-source-snapshot', 'prd-semantic-confirmation',
+    'approval-mode', 'pending-local-approval', 'prd-source-snapshot', 'prd-source-bundle',
+    'prd-understanding-contract', 'prd-understanding-prepared', 'prd-semantic-confirmation',
   ])
   if (Object.keys(facts).length > allowed.size) context.addIssue({ code: 'custom', message: '可信执行事实数量超限' })
+  let trustedFactBytes = 0
   for (const [key, value] of Object.entries(facts)) {
+    try {
+      const bytes = Buffer.byteLength(canonicalizeJson(value), 'utf8')
+      trustedFactBytes += bytes
+      if (bytes > 10 * 1024 * 1024) context.addIssue({
+        code: 'custom', path: [key], message: '单项可信执行事实超过 10 MiB',
+      })
+    } catch {
+      context.addIssue({ code: 'custom', path: [key], message: '可信执行事实必须是 canonical JSON' })
+    }
     if (!allowed.has(key)) {
       context.addIssue({ code: 'custom', path: [key], message: '未知可信执行事实类型' })
       continue
@@ -114,6 +128,24 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     if (key === 'prd-source-snapshot') {
       if (!PrdSourceSnapshotSchema.safeParse(value).success) context.addIssue({
         code: 'custom', path: [key], message: 'PRD 原文快照结构非法',
+      })
+      continue
+    }
+    if (key === 'prd-source-bundle') {
+      if (!PrdSourceBundleSnapshotSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: 'PRD Source Bundle 快照结构非法',
+      })
+      continue
+    }
+    if (key === 'prd-understanding-contract') {
+      if (!PrdUnderstandingContractFactSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: 'understand-prd 契约冻结事实结构非法',
+      })
+      continue
+    }
+    if (key === 'prd-understanding-prepared') {
+      if (!PrdUnderstandingPreparedFactSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: 'understand-prd prepared fact 结构非法',
       })
       continue
     }
@@ -166,6 +198,9 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
       context.addIssue({ code: 'custom', path: [key], message: '可信 Grant 事实类型不匹配' })
     }
   }
+  if (trustedFactBytes > 16 * 1024 * 1024) context.addIssue({
+    code: 'custom', message: '可信执行事实总量超过 16 MiB',
+  })
 })
 
 function isTrustedManualResultSet(value: unknown): boolean {
@@ -314,7 +349,7 @@ const RuntimePublicationRecordSchema = z.object({
 }).strict()
 
 const RuntimeRunSnapshotSchema = z.object({
-  schemaVersion: z.literal('1.5.0'),
+  schemaVersion: z.literal('1.6.0'),
   runId: RunIdSchema,
   assetId: AssetIdSchema,
   projectIdentityDigest: DigestSchema,
@@ -412,6 +447,10 @@ export const RuntimeStateMigrationRegistry: Readonly<Record<string, RuntimeState
         ?? 'webauthn',
     },
   }),
+  '1.5.0': (snapshot) => ({
+    ...snapshot,
+    schemaVersion: '1.6.0',
+  }),
 })
 
 export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
@@ -423,7 +462,7 @@ export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
   }
   let candidateVersion = sourceVersion
   const visited = new Set<string>()
-  while (candidateVersion !== '1.5.0') {
+  while (candidateVersion !== '1.6.0') {
     if (visited.has(candidateVersion)) throw migrationRequired(sourceVersion)
     visited.add(candidateVersion)
     const migrator = RuntimeStateMigrationRegistry[candidateVersion]

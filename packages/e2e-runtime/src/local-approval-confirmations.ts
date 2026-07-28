@@ -3,8 +3,12 @@ import {
   ApprovalModeSchema,
   ApprovalTypeSchema,
   LocalApprovalSummarySchema,
+  PrdUnderstandingContractHeaderSchema,
+  PrdUnderstandingContractMachineViewSchema,
+  PrdUnderstandingProjectionSchema,
   PrdSemanticReviewSchema,
   canonicalizeJson,
+  digestBytes,
   digestText,
   E2EError,
   type ApprovalGrantSubject,
@@ -28,6 +32,75 @@ export const PrdSourceSnapshotSchema = z.object({
   if (value.normalizedDigest !== digestText('e2e-prd-normalized-source/v1', value.normalizedText)) {
     context.addIssue({ code: 'custom', path: ['normalizedDigest'], message: 'PRD 原文摘要不匹配' })
   }
+})
+
+export const PrdSourceBundleSnapshotSchema = z.object({
+  schemaVersion: z.literal('1.0.0'),
+  sourceRevision: DigestSchema,
+  sources: z.array(z.object({
+    sourceId: SafeIdSchema,
+    kind: z.literal('file'),
+    sourceRef: z.string().min(1).max(4 * 1024),
+    mediaType: z.string().min(1).max(256),
+    origin: z.object({
+      kind: z.enum(['file', 'url', 'text']), ref: z.string().min(1).max(64 * 1024),
+    }).strict(),
+    relevance: z.enum(['target', 'necessary-dependency']),
+    normalizedText: z.string().min(1).max(1024 * 1024),
+    normalizedDigest: DigestSchema,
+    byteLength: z.number().int().positive().max(16 * 1024 * 1024),
+  }).strict().superRefine((source, context) => {
+    if (source.normalizedDigest !== digestText(
+      'e2e-prd-understanding-source/v1', source.normalizedText,
+    )) context.addIssue({
+      code: 'custom', path: ['normalizedDigest'], message: 'Source Bundle 原文摘要不匹配',
+    })
+  })).min(1).max(101),
+}).strict().superRefine((bundle, context) => {
+  const sourceIds = bundle.sources.map((source) => source.sourceId)
+  if (new Set(sourceIds).size !== sourceIds.length) context.addIssue({
+    code: 'custom', path: ['sources'], message: 'Source Bundle sourceId 必须唯一',
+  })
+  if (bundle.sources[0]?.sourceId !== 'PRD-BODY') context.addIssue({
+    code: 'custom', path: ['sources', 0, 'sourceId'], message: '首个来源必须是 PRD-BODY',
+  })
+  if (bundle.sources[0]?.relevance !== 'target'
+    || bundle.sources.slice(1).some((source) => source.relevance !== 'necessary-dependency')) {
+    context.addIssue({ code: 'custom', path: ['sources'], message: 'Source Bundle 相关性顺序非法' })
+  }
+  if (bundle.sources.reduce((total, source) => total + source.byteLength, 0) > 8 * 1024 * 1024) {
+    context.addIssue({ code: 'custom', path: ['sources'], message: 'Source Bundle 总量超过 8 MiB' })
+  }
+})
+
+export const PrdUnderstandingContractFactSchema = z.object({
+  schemaVersion: z.literal('1.0.0'),
+  header: PrdUnderstandingContractHeaderSchema,
+  sourceRef: z.string().min(1).max(4 * 1024),
+  sourceDigest: DigestSchema,
+  byteLength: z.number().int().positive().max(16 * 1024 * 1024),
+  normalizedText: z.string().min(1).max(1024 * 1024),
+  machineView: PrdUnderstandingContractMachineViewSchema,
+}).strict().superRefine((fact, context) => {
+  if (fact.byteLength !== Buffer.byteLength(fact.normalizedText, 'utf8')) context.addIssue({
+    code: 'custom', path: ['byteLength'], message: 'requirements contract 长度不匹配',
+  })
+  if (fact.sourceDigest !== digestBytes(
+    'e2e-prd-understanding-contract-source/v1', Buffer.from(fact.normalizedText, 'utf8'),
+  )) context.addIssue({
+    code: 'custom', path: ['sourceDigest'], message: 'requirements contract 原文摘要不匹配',
+  })
+})
+
+export const PrdUnderstandingPreparedFactSchema = z.object({
+  schemaVersion: z.literal('1.0.0'),
+  contractSourceDigest: DigestSchema,
+  preparedAt: z.string().datetime({ offset: true }),
+  projection: PrdUnderstandingProjectionSchema,
+}).strict().superRefine((fact, context) => {
+  if (fact.contractSourceDigest !== fact.projection.contractSourceDigest) context.addIssue({
+    code: 'custom', path: ['contractSourceDigest'], message: 'prepared fact 未绑定契约原文',
+  })
 })
 
 export const PrdSemanticConfirmationSchema = z.object({
