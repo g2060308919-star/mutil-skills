@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-07-29
+
+### Fixed
+
+- Vitest 在干净 checkout 中显式、幂等创建仓库级 `.tmp`，消除 GitHub Actions 因被忽略目录不存在导致的全套 `mkdtemp ENOENT`；普通测试与 Golden 配置共享同一初始化契约。
+- 发布 Golden 对 npm 明确报告的瞬时网络错误执行一次有界续传，同时让完整性、鉴权及其他确定性错误立即失败，避免把网络抖动误判为 Runtime 缺陷。
+
 ## [0.4.1] - 2026-07-29
 
 ### Added

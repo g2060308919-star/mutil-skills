@@ -9,6 +9,7 @@ import { ArtifactSchemaRegistry, WriteApprovalSubjectV2Schema, digestText }
   from '@mutil-skills/e2e-contracts'
 import { runtimeFullPlaywrightFixture, runtimeGoldenPrdText, runtimeReadOnlyFixture }
   from './e2e-runtime-read-only.fixture.js'
+import { runWithTransientNpmRetry } from './npm-transient-retry.js'
 
 const execFileAsync = promisify(execFile)
 const releaseVersion = (JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as {
@@ -238,14 +239,20 @@ describe('E2E Runtime npm tarball', () => {
       }, null, 2)}\n`)
 
       const tarballs = await resolvePackageTarballs(packedArtifactsDirectory)
-      await execFileAsync('npm', [
-        'install', '--ignore-scripts', '--omit=dev', '--no-bin-links', '--no-audit', '--no-fund', '--save-exact',
-        ...tarballs,
-      ], {
-        cwd: project,
-        env: packedInstallEnvironment({ home, npmCache }),
-        timeout: 780_000,
-        maxBuffer: 10 * 1024 * 1024,
+      await runWithTransientNpmRetry(() => execFileAsync(
+        'npm',
+        [
+          'install', '--ignore-scripts', '--omit=dev', '--no-bin-links', '--no-audit', '--no-fund', '--save-exact',
+          ...tarballs,
+        ],
+        {
+          cwd: project,
+          env: packedInstallEnvironment({ home, npmCache }),
+          timeout: 780_000,
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      ), {
+        maxAttempts: 2,
       })
 
       const sourceRoot = await realpath(new URL('..', import.meta.url).pathname)

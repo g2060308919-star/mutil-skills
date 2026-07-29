@@ -25,6 +25,7 @@ export default defineConfig({
     alias: aliases,
   },
   test: {
+    globalSetup: ['./scripts/vitest-global-setup.ts'],
     include: ['packages/**/*.test.ts', 'scripts/**/*.test.ts'],
     exclude: [...configDefaults.exclude, 'scripts/**/*.golden.test.ts'],
     pool: 'forks',
