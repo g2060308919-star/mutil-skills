@@ -7,17 +7,50 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: npm-publish-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Verify and publish
+  verify-linux:
+    name: Verify on Linux
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout immutable release tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Check architecture
+        run: npm run lint:architecture
+
+      - name: Run full test suite
+        run: npm test
+
+  publish:
+    name: Golden and publish
+    needs: verify-linux
+    runs-on: macos-14
     timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout immutable release tag
@@ -35,15 +68,6 @@ jobs:
 
       - name: Install exact dependencies
         run: npm ci
-
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Check architecture
-        run: npm run lint:architecture
-
-      - name: Run full test suite
-        run: npm test
 
       - name: Run prepublish package and Golden gates
         run: npm run verify:e2e-pack

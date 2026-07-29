@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-07-29
+
+### Fixed
+
+- npm 发布工作流拆分为 Ubuntu 全量代码验证与固定 `macos-14` 系统 Chrome Golden/发布任务；不再为 GitHub Linux runner 绕过 Chromium sandbox，同时保留 Linux 测试覆盖和 macOS 真实浏览器发布门。
+
 ## [0.4.3] - 2026-07-29
 
 ### Fixed

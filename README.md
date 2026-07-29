@@ -36,6 +36,8 @@ Golden，再按内部依赖拓扑逐包发布；相同版本只有 Registry SHA-
 才允许幂等跳过，最后从 Registry 重装并运行正式 Golden。每个 `@mutil-skills/*` 包只需在 npm
 Settings 中一次性登记 GitHub Trusted Publisher：仓库 `g2060308919-star/mutil-skills`、工作流
 文件 `publish.yml`、允许 `npm publish`。之后发布不再需要逐包浏览器认证。
+工作流在 Ubuntu 上执行全量代码验证，在固定 `macos-14` runner 上执行强制 Chromium sandbox
+的系统 Chrome Workspace/Registry Golden 与 OIDC 发布；不会用 `--no-sandbox` 伪造浏览器门禁通过。
 
 Telemetry hook 使用 `install-hooks --runtime all` 显式安装，使用 `uninstall-hooks --runtime all` 卸载；安装后 runtime 位于用户目录，不依赖当前 checkout。第一期默认不保存或上传事件，详细口径见 [统计说明](./docs/telemetry-hook-statistics-guide.md)。
 
@@ -55,7 +57,7 @@ E2E Skill 负责从 PRD 编排需求、审批、受控浏览器执行、证据�
 3. 用户显式安装精确版本 Runtime：
 
    ```bash
-   npm exec --yes --package=@mutil-skills/e2e-runtime@0.4.3 -- repo-e2e install-runtime --version 0.4.3
+   npm exec --yes --package=@mutil-skills/e2e-runtime@0.4.4 -- repo-e2e install-runtime --version 0.4.4
    ```
 
 4. 验证并选择本机系统 Google Chrome。Runtime 只使用 Chrome executable，并为每次 Run 创建全新的一次性 Profile：
