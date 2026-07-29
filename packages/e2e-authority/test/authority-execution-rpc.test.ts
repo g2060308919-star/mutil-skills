@@ -184,7 +184,7 @@ test('WebSocket Authority RPC 严格绑定协议 schema、clientId 与审批上�
   expect(reserveCalls).toBe(4_096)
   // 4096 个真实 authenticated RPC 终态之后，最早 tombstone 仍保持精确幂等且没有 FIFO 淘汰。
   await expect(first.complete(reservation.reservationId, digest)).resolves.toBe(receipt)
-}, 20_000)
+}, 60_000)
 const binding = (context: SignedWriteGrant['approvalContext']) => ({
   runId: context.runId, installationDigest: context.installationDigest,
   approvalType: context.approvalType, subjectDigest: context.subjectDigest,

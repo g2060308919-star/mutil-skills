@@ -1,6 +1,6 @@
 {
   "name": "@mutil-skills/e2e-gateway",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "repository": {
     "type": "git",
     "url": "https://github.com/g2060308919-star/mutil-skills.git",
@@ -23,7 +23,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@mutil-skills/e2e-contracts": "0.4.2"
+    "@mutil-skills/e2e-contracts": "0.4.3"
   },
   "license": "MIT",
   "engines": {
