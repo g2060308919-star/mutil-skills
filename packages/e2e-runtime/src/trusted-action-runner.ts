@@ -554,6 +554,7 @@ export class TrustedActionRunner {
     attemptId: string
   }): Promise<{
     result: ReadOnlyCaseResult
+    gatewayAudit: ReturnType<typeof projectRuntimeReadGatewayAudit>
     evidence?: { screenshot: Uint8Array; dom: Uint8Array }
   }> {
     if (trustedActions.get(input.action)
@@ -570,6 +571,7 @@ export class TrustedActionRunner {
       throw trustedActionError('E2E_RUNTIME_READ_SESSION_BINDING_MISMATCH', 'Browser/Gateway/Grant/Run 不闭合')
     }
     const capture = new CapturingPageAdapter(new PlaywrightPageAdapter(input.browser.page))
+    let actionGatewayAudit: ReturnType<typeof projectRuntimeReadGatewayAudit> | undefined
     try {
       const result = await browser.executeWithCorrelations(input.action.requestCorrelations, async () => await runReadOnlyCase({
         caseId: input.action.caseId, actionId: input.action.actionId, url: input.action.url,
@@ -577,10 +579,18 @@ export class TrustedActionRunner {
         authorization: { grant: input.grant, currentSubject: input.currentSubject, authority: input.authority },
         attemptId: input.attemptId,
         runtime: { sandboxHealthy: true, gatewayConnected: true },
-        gatewayAudit: () => projectRuntimeReadGatewayAudit(input.gateway.auditSummary()), page: capture,
+        gatewayAudit: () => {
+          actionGatewayAudit = projectRuntimeReadGatewayAudit(input.gateway.auditSummary())
+          return actionGatewayAudit
+        }, page: capture,
       }))
       const evidence = capture.releaseVerified(result)
-      return { result, ...(evidence === undefined ? {} : { evidence }) }
+      return {
+        result,
+        gatewayAudit: actionGatewayAudit
+          ?? projectRuntimeReadGatewayAudit(input.gateway.auditSummary()),
+        ...(evidence === undefined ? {} : { evidence }),
+      }
     } catch (error) {
       capture.clear()
       throw error

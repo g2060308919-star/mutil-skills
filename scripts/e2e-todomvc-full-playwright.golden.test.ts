@@ -39,7 +39,7 @@ test.runIf(runPublicGolden)(
     const fixture = runtimeTodoMvcFullPlaywrightFixture({
       runId: 'RUN-TODOMVC-PUBLIC', assetId: 'ASSET-TODOMVC-PUBLIC',
       prdRevision: digestText('todomvc-prd/v1', 'ff43b02e59dfa604386bb382034b2cd07c2bcd8a'),
-      installationDigest: digestText('runtime-installation/v1', '0.4.4'),
+      installationDigest: digestText('runtime-installation/v1', '0.4.5'),
       url: targetUrl, now: new Date('2026-07-26T00:00:00.000Z'),
     })
     const execution = fixture.frozenArtifacts['execution-contract'].content as any

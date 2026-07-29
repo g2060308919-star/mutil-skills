@@ -80,7 +80,6 @@ import {
 import {
   TrustedActionRunner,
   authorizeRuntimeReadExecutor,
-  projectRuntimeReadGatewayAudit,
   authorizeRuntimeInjectionExecutor,
   authorizeRuntimeWriteExecutor,
   type RuntimeInjectionExecutorCapability,
@@ -610,7 +609,7 @@ export function createProductionBrowserCapabilities(input: {
       }
       return {
         status: executed.result.status, result: executed.result,
-        gatewayAudit: projectRuntimeReadGatewayAudit(gateway.handle.auditSummary()),
+        gatewayAudit: executed.gatewayAudit,
         gatewayAuditDigest,
         ...(executed.evidence === undefined ? {} : { evidence: executed.evidence }),
         finalizationFacts: {

@@ -40,7 +40,7 @@ test.runIf(existsSync(executablePath))(
       mkdir(projectRoot, { mode: 0o700 }),
     ])
     const installation = {
-      version: '0.4.4',
+      version: '0.4.5',
       protocolMajor: 1 as const,
       versionRoot: sourceRoot,
       entrypoint: join(sourceRoot, 'packages', 'e2e-runtime', 'src', 'runtime-bin.ts'),

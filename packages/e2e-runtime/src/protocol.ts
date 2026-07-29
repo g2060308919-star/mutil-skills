@@ -8,7 +8,7 @@ import {
   type RuntimeResponseEnvelope,
 } from '@mutil-skills/e2e-contracts'
 
-export const RUNTIME_PACKAGE_VERSION = '0.4.4'
+export const RUNTIME_PACKAGE_VERSION = '0.4.5'
 
 const runtimeInstallRemediation = `npm exec --yes --package=@mutil-skills/e2e-runtime@${RUNTIME_PACKAGE_VERSION} -- repo-e2e install-runtime --version ${RUNTIME_PACKAGE_VERSION}`
 

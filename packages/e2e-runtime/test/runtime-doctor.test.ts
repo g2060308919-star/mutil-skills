@@ -398,7 +398,7 @@ describe('Runtime doctor', () => {
     expect(exitCode).toBe(3)
     expect(report).toMatchObject({
       ready: false,
-      runtimeVersion: '0.4.4',
+      runtimeVersion: '0.4.5',
       installationDigest: `sha256:${'0'.repeat(64)}`,
       probes: {
         installation: {
