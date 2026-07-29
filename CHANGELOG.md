@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-07-29
+
 ### Added
 
 - E2E Skill 支持单次消费外部 `$understand-prd`，并在其不可用时使用互斥的内置等价流程生成唯一 requirements contract。
