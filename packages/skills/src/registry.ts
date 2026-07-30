@@ -28,6 +28,7 @@ const e2eSkill: SkillRegistryEntry = {
   files: [
     { name: 'SKILL.md', relativePath: 'skills/testing/e2e/SKILL.md' },
     { name: 'skill.manifest.json', relativePath: 'skills/testing/e2e/skill.manifest.json' },
+    { name: 'prd-understanding.md', relativePath: 'skills/testing/e2e/prd-understanding.md' },
     { name: 'prd-intake.md', relativePath: 'skills/testing/e2e/prd-intake.md' },
     { name: 'scope-approval.md', relativePath: 'skills/testing/e2e/scope-approval.md' },
     { name: 'requirement-oracles.md', relativePath: 'skills/testing/e2e/requirement-oracles.md' },

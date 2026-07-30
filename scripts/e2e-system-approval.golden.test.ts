@@ -202,7 +202,7 @@ async function prepareWriteSubject(authority: LocalApprovalAuthority, input: {
     discoveryGrantId: discovery.grantId, preflightDigest,
     actions: [{
       actionId: 'ACTION-WRITE', effect: 'reversible-write', dataLeaseId: input.leaseId,
-      fencingToken: input.fencingToken, cleanupPlanDigest: digest('cleanup'),
+      resourceKey: 'order:100', fencingToken: input.fencingToken, cleanupPlanDigest: digest('cleanup'),
       requests: [{
         intentId: 'INTENT-WRITE', method: 'POST', canonicalOrigin: 'http://fixture.test',
         exactPath: '/api/orders/100/approve', query: [],

@@ -125,7 +125,9 @@ describe('ProcessSupervisor', () => {
         args: [marker],
         cwd: canonicalVersionRoot,
         env: safeEnvironment,
-        startTimeoutMs: 100,
+        // 全量并发测试下，Node 子进程冷启动可能超过 100ms；该测试要验证的是
+        // “已启动但始终不发送 ready”的超时清理，而不是宿主调度延迟。
+        startTimeoutMs: 2_000,
         stopTimeoutMs: 30,
       })).rejects.toMatchObject({
         code: 'E2E_RUNTIME_CHILD_START_TIMEOUT',

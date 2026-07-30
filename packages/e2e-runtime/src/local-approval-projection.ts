@@ -1,14 +1,19 @@
 import {
+  ArtifactSchemaRegistry,
   LocalApprovalSummarySchema,
+  PrdSemanticReviewSchema,
+  canonicalizeJson,
+  digestText,
   type ApprovalEffect,
   type ApprovalGrantSubject,
   type LocalApprovalSummary,
 } from '@mutil-skills/e2e-contracts'
 import type { RuntimeRunSnapshot } from './run-store.js'
 import { localApprovalDisposition, projectRiskTier, type LocalApprovalDisposition } from './local-approval-policy.js'
+import { PrdSourceSnapshotSchema } from './local-approval-confirmations.js'
 
 export function projectLocalApproval(input: {
-  snapshot: Pick<RuntimeRunSnapshot, 'runId' | 'frozenArtifacts'>
+  snapshot: Pick<RuntimeRunSnapshot, 'runId' | 'frozenArtifacts' | 'trustedExecutionFacts'>
   approvalType: LocalApprovalSummary['approvalType']
   subjectDigest: string
   grantSubject?: ApprovalGrantSubject
@@ -33,6 +38,8 @@ export function projectLocalApproval(input: {
   const methods = unique(records.map((record) => string(record.method)?.toUpperCase())
     .filter(isHttpMethod)).sort()
   const maxUses = Math.max(0, ...records.map((record) => safePositiveInteger(record.maxUses)))
+  const semanticReview = input.approvalType === 'execution'
+    ? projectPrdSemanticReview(input.snapshot) : undefined
   const summary = LocalApprovalSummarySchema.parse({
     runId: input.snapshot.runId,
     approvalType: input.approvalType,
@@ -54,6 +61,7 @@ export function projectLocalApproval(input: {
     }).filter(isSafeId)).sort(),
     subjectDigest: input.subjectDigest,
     expiresAt: input.expiresAt,
+    ...(semanticReview === undefined ? {} : { semanticReview }),
   })
   return {
     summary,
@@ -66,6 +74,78 @@ export function projectLocalApproval(input: {
       hasManualFinalization,
     }),
   }
+}
+
+function projectPrdSemanticReview(
+  snapshot: Pick<RuntimeRunSnapshot, 'frozenArtifacts' | 'trustedExecutionFacts'>,
+) {
+  const parsedSource = PrdSourceSnapshotSchema.safeParse(
+    snapshot.trustedExecutionFacts['prd-source-snapshot'],
+  )
+  const parsedModel = ArtifactSchemaRegistry['requirement-model']
+    .safeParse(snapshot.frozenArtifacts['requirement-model'])
+  const parsedManifest = ArtifactSchemaRegistry['prd-manifest']
+    .safeParse(snapshot.frozenArtifacts['prd-manifest'])
+  const parsedScope = ArtifactSchemaRegistry['acceptance-scope']
+    .safeParse(snapshot.frozenArtifacts['acceptance-scope'])
+  if (!parsedSource.success || !parsedModel.success
+    || !parsedManifest.success || !parsedScope.success) {
+    throw new Error('E2E_RUNTIME_PRD_SEMANTIC_REVIEW_MISSING')
+  }
+  const source = parsedSource.data
+  const model = parsedModel.data.content
+  const dispositionByClause = new Map(parsedScope.data.content.clauseDispositions
+    .map((disposition) => [disposition.clauseId, disposition]))
+  const clauses = parsedManifest.data.content.clauses.map((clause) => {
+    const disposition = dispositionByClause.get(clause.clauseId)
+    if (disposition === undefined) throw new Error('E2E_RUNTIME_PRD_SEMANTIC_REVIEW_INCOMPLETE')
+    return {
+      ...structuredClone(disposition),
+      sourceId: clause.sourceId,
+      kind: clause.kind,
+      sourceSpan: structuredClone(clause.sourceSpan),
+      originalText: clause.originalText,
+      normalizedText: clause.normalizedText,
+    }
+  })
+  const requirements = model.requirements.map((requirement) => {
+    const outcomes = requirement.observableOutcomes.map((oracle) => ({
+      oracleId: oracle.oracleId, ruleId: oracle.ruleId, statement: oracle.statement,
+      sourceRefs: [...oracle.sourceRefs],
+    }))
+    const outcomeById = new Map(outcomes.map((oracle) => [oracle.oracleId, oracle]))
+    return {
+      reqId: requirement.reqId,
+      title: requirement.title,
+      sourceRefs: [...requirement.sourceRefs],
+      rules: requirement.rules.map((rule) => {
+        const explicitIds = rule.oracleIds
+        const oracles = explicitIds === undefined
+          ? outcomes : explicitIds.map((oracleId) => outcomeById.get(oracleId)!)
+        return {
+          ruleId: rule.ruleId,
+          statement: rule.statement,
+          sourceRefs: [...rule.sourceRefs],
+          oracleMapping: explicitIds === undefined ? 'requirement-level' as const : 'explicit' as const,
+          oracles,
+        }
+      }),
+    }
+  })
+  const review = {
+    prd: {
+      sourceRef: source.sourceRef,
+      normalizedText: source.normalizedText,
+      normalizedDigest: source.normalizedDigest,
+      byteLength: source.byteLength,
+    },
+    clauses,
+    requirements,
+  }
+  return PrdSemanticReviewSchema.parse({
+    ...review,
+    reviewDigest: digestText('prd-semantic-review/v1', canonicalizeJson(review)),
+  })
 }
 
 function projectEffects(

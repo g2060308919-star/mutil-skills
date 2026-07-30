@@ -1,5 +1,6 @@
 import {
   canonicalizeJson, digestArtifactContent, digestBytes, digestText,
+  digestPrdClause, digestPrdClauseInventory, digestPrdUnderstandingProjection,
   digestApprovalProjection,
   type CoverageUniverse, type SanitizerPolicy, type SignedDiscoveryGrant, type SignedReadGrant, type SignedWriteGrant,
   type ApproverIdentity, type PrivacyReviewReceipt,
@@ -34,6 +35,28 @@ const draft = (relativePath: string, content: unknown, files?: Array<{ relativeP
   ...base(), relativePath, content, ...(files ? { files } : {}),
 })
 
+function goldenUnderstandingProjection(prdRevision: string) {
+  const value = {
+    schemaVersion: '1.0.0' as const, contractId: 'CONTRACT-ORDER-GOLDEN', contractVersion: 1,
+    contractStatus: 'confirmed-by-caller' as const, sourceRevision: prdRevision,
+    contractSourceDigest: d('understanding-contract'),
+    sources: [{ sourceId: 'SOURCE-PRD', kind: 'file' as const, ref: 'golden:prd',
+      origin: { kind: 'text' as const, ref: 'golden:prd' },
+      relevance: 'target' as const, digest: d('understanding-source'), byteLength: 1 }],
+    nodes: [{ nodeId: 'REQ-ORDER-1', kind: 'REQ' as const, statement: '验证订单验收行为',
+      provenance: { kind: 'confirmed-decision' as const, decisionId: 'DECISION-ORDER-GOLDEN',
+        decisionRef: 'fixture:order-golden' }, responsibility: '订单页面',
+      upstreamNodeIds: [], downstreamNodeIds: [], acceptanceCriteria: ['订单验收行为符合预期'] }],
+    pendingQuestions: [], route: { skillName: 'e2e' as const, steps: [{ stepId: 'E2E-ORDER-1',
+      inputNodeIds: ['REQ-ORDER-1'], output: 'E2E Golden 报告', constraints: [],
+      dependencyStepIds: [], completionCondition: 'REQ-ORDER-1 已覆盖' }] },
+    authorization: { status: 'confirmed-by-caller' as const, contractVersion: 1,
+      authorizedNodeIds: ['REQ-ORDER-1'], confirmedAt: createdAt },
+    projectionDigest: '',
+  }
+  return { ...value, projectionDigest: digestPrdUnderstandingProjection(value) }
+}
+
 type GoldenDecision = { decisionId: string; status: 'pending' }
   | { decisionId: string; status: 'approved' | 'rejected'; receipt: DecisionReceipt }
 export interface ReadOnlyGoldenDecisions {
@@ -51,9 +74,11 @@ export interface GoldenBlockedRegressionCase {
 
 function goldenScopeFacts() {
   return {
-    includedReqCandidates: [{ reqId: 'REQ-ORDER-1', sourceRefs: ['PRD-ORDER-1'] }], exclusions: [], ambiguities: [],
+    includedReqCandidates: [{ reqId: 'REQ-ORDER-1', sourceRefs: ['CLAUSE-ORDER-1'] }], exclusions: [], ambiguities: [],
     dependencies: [], visualScope: { required: true, refs: ['PAGE-ORDERS'] },
     browserScope: { browserIds: ['CHROMIUM'], viewportIds: ['DESKTOP'] },
+    clauseDispositions: [{ clauseId: 'CLAUSE-ORDER-1', disposition: 'modeled' as const,
+      requirementIds: ['REQ-ORDER-1'] }],
   }
 }
 
@@ -63,11 +88,16 @@ function goldenLineageFacts(currentRevision: string) {
 }
 
 function goldenPrdManifest(revision: string) {
+  const material = { clauseId: 'CLAUSE-ORDER-1', sourceId: 'PRD-ORDER-1', kind: 'functional' as const,
+    sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 10 },
+    originalText: '显示待审核订单', normalizedText: '显示待审核订单' }
+  const clauses = [{ ...material, textDigest: digestPrdClause(material) }]
   return {
     prdId: 'PRD-ORDER-1', assetId: 'PRODUCT-PRD-1', revision,
     normalizedPrdDigest: revision,
     sources: [{ sourceId: 'PRD-ORDER-1', digest: revision, byteLength: 1 }],
-    attachments: [], sourceCacheIndexDigest: d('source-cache-index'),
+    attachments: [], sourceCacheIndexDigest: d('source-cache-index'), clauses,
+    clauseInventoryDigest: digestPrdClauseInventory(clauses),
   }
 }
 
@@ -124,11 +154,12 @@ function readOnlyApprovalContents(input: ReadOnlyApprovalFactsInput): Record<str
   const model = {
     modelRevision: 1, coupledDimensions: [], applicabilityRules: ['actor:auditor'], modelDecisionDigest: input.modelDigest,
     requirements: [{ reqId: 'REQ-ORDER-1', revision: 1, title: '展示订单列表', actors: ['auditor'], entities: ['order'],
-      preconditions: [], states: [], transitions: [], sourceRefs: ['prd:审核流程'], status: 'active',
-      observableOutcomes: [{ oracleId: 'ORACLE-ORDER-VISIBLE', statement: '显示待审核订单' }],
+      preconditions: [], states: [], transitions: [], sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
+      observableOutcomes: [{ oracleId: 'ORACLE-ORDER-VISIBLE', ruleId: 'RULE-ORDER-1',
+        statement: '显示待审核订单', sourceRefs: ['CLAUSE-ORDER-1'] }],
       applicability: [{ dimension: 'actor', value: 'auditor', required: true }],
       rules: [{ ruleId: 'RULE-ORDER-1', category: 'business', statement: '显示待审核订单',
-        sourceRefs: ['prd:1'], certainty: 'explicit' }] }],
+        sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit', oracleIds: ['ORACLE-ORDER-VISIBLE'] }] }],
   }
   const coverage = { ...input.universe,
     obligations: input.universe.obligations.map(({ kind: _kind, ...obligation }) => obligation) }
@@ -213,6 +244,7 @@ export function createWriteApprovalProjection(input: {
   runtimePolicyDigest: string
   dataLeaseId: string
   resourceKey: string
+  resourceFingerprint: string
   cleanupPlanDigest: string
   runtimeIsolationPolicy: RuntimeIsolationPolicy
   decisions?: ReadOnlyGoldenDecisions
@@ -241,6 +273,7 @@ function writeApprovalContents(input: {
   runtimePolicyDigest: string
   dataLeaseId: string
   resourceKey: string
+  resourceFingerprint: string
   cleanupPlanDigest: string
   runtimeIsolationPolicy: RuntimeIsolationPolicy
   evidencePolicyDigest: string
@@ -267,11 +300,12 @@ function writeApprovalContents(input: {
       entities: ['order'], preconditions: ['订单待审核'],
       states: [{ stateId: 'pending', title: '待审核' }, { stateId: 'approved', title: '已批准' }],
       transitions: [{ transitionId: 'TRANSITION-APPROVE', from: 'pending', action: '批准订单', to: 'approved' }],
-      sourceRefs: ['prd:审核流程'], status: 'active',
-      observableOutcomes: [{ oracleId: 'ORACLE-ORDER-APPROVED', statement: '订单显示已批准' }],
+      sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
+      observableOutcomes: [{ oracleId: 'ORACLE-ORDER-APPROVED', ruleId: 'RULE-ORDER-1',
+        statement: '订单显示已批准', sourceRefs: ['CLAUSE-ORDER-1'] }],
       applicability: [{ dimension: 'actor', value: 'operator', required: true }],
       rules: [{ ruleId: 'RULE-ORDER-1', category: 'business', statement: '授权操作员可以批准待审核订单',
-        sourceRefs: ['prd:1'], certainty: 'explicit' }] }],
+        sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit', oracleIds: ['ORACLE-ORDER-APPROVED'] }] }],
   }
   const coverage = { ...input.universe,
     obligations: input.universe.obligations.map(({ kind: _kind, ...obligation }) => obligation) }
@@ -297,7 +331,8 @@ function writeApprovalContents(input: {
     caseQueue: [{ ordinal: 0, caseId: 'CASE-WRITE-1' }],
     actionIntents: [{ actionId: 'ACTION-APPROVE', effect: 'reversible-write', intentDigest: d('write-intent'), requestIds: [] }],
     readHttpRequests: [],
-    dataNeeds: [{ leaseId: input.dataLeaseId, resourceKey: input.resourceKey, mode: 'write' }],
+    dataNeeds: [{ leaseId: input.dataLeaseId, resourceKey: input.resourceKey,
+      resourceFingerprint: input.resourceFingerprint, mode: 'write' }],
     manualProcedures: [], evidencePolicyDigest: input.evidencePolicyDigest,
     runtimeIsolation: null, unresolvedItems: [] }
   const approvalContents: Record<string, unknown> = {
@@ -517,11 +552,12 @@ export async function createReadOnlyGoldenGenerationInput(input: {
       productSpace: 'ORDER-AUDIT', title: '订单列表 E2E 验收',
       sourceDescriptors: [{ sourceId: 'SOURCE-PRD', kind: 'text', ref: 'golden:prd' }],
       userRequest: '验证订单列表展示待审核订单', testWorkspaceId: 'WORKSPACE-GOLDEN', secretRefs: [],
+      understanding: goldenUnderstandingProjection(context.prdRevision),
     }),
     'prd-manifest': draft('prd/prd-manifest.json', {
-      prdId: 'PRD-ORDER-1', assetId: context.assetId, revision: context.prdRevision,
+      ...goldenPrdManifest(context.prdRevision), assetId: context.assetId,
       normalizedPrdDigest: d('normalized-prd'),
-      sources: [{ sourceId: 'SOURCE-PRD', digest: d('source-prd'), byteLength: 18 }], attachments: [],
+      sources: [{ sourceId: 'PRD-ORDER-1', digest: d('source-prd'), byteLength: 18 }],
       sourceCacheIndexDigest: d('source-cache'),
     }),
     'prd-diff': draft('prd/prd-diff.json', {
@@ -541,11 +577,12 @@ export async function createReadOnlyGoldenGenerationInput(input: {
       modelRevision: 1, coupledDimensions: [], applicabilityRules: ['actor:auditor'],
       modelDecisionDigest: input.modelDigest, requirements: [{
         reqId: 'REQ-ORDER-1', revision: 1, title: '展示订单列表', actors: ['auditor'], entities: ['order'],
-        preconditions: [], states: [], transitions: [], sourceRefs: ['prd:审核流程'], status: 'active',
-        observableOutcomes: [{ oracleId: 'ORACLE-ORDER-VISIBLE', statement: '显示待审核订单' }],
+        preconditions: [], states: [], transitions: [], sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
+        observableOutcomes: [{ oracleId: 'ORACLE-ORDER-VISIBLE', ruleId: 'RULE-ORDER-1',
+          statement: '显示待审核订单', sourceRefs: ['CLAUSE-ORDER-1'] }],
         applicability: [{ dimension: 'actor', value: 'auditor', required: true }],
         rules: [{ ruleId: 'RULE-ORDER-1', category: 'business', statement: '显示待审核订单',
-          sourceRefs: ['prd:1'], certainty: 'explicit' }],
+          sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit', oracleIds: ['ORACLE-ORDER-VISIBLE'] }],
       }],
     }),
     'interaction-flow': draft('design/interaction-flow.json', { flows: [{
@@ -865,7 +902,8 @@ function applyWriteGoldenScenario(
   const projected = writeApprovalContents({
     modelDigest: input.modelDigest, universe: input.universe, fixtureOrigin: input.fixtureOrigin,
     runtimePolicyDigest: input.gatewayAudit.policyDigest, dataLeaseId: write.dataLeaseId,
-    resourceKey: write.resourceKey, cleanupPlanDigest: write.cleanupPlanDigest,
+    resourceKey: write.resourceKey, resourceFingerprint: write.resourceDigest,
+    cleanupPlanDigest: write.cleanupPlanDigest,
     evidencePolicyDigest, runtimeIsolationPolicy: write.runtimeIsolationPolicy, decisions: input.decisions,
   })
   for (const type of [
@@ -878,6 +916,7 @@ function applyWriteGoldenScenario(
     sourceDescriptors: [{ sourceId: 'SOURCE-PRD', kind: 'text', ref: 'golden:prd' }],
     userRequest: '验证操作员批准订单后系统可确认副作用并恢复测试数据',
     testWorkspaceId: 'WORKSPACE-GOLDEN', secretRefs: [],
+    understanding: goldenUnderstandingProjection(input.modelDigest),
   }
   drafts['interaction-flow'].content = { flows: [{
     flowId: 'FLOW-ORDER-APPROVAL', nodes: [
@@ -1078,6 +1117,7 @@ function predictedContentDigest(context: {
 function artifactSchemaVersion(artifactType: string): string {
   if (artifactType === 'browser-action-map') return '2.1.0'
   if (artifactType === 'execution-contract') return '1.1.0'
+  if (artifactType === 'prd-request') return '2.0.0'
   return ['approval-grants', 'browser-preflight', 'run-bundle',
     'project-policy', 'browser-evidence', 'acceptance-scope', 'prd-diff'].includes(artifactType) ? '2.0.0' : '1.0.0'
 }

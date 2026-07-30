@@ -10,7 +10,7 @@ export function fixedLauncherSource(layout: RuntimeLayout): string {
   })
   const nodeExecutable = shellSingleQuote(process.execPath)
   return `#!/bin/sh
-':' //; unset NODE_OPTIONS NODE_PATH; exec ${nodeExecutable} "$0" "$@"
+':' //; unset NODE_OPTIONS NODE_PATH; if [ ! -x ${nodeExecutable} ]; then printf '%s\\n' 'E2E_RUNTIME_NODE_EXECUTABLE_UNAVAILABLE' >&2; exit 70; fi; exec ${nodeExecutable} "$0" "$@"
 'use strict'
 const { createHash } = require('node:crypto')
 const { lstatSync, readFileSync, realpathSync } = require('node:fs')

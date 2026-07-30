@@ -1,8 +1,18 @@
 {
   "name": "@mutil-skills/e2e-playwright-runtime",
-  "version": "0.2.1",
+  "version": "0.4.5",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/g2060308919-star/mutil-skills.git",
+    "directory": "packages/e2e-playwright-runtime"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
-  "files": ["dist/src"],
+  "files": [
+    "dist/src"
+  ],
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
@@ -13,11 +23,15 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@mutil-skills/e2e-authority": "0.4.5",
+    "@mutil-skills/e2e-contracts": "0.4.5",
+    "@mutil-skills/e2e-engine": "0.4.5",
     "@playwright/test": "1.61.1",
-    "@mutil-skills/e2e-authority": "0.2.1",
-    "@mutil-skills/e2e-contracts": "0.2.1",
-    "@mutil-skills/e2e-engine": "0.2.1",
     "playwright": "1.61.1",
     "typescript": "5.9.3"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
   }
 }

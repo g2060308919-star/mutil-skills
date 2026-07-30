@@ -8,7 +8,7 @@ import {
   type RuntimeResponseEnvelope,
 } from '@mutil-skills/e2e-contracts'
 
-export const RUNTIME_PACKAGE_VERSION = '0.2.1'
+export const RUNTIME_PACKAGE_VERSION = '0.4.5'
 
 const runtimeInstallRemediation = `npm exec --yes --package=@mutil-skills/e2e-runtime@${RUNTIME_PACKAGE_VERSION} -- repo-e2e install-runtime --version ${RUNTIME_PACKAGE_VERSION}`
 
@@ -21,6 +21,7 @@ const MIGRATION_REASON_CODES = new Set([
   'E2E_RUNTIME_PROTOCOL_MAJOR_UNSUPPORTED',
   'E2E_RUNTIME_PACKAGE_VERSION_SKEW',
   'E2E_RUNTIME_STATE_MIGRATION_REQUIRED',
+  'E2E_RUNTIME_UNDERSTANDING_MIGRATION_REQUIRED',
 ])
 
 export function parseRuntimeRequest(json: string): RuntimeRequestEnvelope {

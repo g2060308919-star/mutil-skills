@@ -11,6 +11,7 @@ import {
   canonicalizeJson, digestBytes, digestText,
 } from './common.js'
 import { RequirementModelSchema } from './design.js'
+import { PrdUnderstandingProjectionSchema } from './prd-understanding.js'
 import { ManualResultSchema } from './manual-result.js'
 import { ApprovalAssuranceSchema } from './approval-assurance.js'
 import { SanitizationRecordSchema } from './privacy.js'
@@ -51,6 +52,8 @@ import { SignedGrantSchema } from './signed-grant.js'
 import {
   computeFullPlaywrightCleanupSourceDigest,
   computeFullPlaywrightSourceDigest,
+  digestOracleCheckpointValue,
+  OracleCheckpointPlanSchema,
 } from './compiler-input.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -96,6 +99,7 @@ export const FullPlaywrightProgramSchema = z.object({
   dataLeaseId: SafeIdSchema,
   cleanupPlanId: SafeIdSchema,
   timeoutMs: z.number().int().positive().max(3_600_000),
+  oracleCheckpoints: z.array(OracleCheckpointPlanSchema).min(1).max(10_000),
   networkRequests: WriteHttpIntentSetSchema,
   networkRequestBodies: z.array(FullPlaywrightRequestBodySchema).max(1_000).optional(),
 }).strict().superRefine((program, context) => {
@@ -108,14 +112,23 @@ export const FullPlaywrightProgramSchema = z.object({
       path: ['cleanupSourceDigest'],
     })
   }
+  const checkpointIds = program.oracleCheckpoints.map((checkpoint) => checkpoint.checkpointId)
+  const oracleIds = program.oracleCheckpoints.map((checkpoint) => checkpoint.oracleId)
+  if (new Set(checkpointIds).size !== checkpointIds.length) {
+    context.addIssue({ code: 'custom', path: ['oracleCheckpoints'], message: 'checkpointId 必须唯一' })
+  }
+  if (new Set(oracleIds).size !== oracleIds.length) {
+    context.addIssue({ code: 'custom', path: ['oracleCheckpoints'], message: '每个 Program 的 oracleId 必须唯一' })
+  }
   const intentIds = program.networkRequests.map((request) => request.intentId)
   const expectedOrders = program.networkRequests.map((request) => request.expectedOrder)
   if (new Set(intentIds).size !== intentIds.length) {
     context.addIssue({ code: 'custom', message: 'full Playwright request intentId 必须唯一', path: ['networkRequests'] })
   }
-  if (new Set(expectedOrders).size !== expectedOrders.length) {
+  const orderStages = [...new Set(expectedOrders)].sort((left, right) => left - right)
+  if (orderStages.some((order, index) => order !== index + 1)) {
     context.addIssue({
-      code: 'custom', message: 'full Playwright request expectedOrder 必须唯一', path: ['networkRequests'],
+      code: 'custom', message: 'full Playwright request expectedOrder 阶段必须从 1 开始连续', path: ['networkRequests'],
     })
   }
   if (program.networkRequestBodies !== undefined) {
@@ -152,6 +165,37 @@ export const FullPlaywrightProgramSchema = z.object({
 
 export type FullPlaywrightProgram = z.infer<typeof FullPlaywrightProgramSchema>
 export type FullPlaywrightRequestBody = z.infer<typeof FullPlaywrightRequestBodySchema>
+
+export const OracleCheckpointResultSchema = z.object({
+  checkpointId: SafeIdSchema,
+  oracleId: SafeIdSchema,
+  expectedJson: z.string().min(1).max(64 * 1024),
+  actualJson: z.string().min(1).max(64 * 1024),
+  expectedDigest: DigestSchema,
+  actualDigest: DigestSchema,
+  status: z.enum(['passed', 'failed']),
+  evidenceIds: z.array(SafeIdSchema).min(1).max(10_000)
+    .refine((values) => new Set(values).size === values.length, 'checkpoint evidenceId 必须唯一'),
+}).strict().superRefine((checkpoint, context) => {
+  for (const field of ['expectedJson', 'actualJson'] as const) {
+    try {
+      if (canonicalizeJson(JSON.parse(checkpoint[field])) !== checkpoint[field]) throw new Error()
+    } catch {
+      context.addIssue({ code: 'custom', path: [field], message: 'checkpoint value 必须是规范 JSON' })
+    }
+  }
+  if (checkpoint.expectedDigest !== digestOracleCheckpointValue(checkpoint.expectedJson)) {
+    context.addIssue({ code: 'custom', path: ['expectedDigest'], message: 'checkpoint expectedDigest 不匹配' })
+  }
+  if (checkpoint.actualDigest !== digestOracleCheckpointValue(checkpoint.actualJson)) {
+    context.addIssue({ code: 'custom', path: ['actualDigest'], message: 'checkpoint actualDigest 不匹配' })
+  }
+  if ((checkpoint.expectedDigest === checkpoint.actualDigest) !== (checkpoint.status === 'passed')) {
+    context.addIssue({ code: 'custom', path: ['status'], message: 'checkpoint status 与 expected/actual 不一致' })
+  }
+})
+
+export type OracleCheckpointResult = z.infer<typeof OracleCheckpointResultSchema>
 
 function refineFullPlaywrightPrograms(input: {
   executionProfile?: z.infer<typeof ExecutionProfileSchema>
@@ -350,16 +394,64 @@ const projectPolicyContent = z.object({
   runtimePolicy: IdDigestSchema,
 }).strict()
 
-const prdRequestContent = z.object({
+export const PrdRequestContentSchema = z.object({
   productSpace: SafeIdSchema,
   title: NonEmptyTextSchema,
   sourceDescriptors: z.array(z.object({ sourceId: SafeIdSchema, kind: z.enum(['file', 'url', 'text']), ref: NonEmptyTextSchema }).strict()).min(1).max(1_000),
   userRequest: NonEmptyTextSchema,
   testWorkspaceId: SafeIdSchema,
   secretRefs: z.array(SafeIdSchema).max(1_000),
+  understanding: PrdUnderstandingProjectionSchema,
 }).strict()
 
-const prdManifestContent = z.object({
+const prdRequestContent = PrdRequestContentSchema
+
+export const PrdSourceSpanSchema = z.object({
+  startLine: z.number().int().positive(),
+  startColumn: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  endColumn: z.number().int().positive(),
+}).strict().superRefine((span, context) => {
+  if (span.endLine < span.startLine
+    || (span.endLine === span.startLine && span.endColumn < span.startColumn)) {
+    context.addIssue({ code: 'custom', message: 'PRD Clause sourceSpan 结束位置不得早于开始位置' })
+  }
+})
+
+export const PrdClauseKindSchema = z.enum([
+  'functional', 'validation', 'state', 'error', 'visual', 'permission',
+  'non-functional', 'out-of-scope', 'context',
+])
+
+const PrdClauseDigestInputSchema = z.object({
+  clauseId: SafeIdSchema,
+  sourceId: SafeIdSchema,
+  kind: PrdClauseKindSchema,
+  sourceSpan: PrdSourceSpanSchema,
+  originalText: NonEmptyTextSchema,
+  normalizedText: NonEmptyTextSchema,
+}).strict()
+
+export function digestPrdClause(input: z.input<typeof PrdClauseDigestInputSchema>): string {
+  return digestText('prd-clause/v1', canonicalizeJson(input))
+}
+
+export const PrdClauseSchema = PrdClauseDigestInputSchema.extend({
+  textDigest: DigestSchema,
+}).strict().superRefine((clause, context) => {
+  const { textDigest, ...material } = clause
+  if (textDigest !== digestPrdClause(material)) {
+    context.addIssue({ code: 'custom', path: ['textDigest'], message: 'PRD Clause 文本摘要不匹配' })
+  }
+})
+
+export type PrdClause = z.infer<typeof PrdClauseSchema>
+
+export function digestPrdClauseInventory(clauses: PrdClause[]): string {
+  return digestText('prd-clause-inventory/v1', canonicalizeJson(clauses))
+}
+
+export const PrdManifestContentSchema = z.object({
   prdId: SafeIdSchema,
   assetId: AssetIdSchema,
   revision: DigestSchema,
@@ -371,7 +463,25 @@ const prdManifestContent = z.object({
     byteLength: z.number().int().nonnegative(),
   }).strict()).max(10_000),
   sourceCacheIndexDigest: DigestSchema,
-}).strict()
+  clauses: z.array(PrdClauseSchema).min(1).max(100_000),
+  clauseInventoryDigest: DigestSchema,
+}).strict().superRefine((content, context) => {
+  const sourceIds = new Set(content.sources.map((source) => source.sourceId))
+  const clauseIds = content.clauses.map((clause) => clause.clauseId)
+  if (new Set(clauseIds).size !== clauseIds.length) {
+    context.addIssue({ code: 'custom', path: ['clauses'], message: 'PRD Clause ID 必须唯一' })
+  }
+  content.clauses.forEach((clause, index) => {
+    if (!sourceIds.has(clause.sourceId)) {
+      context.addIssue({ code: 'custom', path: ['clauses', index, 'sourceId'], message: 'PRD Clause 必须引用已登记来源' })
+    }
+  })
+  if (content.clauseInventoryDigest !== digestPrdClauseInventory(content.clauses)) {
+    context.addIssue({ code: 'custom', path: ['clauseInventoryDigest'], message: 'PRD Clause Inventory 摘要不匹配' })
+  }
+})
+
+const prdManifestContent = PrdManifestContentSchema
 
 const prdDiffContent = z.object({
   previousRevision: DigestSchema,
@@ -396,7 +506,26 @@ const semanticGenerationContent = z.object({
   { message: '选中候选必须存在于候选集合', path: ['selectedDigest'] },
 )
 
-const acceptanceScopeContent = z.object({
+export const ClauseDispositionSchema = z.discriminatedUnion('disposition', [
+  z.object({
+    clauseId: SafeIdSchema, disposition: z.literal('modeled'),
+    requirementIds: z.array(SafeIdSchema).min(1).max(1_000)
+      .refine((values) => new Set(values).size === values.length, 'Requirement ID 必须唯一'),
+  }).strict(),
+  z.object({
+    clauseId: SafeIdSchema, disposition: z.literal('excluded'),
+    reason: NonEmptyTextSchema, decisionId: SafeIdSchema,
+  }).strict(),
+  z.object({
+    clauseId: SafeIdSchema, disposition: z.literal('not-applicable'),
+    reason: NonEmptyTextSchema, decisionId: SafeIdSchema,
+  }).strict(),
+  z.object({
+    clauseId: SafeIdSchema, disposition: z.literal('ambiguous'), ambiguityId: SafeIdSchema,
+  }).strict(),
+])
+
+export const AcceptanceScopeContentSchema = z.object({
   includedReqCandidates: z.array(z.object({ reqId: SafeIdSchema, sourceRefs: z.array(NonEmptyTextSchema).min(1) }).strict()).max(100_000),
   exclusions: z.array(z.object({ reqId: SafeIdSchema, rationale: NonEmptyTextSchema, decisionId: SafeIdSchema }).strict()).max(100_000),
   ambiguities: z.array(z.object({
@@ -413,14 +542,21 @@ const acceptanceScopeContent = z.object({
   dependencies: z.array(z.object({ dependencyId: SafeIdSchema, status: z.enum(['available', 'blocked']), digest: DigestSchema }).strict()).max(100_000),
   visualScope: z.object({ required: z.boolean(), refs: z.array(SafeIdSchema) }).strict(),
   browserScope: z.object({ browserIds: z.array(SafeIdSchema).min(1), viewportIds: z.array(SafeIdSchema).min(1) }).strict(),
+  clauseDispositions: z.array(ClauseDispositionSchema).min(1).max(100_000)
+    .refine((items) => new Set(items.map((item) => item.clauseId)).size === items.length,
+      '每个 PRD Clause 只能有一个 Scope 处置'),
   scopeDecision: decisionFor('scope'),
 }).strict()
+
+const acceptanceScopeContent = AcceptanceScopeContentSchema
 
 const requirementModelContent = RequirementModelSchema
 
 const interactionFlowContent = z.object({
   flows: z.array(z.object({
     flowId: SafeIdSchema,
+    contractNodeIds: z.array(SafeIdSchema).min(1).max(10_000)
+      .refine((values) => new Set(values).size === values.length, 'contractNodeId 必须唯一').optional(),
     nodes: z.array(z.object({ nodeId: SafeIdSchema, reqId: SafeIdSchema, kind: z.enum(['entry', 'page', 'action', 'decision', 'state', 'feedback', 'exit']), effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']), oracleIds: z.array(SafeIdSchema) }).strict()).min(2),
     edgeIds: z.array(SafeIdSchema).min(1), entryNodeId: SafeIdSchema, exitNodeIds: z.array(SafeIdSchema).min(1),
   }).strict()).max(100_000),
@@ -436,14 +572,18 @@ const coverageDisposition = z.discriminatedUnion('kind', [
   }).strict(),
 ])
 
-const coverageUniverseContent = z.object({
+export const CoverageUniverseContentSchema = z.object({
   coveragePolicyDigest: DigestSchema,
   pairwiseSeed: z.number().int().nonnegative(),
   universeDigest: DigestSchema,
   obligations: z.array(z.object({
     obligationId: SafeIdSchema,
     reqId: SafeIdSchema,
+    clauseIds: z.array(SafeIdSchema).min(1).max(10_000)
+      .refine((values) => new Set(values).size === values.length, 'Clause ID 必须唯一'),
     ruleIds: z.array(SafeIdSchema).max(10_000),
+    oracleIds: z.array(SafeIdSchema).min(1).max(10_000)
+      .refine((values) => new Set(values).size === values.length, 'Oracle ID 必须唯一'),
     nodeIds: z.array(SafeIdSchema).max(10_000),
     actor: z.union([SafeIdSchema, z.literal('not-applicable')]),
     transitionId: z.union([SafeIdSchema, z.literal('not-applicable')]),
@@ -453,6 +593,8 @@ const coverageUniverseContent = z.object({
     disposition: coverageDisposition,
   }).strict()).max(100_000),
 }).strict()
+
+const coverageUniverseContent = CoverageUniverseContentSchema
 
 const testCasesContent = z.object({
   cases: z.array(z.object({
@@ -506,7 +648,11 @@ export const ExecutionContractV10ContentSchema = z.object({
   identities: z.array(z.object({ identityId: SafeIdSchema, roleIds: z.array(SafeIdSchema).min(1), secretRef: SafeIdSchema }).strict()).max(10_000),
   caseQueue: z.array(z.object({ ordinal: z.number().int().nonnegative(), caseId: SafeIdSchema }).strict()).max(100_000),
   actionIntents: z.array(ExecutionActionIntentV10Schema).max(100_000),
-  dataNeeds: z.array(z.object({ leaseId: SafeIdSchema, resourceKey: SafeIdSchema, mode: z.enum(['read', 'write']) }).strict()).max(100_000),
+  dataNeeds: z.array(z.discriminatedUnion('mode', [
+    z.object({ leaseId: SafeIdSchema, resourceKey: SafeIdSchema, mode: z.literal('read') }).strict(),
+    z.object({ leaseId: SafeIdSchema, resourceKey: SafeIdSchema,
+      resourceFingerprint: DigestSchema, mode: z.literal('write') }).strict(),
+  ])).max(100_000),
   manualProcedures: z.array(z.object({ manualProcedureId: SafeIdSchema, instructionDigest: DigestSchema }).strict()).max(100_000),
   evidencePolicyDigest: DigestSchema,
   runtimeIsolation: RuntimeIsolationPolicySchema.nullable(),
@@ -839,6 +985,7 @@ const browserResultsContent = z.object({
       actualDigest: DigestSchema.optional(),
       oracleResult: z.enum(['passed', 'failed', 'not-evaluated']),
       evidenceIds: z.array(SafeIdSchema).max(10_000),
+      oracleCheckpoints: z.array(OracleCheckpointResultSchema).max(10_000).optional(),
     }).strict()).max(100_000),
     effectObservation: z.enum(['not-applicable', 'proven-not-applied', 'applied', 'unknown']),
     gatewayAuditRef: SafeIdSchema,
@@ -996,6 +1143,16 @@ export const FinalReportContentSchema = z.object({
   metrics: VerdictResultSchema.shape.metrics,
   scope: z.array(IdDigestSchema).max(100_000),
   traceability: z.array(z.object({ fromId: SafeIdSchema, toId: SafeIdSchema, kind: SafeIdSchema }).strict()).max(1_000_000),
+  semanticTraceability: z.array(z.object({
+    clauseId: SafeIdSchema,
+    sourceId: SafeIdSchema,
+    sourceSpan: PrdSourceSpanSchema,
+    originalText: NonEmptyTextSchema,
+    disposition: z.enum(['modeled', 'excluded', 'not-applicable', 'ambiguous', 'missing']),
+    requirementId: SafeIdSchema.optional(),
+    ruleId: SafeIdSchema.optional(),
+    oracleId: SafeIdSchema.optional(),
+  }).strict()).min(1).max(1_000_000),
   realResults: z.array(IdDigestSchema).max(100_000),
   injectionResults: z.array(IdDigestSchema).max(100_000),
   manualResults: z.array(IdDigestSchema.extend({
@@ -1078,6 +1235,7 @@ export const FinalReportContentSchema = z.object({
       oracle: NonEmptyTextSchema,
       status: ReportStatusSchema,
       evidenceLinks: z.array(RelativePathSchema).max(10_000),
+      oracleCheckpoints: z.array(OracleCheckpointResultSchema).max(10_000).optional(),
     }).strict()).max(100_000),
   }).strict()).max(100_000),
   injectionBoundary: NonEmptyTextSchema,
@@ -1361,7 +1519,9 @@ function createArtifactSchema<T extends ArtifactType>(
         ? z.literal('2.1.0')
         : artifactType === 'final-report'
           ? z.literal('3.0.0')
-          : artifactType === 'generation-manifest'
+      : artifactType === 'generation-manifest'
+            ? z.literal('2.0.0')
+          : artifactType === 'prd-request'
             ? z.literal('2.0.0')
         : artifactType === 'cleanup-results'
       || artifactType === 'approval-grants' || artifactType === 'browser-preflight'
@@ -1400,6 +1560,13 @@ export function parseArtifactDocument(candidate: unknown): ArtifactDocument {
     throw new E2EError({
       code: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED', category: 'artifact', retryable: false,
       message: `E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED: ${typeResult.data.artifactType} 必须携带严格 Runtime provenance`,
+    })
+  }
+  if (typeResult.data.artifactType === 'prd-request'
+    && (!versionResult.success || versionResult.data.schemaVersion !== '2.0.0')) {
+    throw new E2EError({
+      code: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED', category: 'artifact', retryable: false,
+      message: 'E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED: prd-request 必须迁移到 understand-prd 契约投影 v2',
     })
   }
   if ((typeResult.data.artifactType === 'execution-contract'

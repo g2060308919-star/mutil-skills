@@ -82,8 +82,9 @@ export class ReversibleWriteGateway {
   readonly #requests: ReversibleWriteCapability['requests']
   readonly #resolvedTemplatePayloadDigests: Readonly<Record<string, string>>
   readonly #uses = new Map<string, number>()
+  readonly #seenIntentIds = new Set<string>()
   readonly #audit: GatewayAuditSummary = { received: 0, forwarded: 0, blocked: 0, byIntent: {} }
-  #requestIndex = 0
+  #expectedOrder = 1
   #reservation?: CapabilityReservation
   #final = false
 
@@ -118,8 +119,14 @@ export class ReversibleWriteGateway {
       throw gatewayError('E2E_GATEWAY_CAPABILITY_NOT_IN_GRANT', 'Capability 与签名 Grant 不一致')
     }
     const requests = [...input.capability.requests].sort((left, right) => left.expectedOrder - right.expectedOrder)
-    if (requests.length === 0 || requests.some((request, index) => request.expectedOrder !== index + 1 || request.maxRequests < 1)) {
-      throw gatewayError('E2E_GATEWAY_REQUEST_SEQUENCE_INVALID', 'Capability 请求序列必须从 1 开始连续且请求次数为正数')
+    const orderStages = [...new Set(requests.map((request) => request.expectedOrder))]
+    if (requests.length === 0
+      || requests.some((request) => request.maxRequests < 1)
+      || orderStages.some((order, index) => order !== index + 1)) {
+      throw gatewayError(
+        'E2E_GATEWAY_REQUEST_SEQUENCE_INVALID',
+        'Capability 请求阶段必须从 1 开始连续且请求次数为正数',
+      )
     }
     const templateIntentIds = requests.filter((request) => request.payload.kind === 'template')
       .map((request) => request.intentId).sort()
@@ -181,24 +188,57 @@ export class ReversibleWriteGateway {
       return this.block(error instanceof E2EError ? error.code : 'E2E_GATEWAY_REQUEST_INVALID', String(error))
     }
 
-    const expected = this.#requests[this.#requestIndex]
-    if (!expected) return this.block('E2E_GATEWAY_REQUEST_SEQUENCE_EXHAUSTED', '已批准请求序列已耗尽', request)
-    const matchingIntent = this.#requests.find((intent) => requestMatchesMetadata(intent, request))
-    if (matchingIntent && matchingIntent.intentId !== expected.intentId) {
-      return this.block('E2E_GATEWAY_REQUEST_OUT_OF_ORDER', '请求顺序与已批准序列不一致', request)
-    }
-    if (!requestMatchesMetadata(expected, request)) {
-      return this.block('E2E_GATEWAY_INTENT_NOT_FOUND', '请求不匹配当前已批准 intent', request)
-    }
-
-    const payloadDecision = matchPayload(
-      expected.payload,
+    const metadataMatches = this.#requests
+      .map((intent, index) => ({ intent, index }))
+      .filter(({ intent }) => requestMatchesMetadata(intent, request))
+    const payloadFor = (intent: HttpIntent) => matchPayload(
+      intent.payload,
       raw,
-      expected.payload.kind === 'template'
-        ? this.#resolvedTemplatePayloadDigests[expected.intentId]
+      intent.payload.kind === 'template'
+        ? this.#resolvedTemplatePayloadDigests[intent.intentId]
         : undefined,
     )
-    if (!payloadDecision.allowed) return this.block(payloadDecision.code, payloadDecision.reason, request)
+
+    // expectedOrder 约束首次出现的阶段；同阶段 intent 可按浏览器并发调度任意顺序首次出现。
+    // 已出现 intent 可在后续阶段交错复用，但总次数仍受 maxRequests 限制。
+    const expectedMatches = metadataMatches
+      .filter(({ intent }) => intent.expectedOrder === this.#expectedOrder
+        && !this.#seenIntentIds.has(intent.intentId))
+      .map((candidate) => ({ ...candidate, payload: payloadFor(candidate.intent) }))
+    const expectedMatch = expectedMatches.find(({ payload }) => payload.allowed)
+    const reusableMatches = metadataMatches
+      .filter(({ intent }) => this.#seenIntentIds.has(intent.intentId))
+      .reverse()
+      .map((candidate) => ({ ...candidate, payload: payloadFor(candidate.intent) }))
+    const reusableMatch = reusableMatches.find(({ intent, payload }) =>
+      payload.allowed && (this.#uses.get(intent.intentId) ?? 0) < intent.maxRequests)
+
+    let selected: { intent: HttpIntent; index: number } | undefined
+    if (expectedMatch) selected = expectedMatch
+    else if (reusableMatch) selected = reusableMatch
+
+    if (!selected) {
+      const expectedPayloadMismatch = expectedMatches.find(({ payload }) => !payload.allowed)?.payload
+      if (expectedPayloadMismatch && !expectedPayloadMismatch.allowed) {
+        return this.block(expectedPayloadMismatch.code, expectedPayloadMismatch.reason, request)
+      }
+      if (metadataMatches.some(({ intent }) => intent.expectedOrder > this.#expectedOrder)) {
+        return this.block('E2E_GATEWAY_REQUEST_OUT_OF_ORDER', '请求顺序与已批准序列不一致', request)
+      }
+      const exhaustedMatch = reusableMatches.find(({ payload }) => payload.allowed)
+      if (exhaustedMatch) {
+        return !this.isRequestSequenceComplete()
+          ? this.block('E2E_GATEWAY_REQUEST_OUT_OF_ORDER', '该 intent 已达次数上限，且下一个已批准 intent 尚未出现', request)
+          : this.block('E2E_GATEWAY_MAX_REQUESTS_EXCEEDED', '该 intent 已达已批准请求次数上限', request)
+      }
+      const payloadMismatch = reusableMatches.find(({ payload }) => !payload.allowed)?.payload
+      if (payloadMismatch && !payloadMismatch.allowed) {
+        return this.block(payloadMismatch.code, payloadMismatch.reason, request)
+      }
+      return !this.isRequestSequenceComplete()
+        ? this.block('E2E_GATEWAY_INTENT_NOT_FOUND', '请求不匹配当前或已出现的已批准 intent', request)
+        : this.block('E2E_GATEWAY_REQUEST_SEQUENCE_EXHAUSTED', '已批准请求序列已耗尽', request)
+    }
 
     try {
       const grantDecision = await this.#authority.verifyForSubject(this.#grant, this.#currentSubject)
@@ -206,7 +246,7 @@ export class ReversibleWriteGateway {
       const targetAllowed = await this.#leaseAuthority.verifyTarget(
         this.#capability.dataLeaseId,
         this.#capability.fencingToken,
-        expected.targetFingerprint,
+        selected.intent.targetFingerprint,
       )
       if (!targetAllowed) return this.block('E2E_GATEWAY_LEASE_TARGET_INVALID', 'Lease、fencing token 或目标指纹不再有效', request)
       if (!this.#reservation) await this.#reserveAfterVerification()
@@ -214,20 +254,26 @@ export class ReversibleWriteGateway {
       return this.block(error instanceof E2EError ? error.code : 'E2E_GATEWAY_AUTHORITY_FAILURE', String(error), request)
     }
 
-    const used = (this.#uses.get(expected.intentId) ?? 0) + 1
-    this.#uses.set(expected.intentId, used)
-    if (used >= expected.maxRequests) this.#requestIndex += 1
+    const used = (this.#uses.get(selected.intent.intentId) ?? 0) + 1
+    this.#uses.set(selected.intent.intentId, used)
+    if (!this.#seenIntentIds.has(selected.intent.intentId)) {
+      this.#seenIntentIds.add(selected.intent.intentId)
+      const stageComplete = this.#requests
+        .filter((intent) => intent.expectedOrder === this.#expectedOrder)
+        .every((intent) => this.#seenIntentIds.has(intent.intentId))
+      if (stageComplete) this.#expectedOrder += 1
+    }
     this.#audit.forwarded += 1
-    this.#audit.byIntent[expected.intentId] = (this.#audit.byIntent[expected.intentId] ?? 0) + 1
+    this.#audit.byIntent[selected.intent.intentId] = (this.#audit.byIntent[selected.intent.intentId] ?? 0) + 1
     this.#recorder.recordReadDecision({ actionId: this.#capability.actionId,
       executionSessionId: this.#executionSessionId, decision: 'forwarded', request })
-    return { decision: 'forward', intentId: expected.intentId, request }
+    return { decision: 'forward', intentId: selected.intent.intentId, request }
   }
 
   async complete(outcomeDigest: string): Promise<string> {
     if (this.#final) throw gatewayError('E2E_GATEWAY_ACTION_FINAL', 'Action 已进入终态')
     if (!this.#reservation) throw gatewayError('E2E_GATEWAY_RESERVATION_MISSING', 'Action 尚未产生 capability reservation')
-    if (this.#requestIndex !== this.#requests.length) {
+    if (!this.isRequestSequenceComplete()) {
       throw gatewayError('E2E_GATEWAY_REQUEST_SEQUENCE_INCOMPLETE', '已批准请求序列尚未完整执行')
     }
     const authorityReceiptDigest = await this.#authority.complete(this.#reservation.reservationId, outcomeDigest)
@@ -245,7 +291,7 @@ export class ReversibleWriteGateway {
   async completeWithExecutionOutcomeResult(input: CompleteExecutionOutcomeInput): Promise<GatewayTerminalOutcome> {
     if (this.#final) throw gatewayError('E2E_GATEWAY_ACTION_FINAL', 'Action 已进入终态')
     if (!this.#reservation) throw gatewayError('E2E_GATEWAY_RESERVATION_MISSING', 'Action 尚未产生 capability reservation')
-    if (this.#requestIndex !== this.#requests.length) {
+    if (!this.isRequestSequenceComplete()) {
       throw gatewayError('E2E_GATEWAY_REQUEST_SEQUENCE_INCOMPLETE', '已批准请求序列尚未完整执行')
     }
     if (!this.#outcomeSigner || !this.#gatewayPolicyDigest) {
@@ -350,13 +396,17 @@ export class ReversibleWriteGateway {
     return { ...this.#audit, byIntent: { ...this.#audit.byIntent } }
   }
 
+  getExecutionSessionId(): string {
+    return this.#executionSessionId
+  }
+
   getReservation(): CapabilityReservation | undefined {
     return this.#reservation ? { ...this.#reservation } : undefined
   }
 
   /** Transport Host 用于避免在多步已批准请求序列完成前开放 outcome finalization。 */
   isRequestSequenceComplete(): boolean {
-    return this.#requestIndex === this.#requests.length
+    return this.#seenIntentIds.size === this.#requests.length
   }
 
   async #reserveAfterVerification(): Promise<CapabilityReservation> {

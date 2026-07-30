@@ -118,6 +118,14 @@ describe('runtime discovery', () => {
     })).rejects.toMatchObject({ code: 70 })
   })
 
+  test('the fixed launcher reports an actionable environment code when its pinned Node disappears', async () => {
+    const source = await readFile(new URL('../src/launcher-template.ts', import.meta.url), 'utf8')
+    expect(source).toContain('E2E_RUNTIME_NODE_EXECUTABLE_UNAVAILABLE')
+    expect(source).toContain('if [ ! -x ${nodeExecutable} ]')
+    expect(source.indexOf('if [ ! -x ${nodeExecutable} ]'))
+      .toBeLessThan(source.lastIndexOf('exec ${nodeExecutable}'))
+  })
+
   test('the fixed launcher rejects a symlinked versions root even when current binds its resolved path', async () => {
     const roots = await createRuntimeTestRoots()
     await installFixture(roots.source, roots.home, '0.0.0')

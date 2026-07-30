@@ -6,6 +6,7 @@ import {
   computeFullPlaywrightCleanupSourceDigest,
   computeFullPlaywrightSourceDigest,
   digestCanonicalGrantApprovalSubject,
+  digestOracleCheckpointValue,
   digestText,
   type CompilerInputV1,
 } from '../src/index.js'
@@ -106,6 +107,8 @@ describe('CompilerInputV1', () => {
       cleanupPlanId: 'CLEANUP-1',
       timeoutMs: 30_000,
       cleanupTimeoutMs: 30_000,
+      oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1',
+        expectedJson: 'true', expectedDigest: digestOracleCheckpointValue('true') }],
     }
     const fullInput = {
       ...input,

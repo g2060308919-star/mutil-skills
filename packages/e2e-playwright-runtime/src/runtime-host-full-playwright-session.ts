@@ -27,6 +27,7 @@ export interface RuntimeHostFullPlaywrightSessionInput {
   cleanupBindings: FullPlaywrightBindings
   reserveCapability(): Promise<CapabilityReservation>
   capture(stage: FullPlaywrightEvidenceStage): Promise<FullPlaywrightEvidenceSummary[]>
+  captureCheckpoint(checkpointId: string): Promise<FullPlaywrightEvidenceSummary[]>
   retireProgram(): Promise<void>
   retireCleanup(): Promise<void>
   observeEffect(): 'proven-not-applied' | 'applied' | 'unknown'
@@ -77,7 +78,7 @@ export function createRuntimeHostFullPlaywrightSession(input: RuntimeHostFullPla
   })
   const session = authorizeFullPlaywrightControlledSession({
     binding: input.binding, programBindings, cleanupBindings, reserveCapability: input.reserveCapability,
-    capture: input.capture,
+    capture: input.capture, captureCheckpoint: input.captureCheckpoint,
     retireProgram: input.retireProgram, retireCleanup: input.retireCleanup,
     observeEffect: input.observeEffect, freezeGateway: input.freezeGateway,
     publishGateway: input.publishGateway, checkpoint: input.checkpoint, terminal: input.terminal,

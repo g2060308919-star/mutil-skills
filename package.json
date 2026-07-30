@@ -1,6 +1,14 @@
 {
   "name": "mutil-skills",
-  "version": "0.0.0",
+  "version": "0.4.5",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/g2060308919-star/mutil-skills.git"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "private": true,
   "type": "module",
   "workspaces": [
@@ -13,7 +21,9 @@
     "generate:e2e-schemas": "npm run build && node scripts/generate-e2e-artifact-schemas.mjs",
     "lint:architecture": "node scripts/check-architecture.mjs",
     "e2e:golden": "vitest run --config vitest.e2e.config.ts",
-    "verify:e2e-release": "npm run build && npm pack --workspaces --pack-destination /private/tmp/mutil-skills-pack-qa && E2E_RUNTIME_RUN_PACKED_INSTALL=1 E2E_RUNTIME_PACKS_DIR=/private/tmp/mutil-skills-pack-qa npx vitest run scripts/e2e-runtime-package.test.ts && E2E_RUNTIME_RUN_CROSS_REPO=1 npm run e2e:golden"
+    "verify:e2e-pack": "node scripts/run-e2e-release.mjs pack",
+    "verify:e2e-release": "node scripts/run-e2e-release.mjs registry",
+    "verify:e2e-public-diagnostic": "node scripts/run-e2e-release.mjs diagnostic"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",

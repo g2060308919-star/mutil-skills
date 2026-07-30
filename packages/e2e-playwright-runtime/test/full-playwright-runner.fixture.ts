@@ -7,6 +7,7 @@ import {
   digestApprovalProjection,
   digestCleanupPlanDefinition,
   digestExecutionOutcomeBinding,
+  digestOracleCheckpointValue,
   digestText,
   type ApprovalCapabilityRecord,
   type CleanupPlanDefinition,
@@ -53,7 +54,10 @@ export async function readyFixture(input: {
   retireProgramError?: Error
   retireCleanupError?: Error
   networkRequests?: FullPlaywrightProgram['networkRequests']
+  networkRequestBodies?: FullPlaywrightProgram['networkRequestBodies']
+  oracleCheckpoints?: FullPlaywrightProgram['oracleCheckpoints']
   capture?: (stage: FullPlaywrightEvidenceStage) => Promise<ReturnType<typeof evidenceForStage>>
+  captureCheckpoint?: (checkpointId: string) => Promise<ReturnType<typeof evidenceForStage>>
   gatewaySummary?: { received: number; forwarded: number; blocked: number; byIntent: Record<string, number> }
   issueOutcome?: (binding: ExecutionOutcomeBinding) => ExecutionOutcomeReceipt
   terminalFailures?: Partial<Record<'complete' | 'release' | 'markUnknown' | 'quarantine' | 'sign', number>>
@@ -123,6 +127,7 @@ export async function readyFixture(input: {
     'await extra.newPage()',
     "const response = await request.post('http://127.0.0.1/api')",
     'await expect(response.ok()).toBeTruthy()',
+    "await checkpoint({ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', actual: true })",
     'state.programCompleted = true',
   ].join('\n')
   const cleanupSource = input.cleanupSource ?? [
@@ -135,7 +140,12 @@ export async function readyFixture(input: {
     source, sourceDigest: computeFullPlaywrightSourceDigest(source), cleanupSource,
     cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource), dataLeaseId: active.leaseId,
     cleanupPlanId: 'CLEANUP-1', timeoutMs: input.programTimeoutMs ?? 500,
+    oracleCheckpoints: input.oracleCheckpoints ?? [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1',
+      expectedJson: 'true', expectedDigest: digestOracleCheckpointValue('true') }],
     networkRequests: input.networkRequests ?? [],
+    ...(input.networkRequestBodies === undefined ? {} : {
+      networkRequestBodies: input.networkRequestBodies,
+    }),
   }
   const cleanupPlan: CleanupPlanDefinition = {
     schemaVersion: '2.0.0', transport: 'browser-local', cleanupPlanId: 'CLEANUP-1', actionId: 'ACTION-1',
@@ -188,7 +198,8 @@ export async function readyFixture(input: {
     preflightDigest, actions: [{ actionId: 'ACTION-1', transport: 'browser-local' as const,
       operation: 'full-playwright' as const, effect: 'reversible-write' as const,
       programDigest: program.sourceDigest, cleanupProgramDigest: program.cleanupSourceDigest,
-      dataLeaseId: active.leaseId, fencingToken: 1, cleanupPlanDigest, requests: input.networkRequests ?? [] }],
+      dataLeaseId: active.leaseId, resourceKey: 'browser-local:fixture', fencingToken: 1,
+      cleanupPlanDigest, requests: input.networkRequests ?? [] }],
   }
   const grant = await authority.issueWriteGrant({ subject, approver: { subject: 'alice', roles: ['e2e-approver'] },
     approvalSessionRef: 'session:alice', ttlMs: 60_000 })
@@ -253,7 +264,9 @@ export async function readyFixture(input: {
   const session = authorizeFullPlaywrightControlledSession({
     binding: { executionProfile: 'full-playwright', assetId: 'ASSET-1', generationId: 'GEN-1',
       prdRevision: d('prd'), runId: 'RUN-TEST', caseId: 'CASE-1', stepId: 'STEP-1',
-      actionId: 'ACTION-1', capabilityId: capability.capabilityId, programDigest: program.sourceDigest,
+      actionId: 'ACTION-1', capabilityId: capability.capabilityId,
+      programArtifactDigest: digestText('full-playwright-program/v1', canonicalizeJson(program)),
+      programDigest: program.sourceDigest,
       cleanupProgramDigest: program.cleanupSourceDigest, cleanupPlanDigest, leaseId: active.leaseId, fencingToken: 1,
       targetFingerprint: d('target'), approvedRequestSetDigest: digestText(
         'execution-outcome-approved-request-set/v1', canonicalizeJson(input.networkRequests ?? [])),
@@ -270,6 +283,9 @@ export async function readyFixture(input: {
       return gatewayReservation
     },
     capture: input.capture ?? (async (stage) => evidence(stage)),
+    captureCheckpoint: input.captureCheckpoint ?? (async (checkpointId) =>
+      evidenceForStage('checkpoint').map((item) => ({ ...item,
+        evidenceId: `${checkpointId}-${item.evidenceId}`, checkpointId }))),
     retireProgram: async () => { events.push('retire-program'); if (input.retireProgramError) throw input.retireProgramError },
     retireCleanup: async () => { events.push('retire-cleanup'); if (input.retireCleanupError) throw input.retireCleanupError },
     observeEffect: () => { if (input.observeEffectError) throw input.observeEffectError
@@ -353,6 +369,16 @@ describe('runFullPlaywrightCase', () => {
     await expect(runFullPlaywrightCase(fixture.input)).resolves.toMatchObject({ status: 'safety-blocked',
       reasonCode: 'E2E_FULL_PLAYWRIGHT_RUNTIME_BINDING_MISMATCH' })
   })
+  test('Oracle checkpoint plan 漂移在执行前被可信 session binding 拒绝', async () => {
+    const fixture = await readyFixture()
+    fixture.input.program = { ...fixture.program, oracleCheckpoints: [{
+      ...fixture.program.oracleCheckpoints[0]!, expectedJson: 'false',
+      expectedDigest: digestOracleCheckpointValue('false'),
+    }] }
+    await expect(runFullPlaywrightCase(fixture.input)).resolves.toMatchObject({
+      status: 'safety-blocked', reasonCode: 'E2E_FULL_PLAYWRIGHT_SESSION_BINDING_MISMATCH',
+    })
+  })
   test('lease execution client 缺少审批四字段 binding 时执行前拒绝', async () => {
     const fixture = await readyFixture()
     fixture.input.lease.authority = fixture.leaseAuthority.createExecutionClient()
@@ -364,12 +390,16 @@ describe('runFullPlaywrightCase', () => {
     const result = await runFullPlaywrightCase(fixture.input)
 
     expect(result).toMatchObject({ status: 'passed', effectObservation: 'applied', retryAllowed: false,
-      cleanup: { status: 'verified-clean' } })
+      cleanup: { status: 'verified-clean' },
+      oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', status: 'passed',
+        expectedJson: 'true', actualJson: 'true', evidenceIds: expect.arrayContaining([expect.any(String)]) }],
+    })
     expect(fixture.events).toEqual([
       'gateway-reserve',
       'fill:Name:Ada', 'press:Name:Enter', 'check:Enabled', 'click:link:Details', 'dblclick:#row',
       'hover:#remove', 'popup:page', 'new-context', 'new-page', 'request:http://127.0.0.1/api',
-      'expect', 'cleanup-page-close', 'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish',
+      'expect', 'cleanup-page-close', 'retire-program', 'retire-cleanup',
+      'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish',
     ])
     expect(result.evidence.map((item) => item.stage)).toEqual(expect.arrayContaining(['before', 'after', 'cleanup']))
     expect(result.outcome).toBeDefined()
@@ -379,10 +409,46 @@ describe('runFullPlaywrightCase', () => {
     })
   })
 
+  test('缺失 Oracle checkpoint 时不能通过', async () => {
+    const fixture = await readyFixture({ source: 'state.programCompleted = true' })
+    await expect(runFullPlaywrightCase(fixture.input)).resolves.toMatchObject({
+      status: 'failed',
+      primaryError: { message: 'E2E_ORACLE_CHECKPOINT_MISSING' },
+      oracleCheckpoints: [],
+    })
+  })
+
+  test('Oracle checkpoint 实际值不匹配时保留事实并失败', async () => {
+    const fixture = await readyFixture({ source: [
+      "await checkpoint({ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', actual: false })",
+      'state.programCompleted = true',
+    ].join('\n') })
+    await expect(runFullPlaywrightCase(fixture.input)).resolves.toMatchObject({
+      status: 'failed',
+      primaryError: { message: 'E2E_ORACLE_CHECKPOINT_FAILED' },
+      oracleCheckpoints: [{ status: 'failed', expectedJson: 'true', actualJson: 'false' }],
+    })
+  })
+
+  test('重复或越权 Oracle checkpoint 被 Runner 拒绝', async () => {
+    const fixture = await readyFixture({ source: [
+      "await checkpoint({ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', actual: true })",
+      "await checkpoint({ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', actual: true })",
+    ].join('\n') })
+    await expect(runFullPlaywrightCase(fixture.input)).resolves.toMatchObject({
+      status: 'failed', primaryError: { message: 'E2E_ORACLE_CHECKPOINT_BINDING_INVALID' },
+      oracleCheckpoints: [{ status: 'passed' }],
+    })
+  })
+
   test('Gateway 成功 reservation 先由唯一 terminal owner 完成，再发布签名审计', async () => {
     const fixture = await readyFixture()
     const result = await runFullPlaywrightCase(fixture.input)
     expect(result.finalization?.state).toBe('completed')
+    expect(fixture.events.filter((event) => event.startsWith('retire-'))).toEqual([
+      'retire-program', 'retire-cleanup',
+    ])
+    expect(fixture.events.indexOf('retire-cleanup')).toBeLessThan(fixture.events.indexOf('gateway-freeze'))
     expect(fixture.events.filter((event) => event.startsWith('gateway-'))).toEqual([
       'gateway-reserve', 'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish',
     ])
@@ -534,7 +600,7 @@ describe('runFullPlaywrightCase', () => {
     const result = await runFullPlaywrightCase(fixture.input)
     expect(result).toMatchObject({ status: 'failed', effectObservation: 'unknown', retryAllowed: false,
       cleanup: { status: 'verified-clean' } })
-    expect(fixture.events).toEqual(['gateway-reserve', 'retire-program', 'cleanup-page-close',
+    expect(fixture.events).toEqual(['gateway-reserve', 'retire-program', 'cleanup-page-close', 'retire-cleanup',
       'gateway-freeze', 'gateway-terminal-unknown', 'gateway-publish'])
     expect(fixture.authority.getReservation(result.reservationId!)).toMatchObject({ status: 'unknown' })
     expect(await fixture.trustedLease.verifyTarget(fixture.active.leaseId, 1, d('target'))).toBe(false)
@@ -549,7 +615,7 @@ describe('runFullPlaywrightCase', () => {
     const result = await runFullPlaywrightCase(fixture.input)
     expect(result).toMatchObject({ status: 'failed', effectObservation: 'applied',
       primaryError: { present: true, type: 'undefined' }, cleanup: { status: 'verified-clean' } })
-    expect(fixture.events).toEqual(['gateway-reserve', 'cleanup-page-close',
+    expect(fixture.events).toEqual(['gateway-reserve', 'cleanup-page-close', 'retire-program', 'retire-cleanup',
       'gateway-freeze', 'gateway-terminal-complete', 'gateway-publish'])
   })
 

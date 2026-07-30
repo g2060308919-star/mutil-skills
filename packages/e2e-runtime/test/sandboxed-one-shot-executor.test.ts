@@ -1,16 +1,16 @@
-import { existsSync } from 'node:fs'
 import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { SandboxedOneShotExecutor, type OneShotExecFile } from '../src/sandboxed-one-shot-executor.js'
+import { realMacSandboxAvailable } from './platform-capabilities.js'
 
 const roots: string[] = []
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))))
 
 describe('SandboxedOneShotExecutor', () => {
-  test.runIf(process.platform === 'darwin' && existsSync('/usr/bin/sandbox-exec'))(
+  test.runIf(realMacSandboxAvailable)(
     '真实 macOS sandbox 可在只读 staging 中执行 Playwright list', async () => {
       const root = await mkdtemp(join(tmpdir(), 'e2e-one-shot-real-')); roots.push(root)
       const staging = join(root, 'staging')

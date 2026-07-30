@@ -16,6 +16,9 @@ import {
   type FullPlaywrightEvidenceStage,
 } from '@mutil-skills/e2e-playwright-runtime'
 import {
+  ApprovalCapabilityRecordSchema,
+  ApprovalFreshnessReceiptSchema,
+  ArtifactSchemaRegistry,
   canonicalizeJson,
   digestBytes,
   deriveExecutionResultId,
@@ -28,6 +31,7 @@ import {
   type RuntimeFixedHttpRequest,
   type RuntimeHttpReadProbe,
   type SignedInjectionGrant,
+  type SignedDiscoveryGrant,
   type SignedGrant,
   type CapabilityReservation,
   type ApprovalFreshnessReceipt,
@@ -55,20 +59,27 @@ import {
   type SystemChromeSelection,
 } from './system-chrome.js'
 import { startGatewayProxyHostForRuntime } from './gateway-proxy-host.js'
-import { projectGatewayRules } from './gateway-rule-projector.js'
+import { projectGatewayRules, type ApprovedGatewayRequest } from './gateway-rule-projector.js'
 import { runtimeLayout } from './runtime-layout.js'
 import {
   inspectRuntimeCapabilityProof,
   recordRuntimeCapabilityProof,
   type RuntimeCapabilityProof,
 } from './runtime-capability-proof.js'
-import { runtimeApprovalExecutionBinding, type RuntimeAuthorityHost } from './authority-host.js'
+import {
+  runtimeApprovalExecutionBinding,
+  type RuntimeArtifactStoreAuthority,
+  type RuntimeAuthorityHost,
+} from './authority-host.js'
 import type { RuntimeInstallation } from './runtime-discovery.js'
-import { authorizeRuntimePreflight, type RuntimePreflightCapability } from './runtime-preflight.js'
+import {
+  authorizeRuntimePreflight,
+  BrowserPreflightFactSchema,
+  type RuntimePreflightCapability,
+} from './runtime-preflight.js'
 import {
   TrustedActionRunner,
   authorizeRuntimeReadExecutor,
-  projectRuntimeReadGatewayAudit,
   authorizeRuntimeInjectionExecutor,
   authorizeRuntimeWriteExecutor,
   type RuntimeInjectionExecutorCapability,
@@ -77,7 +88,11 @@ import {
   authorizeRuntimeFullPlaywrightExecutor,
   type RuntimeFullPlaywrightExecutorCapability,
 } from './trusted-action-runner.js'
-import { projectRuntimeFullPlaywrightSnapshot } from './runtime-full-playwright-projector.js'
+import {
+  projectRuntimeFullPlaywrightSnapshot,
+  type RuntimeFullPlaywrightProjection,
+} from './runtime-full-playwright-projector.js'
+import type { RuntimeRunSnapshot } from './run-store.js'
 import { RuntimeFullPlaywrightCheckpointStore } from './runtime-full-playwright-checkpoint.js'
 import type { RuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
 import { projectRuntimeWriteSnapshot } from './runtime-write-projector.js'
@@ -88,11 +103,18 @@ import {
   prepareRuntimeWriteCleanup,
   type RuntimeWriteProductionCapability,
 } from './runtime-write-production.js'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { expect as playwrightExpect, type APIRequestContext, type Browser, type BrowserContext,
   type Route } from '@playwright/test'
+
+export function runtimeFullPlaywrightRunnerResultDigest(input: {
+  resultDigest: string
+  outcome?: { runnerResultDigest: string }
+}): string {
+  return input.outcome?.runnerResultDigest ?? input.resultDigest
+}
 
 export interface RuntimeBrowserInstallationOperations {
   readSelection(homeDir: string): Promise<BrowserSelection | undefined>
@@ -261,6 +283,67 @@ export function createAuditedRuntimeReadAuthority(
   })
 }
 
+export function projectDiscoveryPreflightRequests(grant: SignedDiscoveryGrant): {
+  navigation: Extract<SignedDiscoveryGrant['capabilities'][number], { transport: 'browser-local' }>
+  approvedRequests: ApprovedGatewayRequest[]
+  usesSignedRequestClosure: boolean
+} {
+  const navigation = grant.capabilities.filter((capability) => capability.operation === 'local-navigation')
+  if (navigation.length !== 1 || navigation[0]!.transport !== 'browser-local') {
+    throw new Error('E2E_RUNTIME_DISCOVERY_CAPABILITY_AMBIGUOUS')
+  }
+  const subject = grant.subject
+  if (subject.requests.length === 0) {
+    return {
+      navigation: navigation[0], usesSignedRequestClosure: false,
+      approvedRequests: [{
+        actionId: navigation[0].actionId, capabilityId: navigation[0].capabilityId,
+        method: 'GET', url: subject.expectedPageIdentity.url, maxUses: navigation[0].maxUses,
+        behavior: { kind: 'pass-through' },
+      }],
+    }
+  }
+  const requests = new Map(subject.requests.map((request) => [request.requestId, request]))
+  const mappings = new Map<string, { actionId: string; capabilityId: string; maxUses: number }>()
+  for (const action of subject.actions.filter((candidate) => candidate.operation === 'http-request')) {
+    const capabilities = grant.capabilities.filter((candidate): candidate is Extract<
+      SignedDiscoveryGrant['capabilities'][number], { transport: 'http' }
+    > => candidate.operation === 'http-request'
+      && candidate.actionId === action.actionId && candidate.transport === 'http')
+    if (capabilities.length !== 1
+      || canonicalizeJson(capabilities[0]!.requestIds) !== canonicalizeJson(action.requestIds)) {
+      throw new Error('E2E_RUNTIME_DISCOVERY_HTTP_CAPABILITY_MISMATCH')
+    }
+    for (const requestId of action.requestIds) {
+      if (mappings.has(requestId)) throw new Error('E2E_RUNTIME_DISCOVERY_REQUEST_DUPLICATE')
+      mappings.set(requestId, {
+        actionId: action.actionId, capabilityId: capabilities[0]!.capabilityId,
+        maxUses: capabilities[0]!.maxUses,
+      })
+    }
+  }
+  if (mappings.size !== requests.size
+    || !subject.requests.some((request) => request.method === 'GET'
+      && request.url === subject.expectedPageIdentity.url)) {
+    throw new Error('E2E_RUNTIME_DISCOVERY_REQUEST_CLOSURE_INCOMPLETE')
+  }
+  return {
+    navigation: navigation[0], usesSignedRequestClosure: true,
+    approvedRequests: subject.requests.map((request) => {
+      const mapping = mappings.get(request.requestId)
+      if (!mapping) throw new Error('E2E_RUNTIME_DISCOVERY_REQUEST_CAPABILITY_MISSING')
+      return {
+        ...mapping, requestId: request.requestId, method: request.method, url: request.url,
+        signedBodyDigest: request.bodyDigest,
+        headers: request.headers.map(({ name, value }) => ({ name, value })),
+        redirectRequestIds: request.redirectPolicy.mode === 'follow-approved'
+          ? [...request.redirectPolicy.requestIds] : [],
+        behavior: { kind: 'pass-through' as const },
+      }
+    }),
+  }
+}
+
 export function createProductionBrowserCapabilities(input: {
   homeDir: string
   browserHomeDir?: string
@@ -271,9 +354,8 @@ export function createProductionBrowserCapabilities(input: {
   const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
   const preflight = authorizeRuntimePreflight({
     prepare: async ({ snapshot, grant, attemptId }) => {
-    const navigation = grant.capabilities.filter((capability) => capability.operation === 'local-navigation')
-    if (navigation.length !== 1) throw new Error('E2E_RUNTIME_DISCOVERY_CAPABILITY_AMBIGUOUS')
-    const capability = navigation[0]!
+    const projection = projectDiscoveryPreflightRequests(grant)
+    const capability = projection.navigation
     const authorityHost = await input.authorityHost()
     const activated = await activateRuntimeGrant(authorityHost, grant)
     const authority = activated.consumeConnection((consumed) =>
@@ -283,11 +365,7 @@ export function createProductionBrowserCapabilities(input: {
         transport: createAuthenticatedRpcHttpTransport(consumed.endpoint),
         approvalBinding: consumed.approvalBinding,
       }))
-    const approvedRequests = [{
-      actionId: capability.actionId, capabilityId: capability.capabilityId,
-      method: 'GET', url: grant.subject.expectedPageIdentity.url, maxUses: capability.maxUses,
-      behavior: { kind: 'pass-through' as const },
-    }]
+    const approvedRequests = projection.approvedRequests
     let gateway: Awaited<ReturnType<typeof startGatewayProxyHostForRuntime>> | undefined
     let browser: Awaited<ReturnType<ControlledBrowserHost['open']>> | undefined
     let operationError: unknown
@@ -306,9 +384,24 @@ export function createProductionBrowserCapabilities(input: {
         homeDir: input.homeDir, runId: snapshot.runId,
         installation: await browserInstallation(), gateway,
       })
-      const rule = projectGatewayRules({ runId: snapshot.runId, approvedRequests }).rules[0]!
+      const rules = projectGatewayRules({ runId: snapshot.runId, approvedRequests }).rules
       const page = new PlaywrightPageAdapter(browser.page)
       const binding = getControlledBrowserSessionBinding(browser)
+      const navigate = async (url: string) => projection.usesSignedRequestClosure
+        ? await binding.executeWithCorrelations(rules.map((rule) => ({
+            requestId: rule.requestId!, ruleId: rule.ruleId, stepOrdinal: rule.stepOrdinal,
+            method: rule.method, url: rule.url, channel: 'http' as const, bodyDigest: rule.bodyDigest,
+            actionId: rule.actionId, capabilityId: rule.capabilityId,
+            signedBodyDigest: rule.signedBodyDigest!, redirectRequestIds: [...rule.redirectRequestIds],
+            navigation: rule.method === 'GET' && rule.url === grant.subject.expectedPageIdentity.url,
+            maxUses: rule.maxUses, headers: { ...rule.requestHeaders },
+          })), async () => await page.goto(url))
+        : await binding.executeWithCorrelation({
+            ruleId: rules[0]!.ruleId, stepOrdinal: rules[0]!.stepOrdinal,
+            method: rules[0]!.method, url: rules[0]!.url, channel: 'http',
+            bodyDigest: rules[0]!.bodyDigest, actionId: rules[0]!.actionId,
+            capabilityId: rules[0]!.capabilityId, headers: {},
+          }, async () => await page.goto(url))
       const outcome = await runBrowserPreflight({
         authorization: { grant, currentSubject: grant.subject, authority: {
           reserveForSubject: async (reservationInput) =>
@@ -319,11 +412,7 @@ export function createProductionBrowserCapabilities(input: {
         runtime: { sandboxHealthy: true, gatewayConnected: true },
         gatewayAudit: () => gateway!.handle.auditSummary(),
         page: {
-          goto: async (url) => await binding.executeWithCorrelation({
-            ruleId: rule.ruleId, stepOrdinal: rule.stepOrdinal, method: rule.method,
-            url: rule.url, channel: 'http', bodyDigest: rule.bodyDigest,
-            actionId: rule.actionId, capabilityId: rule.capabilityId, headers: {},
-          }, async () => await page.goto(url)),
+          goto: navigate,
           identity: async () => await page.identity(),
           containsText: async (text) => await page.containsText(text),
           screenshot: async () => await page.screenshot(),
@@ -520,7 +609,7 @@ export function createProductionBrowserCapabilities(input: {
       }
       return {
         status: executed.result.status, result: executed.result,
-        gatewayAudit: projectRuntimeReadGatewayAudit(gateway.handle.auditSummary()),
+        gatewayAudit: executed.gatewayAudit,
         gatewayAuditDigest,
         ...(executed.evidence === undefined ? {} : { evidence: executed.evidence }),
         finalizationFacts: {
@@ -775,6 +864,41 @@ export function createProductionWriteBrowserCapability(input: {
 }
 
 /** Production full-playwright: real Gateway proxy plus independent program/cleanup Chromium lifecycles. */
+export async function issueRuntimeFullPlaywrightExecutionFreshness(input: {
+  snapshot: RuntimeRunSnapshot
+  projection: RuntimeFullPlaywrightProjection
+  issuer: Pick<RuntimeArtifactStoreAuthority, 'issueApprovalFreshnessReceipt'>
+}): Promise<ApprovalFreshnessReceipt> {
+  const preflight = BrowserPreflightFactSchema.parse(
+    input.snapshot.trustedExecutionFacts['browser-preflight'],
+  )
+  const runBundle = ArtifactSchemaRegistry['run-bundle'].parse(
+    input.snapshot.frozenArtifacts['run-bundle'],
+  )
+  const runBundleContent = runBundle.content as Record<string, unknown>
+  const expectedCapabilities = ApprovalCapabilityRecordSchema.array().min(1).max(100_000)
+    .parse(runBundleContent.signedCapabilities)
+  const receipt = await input.issuer.issueApprovalFreshnessReceipt({
+    grant: input.projection.grant,
+    currentSubject: input.projection.grant.subject,
+    expectedCapabilities,
+    browserPreflight: {
+      artifactDigest: digestText(
+        'runtime-browser-preflight-fact/v1', canonicalizeJson(preflight),
+      ),
+      discoveryGrantId: preflight.discoveryGrantId,
+      authorityPreflightDigest: preflight.preflightDigest,
+    },
+    runBundle: {
+      artifactDigest: runBundle.contentDigest,
+      content: runBundle.content,
+    },
+  })
+  return ApprovalFreshnessReceiptSchema.parse(
+    JSON.parse(canonicalizeJson(receipt)),
+  )
+}
+
 export function createProductionFullPlaywrightBrowserCapability(input: {
   homeDir: string
   browserHomeDir?: string
@@ -783,6 +907,7 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
   authorityHost(): Promise<RuntimeAuthorityHost>
   writeProduction: RuntimeWriteProductionCapability
   freshnessAuthority: TrustedApprovalFreshnessClient
+  freshnessIssuer: Pick<RuntimeArtifactStoreAuthority, 'issueApprovalFreshnessReceipt'>
   checkpointSigner: { signDigest(digest: string): ArtifactSignature }
   checkpointAuthority: {
     material: ArtifactAuthorityVerifierMaterial
@@ -799,6 +924,9 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
     if (projectRuntimeFullPlaywrightSnapshot(snapshot).sourceSetDigest !== projection.sourceSetDigest) {
       throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_PROJECTION_CHANGED')
     }
+    const freshnessReceipt = await issueRuntimeFullPlaywrightExecutionFreshness({
+      snapshot, projection, issuer: input.freshnessIssuer,
+    })
     const renderedBodies = await renderRuntimeFullPlaywrightRequestBodies(
       snapshot.runId, projection.program, input.secretBroker,
     )
@@ -825,7 +953,6 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
         transport: createAuthenticatedRpcHttpTransport(consumed.endpoint),
         approvalBinding: consumed.approvalBinding,
       }))
-    const freshnessReceipt = snapshot.trustedExecutionFacts['approval-freshness-receipt'] as ApprovalFreshnessReceipt
     const freshnessAuthority = input.freshnessAuthority
     const approvedRequests = projection.program.networkRequests
       .slice().sort((left, right) => left.expectedOrder - right.expectedOrder)
@@ -977,7 +1104,7 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
             grant: projection.grant, currentSubject: projection.grant.subject, capability: projection.capability,
             attemptId, attemptContext: { assetId: snapshot.assetId, generationId: projection.generationId,
               prdRevision: projection.grant.subject.prdRevision, runId: snapshot.runId, caseId: projection.caseId },
-            authority: authority.gatewayAuthority, leaseAuthority: authority.lease, recorder, outcomeSigner: signer,
+            authority: authority.browserLocalAuthority, leaseAuthority: authority.lease, recorder, outcomeSigner: signer,
             resolvedTemplatePayloadDigests: Object.fromEntries(projection.program.networkRequests
               .filter((request) => request.payload.kind === 'template')
               .map((request) => [request.intentId,
@@ -995,18 +1122,27 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
       if (!programRawBrowser || !cleanupRawBrowser || programRawBrowser === cleanupRawBrowser) {
         throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_BROWSER_LIFECYCLE_NOT_INDEPENDENT')
       }
+      const traceStateRoot = runtimeLayout(input.homeDir).state
+      const programTrace = new RuntimeFullPlaywrightTraceRecorder({ context: programBrowser.context,
+        stateRoot: traceStateRoot, attemptId, lifecycle: 'program' })
+      const cleanupTrace = new RuntimeFullPlaywrightTraceRecorder({ context: cleanupBrowser.context,
+        stateRoot: traceStateRoot, attemptId, lifecycle: 'cleanup' })
+      await Promise.all([programTrace.start(), cleanupTrace.start()])
       const state = Object.create(null) as Record<string, unknown>
       const programBindings = fullPlaywrightBindings(programRawBrowser, programBrowser.context,
         programBrowser.page, gateway, correlations, state, 'program')
       const cleanupBindings = fullPlaywrightBindings(cleanupRawBrowser, cleanupBrowser.context,
         cleanupBrowser.page, gateway, correlations, state, 'cleanup')
-      const gatewaySessionId = `GW-${gateway.handle.measurement.gatewaySessionMeasurementDigest.slice(7, 31)}`
+      const gatewaySessionId = gateway.writeLifecycle.writeExecutionSessionId(
+        projection.capability.capabilityId,
+      )
       const assembled = createRuntimeHostFullPlaywrightSession({
         authorityRpcPublicKeyDigest: authorityPublicKeyDigest,
         binding: { executionProfile: 'full-playwright', assetId: snapshot.assetId,
           generationId: projection.generationId, prdRevision: projection.grant.subject.prdRevision,
           runId: snapshot.runId, caseId: projection.caseId, stepId: projection.stepId,
           actionId: projection.actionId, capabilityId: projection.capability.capabilityId,
+          programArtifactDigest: digestText('full-playwright-program/v1', canonicalizeJson(projection.program)),
           programDigest: projection.program.sourceDigest, cleanupProgramDigest: projection.program.cleanupSourceDigest,
           cleanupPlanDigest: digestCleanupPlanDefinition(projection.cleanupPlan),
           leaseId: projection.capability.dataLeaseId, fencingToken: projection.capability.fencingToken,
@@ -1022,6 +1158,7 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
           projection.capability.capabilityId,
         ),
         capture: async (stage) => {
+          if (stage === 'checkpoint') throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_CHECKPOINT_PATH_REQUIRED')
           const session = stage === 'cleanup' ? cleanupBrowser! : programBrowser!
           const adapter = new PlaywrightPageAdapter(session.page)
           const screenshot = await adapter.screenshot()
@@ -1031,16 +1168,28 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
           return [
             runtimeFullEvidence(stage, 'screenshot', screenshot), runtimeFullEvidence(stage, 'dom', dom),
             runtimeFullEvidence(stage, 'url', Buffer.from(url, 'utf8')),
-            { ...runtimeFullEvidence(stage, 'trace', Buffer.from(`trace:${stage}`, 'utf8')),
-              references: [`runtime-trace://${snapshot.runId}/${attemptId}/${stage}`] },
+            await (stage === 'cleanup' ? cleanupTrace : programTrace).capture(stage, stage === 'before'),
+          ]
+        },
+        captureCheckpoint: async (checkpointId) => {
+          const adapter = new PlaywrightPageAdapter(programBrowser!.page)
+          const screenshot = await adapter.screenshot()
+          const dom = Buffer.from(await adapter.domSnapshot(), 'utf8')
+          const url = programBrowser!.page.url()
+          return [
+            runtimeFullEvidence('checkpoint', 'screenshot', screenshot, checkpointId),
+            runtimeFullEvidence('checkpoint', 'dom', dom, checkpointId),
+            runtimeFullEvidence('checkpoint', 'url', Buffer.from(url, 'utf8'), checkpointId),
+            await programTrace.capture('checkpoint', true, checkpointId),
           ]
         },
         retireProgram: async () => await programBrowser!.close(),
         retireCleanup: async () => await cleanupBrowser!.close(),
-        observeEffect: () => gateway!.handle.auditSummary().forwarded > 0 ? 'applied' : 'proven-not-applied',
+        observeEffect: () => gateway!.writeLifecycle.writeAuditSummary(projection.capability.capabilityId).forwarded > 0
+          ? 'applied' : 'proven-not-applied',
         freezeGateway: async () => {
           await gateway!.handle.freeze()
-          const summary = gateway!.handle.auditSummary()
+          const summary = gateway!.writeLifecycle.writeAuditSummary(projection.capability.capabilityId)
           return { executionSessionId: gatewaySessionId, policyDigest: gateway!.handle.measurement.policyDigest,
             summary: { received: summary.received, forwarded: summary.forwarded, blocked: summary.blocked,
               byIntent: { ...summary.byIntent } } }
@@ -1094,12 +1243,24 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
         throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TERMINAL_RECOVERY_REQUIRED')
       }
       const after = captured.get('after') ?? captured.get('cleanup')
-      if (!after || !publishedGatewayAudit || !gatewayAuditVerifierMaterial || !executionOutcomeVerifierMaterial) {
-        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_FINALIZATION_FACTS_MISSING')
+      if (!after) throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_AFTER_EVIDENCE_MISSING')
+      if (!publishedGatewayAudit) {
+        const terminalErrors = canonicalizeJson(result.finalization?.errors ?? [])
+        const safeTerminalCode = terminalErrors.match(/E2E_[A-Z0-9_]+/g)?.[0]
+        if (safeTerminalCode) throw writeWiringError(safeTerminalCode)
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_GATEWAY_PUBLICATION_MISSING')
+      }
+      if (!gatewayAuditVerifierMaterial) {
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_GATEWAY_VERIFIER_MISSING')
+      }
+      if (!executionOutcomeVerifierMaterial) {
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_OUTCOME_VERIFIER_MISSING')
       }
       const output: RuntimeWriteExecutionOutput = { caseId: result.caseId, actionId: result.actionId,
         status: result.status === 'safety-blocked' ? 'safety-blocked' : result.status,
-        effectObservation: result.effectObservation, resultDigest: result.resultDigest,
+        effectObservation: result.effectObservation,
+        resultDigest: runtimeFullPlaywrightRunnerResultDigest(result),
+        oracleCheckpoints: result.oracleCheckpoints,
         gatewayCommit: { reservationId: result.reservationId,
           reservationReceiptDigest: result.finalization.authorityReceiptDigest ?? result.finalization.terminalIntentDigest,
           outcomeReceiptDigest: result.outcome?.signedDigest ?? result.resultDigest, committed: true as const },
@@ -1284,9 +1445,77 @@ function canonicalFullPlaywrightIntentUrl(intent: {
 }
 
 function runtimeFullEvidence(stage: FullPlaywrightEvidenceStage,
-  kind: 'screenshot' | 'dom' | 'url' | 'trace', bytes: Uint8Array) {
-  return { evidenceId: `${stage.toUpperCase()}-${kind.toUpperCase()}`, stage, kind,
+  kind: 'screenshot' | 'dom' | 'url' | 'trace', bytes: Uint8Array, checkpointId?: string) {
+  const identity = checkpointId === undefined ? stage.toUpperCase() : checkpointId
+  return { evidenceId: `${identity}-${kind.toUpperCase()}`, stage, kind,
+    ...(checkpointId === undefined ? {} : { checkpointId }),
     byteLength: bytes.byteLength, digest: digestBytes(`runtime-evidence/${kind}/v1`, bytes) }
+}
+
+const MAX_FULL_PLAYWRIGHT_TRACE_BYTES = 256 * 1024 * 1024
+
+/**
+ * 将 Playwright 自身生成的 trace.zip 持久化到 Runtime 状态目录。
+ * `before` 截止后立即开启下一段，因此 `after` 覆盖实际 program 交互；cleanup 使用独立 Context/trace。
+ */
+export class RuntimeFullPlaywrightTraceRecorder {
+  readonly #context: Pick<BrowserContext, 'tracing'>
+  readonly #stateRoot: string
+  readonly #attemptId: string
+  readonly #lifecycle: 'program' | 'cleanup'
+  #active = false
+
+  constructor(input: { context: Pick<BrowserContext, 'tracing'>; stateRoot: string; attemptId: string;
+    lifecycle: 'program' | 'cleanup' }) {
+    if (!isAbsolute(input.stateRoot) || !/^[A-Za-z0-9._:-]{1,256}$/.test(input.attemptId)) {
+      throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TRACE_INPUT_INVALID')
+    }
+    this.#context = input.context
+    this.#stateRoot = input.stateRoot
+    this.#attemptId = input.attemptId
+    this.#lifecycle = input.lifecycle
+  }
+
+  async start(): Promise<void> {
+    if (this.#active) throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TRACE_ALREADY_ACTIVE')
+    await this.#context.tracing.start({ screenshots: true, snapshots: true, sources: false })
+    await this.#context.tracing.startChunk()
+    this.#active = true
+  }
+
+  async capture(stage: FullPlaywrightEvidenceStage, restart: boolean,
+    checkpointId?: string): Promise<ReturnType<typeof runtimeFullEvidence>
+    & { references: string[] }> {
+    if (!this.#active || (this.#lifecycle === 'program' ? stage === 'cleanup' : stage !== 'cleanup')) {
+      throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TRACE_STAGE_INVALID')
+    }
+    if ((stage === 'checkpoint') !== (checkpointId !== undefined)
+      || checkpointId !== undefined && !/^[A-Za-z0-9._:-]{1,256}$/.test(checkpointId)) {
+      throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TRACE_CHECKPOINT_INVALID')
+    }
+    const fileIdentity = checkpointId === undefined ? stage : `checkpoint-${checkpointId}`
+    const relativePath = join('full-playwright-traces', this.#attemptId,
+      `${this.#lifecycle}-${fileIdentity}.zip`)
+    const directory = join(this.#stateRoot, 'full-playwright-traces', this.#attemptId)
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+    const path = join(this.#stateRoot, relativePath)
+    await this.#context.tracing.stopChunk({ path })
+    this.#active = false
+    const bytes = await readFile(path)
+    if (bytes.byteLength < 4 || bytes.byteLength > MAX_FULL_PLAYWRIGHT_TRACE_BYTES
+      || bytes[0] !== 0x50 || bytes[1] !== 0x4b) {
+      throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TRACE_INVALID')
+    }
+    const evidence = runtimeFullEvidence(stage, 'trace', bytes, checkpointId)
+    if (restart) {
+      await this.#context.tracing.startChunk()
+      this.#active = true
+    } else {
+      await this.#context.tracing.stop()
+    }
+    return { ...evidence,
+      references: [`runtime-artifact://full-playwright-traces/${this.#attemptId}/${this.#lifecycle}-${fileIdentity}.zip`] }
+  }
 }
 
 function fullPlaywrightBindings(browser: Browser, context: BrowserContext, page: unknown,

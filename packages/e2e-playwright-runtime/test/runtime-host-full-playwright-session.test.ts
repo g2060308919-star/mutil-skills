@@ -20,7 +20,8 @@ describe('Runtime Host full Playwright production assembly', () => {
       cleanupBindings: { page: {}, context: {}, browser: { close: cleanupClose, newContext() {} },
         request: {}, expect: {}, testInfo: {}, state },
       reserveCapability: async () => ({ reservationId: 'RES-1' } as never),
-      capture: async () => [], retireProgram: async () => undefined, retireCleanup: async () => undefined,
+      capture: async () => [], captureCheckpoint: async () => [],
+      retireProgram: async () => undefined, retireCleanup: async () => undefined,
       observeEffect: () => 'applied', freezeGateway: async () => ({ executionSessionId: 'GW-1',
         policyDigest: d('policy'), summary: { received: 1, forwarded: 1, blocked: 0, byIntent: {} } }),
       publishGateway: async () => ({ auditDigest: d('audit') }),
@@ -48,7 +49,8 @@ describe('Runtime Host full Playwright production assembly', () => {
       programBindings: { page: {}, context: {}, browser, request: {}, expect: {}, testInfo: {}, state },
       cleanupBindings: { page: {}, context: {}, browser, request: {}, expect: {}, testInfo: {}, state },
       reserveCapability: async () => ({ reservationId: 'RES-1' } as never),
-      capture: async () => [], retireProgram: async () => undefined, retireCleanup: async () => undefined,
+      capture: async () => [], captureCheckpoint: async () => [],
+      retireProgram: async () => undefined, retireCleanup: async () => undefined,
       observeEffect: () => 'unknown', freezeGateway: async () => { throw new Error('unused') },
       publishGateway: async () => { throw new Error('unused') }, terminal: {
         releaseLease: async () => d('release'), quarantineLease: async () => d('quarantine'),
@@ -61,6 +63,7 @@ describe('Runtime Host full Playwright production assembly', () => {
 
   test('page/context/browser/browserType 全对象图不能逃逸到 raw Browser lifecycle', async () => {
     const close = vi.fn()
+    const closeChild = vi.fn(async () => undefined)
     const launch = vi.fn(async () => rawBrowser)
     const rawBrowserType = { launch, launchPersistentContext: launch, connect: launch, connectOverCDP: launch }
     const rawBrowser: any = { close, browserType: () => rawBrowserType,
@@ -68,7 +71,7 @@ describe('Runtime Host full Playwright production assembly', () => {
     const rawContext: any = { browser: () => rawBrowser, pages: () => [rawPage],
       newPage: async () => rawPage, waitForEvent: async () => rawPage, newCDPSession: async () => ({}) }
     const rawPage: any = { context: () => rawContext, opener: async () => rawPage }
-    const rawChildContext: any = { browser: () => rawBrowser, pages: () => [],
+    const rawChildContext: any = { browser: () => rawBrowser, pages: () => [], close: closeChild,
       newPage: async () => rawChildPage, newCDPSession: async () => ({}) }
     const rawChildPage: any = { context: () => rawChildContext, opener: async () => rawPage }
     const cleanupBrowser = { close() {}, contexts: () => [], browserType: () => rawBrowserType }
@@ -80,7 +83,8 @@ describe('Runtime Host full Playwright production assembly', () => {
       cleanupBindings: { page: {}, context: {}, browser: cleanupBrowser,
         request: {}, expect: {}, testInfo: {}, state },
       reserveCapability: async () => ({ reservationId: 'RES-1' } as never),
-      capture: async () => [], retireProgram: async () => undefined, retireCleanup: async () => undefined,
+      capture: async () => [], captureCheckpoint: async () => [],
+      retireProgram: async () => undefined, retireCleanup: async () => undefined,
       observeEffect: () => 'applied', freezeGateway: async () => ({ executionSessionId: 'GW-1',
         policyDigest: d('policy'), summary: { received: 0, forwarded: 0, blocked: 0, byIntent: {} } }),
       publishGateway: async () => ({ auditDigest: d('audit') }), terminal: {
@@ -103,6 +107,9 @@ describe('Runtime Host full Playwright production assembly', () => {
     expect(childPage.context()).toBe(childContext)
     expect((await childPage.opener()).context()).toBe(program.context)
     expect(childContext.newCDPSession).toBeUndefined()
+    expect(childContext.close).toEqual(expect.any(Function))
+    await childContext.close()
+    expect(closeChild).toHaveBeenCalledOnce()
     expect(close).not.toHaveBeenCalled()
     expect(launch).not.toHaveBeenCalled()
   })
@@ -111,7 +118,8 @@ describe('Runtime Host full Playwright production assembly', () => {
 function binding() {
   return { executionProfile: 'full-playwright' as const, assetId: 'ASSET-1', generationId: 'GEN-1',
     prdRevision: d('prd'), runId: 'RUN-1', caseId: 'CASE-1', stepId: 'STEP-1', actionId: 'ACTION-1',
-    capabilityId: 'CAP-1', programDigest: d('program'), cleanupProgramDigest: d('cleanup'),
+    capabilityId: 'CAP-1', programArtifactDigest: d('program-artifact'),
+    programDigest: d('program'), cleanupProgramDigest: d('cleanup'),
     cleanupPlanDigest: d('plan'), leaseId: 'LEASE-1', fencingToken: 1, targetFingerprint: d('target'),
     approvedRequestSetDigest: d('requests'), gatewayPolicyDigest: d('policy'), executionSessionId: 'GW-1',
     sourceSetDigest: d('source-set'), programBrowserSessionId: 'BROWSER-PROGRAM-1',

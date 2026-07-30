@@ -93,12 +93,13 @@ export function projectRuntimeFullPlaywrightSnapshot(
   const intents = executionContent.actionIntents
   const queue = executionContent.caseQueue
   const dataNeeds = executionContent.dataNeeds
+  const matchingDataNeeds = Array.isArray(dataNeeds) ? dataNeeds.filter((need) => record(need)
+    && need.leaseId === executionProgram.dataLeaseId && need.mode === 'write') : []
   if (!Array.isArray(intents) || intents.length !== 1 || !record(intents[0])
     || intents[0].actionId !== executionProgram.actionId || intents[0].effect !== 'reversible-write'
     || !Array.isArray(queue) || queue.length !== 1 || !record(queue[0])
     || queue[0].caseId !== executionProgram.caseId
-    || !Array.isArray(dataNeeds) || dataNeeds.filter((need) => record(need)
-      && need.leaseId === executionProgram.dataLeaseId && need.mode === 'write').length !== 1) {
+    || matchingDataNeeds.length !== 1) {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_CONTRACT_BINDING_MISMATCH')
   }
   if (cleanupPlan.actionId !== executionProgram.actionId || cleanupPlan.leaseId !== executionProgram.dataLeaseId
@@ -141,12 +142,14 @@ export function projectRuntimeFullPlaywrightSnapshot(
     || canonicalizeJson(subjectAction.requests) !== canonicalizeJson(executionProgram.networkRequests)
     || subjectAction.programDigest !== executionProgram.sourceDigest
     || subjectAction.cleanupProgramDigest !== executionProgram.cleanupSourceDigest
+    || subjectAction.resourceKey !== matchingDataNeeds[0]!.resourceKey
     || subjectAction.cleanupPlanDigest !== cleanupPlanDigest) {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_FROZEN_BINDING_MISMATCH')
   }
   const targetFingerprints = [...new Set(executionProgram.networkRequests
     .map((request) => request.targetFingerprint))]
-  if (targetFingerprints.length !== 1) {
+  if (targetFingerprints.length !== 1
+    || matchingDataNeeds[0]!.resourceFingerprint !== targetFingerprints[0]) {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_TARGET_AMBIGUOUS')
   }
   const runContent = runBundle.content as Record<string, unknown>

@@ -1,13 +1,17 @@
 import { describe, expect, test, vi } from 'vitest'
-import { rm } from 'node:fs/promises'
+import { readFile, rm, writeFile } from 'node:fs/promises'
 import {
   bindRuntimeCapabilityProofToBrowserSelection,
   consumeRpcConnectionCredential,
   createAuditedRuntimeReadAuthority,
   createRuntimeFixedHttpWriteEvidence,
+  issueRuntimeFullPlaywrightExecutionFreshness,
   renderRuntimeFullPlaywrightRequestBodies,
   persistRuntimeFullPlaywrightRecoveryEvidence,
+  projectDiscoveryPreflightRequests,
   restoreRuntimeFullPlaywrightRecoveryOutput,
+  RuntimeFullPlaywrightTraceRecorder,
+  runtimeFullPlaywrightRunnerResultDigest,
   resolveRuntimeBrowserInstallation,
   settleRuntimeBrowserResourcesThenRecordProof,
   settleRuntimeBrowserResources,
@@ -18,13 +22,144 @@ import {
   computeFullPlaywrightSourceDigest,
   digestBytes,
   digestRuntimeHttpBodyTemplate,
+  digestOracleCheckpointValue,
   digestText,
 } from '@mutil-skills/e2e-contracts'
 import { systemChromeClosureDigest } from '../src/system-chrome.js'
 import { readBrowserSelection, writeBrowserSelection } from '../src/runtime-user-config.js'
 import { createRuntimeTestRoots } from './fixtures.js'
+import { projectRuntimeFullPlaywrightSnapshot } from '../src/runtime-full-playwright-projector.js'
+import { runtimeFullPlaywrightProjectionFixture } from './runtime-full-playwright-projector.test.js'
 
 describe('Runtime browser production wiring cleanup', () => {
+  test('Discovery preflight 将已签 HTML 与静态资源请求完整投影到 Gateway', () => {
+    const emptyBody = digestText('test/v1', 'empty')
+    const target = 'https://example.test/app/'
+    const requests = [
+      { requestId: 'DOC', method: 'GET', url: target, headers: [], bodyDigest: emptyBody,
+        redirectPolicy: { mode: 'deny' } },
+      { requestId: 'JS', method: 'GET', url: `${target}app.js`, headers: [], bodyDigest: emptyBody,
+        redirectPolicy: { mode: 'deny' } },
+    ]
+    const projection = projectDiscoveryPreflightRequests({
+      subject: {
+        expectedPageIdentity: { url: target }, requests,
+        actions: [
+          { actionId: 'NAV', operation: 'local-navigation', requestIds: [] },
+          { actionId: 'BOOTSTRAP', operation: 'http-request', requestIds: ['DOC', 'JS'] },
+        ],
+      },
+      capabilities: [
+        { capabilityId: 'CAP-NAV', actionId: 'NAV', operation: 'local-navigation',
+          transport: 'browser-local', maxUses: 1 },
+        { capabilityId: 'CAP-HTTP', actionId: 'BOOTSTRAP', operation: 'http-request', transport: 'http',
+          requestIds: ['DOC', 'JS'], maxUses: 1 },
+      ],
+    } as never)
+
+    expect(projection.navigation).toMatchObject({ capabilityId: 'CAP-NAV', actionId: 'NAV' })
+    expect(projection.approvedRequests).toEqual([
+      expect.objectContaining({ actionId: 'BOOTSTRAP', capabilityId: 'CAP-HTTP',
+        requestId: 'DOC', method: 'GET', url: target, maxUses: 1, signedBodyDigest: emptyBody }),
+      expect.objectContaining({ actionId: 'BOOTSTRAP', capabilityId: 'CAP-HTTP',
+        requestId: 'JS', method: 'GET', url: `${target}app.js`, maxUses: 1, signedBodyDigest: emptyBody }),
+    ])
+  })
+
+  test('full-playwright 持久结果使用 ExecutionOutcome 绑定的 runnerResultDigest', () => {
+    const runnerResultDigest = digestText('test/v1', 'runner-result')
+    const outcomeReceiptDigest = digestText('test/v1', 'outcome-receipt')
+    expect(runtimeFullPlaywrightRunnerResultDigest({
+      resultDigest: outcomeReceiptDigest,
+      outcome: { runnerResultDigest },
+    })).toBe(runnerResultDigest)
+    expect(runtimeFullPlaywrightRunnerResultDigest({ resultDigest: runnerResultDigest }))
+      .toBe(runnerResultDigest)
+  })
+
+  test('full-playwright 在生产执行前用冻结 RunBundle 与可信 Preflight 即时签发 freshness', async () => {
+    const snapshot = runtimeFullPlaywrightProjectionFixture()
+    const preflight = {
+      runId: snapshot.runId,
+      discoveryGrantId: 'DISCOVERY-1',
+      reservationId: 'RESERVATION-1',
+      preflightDigest: digestText('runtime-full-playwright-projector-test/v1', 'preflight'),
+      status: 'ready' as const,
+      observedIdentityDigest: digestText('test/v1', 'observed'),
+      browserMeasurementDigest: digestText('test/v1', 'browser'),
+      browserClosureDigest: digestText('test/v1', 'closure'),
+      browserExecutableDigest: digestText('test/v1', 'executable'),
+      gatewaySessionMeasurementDigest: digestText('test/v1', 'gateway-session'),
+      gatewayPolicyDigest: digestText('test/v1', 'gateway-policy'),
+      gatewayAuditDigest: digestText('test/v1', 'gateway-audit'),
+      canaryProofDigest: digestText('test/v1', 'canary'),
+      authorityOutcomeDigest: digestText('test/v1', 'authority-outcome'),
+      authorityReceiptDigest: digestText('test/v1', 'authority-receipt'),
+    }
+    snapshot.trustedExecutionFacts['browser-preflight'] = preflight
+    const projection = projectRuntimeFullPlaywrightSnapshot(snapshot)
+    const sentinel = new Error('issuer-called')
+    let issued: unknown
+
+    await expect(issueRuntimeFullPlaywrightExecutionFreshness({
+      snapshot,
+      projection,
+      issuer: {
+        issueApprovalFreshnessReceipt: async (input) => {
+          issued = input
+          throw sentinel
+        },
+      },
+    })).rejects.toBe(sentinel)
+
+    expect(issued).toEqual({
+      grant: projection.grant,
+      currentSubject: projection.grant.subject,
+      expectedCapabilities: (snapshot.frozenArtifacts['run-bundle']!.content as {
+        signedCapabilities: unknown[]
+      }).signedCapabilities,
+      browserPreflight: {
+        artifactDigest: digestText('runtime-browser-preflight-fact/v1', canonicalizeJson(preflight)),
+        discoveryGrantId: preflight.discoveryGrantId,
+        authorityPreflightDigest: preflight.preflightDigest,
+      },
+      runBundle: {
+        artifactDigest: snapshot.frozenArtifacts['run-bundle']!.contentDigest,
+        content: snapshot.frozenArtifacts['run-bundle']!.content,
+      },
+    })
+  })
+
+  test('full Playwright trace 必须持久化真实 Playwright ZIP，不能用零字节引用占位', async () => {
+    const roots = await createRuntimeTestRoots()
+    const starts: unknown[] = []
+    const chunks: unknown[] = []
+    const stops: string[] = []
+    const tracing = {
+      start: async (options: unknown) => { starts.push(options) },
+      startChunk: async (options?: unknown) => { chunks.push(options) },
+      stopChunk: async ({ path }: { path: string }) => {
+        stops.push(path)
+        await writeFile(path, Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3, 4]))
+      },
+      stop: async () => undefined,
+    }
+    try {
+      const recorder = new RuntimeFullPlaywrightTraceRecorder({
+        context: { tracing } as never, stateRoot: roots.home, attemptId: 'ATTEMPT-TRACE-1', lifecycle: 'program',
+      })
+      await recorder.start()
+      const evidence = await recorder.capture('before', true)
+      expect(evidence).toMatchObject({ kind: 'trace', stage: 'before', byteLength: 8,
+        references: ['runtime-artifact://full-playwright-traces/ATTEMPT-TRACE-1/program-before.zip'] })
+      expect(evidence.digest).toMatch(/^sha256:/)
+      expect(starts).toHaveLength(1)
+      expect(chunks).toHaveLength(2)
+      expect(stops).toHaveLength(1)
+      expect(await readFile(stops[0]!)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3, 4]))
+    } finally { await rm(roots.root, { recursive: true, force: true }) }
+  })
+
   test('full Playwright checkpoint 以摘要约束的 Git 外 artifact ref 恢复 evidence 与完整 finalization facts', async () => {
     const roots = await createRuntimeTestRoots()
     try {
@@ -68,6 +203,8 @@ describe('Runtime browser production wiring cleanup', () => {
       source, sourceDigest: computeFullPlaywrightSourceDigest(source), cleanupSource,
       cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource), dataLeaseId: 'LEASE-1',
       cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+      oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1',
+        expectedJson: 'true', expectedDigest: digestOracleCheckpointValue('true') }],
       networkRequests: [
         { intentId: 'JSON', method: 'POST', canonicalOrigin: 'https://example.test', exactPath: '/json', query: [],
           payload: { kind: 'json' as const, digest: digestText('http-json-payload/v1', canonicalizeJson(json)) },
@@ -118,7 +255,7 @@ describe('Runtime browser production wiring cleanup', () => {
     }))
     await expect(resolveRuntimeBrowserInstallation({
       homeDir: '/safe/home', projectRoot: '/safe/project', installation: {
-        version: '0.2.1', installationDigest: runtimeInstallationDigest,
+        version: '0.3.0', installationDigest: runtimeInstallationDigest,
       },
     } as never, {
       readSelection: async () => selection,
@@ -140,7 +277,7 @@ describe('Runtime browser production wiring cleanup', () => {
     } }
     await expect(resolveRuntimeBrowserInstallation({
       homeDir: '/safe/home', projectRoot: '/safe/project', installation: {
-        version: '0.2.1', installationDigest: runtimeInstallationDigest,
+        version: '0.3.0', installationDigest: runtimeInstallationDigest,
       },
     } as never, {
       readSelection: async () => undefined,
@@ -163,7 +300,7 @@ describe('Runtime browser production wiring cleanup', () => {
 
     await expect(resolveRuntimeBrowserInstallation({
       homeDir: '/safe/home', projectRoot: '/safe/project',
-      installation: { version: '0.2.1', installationDigest: runtimeInstallationDigest },
+      installation: { version: '0.3.0', installationDigest: runtimeInstallationDigest },
     } as never, {
       readSelection: async () => selection,
       inspectManaged: vi.fn(),

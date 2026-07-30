@@ -1,5 +1,5 @@
 import { canonicalizeJson, digestText, E2EError } from '@mutil-skills/e2e-contracts'
-import { chromium, type BrowserContext, type Page } from 'playwright'
+import { chromium, type BrowserContext, type Page, type Request } from 'playwright'
 import { mkdir, rename, rm } from 'node:fs/promises'
 import { lstat, open, realpath } from 'node:fs/promises'
 import { constants } from 'node:fs'
@@ -559,10 +559,11 @@ class PlaywrightBrowserHostDriver implements BrowserHostDriver {
   async installRequestInterceptor(handler: (request: BrowserHostRequest) => Promise<void>): Promise<void> {
     await this.context.route('**/*', async (route) => {
       const request = route.request()
+      const headers = await request.allHeaders()
       await handler({
-        url: request.url(), method: request.method(), headers: await request.allHeaders(),
+        url: request.url(), method: request.method(), headers,
         isNavigationRequest: request.isNavigationRequest(),
-        isMainFrame: request.frame() === this.page.mainFrame(),
+        isMainFrame: isPlaywrightMainFrameRequest(request, headers),
         resourceType: request.resourceType(),
         ...(request.redirectedFrom() === null ? {} : { redirectedFromUrl: request.redirectedFrom()!.url() }),
         continueWithHeaders: async (headers) => await route.continue({ headers }),
@@ -576,6 +577,23 @@ class PlaywrightBrowserHostDriver implements BrowserHostDriver {
   }
   async close(): Promise<void> { await this.#context?.close() }
   isClosed(): boolean { return this.#closed }
+}
+
+export function isPlaywrightMainFrameRequest(
+  request: Pick<Request, 'frame' | 'isNavigationRequest' | 'resourceType'>,
+  headers: Readonly<Record<string, string>>,
+): boolean {
+  try {
+    const frame = request.frame()
+    return frame === frame.page().mainFrame()
+  } catch {
+    return request.isNavigationRequest()
+      && request.resourceType() === 'document'
+      // Chromium 的 Popup 首次导航可能发生在 Page/Frame 对象创建之前，且
+      // Playwright allHeaders() 不保证暴露 sec-fetch-dest。此时 navigation +
+      // document 是 Playwright 提供的可信分类；若浏览器明确标记 iframe 则拒绝。
+      && headers['sec-fetch-dest']?.toLowerCase() !== 'iframe'
+  }
 }
 
 function verifyActualCommandLine(

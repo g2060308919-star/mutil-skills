@@ -103,7 +103,7 @@ async function readyWriteGrant(now: () => Date) {
     environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'OPERATOR',
     discoveryGrantId: discovery.grantId, preflightDigest,
     actions: [{ actionId: 'ACTION-WRITE-1', effect: 'reversible-write' as const, dataLeaseId: 'LEASE-1',
-      fencingToken: 7, cleanupPlanDigest: d('cleanup'), requests: [{ intentId: 'INTENT-WRITE-1', method: 'POST',
+      resourceKey: 'order:1', fencingToken: 7, cleanupPlanDigest: d('cleanup'), requests: [{ intentId: 'INTENT-WRITE-1', method: 'POST',
         canonicalOrigin: 'https://example.test', exactPath: '/api/orders/1/approve', query: [],
         payload: { kind: 'json' as const, digest: d('payload') }, targetFingerprint: d('resource'),
         maxRequests: 1, expectedOrder: 1 }] }],
@@ -244,7 +244,9 @@ describe('LocalApprovalAuthority approval freshness receipt', () => {
     })
     const decisionSubject = projectScopeDecisionSubject({ includedReqCandidates: [], exclusions: [], ambiguities: [],
       dependencies: [], visualScope: { required: false, refs: [] },
-      browserScope: { browserIds: ['chrome'], viewportIds: ['desktop'] } })
+      browserScope: { browserIds: ['chrome'], viewportIds: ['desktop'] },
+      clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'excluded', reason: '测试处置',
+        decisionId: 'SCOPE-1' }] })
     const decision = fixture.authority.issueDecisionReceipt({ kind: 'scope', decisionId: 'SCOPE-1',
       decisionStatus: 'approved', decisionSubject,
       approver: { subject: 'scope-alice', roles: ['scope-approver'] } })

@@ -10,6 +10,7 @@ import {
   canonicalizeJson,
   digestBytes,
   digestRuntimeHttpBodyTemplate,
+  digestOracleCheckpointValue,
   digestText,
 } from '../src/index.js'
 
@@ -30,6 +31,8 @@ function program() {
     dataLeaseId: 'LEASE-1',
     cleanupPlanId: 'CLEANUP-1',
     timeoutMs: 30_000,
+    oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', expectedJson: 'true',
+      expectedDigest: digestOracleCheckpointValue('true') }],
     networkRequests: [{
       intentId: 'INTENT-1', method: 'POST', canonicalOrigin: 'https://example.test',
       exactPath: '/api/todos', query: [], payload: { kind: 'json' as const, digest: digest('a') },
@@ -59,7 +62,8 @@ describe('FullPlaywrightProgram', () => {
     const value = program()
     expect(FullPlaywrightProgramSchema.parse(value)).toEqual(value)
     for (const field of [
-      'caseId', 'stepId', 'actionId', 'cleanupSource', 'dataLeaseId', 'cleanupPlanId', 'timeoutMs', 'networkRequests',
+      'caseId', 'stepId', 'actionId', 'cleanupSource', 'dataLeaseId', 'cleanupPlanId', 'timeoutMs',
+      'oracleCheckpoints', 'networkRequests',
     ] as const) {
       expect(FullPlaywrightProgramSchema.safeParse({ ...value, [field]: undefined }).success, field).toBe(false)
     }
@@ -71,6 +75,24 @@ describe('FullPlaywrightProgram', () => {
       ...value.networkRequests[0]!, intentId: `INTENT-${index}`, expectedOrder: index + 1,
     }))
     expect(FullPlaywrightProgramSchema.safeParse({ ...value, networkRequests: tooManyRequests }).success).toBe(false)
+    expect(FullPlaywrightProgramSchema.safeParse({ ...value,
+      oracleCheckpoints: [{ ...value.oracleCheckpoints[0], expectedJson: '{ "value": true }' }],
+    }).success).toBe(false)
+  })
+
+  test('full Playwright network request 支持连续阶段内无序，并拒绝阶段断档', () => {
+    const value = program()
+    const grouped = [
+      value.networkRequests[0]!,
+      { ...value.networkRequests[0]!, intentId: 'INTENT-CSS', exactPath: '/app.css', expectedOrder: 2 },
+      { ...value.networkRequests[0]!, intentId: 'INTENT-JS', exactPath: '/app.js', expectedOrder: 2 },
+    ]
+
+    expect(FullPlaywrightProgramSchema.safeParse({ ...value, networkRequests: grouped }).success).toBe(true)
+    expect(FullPlaywrightProgramSchema.safeParse({
+      ...value,
+      networkRequests: grouped.map((request, index) => index === 0 ? request : { ...request, expectedOrder: 3 }),
+    }).success).toBe(false)
   })
 
   test('拒绝 source 或 cleanup digest 与冻结源码不一致', () => {
@@ -147,7 +169,8 @@ describe('FullPlaywrightProgram', () => {
       identities: [], caseQueue: [{ ordinal: 0, caseId: 'CASE-1' }],
       actionIntents: [{ actionId: 'ACTION-1', effect: 'reversible-write' as const,
         intentDigest: digest('e'), requestIds: [] }],
-      dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'TODOS', mode: 'write' as const }],
+      dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'TODOS',
+        resourceFingerprint: value.networkRequests[0]!.targetFingerprint, mode: 'write' as const }],
       manualProcedures: [], evidencePolicyDigest: digest('f'), runtimeIsolation: null,
       unresolvedItems: [], readHttpRequests: [], writeCleanupPlans: [cleanupPlan], fullPlaywrightPrograms: [value],
     }
@@ -226,11 +249,11 @@ describe('FullPlaywrightProgram', () => {
       actionId: value.actionId, transport: 'browser-local' as const, operation: 'full-playwright' as const,
       effect: 'reversible-write' as const, programDigest: value.sourceDigest,
       cleanupProgramDigest: value.cleanupSourceDigest, dataLeaseId: value.dataLeaseId,
-      fencingToken: 1, cleanupPlanDigest: digest('d'), requests: value.networkRequests,
+      resourceKey: 'todos:fixture', fencingToken: 1, cleanupPlanDigest: digest('d'), requests: value.networkRequests,
     }
     const httpAction = {
       actionId: 'ACTION-HTTP', effect: 'reversible-write' as const, dataLeaseId: 'LEASE-HTTP',
-      fencingToken: 1, cleanupPlanDigest: digest('e'), requests: value.networkRequests,
+      resourceKey: 'todos:http', fencingToken: 1, cleanupPlanDigest: digest('e'), requests: value.networkRequests,
     }
 
     expect(WriteApprovalSubjectV2Schema.safeParse({ ...base, actions: [browserAction] }).success).toBe(true)

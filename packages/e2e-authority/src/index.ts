@@ -16,6 +16,7 @@ export {
   type TrustedMonotonicAuthorityStateAnchor,
 } from './authority-state-anchor.js'
 export * from './local-lease-authority.js'
+export * from './write-lease-provisioning.js'
 export * from './authenticated-rpc.js'
 export {
   getTrustedExecutionClientBinding,

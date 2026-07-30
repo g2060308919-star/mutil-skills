@@ -4,10 +4,12 @@ import {
   ExecutionOutcomeBindingSchema,
   ExecutionOutcomeReceiptSchema,
   FullPlaywrightProgramSchema,
+  OracleCheckpointResultSchema,
   canonicalizeJson,
   digestBytes,
   digestCleanupPlanDefinition,
   digestExecutionOutcomeBinding,
+  digestOracleCheckpointValue,
   digestText,
   type ApprovalFreshnessReceipt,
   type BrowserLocalReversibleWriteCapability,
@@ -15,6 +17,7 @@ import {
   type ExecutionOutcomeBinding,
   type ExecutionOutcomeReceipt,
   type FullPlaywrightProgram,
+  type OracleCheckpointResult,
   type GatewayAuditSummary,
   type SignedWriteGrant,
   type WriteApprovalSubject,
@@ -60,7 +63,7 @@ export interface FullPlaywrightBindings {
   state: Record<string, unknown>
 }
 
-export type FullPlaywrightEvidenceStage = 'before' | 'after' | 'cleanup'
+export type FullPlaywrightEvidenceStage = 'before' | 'checkpoint' | 'after' | 'cleanup'
 
 export interface FullPlaywrightEvidenceSummary {
   evidenceId: string
@@ -69,6 +72,7 @@ export interface FullPlaywrightEvidenceSummary {
   byteLength: number
   digest: string
   references?: string[]
+  checkpointId?: string
 }
 
 export interface FullPlaywrightGatewayObservation {
@@ -88,6 +92,7 @@ export interface FullPlaywrightTerminalOutcomeInput {
   cleanupPlanId: string
   cleanup: FullPlaywrightCleanupResult
   evidenceIds: string[]
+  oracleCheckpoints: OracleCheckpointResult[]
   completedAt: string
 }
 
@@ -119,6 +124,7 @@ export interface FullPlaywrightCaseResult {
   reasonCode?: string
   reservationId?: string
   evidence: FullPlaywrightEvidenceSummary[]
+  oracleCheckpoints: OracleCheckpointResult[]
   cleanup?: FullPlaywrightCleanupResult
   primaryError?: FullPlaywrightErrorSummary
   cleanupError?: FullPlaywrightErrorSummary
@@ -147,6 +153,7 @@ export interface ControlledFullPlaywrightSessionBinding {
   stepId: string
   actionId: string
   capabilityId: string
+  programArtifactDigest: string
   programDigest: string
   cleanupProgramDigest: string
   cleanupPlanDigest: string
@@ -227,7 +234,24 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   let cleanupValue: unknown
   let retireCaught = false
   let retireError: unknown
+  let programRetireAttempted = false
+  let cleanupRetireAttempted = false
   let infrastructureError: unknown
+
+  const recordRetireFailure = (error: unknown): void => {
+    if (!retireCaught) { retireCaught = true; retireError = error }
+    else retireError = new HostAggregateError([retireError, error], 'E2E_FULL_PLAYWRIGHT_RETIRE_FAILED')
+  }
+  const retireProgram = async (): Promise<void> => {
+    if (programRetireAttempted) return
+    programRetireAttempted = true
+    try { await session.retireProgram() } catch (error) { recordRetireFailure(error) }
+  }
+  const retireCleanup = async (): Promise<void> => {
+    if (cleanupRetireAttempted) return
+    cleanupRetireAttempted = true
+    try { await session.retireCleanup() } catch (error) { recordRetireFailure(error) }
+  }
 
   try { evidence.push(...await captureChecked(session, 'before')) }
   catch (error) {
@@ -235,15 +259,42 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
       'before-evidence-failed', error)
   }
 
+  const checkpointPlans = new Map(program.oracleCheckpoints.map((checkpoint) => [checkpoint.checkpointId, checkpoint]))
+  const oracleCheckpoints: OracleCheckpointResult[] = []
+  const checkpoint = async (candidate: unknown): Promise<void> => {
+    const input = checkpointInput(candidate)
+    const plan = checkpointPlans.get(input.checkpointId)
+    if (!plan || plan.oracleId !== input.oracleId
+      || oracleCheckpoints.some((item) => item.checkpointId === input.checkpointId)) {
+      throw new HostError('E2E_ORACLE_CHECKPOINT_BINDING_INVALID')
+    }
+    const actualJson = canonicalCheckpointJson(input.actual)
+    const actualDigest = digestOracleCheckpointValue(actualJson)
+    const captured = await captureCheckpointChecked(session, input.checkpointId)
+    evidence.push(...captured)
+    const result = OracleCheckpointResultSchema.parse({
+      checkpointId: plan.checkpointId, oracleId: plan.oracleId,
+      expectedJson: plan.expectedJson, actualJson,
+      expectedDigest: plan.expectedDigest, actualDigest,
+      status: plan.expectedDigest === actualDigest ? 'passed' : 'failed',
+      evidenceIds: captured.map((item) => item.evidenceId),
+    })
+    oracleCheckpoints.push(result)
+    if (result.status === 'failed') throw new HostError('E2E_ORACLE_CHECKPOINT_FAILED')
+  }
+
   try {
-    await withDeadline(() => executeSource(program.source, session.programBindings), program.timeoutMs, 'program')
+    await withDeadline(
+      () => executeSource(program.source, session.programBindings, checkpoint), program.timeoutMs, 'program',
+    )
+    if (oracleCheckpoints.length !== program.oracleCheckpoints.length) {
+      throw new HostError('E2E_ORACLE_CHECKPOINT_MISSING')
+    }
   } catch (error) {
     primaryCaught = true
     primaryError = error
     programTimedOut = isDeadline(error, 'program')
-    if (programTimedOut) {
-      try { await session.retireProgram() } catch (retireFailure) { retireCaught = true; retireError = retireFailure }
-    }
+    if (programTimedOut) await retireProgram()
   }
 
   try { evidence.push(...await captureChecked(session, 'after')) }
@@ -265,12 +316,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     cleanupCaught = true
     cleanupError = new HostError('E2E_FULL_PLAYWRIGHT_CLEANUP_NOT_VERIFIED')
   }
-  if (cleanupCaught) {
-    try { await session.retireCleanup() } catch (error) {
-      if (!retireCaught) { retireCaught = true; retireError = error }
-      else retireError = new HostAggregateError([retireError, error], 'E2E_FULL_PLAYWRIGHT_RETIRE_FAILED')
-    }
-  }
+  if (cleanupCaught) await retireCleanup()
   try { evidence.push(...await captureChecked(session, 'cleanup')) }
   catch (error) {
     infrastructureError ??= error
@@ -280,6 +326,11 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
       'evidence-capture-failed', infrastructureError)
   }
+
+  // No browser operation is permitted after cleanup evidence. Retiring both independent
+  // lifecycles here closes HTTPS CONNECT tunnels before Gateway freeze/publication; otherwise
+  // a successful public-site run can leave the audit drain waiting on live browser sockets.
+  await Promise.all([retireProgram(), retireCleanup()])
 
   let gateway: FullPlaywrightGatewayObservation
   try { gateway = await session.freezeGateway() }
@@ -300,7 +351,8 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
       'effect-observation-failed', error)
   }
-  const unknown = programTimedOut || cleanupCaught || gateway.summary.blocked > 0 || observedEffect === 'unknown'
+  const unknown = programTimedOut || cleanupCaught || retireCaught
+    || gateway.summary.blocked > 0 || observedEffect === 'unknown'
   const effectObservation = unknown ? 'unknown' as const : observedEffect
   const status = !primaryCaught && !unknown && effectObservation === 'applied' ? 'passed' as const : 'failed' as const
   const cleanupStatus = cleanupCaught ? (cleanupTimedOut ? 'unknown' as const : 'failed' as const)
@@ -324,6 +376,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     reservationId: reservation.reservationId, status, effectObservation, cleanupStatus,
     gatewaySummaryDigest: digestText('full-playwright-gateway-summary/v1', canonicalizeJson(gateway)),
     evidenceSetDigest,
+    oracleCheckpoints,
     primaryError: primaryCaught ? errorSummary(primaryError) : null,
     cleanupError: cleanupCaught ? errorSummary(cleanupError) : null,
     retireError: retireCaught ? errorSummary(retireError) : null,
@@ -337,6 +390,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   let publishedGateway: FullPlaywrightGatewayResult | undefined
   const unknownObservation = unknown
     ? programTimedOut ? 'full-playwright-program-timeout-effect-unknown'
+      : retireCaught ? 'full-playwright-browser-retire-failed-effect-unknown'
       : gateway.summary.blocked > 0 ? 'full-playwright-gateway-blocked-effect-unknown'
         : 'full-playwright-cleanup-unverified-effect-unknown'
     : undefined
@@ -361,7 +415,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     cleanup ??= { status: cleanupStatus, resultDigest: cleanupResultDigest, leaseReceiptDigest }
     const terminalInput: FullPlaywrightTerminalOutcomeInput = {
       status, effectObservation, runnerResultDigest, cleanupPlanId: cleanupPlan.cleanupPlanId,
-      cleanup, evidenceIds, completedAt: new Date().toISOString(),
+      cleanup, evidenceIds, oracleCheckpoints, completedAt: new Date().toISOString(),
     }
     await session.checkpoint?.('write-terminal-intent', immutableSnapshot({
       reservationId: reservation.reservationId, terminalInput,
@@ -399,7 +453,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     return {
       caseId: program.caseId, stepId: program.stepId, actionId: program.actionId,
       status, effectObservation, retryAllowed: effectObservation === 'proven-not-applied',
-      reservationId: reservation.reservationId, evidence, cleanup,
+      reservationId: reservation.reservationId, evidence, oracleCheckpoints, cleanup,
       ...(primaryCaught ? { primaryError: errorSummary(primaryError) } : {}),
       ...(cleanupCaught ? { cleanupError: errorSummary(cleanupError) } : {}),
       ...(retireCaught ? { retireError: errorSummary(retireError) } : {}),
@@ -415,7 +469,8 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
       return {
       caseId: program.caseId, stepId: program.stepId, actionId: program.actionId,
       status: 'failed', effectObservation: 'unknown', retryAllowed: false,
-      reservationId: reservation.reservationId, evidence, ...(cleanup ? { cleanup } : {}), resultDigest,
+      reservationId: reservation.reservationId, evidence, oracleCheckpoints,
+      ...(cleanup ? { cleanup } : {}), resultDigest,
       finalization: { state: 'terminal-failed', terminalIntentDigest: runnerResultDigest,
         ...(leaseReceiptDigest ? { leaseReceiptDigest } : {}), errors: terminalErrors },
       }
@@ -500,6 +555,7 @@ async function safetyPrecondition(input: RunFullPlaywrightCaseInput): Promise<{
     || binding.prdRevision !== attempt.prdRevision
     || binding.caseId !== program.caseId || binding.stepId !== program.stepId
     || binding.actionId !== program.actionId || binding.capabilityId !== capability.capabilityId
+    || binding.programArtifactDigest !== fullPlaywrightProgramDigest(program)
     || binding.programDigest !== program.sourceDigest || binding.cleanupProgramDigest !== program.cleanupSourceDigest
     || binding.cleanupPlanDigest !== cleanupPlanDigest || binding.leaseId !== input.lease.leaseId
     || binding.fencingToken !== input.lease.fencingToken || binding.targetFingerprint !== input.lease.targetFingerprint
@@ -560,15 +616,17 @@ function fragment(relativePath: string, source: string, kind: 'Run' | 'Cleanup')
     "import { test, expect } from '@playwright/test'",
     "test('trusted fragment', async ({ page, context, browser, request }, testInfo) => {",
     '  const state = {} as Record<string, unknown>', `  const __biztest${kind}0 = async () => {`,
+    '  const checkpoint = async (_input: { checkpointId: string; oracleId: string; actual: unknown }) => undefined',
     source, '  }', `  await __biztest${kind}0()`, '})', '',
   ].join('\n'), 'utf8') }
 }
 
-async function executeSource(source: string, bindings: FullPlaywrightBindings): Promise<unknown> {
-  const run = new HostAsyncFunction('page', 'context', 'browser', 'request', 'expect', 'testInfo', 'state',
+async function executeSource(source: string, bindings: FullPlaywrightBindings,
+  checkpoint?: (input: unknown) => Promise<void>): Promise<unknown> {
+  const run = new HostAsyncFunction('page', 'context', 'browser', 'request', 'expect', 'testInfo', 'state', 'checkpoint',
     `"use strict";\n${source}\n`)
   return await run(bindings.page, bindings.context, bindings.browser, bindings.request,
-    bindings.expect, bindings.testInfo, bindings.state)
+    bindings.expect, bindings.testInfo, bindings.state, checkpoint)
 }
 
 async function withDeadline(operation: () => Promise<unknown>, timeoutMs: number,
@@ -593,6 +651,7 @@ function isDeadline(error: unknown, kind: 'program' | 'cleanup'): boolean {
 }
 
 async function captureChecked(session: FullPlaywrightControlledSessionBackend, stage: FullPlaywrightEvidenceStage) {
+  if (stage === 'checkpoint') throw new HostError('E2E_FULL_PLAYWRIGHT_CHECKPOINT_CAPTURE_PATH_REQUIRED')
   const evidence = await session.capture(stage)
   const requiredKinds = new Set(['screenshot', 'dom', 'url', 'trace'])
   if (!Array.isArray(evidence) || evidence.length === 0
@@ -602,6 +661,47 @@ async function captureChecked(session: FullPlaywrightControlledSessionBackend, s
     throw new HostError('E2E_FULL_PLAYWRIGHT_EVIDENCE_INVALID')
   }
   return immutableSnapshot(evidence)
+}
+
+async function captureCheckpointChecked(session: FullPlaywrightControlledSessionBackend, checkpointId: string) {
+  const evidence = await session.captureCheckpoint(checkpointId)
+  const requiredKinds = new Set(['screenshot', 'dom', 'url', 'trace'])
+  if (!Array.isArray(evidence) || evidence.length === 0
+    || evidence.some((item) => item.stage !== 'checkpoint' || item.checkpointId !== checkpointId
+      || !/^[A-Za-z0-9._:-]{1,256}$/.test(item.evidenceId)
+      || !DIGEST.test(item.digest) || !Number.isSafeInteger(item.byteLength) || item.byteLength < 0)
+    || [...requiredKinds].some((kind) => !evidence.some((item) => item.kind === kind))) {
+    throw new HostError('E2E_ORACLE_CHECKPOINT_EVIDENCE_INVALID')
+  }
+  return immutableSnapshot(evidence)
+}
+
+function checkpointInput(value: unknown): { checkpointId: string; oracleId: string; actual: unknown } {
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new HostError('E2E_ORACLE_CHECKPOINT_INPUT_INVALID')
+  }
+  const keys = Reflect.ownKeys(value)
+  if (keys.length !== 3 || !['actual', 'checkpointId', 'oracleId'].every((key) => keys.includes(key))) {
+    throw new HostError('E2E_ORACLE_CHECKPOINT_INPUT_INVALID')
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value)
+  if (Object.values(descriptors).some((descriptor) => !('value' in descriptor) || !descriptor.enumerable)) {
+    throw new HostError('E2E_ORACLE_CHECKPOINT_INPUT_INVALID')
+  }
+  const checkpointId = descriptors.checkpointId?.value
+  const oracleId = descriptors.oracleId?.value
+  if (typeof checkpointId !== 'string' || typeof oracleId !== 'string'
+    || !/^[A-Za-z0-9._:-]{1,256}$/.test(checkpointId) || !/^[A-Za-z0-9._:-]{1,256}$/.test(oracleId)) {
+    throw new HostError('E2E_ORACLE_CHECKPOINT_INPUT_INVALID')
+  }
+  return { checkpointId, oracleId, actual: descriptors.actual?.value }
+}
+
+function canonicalCheckpointJson(value: unknown): string {
+  let result: string
+  try { result = canonicalizeJson(value) } catch { throw new HostError('E2E_ORACLE_CHECKPOINT_VALUE_INVALID') }
+  if (Buffer.byteLength(result, 'utf8') > 64 * 1024) throw new HostError('E2E_ORACLE_CHECKPOINT_VALUE_TOO_LARGE')
+  return result
 }
 
 function gatewayEvidence(
@@ -616,6 +716,10 @@ function gatewayEvidence(
 
 function approvedRequestSetDigest(requests: BrowserLocalReversibleWriteCapability['requests']): string {
   return digestText('execution-outcome-approved-request-set/v1', canonicalizeJson(requests))
+}
+
+function fullPlaywrightProgramDigest(program: FullPlaywrightProgram): string {
+  return digestText('full-playwright-program/v1', canonicalizeJson(program))
 }
 
 function uniqueEvidenceIds(evidence: FullPlaywrightEvidenceSummary[]): string[] {
@@ -643,7 +747,8 @@ function errorCode(error: unknown, fallback: string): string {
 function blocked(input: Pick<RunFullPlaywrightCaseInput, 'program'>, reasonCode: string): FullPlaywrightCaseResult {
   const core = { caseId: input.program.caseId, stepId: input.program.stepId,
     actionId: input.program.actionId, status: 'safety-blocked' as const,
-    effectObservation: 'proven-not-applied' as const, retryAllowed: false, reasonCode, evidence: [] }
+    effectObservation: 'proven-not-applied' as const, retryAllowed: false, reasonCode,
+    evidence: [], oracleCheckpoints: [] }
   return { ...core, resultDigest: digestText('full-playwright-runner-result/v1', canonicalizeJson(core)) }
 }
 
@@ -726,7 +831,7 @@ function failedUnknown(input: RunFullPlaywrightCaseInput, reservationId: string,
   errors: { primary?: unknown; cleanup?: unknown; retire?: unknown }): FullPlaywrightCaseResult {
   const core = { caseId: input.program.caseId, stepId: input.program.stepId, actionId: input.program.actionId,
     status: 'failed' as const, effectObservation: 'unknown' as const, retryAllowed: false,
-    reasonCode, reservationId, evidence,
+    reasonCode, reservationId, evidence, oracleCheckpoints: [],
     ...(Object.hasOwn(errors, 'primary') ? { primaryError: errorSummary(errors.primary) } : {}),
     ...(Object.hasOwn(errors, 'cleanup') ? { cleanupError: errorSummary(errors.cleanup) } : {}),
     ...(Object.hasOwn(errors, 'retire') ? { retireError: errorSummary(errors.retire) } : {}),

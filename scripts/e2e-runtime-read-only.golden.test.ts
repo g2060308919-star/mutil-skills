@@ -34,6 +34,32 @@ import { copyVerifiedCapabilityProof } from './e2e-runtime-read-only-installatio
 
 const browserHome = process.env.E2E_RUNTIME_REAL_GOLDEN_HOME
 const roots: string[] = []
+const understandingContractHeader = {
+  schemaVersion: '1.0.0' as const, contractId: 'CONTRACT-RUNTIME-GOLDEN', contractVersion: 1,
+  contractStatus: 'confirmed-by-caller' as const, authorization: {
+    status: 'confirmed-by-caller' as const, contractVersion: 1,
+    confirmedAt: '2026-07-17T00:00:00.000Z',
+  },
+}
+const runtimeContractMachineView = {
+  schemaVersion: '1.0.0', nodes: [{
+    nodeId: 'REQ-ORDER-1', kind: 'REQ', statement: '验证订单验收行为',
+    provenance: { kind: 'confirmed-decision', decisionId: 'DECISION-GOLDEN-1',
+      decisionRef: 'fixture:runtime-golden' },
+    responsibility: '订单页面', upstreamNodeIds: [], downstreamNodeIds: [],
+    acceptanceCriteria: ['订单验收行为符合预期'],
+  }], pendingQuestions: [], route: { skillName: 'e2e', steps: [{
+    stepId: 'E2E-GOLDEN-1', inputNodeIds: ['REQ-ORDER-1'], output: 'E2E Golden 报告',
+    constraints: [], dependencyStepIds: [], completionCondition: 'REQ-ORDER-1 已覆盖',
+  }] }, authorizedNodeIds: ['REQ-ORDER-1'],
+}
+const understandingContractText = [
+  '---', 'schemaVersion: 1.0.0', 'contractId: CONTRACT-RUNTIME-GOLDEN',
+  'contractVersion: 1', 'contractStatus: confirmed-by-caller',
+  'confirmationStatus: confirmed-by-caller', 'confirmationContractVersion: 1',
+  'confirmedAt: 2026-07-17T00:00:00.000Z', '---', '# Runtime Golden Requirements Contract',
+  '<!-- e2e-contract-machine-view:v1', JSON.stringify(runtimeContractMachineView), '-->',
+].join('\n')
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })))
@@ -60,6 +86,7 @@ describe('self-contained Runtime CLI read-only real Golden', () => {
         writeFile(join(projectRoot, 'inputs', 'policy.json'), JSON.stringify({
           schemaVersion: '1.0.0', environment: 'test', browser: 'chromium',
         })),
+        writeFile(join(projectRoot, 'inputs', 'understanding-contract.md'), understandingContractText),
       ])
 
       const externalInstallation = await inspectRuntimeInstallation({ homeDir: browserHome! })
@@ -191,7 +218,10 @@ describe('self-contained Runtime CLI read-only real Golden', () => {
         })
         const created = await invokeCli(runCli, dependencies, projectRoot, 'CREATE-REAL-GOLDEN', 'create-run', {
           assetId: 'ASSET-1',
-          prdSource: { kind: 'file', path: 'inputs/prd.md' },
+          prdSource: { kind: 'file', path: 'inputs/prd.md',
+            origin: { kind: 'file', ref: 'inputs/prd.md' } },
+          understandingContract: { header: understandingContractHeader,
+            source: { kind: 'file', path: 'inputs/understanding-contract.md' } },
           projectPolicyPath: 'inputs/policy.json',
         })
         runId = requiredString(created, 'runId')
@@ -202,8 +232,14 @@ describe('self-contained Runtime CLI read-only real Golden', () => {
           installationDigest: installation.installationDigest,
           url,
           now,
+          understandingContractDigest: requiredString(created, 'understandingContractDigest'),
+          sourceBundle: requiredArray(created, 'sourceBundle'),
         })
 
+        const understanding = fixture.semanticArtifacts['prd-request'].content.understanding as Record<string, unknown>
+        const { projectionDigest: _projectionDigest, ...projection } = understanding
+        await invokeCli(runCli, dependencies, projectRoot, 'PREPARE-UNDERSTANDING',
+          'prepare-prd-understanding', { runId, projection })
         await submit(runCli, dependencies, projectRoot, runId, 'SUBMIT-PRD', 'created',
           'prd-request', fixture.semanticArtifacts['prd-request'])
         await submit(runCli, dependencies, projectRoot, runId, 'SUBMIT-SCOPE', 'source-frozen',
@@ -374,6 +410,12 @@ function success(response: RuntimeResponseEnvelope): Record<string, unknown> {
 function requiredString(record: Record<string, unknown>, key: string): string {
   const value = record[key]
   if (typeof value !== 'string' || value.length === 0) throw new Error(`Missing ${key}`)
+  return value
+}
+
+function requiredArray(record: Record<string, unknown>, key: string): any[] {
+  const value = record[key]
+  if (!Array.isArray(value)) throw new Error(`missing ${key}`)
   return value
 }
 

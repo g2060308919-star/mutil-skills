@@ -1,8 +1,19 @@
 {
   "name": "@mutil-skills/e2e-engine",
-  "version": "0.2.1",
+  "version": "0.4.5",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/g2060308919-star/mutil-skills.git",
+    "directory": "packages/e2e-engine"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
-  "files": ["dist/src", "runtime"],
+  "files": [
+    "dist/src",
+    "runtime"
+  ],
   "exports": {
     ".": {
       "types": "./dist/src/index.d.ts",
@@ -13,6 +24,10 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@mutil-skills/e2e-contracts": "0.2.1"
+    "@mutil-skills/e2e-contracts": "0.4.5"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
   }
 }

@@ -9,6 +9,17 @@ import {
 } from '../src/gateway-websocket-transport.js'
 
 describe('Gateway write 终态协调器', () => {
+  test('业务 Action 终态只读取当前 capability 的审计摘要', () => {
+    const coordinator = new GatewayWriteStateCoordinator()
+    const gateway = fakeWriteGateway(vi.fn(), vi.fn())
+    const scopedAudit = { received: 2, forwarded: 2, blocked: 0, byIntent: { WRITE: 2 } }
+    gateway.getAuditSummary = vi.fn(() => scopedAudit)
+    coordinator.observeReservation('REQ-AUDIT', 'CAP-AUDIT', gateway)
+
+    expect(coordinator.auditSummary('CAP-AUDIT')).toEqual(scopedAudit)
+    expect(gateway.getAuditSummary).toHaveBeenCalledTimes(1)
+  })
+
   test('finalize 在首个 await 前 claim，child-exit unknown 只能等待同一终态', async () => {
     const completion = deferred<{ outcome: ExecutionOutcomeReceipt; authorityReceiptDigest: string }>()
     const complete = vi.fn(async () => await completion.promise)

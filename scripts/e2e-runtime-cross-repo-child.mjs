@@ -1,14 +1,45 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { runtimeReadOnlyFixture } from './fixture.js'
+import {
+  runtimeFullPlaywrightFixture,
+  runtimeGoldenPrdText,
+  runtimeReadOnlyFixture,
+  runtimeTodoMvcFullPlaywrightFixture,
+} from './fixture.js'
 
 const homeDir = requiredEnvironment('HOME')
 const projectRoot = requiredEnvironment('E2E_PACKED_PROJECT')
 const runtimePackageRoot = requiredEnvironment('E2E_PACKED_RUNTIME_PACKAGE_ROOT')
+const understandingContractHeader = {
+  schemaVersion: '1.0.0', contractId: 'CONTRACT-RUNTIME-GOLDEN', contractVersion: 1,
+  contractStatus: 'confirmed-by-caller', authorization: {
+    status: 'confirmed-by-caller', contractVersion: 1, confirmedAt: '2026-07-17T00:00:00.000Z',
+  },
+}
+const runtimeContractMachineView = {
+  schemaVersion: '1.0.0', nodes: [{
+    nodeId: 'REQ-ORDER-1', kind: 'REQ', statement: '验证订单验收行为',
+    provenance: { kind: 'confirmed-decision', decisionId: 'DECISION-GOLDEN-1',
+      decisionRef: 'fixture:runtime-golden' },
+    responsibility: '订单页面', upstreamNodeIds: [], downstreamNodeIds: [],
+    acceptanceCriteria: ['订单验收行为符合预期'],
+  }],
+  pendingQuestions: [], route: { skillName: 'e2e', steps: [{
+    stepId: 'E2E-GOLDEN-1', inputNodeIds: ['REQ-ORDER-1'], output: 'E2E Golden 报告',
+    constraints: [], dependencyStepIds: [], completionCondition: 'REQ-ORDER-1 已覆盖',
+  }] }, authorizedNodeIds: ['REQ-ORDER-1'],
+}
+const understandingContractText = [
+  '---', 'schemaVersion: 1.0.0', 'contractId: CONTRACT-RUNTIME-GOLDEN',
+  'contractVersion: 1', 'contractStatus: confirmed-by-caller',
+  'confirmationStatus: confirmed-by-caller', 'confirmationContractVersion: 1',
+  'confirmedAt: 2026-07-17T00:00:00.000Z', '---', '# Runtime Golden Requirements Contract',
+  '<!-- e2e-contract-machine-view:v1', JSON.stringify(runtimeContractMachineView), '-->',
+].join('\n')
 const installedPackage = async (name) => await import(pathToFileURL(
   join(runtimePackageRoot, '..', name, 'dist', 'src', 'index.js'),
 ).href)
@@ -73,16 +104,50 @@ await Promise.all([
   writeFile(join(projectRoot, '.biztest', 'project.json'), `${JSON.stringify({
     schemaVersion: '1.0.0', projectId: 'RUNTIME-CROSS-REPO-GOLDEN',
   })}\n`, { mode: 0o600 }),
-  writeFile(join(projectRoot, 'inputs', 'prd.md'), '# 订单验收\n\n审计员应能看到待审核订单。\n', { mode: 0o600 }),
+  writeFile(join(projectRoot, 'inputs', 'prd.md'), runtimeGoldenPrdText, { mode: 0o600 }),
   writeFile(join(projectRoot, 'inputs', 'policy.json'), `${JSON.stringify({
     schemaVersion: '1.0.0', environment: 'test', browser: 'chromium',
   })}\n`, { mode: 0o600 }),
+  writeFile(join(projectRoot, 'inputs', 'understanding-contract.md'), understandingContractText,
+    { mode: 0o600 }),
 ])
 
 const installation = await inspectRuntimeInstallation({ homeDir })
-const fixtureServer = createServer((_request, response) => {
+let applicationState = 'clean'
+const receivedApiBodies = []
+let resetObserved = false
+let rootReadsAfterReset = 0
+const fixtureServer = createServer(async (request, response) => {
+  const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+  if (request.method === 'POST' && url.pathname === '/api') {
+    const body = await readRequestBody(request)
+    receivedApiBodies.push(body)
+    if (body !== canonicalizeJson({ enabled: true, name: 'Ada' })) {
+      response.writeHead(400); response.end('bad json body'); return
+    }
+    applicationState = 'dirty'
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end('{"ok":true}')
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/reset') {
+    applicationState = 'clean'
+    resetObserved = true
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end('{"ok":true}')
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/' && resetObserved) rootReadsAfterReset += 1
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-  response.end('<!doctype html><html data-e2e-role="auditor"><head><title>订单</title></head><body><main><h1>订单列表</h1>页面显示待审核订单</main></body></html>')
+  if (url.pathname === '/popup') {
+    response.end('<!doctype html><html><head><title>popup</title></head><body>details</body></html>')
+    return
+  }
+  if (url.pathname === '/extra') {
+    response.end('<!doctype html><html><head><title>extra</title></head><body>extra page</body></html>')
+    return
+  }
+  response.end(`<!doctype html><html data-e2e-role="auditor"><head><title>订单</title><link rel="icon" href="data:,"></head><body><main><h1>订单列表</h1><p>页面显示待审核订单</p><label>Name<input aria-label="Name"></label><label>Enabled<input aria-label="Enabled" type="checkbox"></label><a href="/popup" target="_blank">Details</a><div id="row">row</div><button id="remove">remove</button><span id="state">${applicationState}</span></main></body></html>`)
 })
 await listen(fixtureServer)
 const address = fixtureServer.address()
@@ -103,7 +168,8 @@ const approvalAuthority = LocalApprovalAuthority.create({
     subject: approver.subject, runId, approvalType: expected.approvalType,
     subjectDigest: expected.subjectDigest, installationDigest: installation.installationDigest,
     origin: 'http://127.0.0.1:43210', issuedAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    // 上级审批上下文必须完整包住稍后签发的 10 分钟 Grant，避免毫秒级越界。
+    expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
   }),
 })
 const rpc = AuthenticatedRpcServer.create({
@@ -176,8 +242,15 @@ const authorityAdapter = {
 try {
   const doctor = await invoke('DOCTOR-CROSS-REPO', 'doctor', {})
   if (doctor.ready !== true) throw new Error('installed Runtime doctor is not ready')
+  if (process.env.E2E_RUNTIME_TODOMVC_ONLY === '1') {
+    const todoMvc = await executeTodoMvcGolden({ installation })
+    process.stdout.write(`${JSON.stringify({ doctor, todoMvc })}\n`)
+  } else {
   const created = await invoke('CREATE-CROSS-REPO', 'create-run', {
-    assetId: 'ASSET-ORDER-1', prdSource: { kind: 'file', path: 'inputs/prd.md' },
+    assetId: 'ASSET-ORDER-1', prdSource: { kind: 'file', path: 'inputs/prd.md',
+      origin: { kind: 'file', ref: 'inputs/prd.md' } },
+    understandingContract: { header: understandingContractHeader,
+      source: { kind: 'file', path: 'inputs/understanding-contract.md' } },
     projectPolicyPath: 'inputs/policy.json',
   })
   runId = requiredString(created, 'runId')
@@ -186,8 +259,11 @@ try {
     prdRevision: requiredString(created, 'prdRevision'),
     installationDigest: installation.installationDigest, url: fixtureUrl, now: new Date(),
     evidencePolicyDigest: runtimeProductionSanitizerPolicyDigest(),
+    understandingContractDigest: requiredString(created, 'understandingContractDigest'),
+    sourceBundle: requiredArray(created, 'sourceBundle'),
   })
 
+  await prepareUnderstanding(runId, 'PREPARE-UNDERSTANDING', fixture.semanticArtifacts['prd-request'])
   await submit(runId, 'SUBMIT-PRD', 'created', 'prd-request', fixture.semanticArtifacts['prd-request'])
   for (const artifactType of ['project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation']) {
     await submit(runId, `SUBMIT-${artifactType}`, 'source-frozen', artifactType,
@@ -232,7 +308,9 @@ try {
   await submit(runId, 'SUBMIT-REGRESSION', 'execution-approved', 'regression-manifest',
     fixture.regressionManifest)
   const executed = await invoke('EXECUTE-CROSS-REPO', 'execute-run', { runId })
-  if (executed.status !== 'passed') throw new Error(`authoritative runtime result:${executed.status}`)
+  if (executed.status !== 'passed') throw new Error(
+    `authoritative runtime result:${safeCode(executed.status)}:${safeCode(executed.result?.reasonCode)}`,
+  )
   const finalized = await invoke('FINALIZE-CROSS-REPO', 'finalize-run', { runId })
   if (finalized.terminalVerdict !== 'accepted') {
     throw new Error(`final generation verdict:${finalized.terminalVerdict}`)
@@ -245,6 +323,11 @@ try {
     projectRoot, '.biztest', 'assets', 'ASSET-ORDER-1', 'generations', runId, 'run', 'final-report.json',
   )
   const report = JSON.parse(await readFile(reportPath, 'utf8'))
+  const fullPlaywright = await executeFullPlaywrightGolden({
+    installation, fixtureUrl: new URL('/', fixtureUrl).href,
+  })
+  const todoMvc = process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === '1'
+    ? await executeTodoMvcGolden({ installation }) : undefined
   process.stdout.write(`${JSON.stringify({
     doctor,
     managedBrowserInstalled: await pathExists(join(
@@ -252,18 +335,238 @@ try {
     )),
     report,
     publishedRegression,
+    fullPlaywright,
+    ...(todoMvc === undefined ? {} : { todoMvc }),
     tracePath: [
       'PRD-ORDER-1', 'REQ-ORDER-1', 'RULE-ORDER-1', 'COV-ORDER-1',
       'CASE-ORDER-1', 'ACTION-ORDER-1', 'EVIDENCE-ORDER-1', report.content.verdict,
     ],
     reportPath,
   })}\n`)
+  }
 } finally {
   await Promise.allSettled([
     rpcHttp.close(),
     Promise.resolve().then(() => approvalAuthority.close()),
     new Promise((resolve, reject) => fixtureServer.close((error) => error ? reject(error) : resolve())),
   ])
+}
+
+async function executeFullPlaywrightGolden(input) {
+  applicationState = 'clean'
+  receivedApiBodies.length = 0
+  resetObserved = false
+  rootReadsAfterReset = 0
+  const created = await invoke('CREATE-FULL-PLAYWRIGHT', 'create-run', {
+    assetId: 'ASSET-FULL-1', prdSource: { kind: 'file', path: 'inputs/prd.md',
+      origin: { kind: 'file', ref: 'inputs/prd.md' } },
+    understandingContract: { header: understandingContractHeader,
+      source: { kind: 'file', path: 'inputs/understanding-contract.md' } },
+    projectPolicyPath: 'inputs/policy.json',
+  })
+  runId = requiredString(created, 'runId')
+  const fixture = runtimeFullPlaywrightFixture({
+    runId, assetId: requiredString(created, 'assetId'), prdRevision: requiredString(created, 'prdRevision'),
+    installationDigest: input.installation.installationDigest, url: input.fixtureUrl, now: new Date(),
+    evidencePolicyDigest: runtimeProductionSanitizerPolicyDigest(),
+    understandingContractDigest: requiredString(created, 'understandingContractDigest'),
+    sourceBundle: requiredArray(created, 'sourceBundle'),
+  })
+  await prepareUnderstanding(runId, 'PREPARE-FULL-UNDERSTANDING', fixture.semanticArtifacts['prd-request'])
+  await submit(runId, 'SUBMIT-FULL-PRD', 'created', 'prd-request', fixture.semanticArtifacts['prd-request'])
+  for (const artifactType of ['project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation']) {
+    await submit(runId, `SUBMIT-FULL-${artifactType}`, 'source-frozen', artifactType,
+      fixture.semanticArtifacts[artifactType])
+  }
+  await submit(runId, 'SUBMIT-FULL-SCOPE', 'source-frozen', 'acceptance-scope',
+    fixture.semanticArtifacts['acceptance-scope'])
+  await approve('APPROVE-FULL-LINEAGE', { runId, approvalType: 'lineage' })
+  const scope = await approve('APPROVE-FULL-SCOPE', { runId, approvalType: 'scope' })
+  for (const artifactType of ['interaction-flow', 'design-audit']) {
+    await submit(runId, `SUBMIT-FULL-${artifactType}`, 'scope-approved', artifactType,
+      fixture.semanticArtifacts[artifactType])
+  }
+  await submit(runId, 'SUBMIT-FULL-MODEL', 'scope-approved', 'requirement-model',
+    fixture.semanticArtifacts['requirement-model'])
+  await submit(runId, 'SUBMIT-FULL-COVERAGE', 'modeled', 'coverage-universe',
+    fixture.semanticArtifacts['coverage-universe'])
+  const discovery = await approve('APPROVE-FULL-DISCOVERY', {
+    runId, approvalType: 'discovery',
+    grantSubject: fixture.discoverySubject({ scopeReceipt: scope.decisionReceipt }),
+  })
+  const discoveryGrant = SignedGrantSchema.parse(discovery.signedGrant)
+  const preflight = await invoke('RUN-FULL-PREFLIGHT', 'run-preflight', { runId })
+  if (preflight.status !== 'ready') throw new Error(`full preflight:${safeCode(preflight.reasonCode)}`)
+  const preflightDigest = requiredString(preflight.preflightFact, 'preflightDigest')
+  await submit(runId, 'SUBMIT-FULL-ACTION-MAP', 'preflight-readonly', 'browser-action-map',
+    fixture.frozenArtifacts['browser-action-map'])
+  await submit(runId, 'SUBMIT-FULL-TEST-CASES', 'binding-draft', 'test-cases',
+    fixture.frozenArtifacts['test-cases'])
+  await submit(runId, 'SUBMIT-FULL-EXECUTION-CONTRACT', 'binding-draft', 'execution-contract',
+    fixture.frozenArtifacts['execution-contract'])
+  const approval = await approve('APPROVE-FULL-EXECUTION', {
+    runId, approvalType: 'execution',
+    grantSubject: fixture.writeSubject(discoveryGrant.grantId, preflightDigest,
+      { scopeReceipt: scope.decisionReceipt }),
+  })
+  const review = approval.semanticReview
+  if (!review || review.prd?.normalizedText !== await readFile(join(projectRoot, 'inputs', 'prd.md'), 'utf8')
+    || review.requirements?.[0]?.rules?.[0]?.oracles?.[0]?.oracleId !== 'ORACLE-1'
+    || review.requirements[0].rules[0].oracleMapping !== 'explicit') {
+    throw new Error('E2E_RUNTIME_PRD_SEMANTIC_CONFIRMATION_INCOMPLETE')
+  }
+  await submit(runId, 'SUBMIT-FULL-REGRESSION', 'execution-approved', 'regression-manifest',
+    fixture.regressionManifest)
+  const executed = await invoke('EXECUTE-FULL-PLAYWRIGHT', 'execute-run', { runId })
+  const executionResult = requiredRecord(executed, 'result')
+  const executionCleanup = requiredRecord(executionResult, 'cleanup')
+  if (executed.status !== 'passed' || executionCleanup.status !== 'verified-clean') {
+    throw new Error(`full execution:${safeCode(executed.status)}:${safeCode(executionCleanup.status)}`)
+  }
+  if (applicationState !== fixture.expected.cleanupState
+    || !receivedApiBodies.includes(fixture.expected.jsonBody)
+    || rootReadsAfterReset < 2) {
+    throw new Error('E2E_RUNTIME_FULL_PLAYWRIGHT_EXTERNAL_ASSERTION_FAILED')
+  }
+  const finalized = await invoke('FINALIZE-FULL-PLAYWRIGHT', 'finalize-run', { runId })
+  if (finalized.terminalVerdict !== 'accepted') {
+    throw new Error(`full finalization:${safeCode(finalized.terminalVerdict)}`)
+  }
+  await invoke('REPORT-FULL-PLAYWRIGHT', 'render-report', { runId })
+  const reportPath = join(projectRoot, '.biztest', 'assets', 'ASSET-FULL-1',
+    'generations', runId, 'run', 'final-report.json')
+  const report = JSON.parse(await readFile(reportPath, 'utf8'))
+  return {
+    runId, executionProfile: 'full-playwright', status: executed.status,
+    cleanupStatus: executionCleanup.status,
+    reloadVerified: applicationState === 'clean' && rootReadsAfterReset >= 2,
+    jsonBodyVerified: receivedApiBodies.includes(fixture.expected.jsonBody),
+    semanticReview: review, report, reportPath,
+  }
+}
+
+async function executeTodoMvcGolden(input) {
+  const prdUrl = 'https://raw.githubusercontent.com/tastejs/todomvc/ff43b02e59dfa604386bb382034b2cd07c2bcd8a/app-spec.md'
+  const targetUrl = 'https://todomvc.com/examples/typescript-react/'
+  const prdBytes = await readFile(new URL('./todomvc-app-spec.fixture.md', import.meta.url))
+  const prdBlobSha = createHash('sha1').update(`blob ${prdBytes.byteLength}\0`).update(prdBytes).digest('hex')
+  if (prdBlobSha !== 'd040877fd8895c4f18fa5190e4b8ee474ffa8ac4') {
+    throw new Error('E2E_RUNTIME_TODOMVC_PRD_BLOB_MISMATCH')
+  }
+  const prd = prdBytes.toString('utf8')
+  if (!prd.includes('# Application Specification')
+    || !prd.includes('New todos are entered in the input at the top of the app')) {
+    throw new Error('E2E_RUNTIME_TODOMVC_PRD_CONTENT_INVALID')
+  }
+  await writeFile(join(projectRoot, 'inputs', 'prd.md'), prd, { mode: 0o600 })
+  const preview = runtimeTodoMvcFullPlaywrightFixture({
+    runId: 'RUN-CREATE-TODOMVC', assetId: 'ASSET-TODOMVC-1',
+    prdRevision: `sha256:${'0'.repeat(64)}`,
+    installationDigest: input.installation.installationDigest, url: targetUrl, now: new Date(),
+    evidencePolicyDigest: runtimeProductionSanitizerPolicyDigest(),
+  })
+  const todoMachineView = contractMachineViewFromPrdRequest(preview.semanticArtifacts['prd-request'])
+  await writeFile(join(projectRoot, 'inputs', 'understanding-contract.md'),
+    understandingContractTextFor(todoMachineView), { mode: 0o600 })
+
+  const created = await invoke('CREATE-TODOMVC', 'create-run', {
+    assetId: 'ASSET-TODOMVC-1', prdSource: { kind: 'file', path: 'inputs/prd.md',
+      origin: { kind: 'url', ref: 'https://github.com/tastejs/todomvc/blob/ff43b02e59dfa604386bb382034b2cd07c2bcd8a/app-spec.md' } },
+    understandingContract: { header: understandingContractHeader,
+      source: { kind: 'file', path: 'inputs/understanding-contract.md' } },
+    projectPolicyPath: 'inputs/policy.json',
+  })
+  runId = requiredString(created, 'runId')
+  const fixture = runtimeTodoMvcFullPlaywrightFixture({
+    runId, assetId: requiredString(created, 'assetId'), prdRevision: requiredString(created, 'prdRevision'),
+    installationDigest: input.installation.installationDigest, url: targetUrl, now: new Date(),
+    evidencePolicyDigest: runtimeProductionSanitizerPolicyDigest(),
+    understandingContractDigest: requiredString(created, 'understandingContractDigest'),
+    sourceBundle: requiredArray(created, 'sourceBundle'),
+  })
+  await prepareUnderstanding(runId, 'PREPARE-TODOMVC-UNDERSTANDING', fixture.semanticArtifacts['prd-request'])
+  await submit(runId, 'SUBMIT-TODOMVC-PRD', 'created', 'prd-request', fixture.semanticArtifacts['prd-request'])
+  for (const artifactType of ['project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation']) {
+    await submit(runId, `SUBMIT-TODOMVC-${artifactType}`, 'source-frozen', artifactType,
+      fixture.semanticArtifacts[artifactType])
+  }
+  await submit(runId, 'SUBMIT-TODOMVC-SCOPE', 'source-frozen', 'acceptance-scope',
+    fixture.semanticArtifacts['acceptance-scope'])
+  await approve('APPROVE-TODOMVC-LINEAGE', { runId, approvalType: 'lineage' })
+  const scope = await approve('APPROVE-TODOMVC-SCOPE', { runId, approvalType: 'scope' })
+  for (const artifactType of ['interaction-flow', 'design-audit']) {
+    await submit(runId, `SUBMIT-TODOMVC-${artifactType}`, 'scope-approved', artifactType,
+      fixture.semanticArtifacts[artifactType])
+  }
+  await submit(runId, 'SUBMIT-TODOMVC-MODEL', 'scope-approved', 'requirement-model',
+    fixture.semanticArtifacts['requirement-model'])
+  await submit(runId, 'SUBMIT-TODOMVC-COVERAGE', 'modeled', 'coverage-universe',
+    fixture.semanticArtifacts['coverage-universe'])
+  const discovery = await approve('APPROVE-TODOMVC-DISCOVERY', {
+    runId, approvalType: 'discovery',
+    grantSubject: fixture.discoverySubject({ scopeReceipt: scope.decisionReceipt }),
+  })
+  const discoveryGrant = SignedGrantSchema.parse(discovery.signedGrant)
+  const preflight = await invoke('RUN-TODOMVC-PREFLIGHT', 'run-preflight', { runId })
+  if (preflight.status !== 'ready') {
+    throw new Error(`todomvc preflight:${safeCode(preflight.status)}:${safeCode(preflight.reasonCode)}`)
+  }
+  const preflightDigest = requiredString(preflight.preflightFact, 'preflightDigest')
+  await submit(runId, 'SUBMIT-TODOMVC-ACTION-MAP', 'preflight-readonly', 'browser-action-map',
+    fixture.frozenArtifacts['browser-action-map'])
+  await submit(runId, 'SUBMIT-TODOMVC-TEST-CASES', 'binding-draft', 'test-cases',
+    fixture.frozenArtifacts['test-cases'])
+  await submit(runId, 'SUBMIT-TODOMVC-EXECUTION-CONTRACT', 'binding-draft', 'execution-contract',
+    fixture.frozenArtifacts['execution-contract'])
+  const approval = await approve('APPROVE-TODOMVC-EXECUTION', {
+    runId, approvalType: 'execution',
+    grantSubject: fixture.writeSubject(discoveryGrant.grantId, preflightDigest,
+      { scopeReceipt: scope.decisionReceipt }),
+  })
+  const review = approval.semanticReview
+  if (!review || review.prd?.normalizedText !== prd
+    || review.clauses?.length !== 35
+    || review.clauses.filter((clause) => clause.disposition === 'modeled').length !== 25
+    || review.clauses.filter((clause) => clause.disposition === 'excluded').length !== 10
+    || review.requirements?.length !== 25
+    || review.requirements.some((requirement) => requirement.rules?.length !== 1
+      || requirement.rules[0]?.oracles?.length !== 1
+      || requirement.rules[0]?.oracleMapping !== 'explicit')) {
+    throw new Error('E2E_RUNTIME_TODOMVC_SEMANTIC_CONFIRMATION_INCOMPLETE')
+  }
+  await submit(runId, 'SUBMIT-TODOMVC-REGRESSION', 'execution-approved', 'regression-manifest',
+    fixture.regressionManifest)
+  const executed = await invoke('EXECUTE-TODOMVC', 'execute-run', { runId })
+  const executionResult = requiredRecord(executed, 'result')
+  const executionCleanup = requiredRecord(executionResult, 'cleanup')
+  const failedOracle = executionResult.oracleCheckpoints?.find((checkpoint) =>
+    checkpoint.oracleId === 'ORACLE-TODOMVC-F20')
+  if (executed.status !== 'failed' || executionCleanup.status !== 'verified-clean'
+    || failedOracle?.status !== 'failed' || failedOracle.expectedJson !== '"todos-react"'
+    || failedOracle.actualJson !== '"react-todos"') {
+    throw new Error(`todomvc execution:${safeCode(executed.status)}:${safeCode(executionCleanup.status)}:`
+      + `${safeCode(failedOracle?.status)}:${safeCode(failedOracle?.expectedJson)}:`
+      + `${safeCode(failedOracle?.actualJson)}`)
+  }
+  const finalized = await invoke('FINALIZE-TODOMVC', 'finalize-run', { runId })
+  if (finalized.terminalVerdict !== 'rejected') {
+    throw new Error(`todomvc finalization:${safeCode(finalized.terminalVerdict)}`)
+  }
+  await invoke('REPORT-TODOMVC', 'render-report', { runId })
+  const reportPath = join(projectRoot, '.biztest', 'assets', 'ASSET-TODOMVC-1',
+    'generations', runId, 'run', 'final-report.json')
+  const report = JSON.parse(await readFile(reportPath, 'utf8'))
+  return {
+    runId, prdUrl, targetUrl, prdRevision: requiredString(created, 'prdRevision'),
+    executionProfile: 'full-playwright', status: executed.status,
+    cleanupStatus: executionCleanup.status,
+    semanticReview: review, report, reportPath,
+    tracePath: [
+      'CLAUSE-TODOMVC-F20', 'REQ-TODOMVC-F20', 'RULE-TODOMVC-F20',
+      'ORACLE-TODOMVC-F20', 'COV-REQ-TODOMVC-F20',
+      fixture.expected.caseId, fixture.expected.actionId, report.content.verdict,
+    ],
+  }
 }
 
 async function executePublishedRegression(input) {
@@ -602,14 +905,45 @@ async function submit(run, requestId, expectedState, artifactType, candidate) {
   })
 }
 
+async function prepareUnderstanding(run, requestId, prdRequest) {
+  const understanding = requiredRecord(requiredRecord(prdRequest, 'content'), 'understanding')
+  const { projectionDigest: _projectionDigest, ...projection } = understanding
+  return await invoke(requestId, 'prepare-prd-understanding', { runId: run, projection })
+}
+
+function contractMachineViewFromPrdRequest(prdRequest) {
+  const understanding = requiredRecord(requiredRecord(prdRequest, 'content'), 'understanding')
+  return {
+    schemaVersion: '1.0.0', nodes: requiredArray(understanding, 'nodes'),
+    pendingQuestions: requiredArray(understanding, 'pendingQuestions'),
+    route: requiredRecord(understanding, 'route'),
+    authorizedNodeIds: requiredArray(requiredRecord(understanding, 'authorization'), 'authorizedNodeIds'),
+  }
+}
+
+function understandingContractTextFor(machineView) {
+  return [
+    '---', 'schemaVersion: 1.0.0', 'contractId: CONTRACT-RUNTIME-GOLDEN',
+    'contractVersion: 1', 'contractStatus: confirmed-by-caller',
+    'confirmationStatus: confirmed-by-caller', 'confirmationContractVersion: 1',
+    'confirmedAt: 2026-07-17T00:00:00.000Z', '---', '# Runtime Golden Requirements Contract',
+    '<!-- e2e-contract-machine-view:v1', JSON.stringify(machineView), '-->',
+  ].join('\n')
+}
+
 async function approve(requestId, payload) {
   const opened = await invoke(requestId, 'open-approval', payload)
   if (opened.status !== 'confirmation-required') return opened
-  return await invoke(`${requestId}-CONFIRM`, 'confirm-approval', {
+  const confirmed = await invoke(`${requestId}-CONFIRM`, 'confirm-approval', {
     runId: payload.runId,
     confirmationId: requiredString(opened, 'confirmationId'),
     subjectDigest: requiredString(opened, 'subjectDigest'),
   })
+  return {
+    ...confirmed,
+    ...(opened.summary?.semanticReview === undefined
+      ? {} : { semanticReview: opened.summary.semanticReview }),
+  }
 }
 
 async function invoke(requestId, command, payload) {
@@ -624,7 +958,9 @@ async function invoke(requestId, command, payload) {
   if (lines.length !== 1) throw new Error(`Runtime RPC wrote ${lines.length} lines:${stderr}`)
   const response = RuntimeResponseEnvelopeSchema.parse(JSON.parse(output))
   if (exitCode !== 0 || !response.ok || !response.result || typeof response.result !== 'object') {
-    throw new Error(`Runtime RPC failed:${stderr}:${output}`)
+    const error = new Error(`Runtime RPC failed:${stderr}:${output}`)
+    if (response.error?.code) error.code = response.error.code
+    throw error
   }
   return response.result
 }
@@ -668,6 +1004,18 @@ async function invokeFixedLauncher(requestJson) {
 function requiredString(record, key) {
   const value = record?.[key]
   if (typeof value !== 'string' || value.length === 0) throw new Error(`missing ${key}`)
+  return value
+}
+
+function requiredRecord(record, key) {
+  const value = record?.[key]
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`missing ${key}`)
+  return value
+}
+
+function requiredArray(record, key) {
+  const value = record?.[key]
+  if (!Array.isArray(value)) throw new Error(`missing ${key}`)
   return value
 }
 
@@ -723,4 +1071,10 @@ async function listen(server) {
     server.once('error', reject)
     server.listen(0, '127.0.0.1', resolve)
   })
+}
+
+async function readRequestBody(request) {
+  const chunks = []
+  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  return Buffer.concat(chunks).toString('utf8')
 }

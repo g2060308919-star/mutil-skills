@@ -39,6 +39,15 @@ describe('read-only Runtime vertical flow', () => {
     expect(Buffer.from(flow.evidence?.dom ?? []).toString('utf8')).toContain('待审核订单')
     expect(counters.forwarded).toBeGreaterThan(0)
     expect(counters.blocked).toBeGreaterThan(0)
+    const actionGatewayAudit = {
+      received: counters.received, forwarded: counters.forwarded,
+      blocked: counters.blocked, byIntent: {},
+    }
+    expect(flow.gatewayAudit).toEqual(actionGatewayAudit)
+    counters.received += 1
+    counters.blocked += 1
+    expect(flow.gatewayAudit).toEqual(actionGatewayAudit)
+    expect(flow.gatewayAudit).not.toEqual(gateway.handle.auditSummary())
     expect(completed).toHaveLength(4)
     expect([]).toEqual([]) // Runtime authoritative path never loads generated source files.
     await browser.close()

@@ -116,8 +116,15 @@ export function projectRuntimeWriteSnapshot(snapshot: RuntimeRunSnapshot): Runti
   }
   const capability = capabilities[0]!
   const subjectAction = subjectActions[0]!
+  const dataNeeds = contract.dataNeeds.filter((need) =>
+    need.mode === 'write' && need.leaseId === subjectAction.dataLeaseId)
+  const targetFingerprints = [...new Set(subjectAction.requests.map((item) => item.targetFingerprint))]
   if (canonicalizeJson(subjectAction.requests) !== canonicalizeJson(capability.requests)
     || subjectAction.dataLeaseId !== capability.dataLeaseId
+    || dataNeeds.length !== 1 || subjectAction.resourceKey !== dataNeeds[0]!.resourceKey
+    || !('resourceFingerprint' in dataNeeds[0]!)
+    || targetFingerprints.length !== 1
+    || dataNeeds[0]!.resourceFingerprint !== targetFingerprints[0]
     || subjectAction.fencingToken !== capability.fencingToken
     || subjectAction.cleanupPlanDigest !== capability.cleanupPlanDigest
     || capability.cleanupPlanDigest !== digestCleanupPlanDefinition(cleanup)) {

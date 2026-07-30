@@ -141,8 +141,11 @@ export const VerdictInputSchema = z.object({
   evidenceAudit: CompletionAuditSchema,
   cleanupAudit: CompletionAuditSchema,
   coverageFacts: z.object({
+    prdClauses: z.object({ covered: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict(),
     requirementDesign: z.object({ covered: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict(),
     rules: z.object({ covered: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict(),
+    oracles: z.object({ covered: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict(),
+    cases: z.object({ covered: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict(),
     criticalNodes: z.object({ covered: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict(),
     roles: z.object({ covered: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict(),
     stateTransitions: z.object({ covered: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict(),
@@ -179,8 +182,11 @@ export const VerdictResultSchema = z.object({
   businessFailuresObserved: z.array(SafeIdSchema),
   advisoryFailures: z.array(SafeIdSchema),
   metrics: z.object({
+    clauseDispositionCoverage: MetricSchema,
     requirementDesignCoverage: MetricSchema,
     ruleCoverage: MetricSchema,
+    oracleCoverage: MetricSchema,
+    caseDesignCoverage: MetricSchema,
     criticalNodeCoverage: MetricSchema,
     roleCoverage: MetricSchema,
     stateTransitionCoverage: MetricSchema,

@@ -256,7 +256,8 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
       environment: 'test', baseOrigin: discoverySubject.baseOrigin, actor: discoverySubject.actor,
       discoveryGrantId: discovery.grantId, preflightDigest,
       actions: [{
-        actionId: 'WRITE-1', effect: 'reversible-write', dataLeaseId: 'LEASE-1', fencingToken: 1,
+        actionId: 'WRITE-1', effect: 'reversible-write', dataLeaseId: 'LEASE-1',
+        resourceKey: 'order:1', fencingToken: 1,
         cleanupPlanDigest: digest('cleanup'), requests: [{
           intentId: 'INTENT-1', method: 'POST', canonicalOrigin: discoverySubject.baseOrigin,
           exactPath: '/orders/1', query: [], payload: { kind: 'no-body' },
@@ -270,6 +271,12 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
     const normalTentativeLease = await lease.acquire({ runId: 'RUN-1', resourceKey: 'normal:1',
       resourceFingerprint: normalLeaseFingerprint, exclusive: true, ttlMs: 300_000 })
     const normalActiveLease = await lease.activate(normalTentativeLease.leaseId)
+    await expect(lease.acquireBound({
+      leaseId: writeSubject.actions[0]!.dataLeaseId, runId: 'RUN-1',
+      resourceKey: writeSubject.actions[0]!.resourceKey,
+      resourceFingerprint: writeSubject.actions[0]!.requests[0]!.targetFingerprint,
+      exclusive: true, ttlMs: 1_000,
+    })).resolves.toMatchObject({ status: 'active', fencingToken: writeSubject.actions[0]!.fencingToken })
     lease.close()
 
     const hostOptions: Parameters<typeof startAuthorityExecutionRpcHostProcess>[0] = {
@@ -375,9 +382,19 @@ test('production Host completes WebAuthn, finalizes one Grant, and registers its
       expect(writeReservation).toMatchObject({ status: 'reserved', attemptId: 'ATTEMPT-WRITE-1' })
     } finally { clients.destroy() }
 
-    // 模拟 Grant 过期且撤销后才重启恢复：只开放 maintenance allowlist。
+    // 最终化成功但 Run outcome 尚未落库时，恢复必须重新验证原 Lease。
     await host.close()
     host = undefined
+    host = await startAuthorityExecutionRpcHostProcess({
+      ...hostOptions, clock: { kind: 'fixed-test-only', now: '2026-07-17T04:00:02.000Z' },
+    })
+    await expect(host.recoverApproval({
+      grantSubject: writeSubject, approvalBinding: finalized.approvalBinding, ...finalization,
+    })).rejects.toMatchObject({ code: 'E2E_LEASE_BINDING_MISMATCH' })
+    await host.close()
+    host = undefined
+
+    // 模拟 Grant 过期且撤销后才重启恢复：只开放 maintenance allowlist。
     const revoked = await LocalApprovalAuthority.open({
       issuer: 'authority', keyId: 'key-1', now, statePath: approvalPath,
       stateEncryptionKey: encryptionKey, testWorkspaceRoots: [process.cwd()], approvalIdentities: [approver],

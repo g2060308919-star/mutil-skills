@@ -9,8 +9,13 @@ import {
   digestApprovalProjection,
   digestArtifactContent,
   digestBytes,
+  digestPrdClause,
+  digestPrdClauseInventory,
+  digestPrdUnderstandingProjection,
+  digestPrdUnderstandingQuote,
   digestText,
   type ArtifactDocument,
+  type ArtifactType,
   type ApprovalGrantSubject,
   type SignedDiscoveryGrant,
   type RuntimeRequestEnvelope,
@@ -49,6 +54,40 @@ const installation: RuntimeInstallation = {
   installationDigest: digest('9'),
   sourceRepositoryIndependent: true,
 }
+const UNDERSTANDING_CONTRACT_MACHINE_VIEW = {
+  schemaVersion: '1.0.0' as const,
+  nodes: [{
+    nodeId: 'REQ-1', kind: 'REQ' as const, statement: 'A stable PRD.',
+    provenance: { kind: 'source-fact' as const, anchors: [{
+      sourceId: 'PRD-BODY', sourceSpan: {
+        startLine: 2, startColumn: 1, endLine: 2, endColumn: 14,
+      }, quote: 'A stable PRD.', quoteDigest: digestPrdUnderstandingQuote('A stable PRD.'),
+    }] },
+    responsibility: 'Product', upstreamNodeIds: [], downstreamNodeIds: [],
+    acceptanceCriteria: ['Product behavior is stable'],
+  }],
+  pendingQuestions: [],
+  route: { skillName: 'e2e' as const, steps: [{
+    stepId: 'E2E-1', inputNodeIds: ['REQ-1'], output: 'E2E report', constraints: [],
+    dependencyStepIds: [], completionCondition: 'REQ-1 is covered',
+  }] },
+  authorizedNodeIds: ['REQ-1'],
+}
+const UNDERSTANDING_CONTRACT_TEXT = [
+  '---',
+  'schemaVersion: 1.0.0',
+  'contractId: CONTRACT-PRODUCT',
+  'contractVersion: 1',
+  'contractStatus: confirmed-by-caller',
+  'confirmationStatus: confirmed-by-caller',
+  'confirmationContractVersion: 1',
+  'confirmedAt: 2026-07-17T00:00:00.000Z',
+  '---',
+  '# Requirements Contract',
+  '<!-- e2e-contract-machine-view:v1',
+  JSON.stringify(UNDERSTANDING_CONTRACT_MACHINE_VIEW),
+  '-->',
+].join('\n')
 
 describe('E2ERuntimeHost', () => {
   test('finalize-run 持久化 attempt 后发布同代 generation，完成 active 复读并幂等重放', async () => {
@@ -143,6 +182,7 @@ describe('E2ERuntimeHost', () => {
         terminalVerdict: 'accepted' as const,
       },
       rendered: { json: '{}\n', markdown: '# report\n', html: '<h1>report</h1>\n' },
+      reportDirectory: '/project/.biztest/reports/ASSET-1/RUN-REQUEST-REPORT-CREATE',
     }))
     const fixture = await hostFixture({
       projectPublisherFactory: () => ({ renderActiveReport }),
@@ -186,7 +226,29 @@ describe('E2ERuntimeHost', () => {
       projectIdentityDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       generationId: 'RUN-REQUEST-CREATE-1',
       prdRevision: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      sourceRevision: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      understandingContractDigest: digestBytes(
+        'e2e-prd-understanding-contract-source/v1', Buffer.from(UNDERSTANDING_CONTRACT_TEXT),
+      ),
+      sourceBundle: [{
+        sourceId: 'PRD-BODY', kind: 'file', ref: 'inputs/prd.md', mediaType: 'text/markdown',
+        digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        byteLength: Buffer.byteLength('# Product\nA stable PRD.'),
+      }],
       workflow: { current: 'created', sequence: 0 },
+    })
+    const createdSnapshot = await fixture.store.getRun(
+      createdResult.projectIdentityDigest as string, createdResult.runId as string,
+    )
+    expect(createdSnapshot?.trustedExecutionFacts['prd-source-snapshot']).toMatchObject({
+      schemaVersion: '1.0.0', sourceRef: 'inputs/prd.md',
+      normalizedText: '# Product\nA stable PRD.',
+      normalizedDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+    })
+    expect(createdSnapshot?.trustedExecutionFacts['prd-understanding-contract']).toMatchObject({
+      sourceDigest: createdResult.understandingContractDigest,
+      normalizedText: UNDERSTANDING_CONTRACT_TEXT,
+      machineView: UNDERSTANDING_CONTRACT_MACHINE_VIEW,
     })
 
     const status = await handleRequest(fixture.host, getStatusRequest(
@@ -199,12 +261,12 @@ describe('E2ERuntimeHost', () => {
       assetId: 'ASSET-1',
       workflow: { current: 'created', sequence: 0 },
       state: 'created',
-      nextEdge: { command: 'submit-candidate', from: 'created', expectedState: 'created' },
+      nextEdge: { command: 'prepare-prd-understanding', from: 'created', expectedState: 'created' },
       verifiedDigests: {
         runtimeInstallation: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
         workflowEventChain: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
       },
-      minimumMissingInput: ['prd-request'],
+      minimumMissingInput: ['prd-understanding-prepared'],
     })
 
     const copied = join(fixture.roots.root, 'project-copy')
@@ -215,6 +277,108 @@ describe('E2ERuntimeHost', () => {
     expect(copiedStatus).toMatchObject({
       ok: false,
       error: { code: 'E2E_RUNTIME_RUN_NOT_FOUND' },
+    })
+    await fixture.store.close()
+  })
+
+  test('create-run 拒绝与冻结 requirements contract 原文不一致的 Header', async () => {
+    const fixture = await hostFixture()
+    const request = createRunRequest('REQUEST-CONTRACT-HEADER-MISMATCH', fixture.roots.project)
+    request.payload.understandingContract.header.contractId = 'CONTRACT-FORGED'
+    expect(await handleRequest(fixture.host, request)).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_CONTRACT_HEADER_MISMATCH' },
+    })
+    await fixture.store.close()
+  })
+
+  test('create-run 一次冻结 understand-prd 收集的 necessary-dependency Source Bundle', async () => {
+    const fixture = await hostFixture()
+    await writeFile(join(fixture.roots.project, 'inputs', 'rules.md'), 'Only named users may edit.')
+    const request = createRunRequest('REQUEST-CREATE-SOURCE-BUNDLE', fixture.roots.project)
+    const response = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...request,
+      payload: { ...request.payload, supportingSources: [{
+        sourceId: 'RULES', kind: 'file', path: 'inputs/rules.md', mediaType: 'text/markdown',
+        origin: { kind: 'url', ref: 'https://example.test/rules' },
+        relevance: 'necessary-dependency',
+      }] },
+    })))
+
+    expect(response.sourceBundle).toEqual([
+      expect.objectContaining({ sourceId: 'PRD-BODY', ref: 'inputs/prd.md' }),
+      expect.objectContaining({
+        sourceId: 'RULES', ref: 'inputs/rules.md', mediaType: 'text/markdown',
+        origin: { kind: 'url', ref: 'https://example.test/rules' },
+        relevance: 'necessary-dependency',
+        digest: digestText('e2e-prd-understanding-source/v1', 'Only named users may edit.'),
+        byteLength: Buffer.byteLength('Only named users may edit.'),
+      }),
+    ])
+    const snapshot = await fixture.store.getRun(
+      response.projectIdentityDigest as string, response.runId as string,
+    )
+    expect(snapshot?.trustedExecutionFacts['prd-source-bundle']).toMatchObject({
+      sourceRevision: response.prdRevision,
+      sources: [{ sourceId: 'PRD-BODY' }, { sourceId: 'RULES' }],
+    })
+    await fixture.store.close()
+  })
+
+  test('prepare-prd-understanding 由 Runtime 生成投影摘要并保持工作流只读', async () => {
+    const fixture = await hostFixture()
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-PREPARE-UNDERSTANDING', fixture.roots.project),
+    ))
+    const { projectionDigest: _ignored, ...draft } = understandingProjection(
+      created.prdRevision as string,
+    )
+    const prepared = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-PREPARE-UNDERSTANDING'),
+      command: 'prepare-prd-understanding', projectRoot: fixture.roots.project,
+      payload: { runId: created.runId, projection: draft },
+    })))
+
+    expect(prepared).toMatchObject({
+      runId: created.runId, sourceRevision: created.prdRevision,
+      understanding: {
+        contractId: 'CONTRACT-PRODUCT',
+        projectionDigest: digestPrdUnderstandingProjection(draft),
+      },
+    })
+    const replay = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-PREPARE-UNDERSTANDING-REPLAY'),
+      command: 'prepare-prd-understanding', projectRoot: fixture.roots.project,
+      payload: { runId: created.runId, projection: draft },
+    })))
+    expect(replay.understanding).toEqual(prepared.understanding)
+    expect(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-PREPARE-UNDERSTANDING-DIFFERENT'),
+      command: 'prepare-prd-understanding', projectRoot: fixture.roots.project,
+      payload: { runId: created.runId, projection: {
+        ...draft,
+        nodes: draft.nodes.map((node) => ({ ...node, responsibility: 'Changed responsibility' })),
+      } },
+    }))).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_CONTRACT_BODY_MISMATCH' },
+    })
+    expect(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-PREPARE-UNDERSTANDING-INVALID'),
+      command: 'prepare-prd-understanding', projectRoot: fixture.roots.project,
+      payload: { runId: created.runId, projection: { ...draft, pendingQuestions: [{
+        questionId: 'QUESTION-1', question: '仍有待确认问题', affectedNodeIds: ['REQ-1'],
+      }] } },
+    }))).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_SCHEMA_INVALID', category: 'input' },
+    })
+    const status = successResult(await handleRequest(fixture.host, getStatusRequest(
+      'REQUEST-STATUS-AFTER-PREPARE', fixture.roots.project, created.runId as string,
+    )))
+    expect(status).toMatchObject({
+      state: 'created', nextEdge: { command: 'submit-candidate' },
+      minimumMissingInput: ['prd-request'],
+      verifiedDigests: {
+        'prd-understanding-projection': digestPrdUnderstandingProjection(draft),
+      },
     })
     await fixture.store.close()
   })
@@ -277,6 +441,7 @@ describe('E2ERuntimeHost', () => {
       generationId: created.generationId as string,
       prdRevision: created.prdRevision as string,
     })
+    await prepareUnderstandingForRun(fixture, created, 'REQUEST-PREPARE-1')
     const response = await handleRequest(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-SUBMIT-1',
       projectRoot: fixture.roots.project,
@@ -294,11 +459,107 @@ describe('E2ERuntimeHost', () => {
       'REQUEST-STATUS-1', fixture.roots.project, created.runId as string,
     )))
     expect(status.workflow).toMatchObject({ current: 'source-frozen', sequence: 1 })
+    expect(status.verifiedDigests).toMatchObject({
+      'prd-understanding-projection': (candidate as any).content.understanding.projectionDigest,
+    })
     await expect(fixture.store.getRun(
       created.projectIdentityDigest as string,
       created.runId as string,
     )).resolves.toMatchObject({
       frozenArtifacts: { 'prd-request': candidate },
+    })
+    await fixture.store.close()
+  })
+
+  test('prd-request 不能跳过 Runtime prepare，也不能替换已准备投影', async () => {
+    const fixture = await hostFixture()
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-PREPARED-BINDING', fixture.roots.project),
+    ))
+    const candidate = prdRequestCandidate({
+      assetId: created.assetId as string,
+      generationId: created.generationId as string,
+      prdRevision: created.prdRevision as string,
+    })
+    expect(await handleRequest(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-SUBMIT-WITHOUT-PREPARE', projectRoot: fixture.roots.project,
+      runId: created.runId as string, expectedState: 'created', candidate,
+    }))).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_PREPARED_MISMATCH' },
+    })
+    await prepareUnderstandingForRun(fixture, created, 'REQUEST-PREPARE-BINDING')
+    const changed = mutateUnderstandingCandidate(candidate, (understanding) => {
+      understanding.nodes[0].responsibility = 'Changed responsibility'
+    })
+    expect(await handleRequest(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-SUBMIT-DIFFERENT-PREPARED', projectRoot: fixture.roots.project,
+      runId: created.runId as string, expectedState: 'created', candidate: changed,
+    }))).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_PREPARED_MISMATCH' },
+    })
+    await fixture.store.close()
+  })
+
+  test('拒绝过期契约 Revision、未冻结 source ref 与伪造 source-fact 引文', async () => {
+    const fixture = await hostFixture()
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-UNDERSTANDING-INVALID', fixture.roots.project),
+    ))
+    const { projectionDigest: _ignored, ...base } = understandingProjection(created.prdRevision as string)
+    const prepare = (requestId: string, projection: unknown) => handleRequest(
+      fixture.host,
+      RuntimeRequestEnvelopeSchema.parse({
+        ...requestHeader(requestId), command: 'prepare-prd-understanding',
+        projectRoot: fixture.roots.project, payload: { runId: created.runId, projection },
+      }),
+    )
+
+    const changedContractBody = structuredClone(base)
+    changedContractBody.nodes[0]!.responsibility = 'Forged responsibility'
+    expect(await prepare('REQUEST-UNDERSTANDING-BODY-MISMATCH', changedContractBody)).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_CONTRACT_BODY_MISMATCH' },
+    })
+
+    const oversized = structuredClone(base)
+    oversized.nodes = Array.from({ length: 40 }, (_unused, index) => ({
+      ...structuredClone(base.nodes[0]!), nodeId: `REQ-LARGE-${index}`,
+      responsibility: 'x'.repeat(64 * 1024),
+      upstreamNodeIds: [], downstreamNodeIds: [],
+    }))
+    oversized.authorization.authorizedNodeIds = oversized.nodes.map((node) => node.nodeId)
+    oversized.route.steps[0]!.inputNodeIds = oversized.authorization.authorizedNodeIds
+    expect(await prepare('REQUEST-UNDERSTANDING-TOO-LARGE', oversized)).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_TOO_LARGE' },
+    })
+
+    const stale = structuredClone(base)
+    stale.sourceRevision = digest('f')
+    expect(await prepare('REQUEST-UNDERSTANDING-STALE', stale)).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_REVISION_MISMATCH' },
+    })
+
+    const missing = structuredClone(base)
+    missing.sources.push({ sourceId: 'MISSING', kind: 'file', ref: 'inputs/missing.md',
+      origin: { kind: 'file', ref: 'inputs/missing.md' },
+      relevance: 'target', digest: digest('e'), byteLength: 1 })
+    expect(await prepare('REQUEST-UNDERSTANDING-MISSING', missing)).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_SOURCE_SET_MISMATCH' },
+    })
+
+    const forged = structuredClone(base)
+    const quote = 'This fact does not occur.'
+    forged.nodes[0]!.statement = quote
+    forged.nodes[0]!.provenance.anchors[0]!.quote = quote
+    forged.nodes[0]!.provenance.anchors[0]!.quoteDigest = digestPrdUnderstandingQuote(quote)
+    expect(await prepare('REQUEST-UNDERSTANDING-FORGED', forged)).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_CONTRACT_BODY_MISMATCH' },
+    })
+
+    const oldContract = structuredClone(base)
+    oldContract.contractVersion = 2
+    oldContract.authorization.contractVersion = 2
+    expect(await prepare('REQUEST-UNDERSTANDING-OLD-CONTRACT', oldContract)).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_CONTRACT_REVISION_MISMATCH' },
     })
     await fixture.store.close()
   })
@@ -432,6 +693,68 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('写 Execution Contract 冻结时原子预留 Lease，并向 Skill 返回 Authority 分配的 fencing token', async () => {
+    const reserveExecutionLeases = vi.fn(async (input: {
+      runId: string
+      leases: Array<{ leaseId: string; resourceKey: string; resourceFingerprint: string; ttlMs: number }>
+    }) => input.leases.map((lease) => ({
+      ...lease, runId: input.runId, exclusive: true as const, status: 'active' as const,
+      fencingToken: 7, acquiredAt: '2026-07-17T00:00:00.000Z', expiresAt: '2026-07-17T00:10:00.000Z',
+    })))
+    const fixture = await hostFixture({ reserveExecutionLeases })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-WRITE-BINDING', fixture.roots.project),
+    ))
+    const projected = projectionFixture()
+    const binding = { assetId: created.assetId as string, generationId: created.generationId as string,
+      prdRevision: created.prdRevision as string }
+    const actionMap = rebindArtifact(projected.frozenArtifacts['browser-action-map'], binding)
+    await fixture.store.beginRequest('SEED-WRITE-BINDING-DRAFT', digest('6'))
+    const lock = await fixture.store.acquireRunLock(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string, created.runId as string,
+      'SEED-WRITE-BINDING-DRAFT', digest('6'),
+      (snapshot) => ({ snapshot: { ...snapshot,
+        artifactDigests: { ...snapshot.artifactDigests, 'browser-action-map': actionMap.contentDigest },
+        frozenArtifacts: { 'browser-action-map': actionMap },
+        workflow: { current: 'binding-draft', sequence: 7, eventChainDigest: digest('7') },
+      }, response: { seeded: true } }),
+      'test-seed-write-binding-draft', lock,
+    )
+    await lock.close()
+    const testCases = rebindArtifact(projected.frozenArtifacts['test-cases'], binding)
+    await handleSuccess(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-SUBMIT-WRITE-CASES', projectRoot: fixture.roots.project,
+      runId: created.runId as string, expectedState: 'binding-draft',
+      artifactType: 'test-cases', candidate: testCases,
+    }))
+    const source = structuredClone(projected.frozenArtifacts['execution-contract']) as ArtifactDocument & {
+      content: { dataNeeds: unknown[] }
+    }
+    source.content.dataNeeds = [{ leaseId: 'LEASE-WRITE-1', resourceKey: 'order:1',
+      resourceFingerprint: digest('3'), mode: 'write' }]
+    const executionContract = rebindArtifact(source, binding)
+
+    const result = successResult(await handleRequest(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-SUBMIT-WRITE-CONTRACT', projectRoot: fixture.roots.project,
+      runId: created.runId as string, expectedState: 'binding-draft',
+      artifactType: 'execution-contract', candidate: executionContract,
+    })))
+
+    expect(reserveExecutionLeases).toHaveBeenCalledWith({
+      runId: created.runId,
+      leases: [{ leaseId: 'LEASE-WRITE-1', resourceKey: 'order:1',
+        resourceFingerprint: digest('3'), ttlMs: 600_000 }],
+    })
+    expect(result).toMatchObject({
+      workflow: { current: 'awaiting-execution-approval', sequence: 9 },
+      reservedLeases: [{ leaseId: 'LEASE-WRITE-1', fencingToken: 7, status: 'active' }],
+    })
+    await fixture.store.close()
+  })
+
   test('从 create-run 走公开 Host 全链，以正式 Authority Grant 执行只读 Case', async () => {
     const now = new Date('2026-07-17T00:00:00.000Z')
     const approver = { subject: 'os-user:runtime-host-test', roles: [
@@ -541,17 +864,74 @@ describe('E2ERuntimeHost', () => {
       generationId: created.generationId as string,
       prdRevision: created.prdRevision as string,
     }
+    await handleSuccess(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-FORMAL-POLICY', projectRoot: fixture.roots.project,
+      runId, expectedState: 'created', artifactType: 'project-policy',
+      candidate: projectPolicyCandidate(binding, 'RUNTIME-POLICY-FORMAL'),
+    }))
     const requestCandidate = prdRequestCandidate(binding)
+    await prepareUnderstandingForRun(fixture, created, 'REQUEST-FORMAL-PREPARE')
     await handleSuccess(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-FORMAL-PRD', projectRoot: fixture.roots.project,
       runId, expectedState: 'created', artifactType: 'prd-request', candidate: requestCandidate,
     }))
-    const acceptance = semanticCandidate('acceptance-scope', '2.0.0', binding, {
-      includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['inputs/prd.md'] }],
+    const prematureAcceptance = semanticCandidate('acceptance-scope', '2.0.0', binding, {
+      includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['CLAUSE-1'] }],
+      clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] }],
       exclusions: [], ambiguities: [], dependencies: [], visualScope: { required: false, refs: [] },
       browserScope: { browserIds: ['chromium'], viewportIds: ['desktop'] },
       scopeDecision: { decisionId: 'SCOPE-1', status: 'pending' },
     })
+    expect(await handleRequest(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-FORMAL-SCOPE-PREMATURE', projectRoot: fixture.roots.project,
+      runId, expectedState: 'source-frozen', artifactType: 'acceptance-scope',
+      candidate: prematureAcceptance,
+    }))).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_STAGE_PREREQUISITES_MISSING' },
+    })
+    expect(successResult(await handleRequest(fixture.host, getStatusRequest(
+      'REQUEST-FORMAL-STATUS-SOURCE', fixture.roots.project, runId,
+    ))).minimumMissingInput).toEqual([
+      'project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
+    ].filter((artifactType) => artifactType !== 'project-policy'))
+    const prdText = '# Product\nA stable PRD.'
+    const clauseInput = {
+      clauseId: 'CLAUSE-1', sourceId: 'PRD-BODY', kind: 'functional' as const,
+      sourceSpan: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 14 },
+      originalText: 'A stable PRD.', normalizedText: 'A stable PRD.',
+    }
+    const clause = { ...clauseInput, textDigest: digestPrdClause(clauseInput) }
+    const manifest = semanticCandidate('prd-manifest', '1.0.0', binding, {
+      prdId: 'PRD-BODY', assetId: binding.assetId, revision: binding.prdRevision,
+      normalizedPrdDigest: binding.prdRevision,
+      sources: [{ sourceId: 'PRD-BODY', digest: binding.prdRevision,
+        byteLength: Buffer.byteLength(prdText) }], attachments: [],
+      sourceCacheIndexDigest: digest('e'), clauses: [clause],
+      clauseInventoryDigest: digestPrdClauseInventory([clause]),
+    })
+    await handleSuccess(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-FORMAL-MANIFEST', projectRoot: fixture.roots.project,
+      runId, expectedState: 'source-frozen', artifactType: 'prd-manifest', candidate: manifest,
+    }))
+    for (const [artifactType, content] of [
+      ['prd-diff', {
+        previousRevision: digest('0'), currentRevision: binding.prdRevision,
+        sectionChanges: [], lineageMappings: [], impactedEntityIds: [],
+        lineageReview: { decisionId: 'LINEAGE-1', status: 'pending' },
+      }],
+      ['semantic-generation', {
+        modelProvider: 'fixture', modelId: 'MODEL', modelVersion: '1.0.0',
+        systemPromptDigest: digest('a'), toolOutputDigests: [],
+        sampling: { temperature: 0, seed: 1 }, candidateDigests: [digest('b')],
+        selectedDigest: digest('b'),
+      }],
+    ] as const) await handleSuccess(fixture.host, submitCandidateRequest({
+      requestId: `REQUEST-FORMAL-${artifactType}`, projectRoot: fixture.roots.project,
+      runId, expectedState: 'source-frozen', artifactType,
+      candidate: semanticCandidate(artifactType, artifactType === 'prd-diff' ? '2.0.0' : '1.0.0',
+        binding, content),
+    }))
+    const acceptance = prematureAcceptance
     await handleSuccess(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-FORMAL-SCOPE', projectRoot: fixture.roots.project,
       runId, expectedState: 'source-frozen', artifactType: 'acceptance-scope', candidate: acceptance,
@@ -564,12 +944,48 @@ describe('E2ERuntimeHost', () => {
 
     const requirementModel = semanticCandidate('requirement-model', '1.0.0', binding, {
       modelRevision: 1, requirements: [{
-        reqId: 'REQ-1', revision: 1, title: '订单列表', actors: ['auditor'], entities: ['order'],
+        reqId: 'REQ-1', contractNodeIds: ['REQ-1'], revision: 1, title: '订单列表',
+        actors: ['auditor'], entities: ['order'],
         preconditions: [], rules: [{ ruleId: 'RULE-1', category: 'business',
-          statement: '显示待审核订单', sourceRefs: ['inputs/prd.md'], certainty: 'explicit' }],
+          contractNodeIds: ['REQ-1'],
+          statement: '显示待审核订单', sourceRefs: ['CLAUSE-1'], certainty: 'explicit',
+          oracleIds: ['ORACLE-1'] }],
         states: [], transitions: [], observableOutcomes: [{ oracleId: 'ORACLE-1',
-          statement: '页面显示待审核订单' }], applicability: [], sourceRefs: ['inputs/prd.md'], status: 'active',
+          ruleId: 'RULE-1', statement: '页面显示待审核订单', sourceRefs: ['CLAUSE-1'],
+          contractAcceptanceCriteria: [{ nodeId: 'REQ-1', criterionIndex: 0 }] }],
+        applicability: [], sourceRefs: ['CLAUSE-1'], status: 'active',
       }], coupledDimensions: [], applicabilityRules: ['RULE-1'], modelDecisionDigest: digest('1'),
+    })
+    const interactionFlow = semanticCandidate('interaction-flow', '1.0.0', binding, { flows: [{
+      flowId: 'FLOW-1', contractNodeIds: ['REQ-1'], nodes: [
+        { nodeId: 'NODE-ENTRY', reqId: 'REQ-1', kind: 'entry', effect: 'read', oracleIds: ['ORACLE-1'] },
+        { nodeId: 'NODE-EXIT', reqId: 'REQ-1', kind: 'exit', effect: 'read', oracleIds: ['ORACLE-1'] },
+      ], edgeIds: ['EDGE-1'], entryNodeId: 'NODE-ENTRY', exitNodeIds: ['NODE-EXIT'],
+    }] })
+    await handleSuccess(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-FORMAL-FLOW', projectRoot: fixture.roots.project,
+      runId, expectedState: 'scope-approved', artifactType: 'interaction-flow', candidate: interactionFlow,
+    }))
+    const designAudit = semanticCandidate('design-audit', '1.0.0', binding, {
+      inputDigests: [requirementModel.contentDigest], metrics: [], findings: [],
+      orphanIds: [], weakIds: [], status: 'passed',
+    })
+    await handleSuccess(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-FORMAL-DESIGN-AUDIT', projectRoot: fixture.roots.project,
+      runId, expectedState: 'scope-approved', artifactType: 'design-audit', candidate: designAudit,
+    }))
+    const unboundRequirementModel = structuredClone(requirementModel) as any
+    delete unboundRequirementModel.content.requirements[0].contractNodeIds
+    unboundRequirementModel.contentDigest = ''
+    unboundRequirementModel.contentDigest = digestArtifactContent(
+      'artifact-content/1.0.0/requirement-model', unboundRequirementModel,
+    )
+    expect(await handleRequest(fixture.host, submitCandidateRequest({
+      requestId: 'REQUEST-FORMAL-MODEL-UNBOUND', projectRoot: fixture.roots.project,
+      runId, expectedState: 'scope-approved', artifactType: 'requirement-model',
+      candidate: unboundRequirementModel,
+    }))).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_UNDERSTANDING_DERIVED_ASSET_UNBOUND' },
     })
     await handleSuccess(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-FORMAL-MODEL', projectRoot: fixture.roots.project,
@@ -634,21 +1050,77 @@ describe('E2ERuntimeHost', () => {
       requestId: 'REQUEST-FORMAL-CONTRACT', projectRoot: fixture.roots.project,
       runId, expectedState: 'binding-draft', artifactType: 'execution-contract', candidate: executionContract,
     }))
+    const bindingSnapshot = await fixture.store.getRun(
+      created.projectIdentityDigest as string, runId,
+    )
+    const projectedExecutionGrant = SignedGrantSchema.parse(projected.grant) as any
+    const runBundleProjection: Record<string, unknown> = {
+      runId,
+      schedule: [{ ordinal: 0, caseId: 'CASE-1', stepIds: ['STEP-1'], actionIds: ['ACTION-1'] }],
+      attemptPlans: [{ caseId: 'CASE-1', slots: 1 }],
+      signedCapabilities: projectedExecutionGrant.capabilities.map((capability: any) => ({
+        capabilityId: capability.capabilityId,
+        actionId: capability.actionId,
+        operation: capability.operation,
+        effect: capability.effect,
+        maxUses: capability.maxUses,
+        digest: digestText('approval-capability/v1', canonicalizeJson(capability)),
+      })),
+      secretRefs: [],
+      runtimeIsolationPolicyDigest: 'not-applicable',
+    }
+    runBundleProjection.allInputRefs = [
+      'project-policy', 'acceptance-scope', 'requirement-model', 'coverage-universe',
+      'test-cases', 'execution-contract', 'browser-action-map',
+    ].map((artifactType) => {
+      const artifact = bindingSnapshot?.frozenArtifacts[artifactType]
+      if (artifact === undefined) throw new Error(`missing ${artifactType}`)
+      return {
+        artifactId: artifact.artifactId,
+        digest: digestApprovalProjection(
+          artifactType as Parameters<typeof digestApprovalProjection>[0], artifact.content,
+        ),
+      }
+    })
+    runBundleProjection.runtimePolicyDigest = ((bindingSnapshot?.frozenArtifacts['project-policy']
+      ?.content as { runtimePolicy: { digest: string } }).runtimePolicy.digest)
     const readSubject = {
       ...structuredClone(projected.currentSubject),
       assetId: binding.assetId, prdRevision: binding.prdRevision,
       caseDigest: digestApprovalProjection('test-cases', testCases.content),
       actionMapDigest: digestApprovalProjection('browser-action-map', actionMap.content),
       executionContractDigest: digestApprovalProjection('execution-contract', executionContract.content),
+      runBundleProjectionDigest: digestApprovalProjection('run-bundle', runBundleProjection),
       discoveryGrantId: discoveryGrant.grantId, preflightDigest: formalPreflightDigest,
     }
-    const executionResult = await handleSuccess(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+    const semanticConfirmation = await handleSuccess(fixture.host, RuntimeRequestEnvelopeSchema.parse({
       ...requestHeader('REQUEST-FORMAL-EXECUTION'), command: 'open-approval',
       projectRoot: fixture.roots.project,
       payload: { runId, approvalType: 'execution', grantSubject: readSubject },
     }))
+    expect(semanticConfirmation).toMatchObject({
+      status: 'confirmation-required', approvalMode: 'webauthn',
+      summary: { semanticReview: { prd: { normalizedText: expect.any(String) } } },
+    })
+    const executionResult = await handleSuccess(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-FORMAL-EXECUTION-CONFIRM'), command: 'confirm-approval',
+      projectRoot: fixture.roots.project,
+      payload: { runId, confirmationId: semanticConfirmation.confirmationId,
+        subjectDigest: semanticConfirmation.subjectDigest },
+    }))
     await expect(authority.verify(SignedGrantSchema.parse(executionResult.signedGrant)))
       .resolves.toMatchObject({ allowed: true })
+    const executionApproved = await fixture.store.getRun(
+      created.projectIdentityDigest as string, runId,
+    )
+    const approvedGrant = SignedGrantSchema.parse(executionResult.signedGrant)
+    expect(executionApproved?.frozenArtifacts['run-bundle']).toBeDefined()
+    expect(((executionApproved?.frozenArtifacts['browser-action-map']?.content as {
+      actions: Array<{ capabilities: Array<{ capabilityId: string }> }>
+    }).actions[0]?.capabilities[0]?.capabilityId)).toBe(approvedGrant.capabilities[0]?.capabilityId)
+    expect(digestApprovalProjection(
+      'run-bundle', executionApproved?.frozenArtifacts['run-bundle']?.content,
+    )).toBe((approvedGrant.subject as { runBundleProjectionDigest: string }).runBundleProjectionDigest)
     const regression = regressionManifestCandidate(binding)
     await handleSuccess(fixture.host, submitCandidateRequest({
       requestId: 'REQUEST-FORMAL-REGRESSION', projectRoot: fixture.roots.project,
@@ -1342,6 +1814,49 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('execute-run 清理包装错误只公开嵌套首因固定码', async () => {
+    const fixture = await hostFixture({ executeReadOnlyRun: async () => {
+      throw Object.assign(new Error('generic cleanup wrapper'), {
+        code: 'E2E_RUNTIME_CLEANUP_FAILED',
+        cause: new AggregateError([Object.assign(new Error('private browser failure'), {
+          code: 'E2E_RUNTIME_BROWSER_TEST_CRASH',
+        })]),
+      })
+    } })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-NESTED-CRASH', fixture.roots.project),
+    ))
+    const projected = projectionFixture()
+    await fixture.store.beginRequest('SEED-NESTED-CRASH', digest('a'))
+    const lock = await fixture.store.acquireRunLock(created.projectIdentityDigest as string, created.runId as string)
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string, created.runId as string,
+      'SEED-NESTED-CRASH', digest('a'),
+      (snapshot) => ({ snapshot: {
+        ...snapshot,
+        artifactDigests: { ...snapshot.artifactDigests, ...Object.fromEntries(
+          Object.entries(projected.frozenArtifacts).map(([key, artifact]) => [key, artifact.contentDigest]),
+        ) },
+        frozenArtifacts: projected.frozenArtifacts,
+        trustedExecutionFacts: executionFactsFor(projected, snapshot),
+        workflow: { current: 'compiled', sequence: 9, eventChainDigest: digest('b') },
+      }, response: { seeded: true } }),
+      'test-seed-nested-crash', lock,
+    )
+    await lock.close()
+
+    const response = await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-EXECUTE-NESTED-CRASH'), command: 'execute-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    }))
+    expect(response).toMatchObject({ ok: false, error: {
+      code: 'E2E_RUNTIME_READ_EXECUTION_CRASHED',
+      message: expect.stringContaining('内部错误码 E2E_RUNTIME_BROWSER_TEST_CRASH'),
+    } })
+    expect(response.error?.message).not.toContain('private browser failure')
+    await fixture.store.close()
+  })
+
   test('resume-run 把 recover-write-attempt 接到生产 Host recovery coordinator，并闭合 resume request', async () => {
     const recover = vi.fn(async () => ({ status: 'blocked' as const,
       reasonCode: 'E2E_RUNTIME_WRITE_EFFECT_UNCERTAIN', browserCalls: 0 as const }))
@@ -1478,6 +1993,7 @@ async function hostFixture(options: {
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
   finalizeGeneration?: Parameters<typeof authorizeRuntimeGenerationFinalizer>[0]
   quarantineEvidence?: Parameters<typeof authorizeRuntimeEvidenceQuarantine>[0]
+  reserveExecutionLeases?: NonNullable<ConstructorParameters<typeof E2ERuntimeHost>[0]['reserveExecutionLeases']>
 } = {}) {
   const roots = options.roots ?? await createRuntimeTestRoots()
   await mkdir(join(roots.project, '.biztest'), { recursive: true })
@@ -1487,6 +2003,9 @@ async function hostFixture(options: {
   await mkdir(join(roots.project, 'inputs'), { recursive: true })
   await writeFile(join(roots.project, 'inputs', 'prd.md'), '# Product\nA stable PRD.')
   await writeFile(join(roots.project, 'inputs', 'policy.json'), '{}')
+  await writeFile(
+    join(roots.project, 'inputs', 'understanding-contract.md'), UNDERSTANDING_CONTRACT_TEXT,
+  )
   const store = await RuntimeRunStore.open({
     homeDir: roots.home,
     projectRoot: roots.project,
@@ -1503,6 +2022,9 @@ async function hostFixture(options: {
     }),
     runStore: store,
     now: () => new Date('2026-07-17T00:00:00.000Z'),
+    ...(options.reserveExecutionLeases === undefined ? {} : {
+      reserveExecutionLeases: options.reserveExecutionLeases,
+    }),
     ...(options.reader === undefined ? {} : { projectFileReader: options.reader }),
     ...(options.executeReadOnlyRun === undefined ? {} : {
       readExecutor: authorizeRuntimeReadExecutor(options.executeReadOnlyRun),
@@ -1584,7 +2106,8 @@ function executionGrantForMode(mode: 'write' | 'injection', runId: string) {
       runBundleProjectionDigest: digest('c'), environment: 'test' as const,
       baseOrigin: 'https://test.example.com', actor: 'auditor', discoveryGrantId: 'DISCOVERY-1',
       preflightDigest: digest('d'), actions: [{ actionId: 'ACTION-1', effect: 'reversible-write' as const,
-        dataLeaseId: 'LEASE-1', fencingToken: 1, cleanupPlanDigest: digest('e'), requests: [request] }],
+        dataLeaseId: 'LEASE-1', resourceKey: 'order:1', fencingToken: 1,
+        cleanupPlanDigest: digest('e'), requests: [request] }],
     }
     const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
     return SignedGrantSchema.parse({ ...common, grantId: 'WRITE-1', subject, subjectDigest,
@@ -1634,7 +2157,18 @@ function createRunRequest(requestId: string, projectRoot: string) {
     ...requestHeader(requestId), command: 'create-run', projectRoot,
     payload: {
       assetId: 'ASSET-1',
-      prdSource: { kind: 'file', path: 'inputs/prd.md' },
+      prdSource: { kind: 'file', path: 'inputs/prd.md',
+        origin: { kind: 'file', ref: 'inputs/prd.md' } },
+      understandingContract: {
+        header: {
+          schemaVersion: '1.0.0', contractId: 'CONTRACT-PRODUCT', contractVersion: 1,
+          contractStatus: 'confirmed-by-caller', authorization: {
+            status: 'confirmed-by-caller', contractVersion: 1,
+            confirmedAt: '2026-07-17T00:00:00.000Z',
+          },
+        },
+        source: { kind: 'file', path: 'inputs/understanding-contract.md' },
+      },
       projectPolicyPath: 'inputs/policy.json',
     },
   }) as Extract<RuntimeRequestEnvelope, { command: 'create-run' }>
@@ -1671,13 +2205,14 @@ function prdRequestCandidate(binding: {
   prdRevision: string
 }): Record<string, unknown> & { contentDigest: string; schemaVersion: string; artifactType: string } {
   const candidate = {
-    artifactId: 'PRD-REQUEST-1', artifactType: 'prd-request', schemaVersion: '1.0.0',
+    artifactId: 'PRD-REQUEST-1', artifactType: 'prd-request', schemaVersion: '2.0.0',
     engineVersion: '0.1.0', ...binding, createdAt: '2026-07-17T00:00:00.000Z',
     contentDigest: '', signatures: [], dependencies: [], graph: { defines: [], references: [] },
     content: {
       productSpace: 'PRODUCT', title: 'Product PRD',
       sourceDescriptors: [{ sourceId: 'PRD-BODY', kind: 'file', ref: 'inputs/prd.md' }],
       userRequest: 'Test the product', testWorkspaceId: 'WORKSPACE-1', secretRefs: [],
+      understanding: understandingProjection(binding.prdRevision),
     },
   }
   return {
@@ -1687,6 +2222,66 @@ function prdRequestCandidate(binding: {
       candidate,
     ),
   }
+}
+
+function understandingProjection(sourceRevision: string) {
+  const value = {
+    schemaVersion: '1.0.0' as const,
+    contractId: 'CONTRACT-PRODUCT', contractVersion: 1,
+    contractStatus: 'confirmed-by-caller' as const,
+    contractSourceDigest: digestBytes(
+      'e2e-prd-understanding-contract-source/v1', Buffer.from(UNDERSTANDING_CONTRACT_TEXT),
+    ),
+    sourceRevision,
+    sources: [{
+      sourceId: 'PRD-BODY', kind: 'file' as const, ref: 'inputs/prd.md',
+      origin: { kind: 'file' as const, ref: 'inputs/prd.md' },
+      relevance: 'target' as const,
+      digest: digestText('e2e-prd-understanding-source/v1', '# Product\nA stable PRD.'),
+      byteLength: Buffer.byteLength('# Product\nA stable PRD.', 'utf8'),
+    }],
+    nodes: structuredClone(UNDERSTANDING_CONTRACT_MACHINE_VIEW.nodes),
+    pendingQuestions: structuredClone(UNDERSTANDING_CONTRACT_MACHINE_VIEW.pendingQuestions),
+    route: structuredClone(UNDERSTANDING_CONTRACT_MACHINE_VIEW.route),
+    authorization: {
+      status: 'confirmed-by-caller' as const, contractVersion: 1,
+      authorizedNodeIds: structuredClone(UNDERSTANDING_CONTRACT_MACHINE_VIEW.authorizedNodeIds),
+      confirmedAt: '2026-07-17T00:00:00.000Z',
+    },
+    projectionDigest: '',
+  }
+  return { ...value, projectionDigest: digestPrdUnderstandingProjection(value) }
+}
+
+async function prepareUnderstandingForRun(
+  fixture: Awaited<ReturnType<typeof hostFixture>>,
+  created: Record<string, unknown>,
+  requestId: string,
+): Promise<Record<string, unknown>> {
+  const { projectionDigest: _ignored, ...draft } = understandingProjection(
+    created.prdRevision as string,
+  )
+  return successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+    ...requestHeader(requestId), command: 'prepare-prd-understanding',
+    projectRoot: fixture.roots.project, payload: { runId: created.runId, projection: draft },
+  })))
+}
+
+function mutateUnderstandingCandidate(
+  candidate: Record<string, unknown>,
+  mutate: (understanding: any, content: any) => void,
+): Record<string, unknown> {
+  const changed = structuredClone(candidate) as any
+  mutate(changed.content.understanding, changed.content)
+  changed.content.understanding.projectionDigest = digestPrdUnderstandingProjection(
+    changed.content.understanding,
+  )
+  changed.contentDigest = ''
+  changed.contentDigest = digestArtifactContent(
+    `artifact-content/${changed.schemaVersion}/${changed.artifactType}`,
+    changed,
+  )
+  return changed
 }
 
 function projectPolicyCandidate(binding: {
@@ -1732,7 +2327,7 @@ function rebindArtifact(
 }
 
 function semanticCandidate(
-  artifactType: 'acceptance-scope' | 'requirement-model' | 'coverage-universe',
+  artifactType: ArtifactType,
   schemaVersion: string,
   binding: { assetId: string; generationId: string; prdRevision: string },
   content: unknown,

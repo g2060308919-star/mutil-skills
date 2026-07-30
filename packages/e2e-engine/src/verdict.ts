@@ -83,6 +83,19 @@ export function computeVerdict(
       ...(input.migrationFindings.length > 0 ? ['VERDICT_MIGRATION_REQUIRED', ...input.migrationFindings] : []),
     ], metrics, businessFailuresObserved, advisoryFailures)
   }
+  const incompleteSemanticDimensions = Object.entries({
+    prdClauses: input.coverageFacts.prdClauses,
+    requirementDesign: input.coverageFacts.requirementDesign,
+    rules: input.coverageFacts.rules,
+    oracles: input.coverageFacts.oracles,
+    cases: input.coverageFacts.cases,
+  }).filter(([, fact]) => fact.covered !== fact.total).map(([dimension]) => dimension)
+  if (incompleteSemanticDimensions.length > 0) {
+    return result(input, 'artifact-blocked', [
+      'VERDICT_ARTIFACT_BLOCKED', 'VERDICT_SEMANTIC_COVERAGE_INCOMPLETE',
+      ...incompleteSemanticDimensions.map((dimension) => `VERDICT_SEMANTIC_${dimension.toUpperCase()}_INCOMPLETE`),
+    ], metrics, businessFailuresObserved, advisoryFailures)
+  }
   if (input.migrationFindings.length > 0) {
     return result(input, 'migration-required', ['VERDICT_MIGRATION_REQUIRED', ...input.migrationFindings], metrics, businessFailuresObserved, advisoryFailures)
   }
@@ -231,8 +244,11 @@ function computeMetrics(
   const automationApplicable = input.obligations.filter((item) => item.disposition !== 'not-applicable')
   const coverage = input.coverageFacts
   return {
+    clauseDispositionCoverage: metric(coverage.prdClauses.covered, coverage.prdClauses.total, '没有 PRD 条款'),
     requirementDesignCoverage: metric(coverage.requirementDesign.covered, coverage.requirementDesign.total, '没有适用需求'),
     ruleCoverage: metric(coverage.rules.covered, coverage.rules.total, '没有适用规则'),
+    oracleCoverage: metric(coverage.oracles.covered, coverage.oracles.total, '没有适用 Oracle'),
+    caseDesignCoverage: metric(coverage.cases.covered, coverage.cases.total, '没有适用 Case'),
     criticalNodeCoverage: metric(coverage.criticalNodes.covered, coverage.criticalNodes.total, '没有适用关键节点'),
     roleCoverage: metric(coverage.roles.covered, coverage.roles.total, '没有适用角色'),
     stateTransitionCoverage: metric(coverage.stateTransitions.covered, coverage.stateTransitions.total, '没有适用状态转换'),
@@ -292,8 +308,11 @@ function invalidInputResult(candidate: VerdictInput): VerdictResult {
     businessFailuresObserved: [],
     advisoryFailures: [],
     metrics: {
+      clauseDispositionCoverage: notApplicable('VerdictInput 无效'),
       requirementDesignCoverage: notApplicable('VerdictInput 无效'),
       ruleCoverage: notApplicable('VerdictInput 无效'),
+      oracleCoverage: notApplicable('VerdictInput 无效'),
+      caseDesignCoverage: notApplicable('VerdictInput 无效'),
       criticalNodeCoverage: notApplicable('VerdictInput 无效'),
       roleCoverage: notApplicable('VerdictInput 无效'),
       stateTransitionCoverage: notApplicable('VerdictInput 无效'),

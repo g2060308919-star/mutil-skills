@@ -1,10 +1,16 @@
+import { randomBytes } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import {
+  canonicalGrantApprovalSubjectDigest,
   digestText,
   type BrowserLocalReversibleWriteCapability,
   type WriteApprovalSubject,
 } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority } from './approval-authority.fixture.js'
+import { LocalApprovalAuthority as PersistentApprovalAuthority } from '../src/index.js'
 
 const NOW = new Date('2026-07-22T10:00:00.000Z')
 const digest = (value: string) => digestText('authority-browser-local-test/v1', value)
@@ -53,7 +59,8 @@ async function browserLocalSubject(authority: ReturnType<typeof LocalApprovalAut
     environment: 'test', baseOrigin: 'https://test.example.com',
     actions: [{
       actionId: 'ACTION-1', transport: 'browser-local', operation: 'full-playwright', effect: 'reversible-write',
-      programDigest, cleanupProgramDigest, dataLeaseId: 'LEASE-1', fencingToken: 7, cleanupPlanDigest,
+      programDigest, cleanupProgramDigest, dataLeaseId: 'LEASE-1', resourceKey: 'todos:fixture',
+      fencingToken: 7, cleanupPlanDigest,
       requests: [request],
     }],
   }
@@ -68,6 +75,83 @@ async function issueBrowserLocalGrant(authority: ReturnType<typeof LocalApproval
 }
 
 describe('LocalApprovalAuthority browser-local write grants', () => {
+  test('Grant 到期边界不得因签发阶段二次读时钟而越过 approvalContext', async () => {
+    let tick = 0
+    const directory = await mkdtemp(join(tmpdir(), 'e2e-authority-clock-boundary-'))
+    const authority = await PersistentApprovalAuthority.open({
+      issuer: 'AUTHORITY', keyId: 'KEY-1', now: () => new Date(NOW.getTime() + tick++),
+      statePath: join(directory, 'approval.sqlite'), stateEncryptionKey: randomBytes(32),
+      testWorkspaceRoots: [process.cwd()],
+    })
+    const subject = {
+      schemaVersion: '1.1.0' as const, assetId: 'ASSET-CLOCK', prdRevision: digest('clock-revision'),
+      scopeDigest: digest('clock-scope'), environment: 'test' as const,
+      baseOrigin: 'https://public.example.com', actor: 'visitor',
+      expectedPageIdentity: { url: 'https://public.example.com/app', title: 'Public',
+        heading: 'Public', ariaSignals: [] },
+      bootstrapIntentsDigest: digest('clock-bootstrap'), requests: [],
+      actions: [{ actionId: 'DISCOVERY-CLOCK', operation: 'local-navigation' as const,
+        maxUses: 1 as const, requestIds: [] }],
+    }
+    try {
+      const grant = await authority.finalizeLocalApprovalGrant({
+        subject, ttlMs: 60_000, finalizationId: 'FINALIZE-CLOCK', requestDigest: digest('clock-request'),
+        approvalBinding: { runId: 'RUN-CLOCK', approvalType: 'discovery',
+          subjectDigest: canonicalGrantApprovalSubjectDigest(subject), installationDigest: digest('installation') },
+      })
+
+      expect(grant.expiresAt).toBe(grant.approvalContext.expiresAt)
+      await expect(authority.verifyForSubject(grant, subject)).resolves.toEqual({ allowed: true })
+    } finally {
+      authority.close()
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test('公开页面缺少可选 DOM role 时完成 Discovery，显式冲突 role 仍拒绝', async () => {
+    const authority = LocalApprovalAuthority.create({ issuer: 'AUTHORITY', keyId: 'KEY-1', now: () => NOW })
+    const subject = {
+      schemaVersion: '1.1.0' as const, assetId: 'ASSET-PUBLIC', prdRevision: digest('public-revision'),
+      scopeDigest: digest('public-scope'), environment: 'test' as const,
+      baseOrigin: 'https://public.example.com', actor: 'visitor',
+      expectedPageIdentity: { url: 'https://public.example.com/app', title: 'Public',
+        heading: 'Public', ariaSignals: [] },
+      bootstrapIntentsDigest: digest('public-bootstrap'), requests: [],
+      actions: [{ actionId: 'DISCOVERY-PUBLIC', operation: 'local-navigation' as const,
+        maxUses: 1 as const, requestIds: [] }],
+    }
+    const grant = await authority.issueDiscoveryGrant({
+      subject, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
+    })
+    const reservation = await authority.reserveForSubject({
+      grant, currentSubject: subject, capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: 'DISCOVERY-PUBLIC', attemptId: 'ATTEMPT-DISCOVERY-PUBLIC',
+    })
+
+    await expect(authority.completeDiscoveryPreflight({
+      grant, currentSubject: subject, reservationId: reservation.reservationId,
+      capabilityId: grant.capabilities[0]!.capabilityId,
+      outcome: { status: 'ready', observedIdentity: { url: subject.expectedPageIdentity.url,
+        title: 'Public', headings: ['Public'] } },
+    })).resolves.toMatch(/^sha256:/)
+
+    const conflictingGrant = await authority.issueDiscoveryGrant({
+      subject, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
+    })
+    const conflictingReservation = await authority.reserveForSubject({
+      grant: conflictingGrant, currentSubject: subject,
+      capabilityId: conflictingGrant.capabilities[0]!.capabilityId,
+      actionId: 'DISCOVERY-PUBLIC', attemptId: 'ATTEMPT-DISCOVERY-PUBLIC-CONFLICT',
+    })
+    await expect(authority.completeDiscoveryPreflight({
+      grant: conflictingGrant, currentSubject: subject,
+      reservationId: conflictingReservation.reservationId,
+      capabilityId: conflictingGrant.capabilities[0]!.capabilityId,
+      outcome: { status: 'ready', observedIdentity: { url: subject.expectedPageIdentity.url,
+        title: 'Public', headings: ['Public'], role: 'ordinary-user' } },
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_PREFLIGHT_RESULT_INVALID' })
+  })
+
   test('签发原样冻结 full-playwright capability，并拒绝 subject 或 capability 任一边界漂移', async () => {
     const authority = LocalApprovalAuthority.create({ issuer: 'AUTHORITY', keyId: 'KEY-1', now: () => NOW })
     const { subject, grant, capability } = await issueBrowserLocalGrant(authority)

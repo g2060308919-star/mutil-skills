@@ -186,7 +186,9 @@ describe('VerdictInput contract', () => {
       evidenceAudit: { status: 'complete', total: 1, complete: 1, reasonCodes: [] },
       cleanupAudit: { status: 'complete', total: 0, complete: 0, reasonCodes: [] },
       coverageFacts: {
+        prdClauses: { covered: 1, total: 1 },
         requirementDesign: { covered: 1, total: 1 }, rules: { covered: 1, total: 1 },
+        oracles: { covered: 1, total: 1 }, cases: { covered: 1, total: 1 },
         criticalNodes: { covered: 1, total: 1 }, roles: { covered: 1, total: 1 },
         stateTransitions: { covered: 0, total: 0 }, scenarioCategories: { covered: 1, total: 1 },
       },

@@ -42,6 +42,7 @@ import {
   type RuntimeProvenance,
 } from '@mutil-skills/e2e-contracts'
 import { computeVerdict, type VerdictDependencies } from './verdict.js'
+import { auditSemanticCompleteness } from './semantic-completeness.js'
 import { auditPersistedAttemptFacts, createPersistedAttemptVerdictDependencies } from './persisted-attempt-audit.js'
 import { auditBrowserExecutionBinding, deriveBrowserCannotClaim } from './browser-claims.js'
 import { deriveRuntimeProvenanceCannotClaim } from './runtime-provenance-claims.js'
@@ -285,6 +286,21 @@ export function auditFinalReportFactBinding(
   }
   if (traceabilityFacts.incomplete) {
     findings.push({ code: 'E2E_GENERATION_REPORT_TRACEABILITY_INCOMPLETE', ref: 'traceabilityMatrix' })
+  }
+  const semanticAudit = auditSemanticCompleteness({
+    manifest: content('prd-manifest'), scope: content('acceptance-scope'),
+    model: content('requirement-model'), flows: content('interaction-flow'),
+    coverage: content('coverage-universe'), cases: content('test-cases'),
+  })
+  const clausesById = new Map(arrayAt(content('prd-manifest'), 'clauses')
+    .map((clause) => [stringAt(clause, 'clauseId'), clause]))
+  const expectedSemanticTraceability = semanticAudit.traceability.map((row) => {
+    const clause = clausesById.get(row.clauseId) ?? {}
+    return { ...row, sourceId: stringAt(clause, 'sourceId'), sourceSpan: objectAt(clause, 'sourceSpan'),
+      originalText: stringAt(clause, 'originalText') }
+  })
+  if (!safeCanonicalEquals(report.semanticTraceability, expectedSemanticTraceability)) {
+    findings.push({ code: 'E2E_GENERATION_REPORT_SEMANTIC_TRACEABILITY_MISMATCH', ref: 'semanticTraceability' })
   }
   const expectedDispositions = independentlyProjectReportDispositions(content)
   if (!safeCanonicalEquals(report.dispositions, expectedDispositions)) {
@@ -932,7 +948,9 @@ export function auditArtifactSemantics(
     const productionIsolated = regressionProfile === 'production-isolated'
     const trustedReadOnly = regressionProfile === 'trusted-read-only'
     const trustedReversibleWrite = regressionProfile === 'trusted-reversible-write'
-    if ((hasNonReadAction && trustedReadOnly) || (!hasNonReadAction && trustedReversibleWrite)) {
+    const trustedFullPlaywright = regressionProfile === 'full-playwright'
+    if ((hasNonReadAction && trustedReadOnly)
+      || (!hasNonReadAction && (trustedReversibleWrite || trustedFullPlaywright))) {
       add('E2E_GENERATION_REGRESSION_PROFILE_EFFECT_MISMATCH', 'regression-manifest', regressionProfile)
     }
     if (productionIsolated) {
@@ -945,14 +963,14 @@ export function auditArtifactSemantics(
           add('E2E_GENERATION_RUNTIME_ISOLATION_BINDING_MISMATCH', 'run-bundle', runtimeIsolationPolicyDigest)
         }
       }
-    } else if (trustedReadOnly || trustedReversibleWrite) {
+    } else if (trustedReadOnly || trustedReversibleWrite || trustedFullPlaywright) {
       if (runtimeIsolation !== null || runtimeIsolationPolicyDigest !== 'not-applicable') {
         add('E2E_GENERATION_RUNTIME_ISOLATION_UNEXPECTED', 'execution-contract', 'runtimeIsolation')
       }
     } else {
       add('E2E_COMPILER_UNATTESTED_SOURCE', 'regression-manifest', 'executionProfile')
     }
-    if (!productionIsolated && !trustedReadOnly && !trustedReversibleWrite
+    if (!productionIsolated && !trustedReadOnly && !trustedReversibleWrite && !trustedFullPlaywright
       && (runtimeIsolation !== null || runtimeIsolationPolicyDigest !== 'not-applicable')) {
       add('E2E_GENERATION_RUNTIME_ISOLATION_UNEXPECTED', 'execution-contract', 'runtimeIsolation')
     }
@@ -966,6 +984,8 @@ export function auditArtifactSemantics(
   const activeCases = arrayAt(cases, 'cases').filter((item) => stringAt(item, 'status') === 'active')
   const activeCaseIds = new Set(activeCases.map((item) => stringAt(item, 'caseId')))
   const mappings = arrayAt(actionMap, 'actions')
+  const fullProgramsByAction = new Map(arrayAt(actionMap, 'fullPlaywrightPrograms')
+    .map((program) => [stringAt(program, 'actionId'), program]))
 
   const approvalInputRefs = arrayAt(runBundle, 'allInputRefs')
   const expectedApprovalRefs = v2ApprovalFacts ? APPROVAL_INPUT_ARTIFACT_TYPES.map((type) => ({
@@ -1141,6 +1161,24 @@ export function auditArtifactSemantics(
       }
       if (resultEvidence.some((id) => !evidenceIds.has(id))) {
         add('E2E_GENERATION_EVIDENCE_REFERENCE_BROKEN', 'browser-results', `${caseId}:${stepId}`)
+      }
+      const fullProgram = fullProgramsByAction.get(actionId)
+      if (fullProgram !== undefined && terminal) {
+        const plans = arrayAt(fullProgram, 'oracleCheckpoints')
+        const checkpoints = arrayAt(stepResult, 'oracleCheckpoints')
+        const receiptEvidenceIds = new Set(arrayAt(caseResult, 'executionOutcomeReceipts')
+          .flatMap((receipt) => stringsAt(receipt, 'evidenceIds')))
+        const valid = plans.length > 0 && checkpoints.length === plans.length
+          && plans.every((plan) => checkpoints.some((checkpoint) =>
+            stringAt(checkpoint, 'checkpointId') === stringAt(plan, 'checkpointId')
+            && stringAt(checkpoint, 'oracleId') === stringAt(plan, 'oracleId')
+            && stringAt(checkpoint, 'expectedJson') === stringAt(plan, 'expectedJson')
+            && stringAt(checkpoint, 'expectedDigest') === stringAt(plan, 'expectedDigest')
+            && stringsAt(checkpoint, 'evidenceIds').length > 0
+            && stringsAt(checkpoint, 'evidenceIds').every((id) => receiptEvidenceIds.has(id))))
+          && (status !== 'passed' || checkpoints.every((checkpoint) => stringAt(checkpoint, 'status') === 'passed'))
+        if (!valid) add('E2E_GENERATION_ORACLE_CHECKPOINT_INCOMPLETE', 'browser-results',
+          `${caseId}:${stepId}:${actionId}`)
       }
       for (const evidenceId of resultEvidence) {
         const evidence = evidenceRecords.find((item) => stringAt(item, 'evidenceId') === evidenceId)
@@ -1678,9 +1716,11 @@ function auditExecutionOutcomeReceipts(
       const capabilityRecordMatches = arrayAt(sources.runBundle, 'signedCapabilities').filter((record) =>
         stringAt(record, 'capabilityId') === stringAt(receipt, 'capabilityId'))
       const capabilityRecord = capabilityRecordMatches[0] ?? {}
+      const capabilityOperation = stringAt(capability, 'operation')
       if (capabilityRecordMatches.length !== 1
         || stringAt(capabilityRecord, 'actionId') !== actionId
-        || stringAt(capabilityRecord, 'operation') !== 'http-request'
+        || !['http-request', 'full-playwright'].includes(capabilityOperation)
+        || stringAt(capabilityRecord, 'operation') !== capabilityOperation
         || stringAt(capabilityRecord, 'effect') !== 'reversible-write'
         || stringAt(capabilityRecord, 'digest') !== digestText(
           'approval-capability/v1', canonicalizeJson(capability))) {
@@ -1701,6 +1741,8 @@ function auditExecutionOutcomeReceipts(
       const attemptContext = objectAt(receipt, 'attemptContext')
       const stepEvidence = [...stringsAt(step, 'evidenceIds')].sort()
       const receiptEvidence = [...stringsAt(receipt, 'evidenceIds')].sort()
+      const receiptGateway = objectAt(receipt, 'gateway')
+      const receiptExecutionSessionId = stringAt(receiptGateway, 'executionSessionId')
       if (stringAt(receipt, 'attemptId') !== stringAt(caseResult, 'attemptId')
         || stringAt(receipt, 'status') !== stringAt(caseResult, 'status')
         || stringAt(receipt, 'effectObservation') !== stringAt(caseResult, 'effectObservation')
@@ -1709,7 +1751,12 @@ function auditExecutionOutcomeReceipts(
         || stringAt(attemptContext, 'prdRevision') !== sources.context.prdRevision
         || stringAt(attemptContext, 'runId') !== sources.context.runId
         || stringAt(attemptContext, 'caseId') !== caseId
-        || canonicalizeJson(stepEvidence) !== canonicalizeJson(receiptEvidence)) {
+        || !executionOutcomeEvidenceContextMatches({
+          operation: capabilityOperation, actionId, executionSessionId: receiptExecutionSessionId,
+          stepEvidence, receiptEvidence,
+          oracleCheckpointEvidence: arrayAt(step, 'oracleCheckpoints')
+            .flatMap((checkpoint) => stringsAt(checkpoint, 'evidenceIds')),
+        })) {
         add('E2E_GENERATION_EXECUTION_OUTCOME_CONTEXT_MISMATCH', 'browser-results', `${caseId}:${actionId}`)
       }
 
@@ -1729,8 +1776,8 @@ function auditExecutionOutcomeReceipts(
         add('E2E_GENERATION_EXECUTION_OUTCOME_RESERVATION_MISMATCH', 'gateway-audit', `${caseId}:${actionId}`)
       }
 
-      const gateway = objectAt(receipt, 'gateway')
-      const executionSessionId = stringAt(gateway, 'executionSessionId')
+      const gateway = receiptGateway
+      const executionSessionId = receiptExecutionSessionId
       const sessionEvents = events.filter((event) =>
         stringAt(event, 'executionSessionId') === executionSessionId)
       const publishedForwarded = sessionEvents.filter((event) =>
@@ -1769,6 +1816,25 @@ function auditExecutionOutcomeReceipts(
       }
     }
   }
+}
+
+function executionOutcomeEvidenceContextMatches(input: {
+  operation: string
+  actionId: string
+  executionSessionId: string
+  stepEvidence: string[]
+  receiptEvidence: string[]
+  oracleCheckpointEvidence: string[]
+}): boolean {
+  if (input.operation !== 'full-playwright') {
+    return canonicalizeJson(input.stepEvidence) === canonicalizeJson(input.receiptEvidence)
+  }
+  const expectedReceiptEvidence = (['BEFORE', 'AFTER', 'CLEANUP'] as const).flatMap((stage) =>
+    ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`))
+  expectedReceiptEvidence.push(...input.oracleCheckpointEvidence)
+  expectedReceiptEvidence.push(`GATEWAY-${input.executionSessionId}`)
+  return canonicalizeJson(input.stepEvidence) === canonicalizeJson([`EVIDENCE-${input.actionId}`])
+    && canonicalizeJson(input.receiptEvidence) === canonicalizeJson([...expectedReceiptEvidence].sort())
 }
 
 function objectAt(value: Record<string, unknown>, key: string): Record<string, unknown> {
@@ -2181,9 +2247,6 @@ export function auditVerdictFactBinding(
     .filter((requirement) => stringAt(requirement, 'status') === 'active')
   const coverageObligations = arrayAt(content('coverage-universe'), 'obligations')
   const flows = arrayAt(content('interaction-flow'), 'flows')
-  const coveredRequirementIds = new Set(coverageObligations.map((item) => stringAt(item, 'reqId')))
-  const allRuleIds = requirements.flatMap((requirement) => arrayAt(requirement, 'rules').map((rule) => stringAt(rule, 'ruleId')))
-  const coveredRuleIds = new Set(coverageObligations.flatMap((item) => stringsAt(item, 'ruleIds')))
   const criticalNodeIds = flows.flatMap((flow) => arrayAt(flow, 'nodes'))
     .filter((node) => stringAt(node, 'effect') !== 'read'
       || ['entry', 'exit', 'decision', 'state'].includes(stringAt(node, 'kind'))
@@ -2197,9 +2260,13 @@ export function auditVerdictFactBinding(
   const coveredTransitions = new Set(coverageObligations.map((item) => stringAt(item, 'transitionId'))
     .filter((transitionId) => transitionId !== 'not-applicable'))
   const scenarioIds = [...new Set(coverageObligations.map((item) => stringAt(item, 'scenario')).filter(Boolean))]
+  const semanticAudit = auditSemanticCompleteness({
+    manifest: content('prd-manifest'), scope: content('acceptance-scope'),
+    model: content('requirement-model'), flows: content('interaction-flow'),
+    coverage: content('coverage-universe'), cases: content('test-cases'),
+  })
   const expectedCoverageFacts = {
-    requirementDesign: { covered: requirements.filter((item) => coveredRequirementIds.has(stringAt(item, 'reqId'))).length, total: requirements.length },
-    rules: { covered: allRuleIds.filter((id) => coveredRuleIds.has(id)).length, total: allRuleIds.length },
+    ...semanticAudit.coverageFacts,
     criticalNodes: { covered: criticalNodeIds.filter((id) => coveredNodeIds.has(id)).length, total: criticalNodeIds.length },
     roles: { covered: actors.filter((actor) => coveredActors.has(actor)).length, total: actors.length },
     stateTransitions: { covered: transitionIds.filter((id) => coveredTransitions.has(id)).length, total: transitionIds.length },
@@ -2351,8 +2418,11 @@ export function auditVerdictFactBinding(
     add('E2E_GENERATION_VERDICT_PENDING_DECISIONS_MISMATCH', 'acceptance-scope')
   }
   const designAudit = content('design-audit')
-  const expectedArtifactFindings = stringAt(designAudit, 'status') === 'failed'
-    ? arrayAt(designAudit, 'findings').map((item) => stringAt(item, 'code')) : []
+  const expectedArtifactFindings = [...new Set([
+    ...(stringAt(designAudit, 'status') === 'failed'
+      ? arrayAt(designAudit, 'findings').map((item) => stringAt(item, 'code')) : []),
+    ...semanticAudit.findings.map((finding) => finding.code),
+  ])]
   const preflight = content('browser-preflight')
   const expectedEnvironmentFindings = stringAt(preflight, 'status') === 'failed'
     ? arrayAt(preflight, 'checks').filter((item) => stringAt(item, 'status') === 'failed')
@@ -2450,9 +2520,6 @@ export function deriveVerdictInputFromArtifacts(input: {
     .filter((requirement) => stringAt(requirement, 'status') === 'active')
   const coverageObligations = arrayAt(content('coverage-universe'), 'obligations')
   const flows = arrayAt(content('interaction-flow'), 'flows')
-  const coveredRequirementIds = new Set(coverageObligations.map((item) => stringAt(item, 'reqId')))
-  const allRuleIds = requirements.flatMap((requirement) => arrayAt(requirement, 'rules').map((rule) => stringAt(rule, 'ruleId')))
-  const coveredRuleIds = new Set(coverageObligations.flatMap((item) => stringsAt(item, 'ruleIds')))
   const criticalNodeIds = flows.flatMap((flow) => arrayAt(flow, 'nodes'))
     .filter((node) => stringAt(node, 'effect') !== 'read'
       || ['entry', 'exit', 'decision', 'state'].includes(stringAt(node, 'kind'))
@@ -2467,6 +2534,11 @@ export function deriveVerdictInputFromArtifacts(input: {
   const coveredTransitions = new Set(coverageObligations.map((item) => stringAt(item, 'transitionId'))
     .filter((transitionId) => transitionId !== 'not-applicable'))
   const scenarioIds = [...new Set(coverageObligations.map((item) => stringAt(item, 'scenario')).filter(Boolean))]
+  const semanticAudit = auditSemanticCompleteness({
+    manifest: content('prd-manifest'), scope: content('acceptance-scope'),
+    model: content('requirement-model'), flows: content('interaction-flow'),
+    coverage: content('coverage-universe'), cases: content('test-cases'),
+  })
   const scheduledActionIds = arrayAt(content('run-bundle'), 'schedule').flatMap((item) => stringsAt(item, 'actionIds'))
   const gatewayActionIds = new Set([
     ...arrayAt(content('gateway-audit'), 'requestEvents').map((item) => stringAt(item, 'actionId')),
@@ -2505,8 +2577,11 @@ export function deriveVerdictInputFromArtifacts(input: {
       .concat(authorityFacts.pendingDecisionIds),
     safetyFindings: diagnoses.filter((item) => stringAt(item, 'category') === 'safety')
       .map((item) => `DIAGNOSIS_SAFETY:${stringAt(item, 'caseId')}`).concat(authorityFacts.safetyFindings),
-    artifactFindings: stringAt(designAudit, 'status') === 'failed'
-      ? arrayAt(designAudit, 'findings').map((item) => stringAt(item, 'code')) : [],
+    artifactFindings: [...new Set([
+      ...(stringAt(designAudit, 'status') === 'failed'
+        ? arrayAt(designAudit, 'findings').map((item) => stringAt(item, 'code')) : []),
+      ...semanticAudit.findings.map((finding) => finding.code),
+    ])],
     migrationFindings: [],
     environmentFindings: (stringAt(preflight, 'status') === 'failed'
       ? arrayAt(preflight, 'checks').filter((item) => stringAt(item, 'status') === 'failed')
@@ -2526,8 +2601,7 @@ export function deriveVerdictInputFromArtifacts(input: {
     evidenceAudit: completionAudit(terminalSteps.length, completeEvidenceSteps, 'EVIDENCE_STEP_MISSING'),
     cleanupAudit,
     coverageFacts: {
-      requirementDesign: { covered: requirements.filter((item) => coveredRequirementIds.has(stringAt(item, 'reqId'))).length, total: requirements.length },
-      rules: { covered: allRuleIds.filter((id) => coveredRuleIds.has(id)).length, total: allRuleIds.length },
+      ...semanticAudit.coverageFacts,
       criticalNodes: { covered: criticalNodeIds.filter((id) => coveredNodeIds.has(id)).length, total: criticalNodeIds.length },
       roles: { covered: actors.filter((actor) => coveredActors.has(actor)).length, total: actors.length },
       stateTransitions: { covered: transitionIds.filter((id) => coveredTransitions.has(id)).length, total: transitionIds.length },

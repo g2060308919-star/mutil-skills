@@ -1,7 +1,8 @@
 import { EventEmitter } from 'node:events'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { expect, test, vi } from 'vitest'
-import { RuntimeRequestEnvelopeSchema, SignedGrantSchema } from '@mutil-skills/e2e-contracts'
+import { digestArtifactContent, digestPrdClause, digestPrdClauseInventory, digestText, RuntimeRequestEnvelopeSchema,
+  SignedGrantSchema } from '@mutil-skills/e2e-contracts'
 
 let lastChild: RecoveryChild | undefined
 
@@ -119,6 +120,59 @@ test('child commit-after-registration failure stays pending and Runtime recovers
       schemaVersion: '1.0.0', projectId: 'PROJECT-1',
     }))
     const identity = await resolveProjectIdentity(roots.project)
+    const normalizedText = '# 订单\n必须显示待审核订单。'
+    const normalizedDigest = digestText('e2e-prd-normalized-source/v1', normalizedText)
+    const requirementModel: Record<string, any> = {
+      artifactId: 'ARTIFACT-REQUIREMENT-MODEL', artifactType: 'requirement-model', schemaVersion: '1.0.0',
+      engineVersion: '0.3.0', assetId: 'ASSET-1', prdRevision: `sha256:${'3'.repeat(64)}`,
+      generationId: 'RUN-1', createdAt: '2026-07-16T00:00:00.000Z', contentDigest: '',
+      signatures: [], dependencies: [], graph: { defines: [], references: [] },
+      content: { modelRevision: 1, requirements: [{
+        reqId: 'REQ-1', revision: 1, title: '订单列表', actors: ['auditor'], entities: ['order'],
+        preconditions: [], rules: [{ ruleId: 'RULE-1', category: 'business', statement: '显示待审核订单',
+          sourceRefs: ['CLAUSE-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'] }], states: [], transitions: [],
+        observableOutcomes: [{ oracleId: 'ORACLE-1', ruleId: 'RULE-1', statement: '页面显示待审核订单',
+          sourceRefs: ['CLAUSE-1'] }],
+        applicability: [], sourceRefs: ['CLAUSE-1'], status: 'active',
+      }], coupledDimensions: [], applicabilityRules: ['RULE-1'],
+      modelDecisionDigest: `sha256:${'4'.repeat(64)}` },
+    }
+    requirementModel.contentDigest = digestArtifactContent(
+      'artifact-content/1.0.0/requirement-model', requirementModel,
+    )
+    const clauseInput = {
+      clauseId: 'CLAUSE-1', sourceId: 'PRD-1', kind: 'functional' as const,
+      sourceSpan: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 11 },
+      originalText: '必须显示待审核订单。', normalizedText: '必须显示待审核订单。',
+    }
+    const clause = { ...clauseInput, textDigest: digestPrdClause(clauseInput) }
+    const artifact = (artifactType: string, schemaVersion: string, content: unknown) => {
+      const document: Record<string, unknown> = {
+        artifactId: `ARTIFACT-${artifactType.toUpperCase()}`, artifactType, schemaVersion,
+        engineVersion: '0.3.0', assetId: 'ASSET-1', prdRevision: `sha256:${'3'.repeat(64)}`,
+        generationId: 'RUN-1', createdAt: '2026-07-16T00:00:00.000Z', contentDigest: '',
+        signatures: [], dependencies: [], graph: { defines: [], references: [] }, content,
+      }
+      document.contentDigest = digestArtifactContent(
+        `artifact-content/${schemaVersion}/${artifactType}`, document,
+      )
+      return document
+    }
+    const prdManifest = artifact('prd-manifest', '1.0.0', {
+      prdId: 'PRD-1', assetId: 'ASSET-1', revision: `sha256:${'3'.repeat(64)}`,
+      normalizedPrdDigest: normalizedDigest,
+      sources: [{ sourceId: 'PRD-1', digest: normalizedDigest,
+        byteLength: Buffer.byteLength(normalizedText) }], attachments: [],
+      sourceCacheIndexDigest: `sha256:${'5'.repeat(64)}`, clauses: [clause],
+      clauseInventoryDigest: digestPrdClauseInventory([clause]),
+    })
+    const acceptanceScope = artifact('acceptance-scope', '2.0.0', {
+      includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['CLAUSE-1'] }], exclusions: [],
+      ambiguities: [], dependencies: [], visualScope: { required: false, refs: [] },
+      browserScope: { browserIds: ['chromium'], viewportIds: ['desktop'] },
+      clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] }],
+      scopeDecision: { decisionId: 'SCOPE-1', status: 'pending' },
+    })
     const snapshot: RuntimeRunSnapshot = {
       schemaVersion: '1.1.0', runId: 'RUN-1', assetId: 'ASSET-1',
       projectIdentityDigest: identity.digest, runtimeInstallationDigest: installationDigest,
@@ -126,8 +180,17 @@ test('child commit-after-registration failure stays pending and Runtime recovers
         current: 'awaiting-execution-approval', sequence: 8,
         eventChainDigest: `sha256:${'8'.repeat(64)}`,
       },
-      artifactDigests: { 'prd-source': `sha256:${'3'.repeat(64)}`, scope: `sha256:${'4'.repeat(64)}` },
-      frozenArtifacts: {}, trustedExecutionFacts: {},
+      artifactDigests: { 'prd-source': `sha256:${'3'.repeat(64)}`, scope: `sha256:${'4'.repeat(64)}`,
+        'requirement-model': requirementModel.contentDigest,
+        'prd-manifest': prdManifest.contentDigest as string,
+        'acceptance-scope': acceptanceScope.contentDigest as string },
+      frozenArtifacts: { 'requirement-model': requirementModel as never,
+        'prd-manifest': prdManifest as never, 'acceptance-scope': acceptanceScope as never },
+      trustedExecutionFacts: { 'prd-source-snapshot': {
+        schemaVersion: '1.0.0', sourceRef: 'inputs/prd.md', normalizedText,
+        normalizedDigest,
+        byteLength: Buffer.byteLength(normalizedText),
+      } },
       requestResponses: {}, createdAt: '2026-07-16T00:00:00.000Z', updatedAt: '2026-07-16T00:00:00.000Z',
     }
     const seedDigest = `sha256:${'6'.repeat(64)}`
@@ -170,13 +233,26 @@ test('child commit-after-registration failure stays pending and Runtime recovers
       client: { name: 'test', version: '1.0.0' }, command: 'open-approval', projectRoot: roots.project,
       payload: { runId: snapshot.runId, approvalType: 'execution', grantSubject },
     })
+    const confirmationResponse = await host.handle(request, JSON.stringify(request))
+    expect(confirmationResponse).toMatchObject({ ok: true, result: {
+      status: 'confirmation-required', approvalMode: 'webauthn',
+      summary: { semanticReview: { requirements: expect.any(Array) } },
+    } })
+    if (!confirmationResponse.ok) throw new Error('semantic confirmation missing')
+    const confirmation = confirmationResponse.result as { confirmationId: string; subjectDigest: string }
+    const confirmedRequest = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: 'APPROVE-CHILD-RECOVERY-CONFIRMED',
+      client: { name: 'test', version: '1.0.0' }, command: 'confirm-approval', projectRoot: roots.project,
+      payload: { runId: snapshot.runId, confirmationId: confirmation.confirmationId,
+        subjectDigest: confirmation.subjectDigest },
+    })
 
-    expect(await host.handle(request, JSON.stringify(request))).toMatchObject({
+    expect(await host.handle(confirmedRequest, JSON.stringify(confirmedRequest))).toMatchObject({
       ok: false, error: { code: 'E2E_APPROVAL_FINALIZATION_RECOVERY_REQUIRED' },
     })
     const parsedGrant = SignedGrantSchema.safeParse(lastChild!.grant)
     expect(parsedGrant.success, parsedGrant.success ? '' : JSON.stringify(parsedGrant.error.issues)).toBe(true)
-    const recoveredResponse = await host.handle(request, JSON.stringify(request))
+    const recoveredResponse = await host.handle(confirmedRequest, JSON.stringify(confirmedRequest))
     expect(recoveredResponse, JSON.stringify(recoveredResponse)).toMatchObject({
       ok: true, result: { signedGrant: { grantId: 'GRANT-CHILD-RECOVERY' } },
     })

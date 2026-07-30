@@ -10,7 +10,7 @@
 
 ## 允许的语义输出
 
-REQ/RULE、actor、state/transition、可观察 oracle、interaction flow 和明确标记的 inference 候选。
+REQ/RULE、actor、state/transition、可观察 oracle、interaction flow、Rule→Oracle 显式引用和明确标记的 inference 候选。
 
 ## 调用的确定性 API
 
@@ -20,15 +20,15 @@ Runtime 内部必须调用 Contracts 校验 `requirement-model`/`interaction-flo
 
 ## 执行步骤
 
-逐个纳入需求建立来源；把规则转成浏览器可观察的 UI/network/state oracle；建立入口、分支、错误、恢复和终点；把未确认推断保留为 pending。
+对每个 modeled Clause 建立至少一个原子 Requirement，并让 Requirement/Rule 的来源只引用 Clause ID。把规则转成浏览器可观察的 UI/network/state Oracle；每条 Rule 恰好绑定一个 Oracle，Rule 的 `oracleIds` 与 Oracle 的 `ruleId` 必须双向一致，Oracle 的 `sourceRefs` 必须回指同一 Clause。旧资产没有精确映射时必须迁移或阻断，不得用 requirement-level 聚合关系伪装成完整覆盖；建立入口、分支、错误、恢复和终点；把未确认推断保留为 pending。
 
 ## 退出条件
 
-每个 REQ/RULE/oracle/flow 均有来源与稳定 ID，所有确定性预期来自 PRD 或签名决定。
+每个 modeled Clause、REQ、RULE、Oracle 和 flow 均有来源与稳定 ID；每条 Rule 恰好绑定一个 Oracle，每个 Oracle 只归属一个 Rule，双向集合无遗漏、重复或孤儿；所有确定性预期来自 PRD 或签名决定。
 
 ## 暂停条件
 
-关键预期无来源、无法观察或新歧义改变 Scope Approval subject。
+modeled Clause 未被 Requirement 覆盖、Rule/Oracle 非一对一、`ruleId`/`sourceRefs` 断裂、关键预期无来源、无法观察或新歧义改变 Scope Approval subject。
 
 ## 禁止行为
 

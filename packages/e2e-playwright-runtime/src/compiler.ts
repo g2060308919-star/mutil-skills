@@ -362,6 +362,7 @@ function renderFullPlaywrightSpec(input: CompilerInputV1): string {
       const actionOrdinal = ordinal++
       lines.push('  {')
       lines.push('    const state = {} as Record<string, unknown>')
+      lines.push('    const checkpoint = async (_input: { checkpointId: string; oracleId: string; actual: unknown }): Promise<void> => undefined')
       lines.push(`    const __biztestRun${actionOrdinal} = async (): Promise<unknown> => {`)
       lines.push(action.source)
       lines.push('    }')
@@ -405,6 +406,7 @@ function trustedFragment(relativePath: string, source: string, kind: 'Run' | 'Cl
     "import { test, expect } from '@playwright/test'",
     "test('trusted fragment', async ({ page, context, browser, request }, testInfo) => {",
     '  const state = {} as Record<string, unknown>',
+    '  const checkpoint = async (_input: { checkpointId: string; oracleId: string; actual: unknown }) => undefined',
     `  const __biztest${kind}0 = async () => {`, source, '  }',
     `  await __biztest${kind}0()`,
     '})', '',

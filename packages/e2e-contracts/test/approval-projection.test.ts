@@ -3,6 +3,7 @@ import {
   computeFullPlaywrightCleanupSourceDigest,
   computeFullPlaywrightSourceDigest,
   digestApprovalProjection,
+  digestOracleCheckpointValue,
 } from '../src/index.js'
 
 describe('approval projection digest', () => {
@@ -41,7 +42,10 @@ describe('approval projection digest', () => {
     const program = { schemaVersion: 'full-playwright/v1', caseId: 'CASE-1', stepId: 'STEP-1',
       actionId: 'ACTION-1', source, sourceDigest: computeFullPlaywrightSourceDigest(source),
       cleanupSource, cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource), dataLeaseId: 'LEASE-1',
-      cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, networkRequests: [] }
+      cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+      oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1',
+        expectedJson: 'true', expectedDigest: digestOracleCheckpointValue('true') }],
+      networkRequests: [] }
     const full = { ...legacy, executionProfile: 'full-playwright', fullPlaywrightPrograms: [program] }
     expect(() => digestApprovalProjection('browser-action-map', full)).not.toThrow()
     expect(digestApprovalProjection('browser-action-map', full)).not.toBe(

@@ -2,6 +2,8 @@ import {
   InjectionApprovalSubjectSchema,
   ArtifactSchemaRegistry,
   RuntimeDoctorReportSchema,
+  RuntimeCreateRunResultSchema,
+  RuntimePreparePrdUnderstandingResultSchema,
   RuntimeResponseEnvelopeSchema,
   RuntimeStatusResultSchema,
   SignedGrantSchema,
@@ -21,10 +23,12 @@ import {
   type ApprovalMode,
   type DecisionReceipt,
   type DecisionSubject,
+  type DataLease,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
   type SignedGrant,
   type WorkflowNode,
+  PrdUnderstandingContractMachineViewSchema,
 } from '@mutil-skills/e2e-contracts'
 import { randomUUID } from 'node:crypto'
 import {
@@ -96,9 +100,18 @@ import {
   createPendingLocalApprovalConfirmation,
   localConfirmationReceiptDigest,
   localManualConfirmationSubjectDigest,
+  PrdSourceBundleSnapshotSchema,
+  PrdUnderstandingContractFactSchema,
+  PrdUnderstandingPreparedFactSchema,
   type PendingLocalApprovalConfirmation,
 } from './local-approval-confirmations.js'
 import { projectLocalApproval } from './local-approval-projection.js'
+import { bindRuntimeExecutionGrantArtifacts } from './runtime-execution-artifact-binder.js'
+import {
+  assertPrdUnderstandingCandidate,
+  assertPrdUnderstandingLinkedCandidate,
+  preparePrdUnderstandingProjection,
+} from './prd-understanding-validator.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -113,6 +126,15 @@ export interface RuntimeHostDependencies {
   now(): Date
   approvalMode?: ApprovalMode
   projectFileReader?: SecureProjectFileReader
+  reserveExecutionLeases?(input: {
+    runId: string
+    leases: Array<{
+      leaseId: string
+      resourceKey: string
+      resourceFingerprint: string
+      ttlMs: number
+    }>
+  }): Promise<DataLease[]>
   authorityHostFactory?: () => Promise<Partial<Pick<RuntimeAuthorityHost,
     'requestApproval' | 'recoverApproval' | 'acknowledgeFinalization'
     | 'prepareManualResult' | 'requestManualResultRole' | 'recoverManualResultRole'>>>
@@ -159,6 +181,7 @@ export class E2ERuntimeHost {
       if (reservation.kind === 'pending'
         && request.command !== 'open-approval'
         && request.command !== 'confirm-approval'
+        && request.command !== 'submit-candidate'
         && request.command !== 'run-preflight'
         && request.command !== 'execute-run'
         && request.command !== 'resume-run'
@@ -181,6 +204,9 @@ export class E2ERuntimeHost {
         return await this.completeGlobalResponse(request.requestId, requestDigest, response)
       }
       if (request.command === 'create-run') return await this.createRun(request, requestDigest)
+      if (request.command === 'prepare-prd-understanding') {
+        return await this.preparePrdUnderstanding(request, requestDigest)
+      }
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
       if (request.command === 'open-approval') return await this.openApproval(request, requestDigest)
@@ -258,15 +284,72 @@ export class E2ERuntimeHost {
     }
 
     const prdBytes = await reader.readFile(identity, request.payload.prdSource.path)
+    const understandingContractBytes = await reader.readFile(
+      identity, request.payload.understandingContract.source.path,
+    )
     const projectPolicyBytes = await reader.readFile(identity, request.payload.projectPolicyPath)
+    const normalizedPrd = decodeUtf8(prdBytes, 'PRD')
+    const normalizedUnderstandingContract = decodeUtf8(
+      understandingContractBytes, 'understand-prd requirements contract',
+    )
+    const understandingContractMachineView = assertUnderstandingContractHeader(
+      normalizedUnderstandingContract, request.payload.understandingContract.header,
+    )
+    if (Buffer.byteLength(normalizedPrd, 'utf8') > 1024 * 1024) {
+      throw runtimeHostError(
+        'E2E_RUNTIME_PRD_SEMANTIC_REVIEW_TOO_LARGE', 'input',
+        'PRD 原文超过单次语义确认上限 1 MiB；请拆分 PRD 后重试',
+      )
+    }
+    if (understandingContractBytes.byteLength > 1024 * 1024) throw runtimeHostError(
+      'E2E_RUNTIME_UNDERSTANDING_CONTRACT_TOO_LARGE', 'input',
+      'understand-prd requirements contract 超过 1 MiB',
+    )
+    const understandingContractSourceDigest = digestBytes(
+      'e2e-prd-understanding-contract-source/v1', understandingContractBytes,
+    )
+    const supportingSources: Array<{
+      sourceId: string
+      kind: 'file'
+      path: string
+      mediaType: string
+      origin: { kind: 'file' | 'url' | 'text'; ref: string }
+      relevance: 'necessary-dependency'
+      bytes: Buffer
+      normalizedText: string
+    }> = []
+    let sourceBundleByteLength = prdBytes.byteLength
+    for (const source of request.payload.supportingSources ?? []) {
+      const bytes = await reader.readFile(identity, source.path)
+      const normalizedText = decodeUtf8(bytes, `PRD supporting source ${source.sourceId}`)
+      if (Buffer.byteLength(normalizedText, 'utf8') > 1024 * 1024) throw runtimeHostError(
+        'E2E_RUNTIME_PRD_SEMANTIC_REVIEW_TOO_LARGE', 'input',
+        `Supporting source ${source.sourceId} 超过 1 MiB`,
+      )
+      sourceBundleByteLength += bytes.byteLength
+      if (sourceBundleByteLength > 8 * 1024 * 1024) throw runtimeHostError(
+        'E2E_RUNTIME_PRD_SOURCE_BUNDLE_TOO_LARGE', 'input',
+        'PRD 与 supporting sources 冻结总量超过 8 MiB；请仅保留执行所需来源',
+      )
+      supportingSources.push({ ...source, bytes: Buffer.from(bytes), normalizedText })
+    }
+    const sourceIds = supportingSources.map((source) => source.sourceId)
+    if (sourceIds.includes('PRD-BODY') || new Set(sourceIds).size !== sourceIds.length) {
+      throw runtimeHostError(
+        'E2E_RUNTIME_PRD_SOURCE_ID_INVALID', 'input',
+        'Supporting sourceId 必须唯一且不得使用保留值 PRD-BODY',
+      )
+    }
     const prdRevision = computePrdRevision({
-      normalizedPrd: decodeUtf8(prdBytes, 'PRD'),
+      normalizedPrd,
       sourceIdentity: { sourceId: 'PRD-BODY', version: '1', kind: 'file' },
-      attachments: [],
+      attachments: supportingSources.map((source) => ({
+        sourceId: source.sourceId, fileName: source.path, mediaType: source.mediaType, bytes: source.bytes,
+      })),
     }).prdRevision
     const timestamp = this.dependencies.now().toISOString()
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.5.0',
+      schemaVersion: '1.6.0',
       runId,
       assetId: request.payload.assetId,
       projectIdentityDigest: identity.digest,
@@ -278,7 +361,39 @@ export class E2ERuntimeHost {
         'project-policy-source': digestBytes('e2e-project-policy-source/v1', projectPolicyBytes),
       },
       frozenArtifacts: {},
-      trustedExecutionFacts: { 'approval-mode': this.dependencies.approvalMode ?? 'webauthn' },
+      trustedExecutionFacts: {
+        'approval-mode': this.dependencies.approvalMode ?? 'webauthn',
+        'prd-source-snapshot': {
+          schemaVersion: '1.0.0', sourceRef: request.payload.prdSource.path,
+          normalizedText: normalizedPrd,
+          normalizedDigest: digestText('e2e-prd-normalized-source/v1', normalizedPrd),
+          byteLength: prdBytes.byteLength,
+        },
+        'prd-source-bundle': {
+          schemaVersion: '1.0.0', sourceRevision: prdRevision,
+          sources: [{
+            sourceId: 'PRD-BODY', kind: 'file', sourceRef: request.payload.prdSource.path,
+            mediaType: 'text/markdown', normalizedText: normalizedPrd,
+            origin: request.payload.prdSource.origin, relevance: 'target',
+            normalizedDigest: digestText('e2e-prd-understanding-source/v1', normalizedPrd),
+            byteLength: prdBytes.byteLength,
+          }, ...supportingSources.map((source) => ({
+            sourceId: source.sourceId, kind: 'file' as const, sourceRef: source.path,
+            mediaType: source.mediaType, normalizedText: source.normalizedText,
+            origin: source.origin, relevance: source.relevance,
+            normalizedDigest: digestText('e2e-prd-understanding-source/v1', source.normalizedText),
+            byteLength: source.bytes.byteLength,
+          }))],
+        },
+        'prd-understanding-contract': {
+          schemaVersion: '1.0.0', header: request.payload.understandingContract.header,
+          sourceRef: request.payload.understandingContract.source.path,
+          sourceDigest: understandingContractSourceDigest,
+          byteLength: understandingContractBytes.byteLength,
+          normalizedText: normalizedUnderstandingContract,
+          machineView: understandingContractMachineView,
+        },
+      },
       writeAttempts: {},
       executionResults: { readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} },
       requestResponses: {},
@@ -313,6 +428,61 @@ export class E2ERuntimeHost {
           this.requireInstallation(snapshot)
           return this.successResponse(request.requestId, statusResult(snapshot, this.dependencies.now()))
         },
+        lock,
+      )
+      return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
+  }
+
+  private async preparePrdUnderstanding(
+    request: Extract<RuntimeRequestEnvelope, { command: 'prepare-prd-understanding' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      if (snapshot.workflow.current !== 'created') throw runtimeHostError(
+        'E2E_RUNTIME_UNDERSTANDING_PREPARE_STATE_MISMATCH', 'input',
+        'understand-prd execution projection 只能在 created 状态准备',
+      )
+      const understanding = preparePrdUnderstandingProjection(request.payload.projection, snapshot)
+      const existing = PrdUnderstandingPreparedFactSchema.safeParse(
+        snapshot.trustedExecutionFacts['prd-understanding-prepared'],
+      )
+      if (existing.success
+        && canonicalizeJson(existing.data.projection) !== canonicalizeJson(understanding)) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_UNDERSTANDING_ALREADY_PREPARED', 'input',
+          '同一 Run 的 requirements contract 只能准备一个不可变 execution projection',
+        )
+      }
+      const response = this.successResponse(request.requestId, RuntimePreparePrdUnderstandingResultSchema.parse({
+        runId: snapshot.runId,
+        sourceRevision: snapshot.artifactDigests['prd-source'],
+        understanding: existing.success ? existing.data.projection : understanding,
+      }))
+      const fact = existing.success ? existing.data : {
+        schemaVersion: '1.0.0' as const,
+        contractSourceDigest: understanding.contractSourceDigest,
+        preparedAt: this.dependencies.now().toISOString(),
+        projection: understanding,
+      }
+      const outcome = await this.dependencies.runStore.updateRunOutcome(
+        identity.digest, snapshot.runId, request.requestId, requestDigest,
+        (current) => ({
+          snapshot: {
+            ...current,
+            trustedExecutionFacts: {
+              ...current.trustedExecutionFacts,
+              'prd-understanding-prepared': fact,
+            },
+            updatedAt: this.dependencies.now().toISOString(),
+          },
+          response,
+        }),
+        'prd-understanding-prepared',
         lock,
       )
       return RuntimeResponseEnvelopeSchema.parse(outcome)
@@ -522,89 +692,136 @@ export class E2ERuntimeHost {
     }
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) {
+        throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      }
+      this.requireInstallation(snapshot)
+      if (request.payload.expectedState !== snapshot.workflow.current) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH',
+          'input',
+          'expectedState 只能作为当前状态的并发前置条件，不能指定 next state',
+        )
+      }
+
+      const candidate = parseCandidate(request.payload.artifactType, request.payload.candidate)
+      const expectedDigest = digestArtifactContent(
+        `artifact-content/${candidate.schemaVersion}/${candidate.artifactType}`,
+        candidate as unknown as Record<string, unknown>,
+      )
+      if (candidate.contentDigest !== expectedDigest) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_CANDIDATE_DIGEST_MISMATCH',
+          'artifact',
+          'Candidate contentDigest 与 Runtime 重算结果不一致',
+        )
+      }
+      if (candidate.assetId !== snapshot.assetId
+        || candidate.prdRevision !== snapshot.artifactDigests['prd-source']
+        || candidate.generationId !== snapshot.runId) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_CANDIDATE_BINDING_MISMATCH',
+          'artifact',
+          'Candidate assetId、prdRevision 或 generationId 未绑定当前 Run',
+        )
+      }
+      if (request.payload.artifactType === 'prd-request') {
+        assertPrdUnderstandingCandidate(candidate, snapshot)
+      }
+      assertPrdUnderstandingLinkedCandidate(request.payload.artifactType, candidate, snapshot)
+
+      const existing = snapshot.frozenArtifacts[request.payload.artifactType]
+      if (existing !== undefined && canonicalizeJson(existing) !== canonicalizeJson(candidate)) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_CANDIDATE_ALREADY_FROZEN',
+          'artifact',
+          '同一 Run 中已冻结的 Artifact 类型不得被不同候选覆盖',
+        )
+      }
+
+      const next = nextWorkflowNode(snapshot.workflow.current, request.payload.artifactType)
+      const bindingAsset = snapshot.workflow.current === 'binding-draft'
+        && (request.payload.artifactType === 'test-cases'
+          || request.payload.artifactType === 'execution-contract')
+      const supplementalAsset = isSupplementalCandidate(
+        snapshot.workflow.current, request.payload.artifactType,
+      )
+      if (next === undefined && !bindingAsset && !supplementalAsset) {
+        throw blockedError(missingCapabilityCode(snapshot.workflow.current))
+      }
+      const frozenArtifacts = {
+        ...snapshot.frozenArtifacts,
+        [request.payload.artifactType]: candidate,
+      }
+      assertSemanticStagePrerequisites(request.payload.artifactType, frozenArtifacts)
+      const bindingComplete = bindingAsset
+        && frozenArtifacts['test-cases'] !== undefined
+        && frozenArtifacts['execution-contract'] !== undefined
+
+      let reservedLeases: DataLease[] = []
+      let workflow = snapshot.workflow
+      if (next !== undefined) {
+        workflow = transitionWorkflow({
+          state: workflow,
+          next,
+          reason: `accepted candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
+          timestamp: this.dependencies.now().toISOString(),
+          engineVersion: this.dependencies.installation.version,
+        }).state
+      } else if (bindingComplete) {
+        const leaseRequests = executionContractWriteLeaseRequests(frozenArtifacts)
+        if (leaseRequests.length > 0) {
+          if (this.dependencies.reserveExecutionLeases === undefined) {
+            throw blockedError('E2E_RUNTIME_LEASE_AUTHORITY_NOT_READY')
+          }
+          reservedLeases = await this.dependencies.reserveExecutionLeases({
+            runId: snapshot.runId,
+            leases: leaseRequests.map((lease) => ({ ...lease, ttlMs: 10 * 60_000 })),
+          })
+          assertReservedExecutionLeases(snapshot.runId, leaseRequests, reservedLeases, this.dependencies.now())
+          workflow = transitionWorkflow({
+            state: workflow,
+            next: 'lease-reserved',
+            reason: `atomically reserved ${reservedLeases.length} execution lease(s)`,
+            timestamp: this.dependencies.now().toISOString(),
+            engineVersion: this.dependencies.installation.version,
+          }).state
+        }
+        workflow = transitionWorkflow({
+          state: workflow,
+          next: 'awaiting-execution-approval',
+          reason: `accepted binding candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
+          timestamp: this.dependencies.now().toISOString(),
+          engineVersion: this.dependencies.installation.version,
+        }).state
+      }
+
+      const updated: RuntimeRunSnapshot = {
+        ...snapshot,
+        workflow,
+        artifactDigests: {
+          ...snapshot.artifactDigests,
+          [request.payload.artifactType]: candidate.contentDigest,
+          ...(request.payload.artifactType === 'prd-request' ? {
+            'prd-understanding-projection': ArtifactSchemaRegistry['prd-request']
+              .parse(candidate).content.understanding.projectionDigest,
+          } : {}),
+        },
+        frozenArtifacts,
+        updatedAt: this.dependencies.now().toISOString(),
+      }
       const outcome = await this.dependencies.runStore.updateRunOutcome(
         identity.digest,
         request.payload.runId,
         request.requestId,
         requestDigest,
-        (snapshot) => {
-          this.requireInstallation(snapshot)
-          if (request.payload.expectedState !== snapshot.workflow.current) {
+        (current) => {
+          if (canonicalizeJson(current) !== canonicalizeJson(snapshot)) {
             throw runtimeHostError(
-              'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH',
-              'input',
-              'expectedState 只能作为当前状态的并发前置条件，不能指定 next state',
+              'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH', 'safety',
+              '租约预留后 Run 快照发生并发变化；须以同一请求恢复',
             )
-          }
-
-          const candidate = parseCandidate(request.payload.artifactType, request.payload.candidate)
-          const expectedDigest = digestArtifactContent(
-            `artifact-content/${candidate.schemaVersion}/${candidate.artifactType}`,
-            candidate as unknown as Record<string, unknown>,
-          )
-          if (candidate.contentDigest !== expectedDigest) {
-            throw runtimeHostError(
-              'E2E_RUNTIME_CANDIDATE_DIGEST_MISMATCH',
-              'artifact',
-              'Candidate contentDigest 与 Runtime 重算结果不一致',
-            )
-          }
-          if (candidate.assetId !== snapshot.assetId
-            || candidate.prdRevision !== snapshot.artifactDigests['prd-source']
-            || candidate.generationId !== snapshot.runId) {
-            throw runtimeHostError(
-              'E2E_RUNTIME_CANDIDATE_BINDING_MISMATCH',
-              'artifact',
-              'Candidate assetId、prdRevision 或 generationId 未绑定当前 Run',
-            )
-          }
-
-          const existing = snapshot.frozenArtifacts[request.payload.artifactType]
-          if (existing !== undefined
-            && canonicalizeJson(existing) !== canonicalizeJson(candidate)) {
-            throw runtimeHostError(
-              'E2E_RUNTIME_CANDIDATE_ALREADY_FROZEN',
-              'artifact',
-              '同一 Run 中已冻结的 Artifact 类型不得被不同候选覆盖',
-            )
-          }
-
-          const next = nextWorkflowNode(snapshot.workflow.current, request.payload.artifactType)
-          const bindingAsset = snapshot.workflow.current === 'binding-draft'
-            && (request.payload.artifactType === 'test-cases'
-              || request.payload.artifactType === 'execution-contract')
-          const supplementalAsset = isSupplementalCandidate(
-            snapshot.workflow.current, request.payload.artifactType,
-          )
-          if (next === undefined && !bindingAsset && !supplementalAsset) {
-            throw blockedError(missingCapabilityCode(snapshot.workflow.current))
-          }
-          const frozenArtifacts = {
-            ...snapshot.frozenArtifacts,
-            [request.payload.artifactType]: candidate,
-          }
-          const nextAfterBinding = bindingAsset
-            && frozenArtifacts['test-cases'] !== undefined
-            && frozenArtifacts['execution-contract'] !== undefined
-            ? 'awaiting-execution-approval' as const : undefined
-          const workflow = next === undefined && nextAfterBinding === undefined
-            ? snapshot.workflow
-            : transitionWorkflow({
-                state: snapshot.workflow,
-                next: next ?? nextAfterBinding!,
-                reason: `accepted candidate ${request.payload.artifactType}:${candidate.contentDigest}`,
-                timestamp: this.dependencies.now().toISOString(),
-                engineVersion: this.dependencies.installation.version,
-              }).state
-          const updated: RuntimeRunSnapshot = {
-            ...snapshot,
-            workflow,
-            artifactDigests: {
-              ...snapshot.artifactDigests,
-              [request.payload.artifactType]: candidate.contentDigest,
-            },
-            frozenArtifacts,
-            updatedAt: this.dependencies.now().toISOString(),
           }
           return {
             snapshot: updated,
@@ -615,6 +832,7 @@ export class E2ERuntimeHost {
                 artifactType: request.payload.artifactType,
                 contentDigest: candidate.contentDigest,
               },
+              reservedLeases,
             }),
           }
         },
@@ -642,23 +860,30 @@ export class E2ERuntimeHost {
     )
     const approvalMode = approvalModeFromTrustedFacts(initial.trustedExecutionFacts)
     if (confirmed !== undefined) {
-      if (approvalMode !== 'local-confirmation') throw confirmationHostError('E2E_LOCAL_CONFIRMATION_MODE_MISMATCH')
+      const webAuthnSemanticConfirmation = approvalMode === 'webauthn'
+        && confirmed.approvalType === 'execution'
+        && confirmed.summary.semanticReview !== undefined
+      if (approvalMode !== 'local-confirmation' && !webAuthnSemanticConfirmation) {
+        throw confirmationHostError('E2E_LOCAL_CONFIRMATION_MODE_MISMATCH')
+      }
       assertCurrentLocalApprovalConfirmation(confirmed, {
         confirmationId: confirmed.confirmationId, subjectDigest,
         projectIdentityDigest: identity.digest,
         runtimeInstallationDigest: initial.runtimeInstallationDigest,
         workflowState: initial.workflow.current, now: this.dependencies.now(),
       })
-    } else if (approvalMode === 'local-confirmation') {
+    } else if (approvalMode === 'local-confirmation'
+      || (approvalMode === 'webauthn' && request.payload.approvalType === 'execution')) {
       const provisionalExpiry = new Date(this.dependencies.now().getTime() + 10 * 60_000).toISOString()
       const projected = projectLocalApproval({
         snapshot: initial, approvalType: request.payload.approvalType,
         subjectDigest, grantSubject: request.payload.grantSubject, expiresAt: provisionalExpiry,
       })
-      if (projected.disposition.kind === 'blocked') {
+      if (approvalMode === 'local-confirmation' && projected.disposition.kind === 'blocked') {
         throw confirmationHostError(projected.disposition.reasonCode)
       }
-      if (projected.disposition.kind === 'confirmation-required') {
+      if (projected.disposition.kind === 'confirmation-required'
+        || (approvalMode === 'webauthn' && request.payload.approvalType === 'execution')) {
         const confirmation = createPendingLocalApprovalConfirmation({
           approvalType: request.payload.approvalType, subjectDigest,
           projectIdentityDigest: identity.digest,
@@ -685,7 +910,7 @@ export class E2ERuntimeHost {
                 updatedAt: this.dependencies.now().toISOString(),
               },
               response: this.successResponse(request.requestId, {
-                status: 'confirmation-required', approvalMode: 'local-confirmation',
+                status: 'confirmation-required', approvalMode,
                 confirmationId: confirmation.confirmationId, subjectDigest,
                 expiresAt: confirmation.expiresAt, summary: confirmation.summary,
               }),
@@ -829,18 +1054,40 @@ export class E2ERuntimeHost {
           await this.dependencies.runStore.writeTrustedFactOutcome({
             capability, requestId: request.requestId, requestDigest,
             factType, fact: finalized.grant, response,
-            update: (snapshot) => clearLocalConfirmation({
-              ...snapshot,
-              workflow: transitionWorkflow({
-                state: snapshot.workflow,
-                next: factType === 'signed-discovery-grant' ? 'discovery-approved' : 'execution-approved',
-                reason: `${request.payload.approvalType} grant finalized`,
-                timestamp: this.dependencies.now().toISOString(),
-                engineVersion: this.dependencies.installation.version,
-                ...(factType === 'signed-execution-grant' ? { executionGrantValid: true } : {}),
-              }).state,
-              updatedAt: this.dependencies.now().toISOString(),
-            }, confirmed),
+            update: (snapshot) => {
+              const approvedSnapshot = factType === 'signed-execution-grant'
+                && 'runBundleProjectionDigest' in finalized.grant.subject
+                ? bindRuntimeExecutionGrantArtifacts({
+                  snapshot,
+                  grant: finalized.grant,
+                  createdAt: this.dependencies.now().toISOString(),
+                  engineVersion: this.dependencies.installation.version,
+                })
+                : snapshot
+              if (factType === 'signed-execution-grant'
+                && confirmed?.summary.semanticReview !== undefined) {
+                approvedSnapshot.trustedExecutionFacts['prd-semantic-confirmation'] = {
+                  schemaVersion: '1.0.0',
+                  confirmationId: confirmed.confirmationId,
+                  subjectDigest: confirmed.subjectDigest,
+                  reviewDigest: confirmed.summary.semanticReview.reviewDigest,
+                  confirmedAt: this.dependencies.now().toISOString(),
+                  semanticReview: structuredClone(confirmed.summary.semanticReview),
+                }
+              }
+              return clearLocalConfirmation({
+                ...approvedSnapshot,
+                workflow: transitionWorkflow({
+                  state: approvedSnapshot.workflow,
+                  next: factType === 'signed-discovery-grant' ? 'discovery-approved' : 'execution-approved',
+                  reason: `${request.payload.approvalType} grant finalized`,
+                  timestamp: this.dependencies.now().toISOString(),
+                  engineVersion: this.dependencies.installation.version,
+                  ...(factType === 'signed-execution-grant' ? { executionGrantValid: true } : {}),
+                }).state,
+                updatedAt: this.dependencies.now().toISOString(),
+              }, confirmed)
+            },
           }),
         )
       }
@@ -855,7 +1102,8 @@ export class E2ERuntimeHost {
         },
         persistencePending: (cause) => runtimeHostError(
           'E2E_RUNTIME_APPROVAL_PERSISTENCE_PENDING', 'safety',
-          'Authority 已最终化 Grant，但 Run Store outcome 尚未持久化；请求保持 pending 并可恢复', cause,
+          `Authority 已最终化 Grant，但 Run Store outcome 尚未持久化；请求保持 pending 并可恢复；内部错误码 ${safeExecutionCauseCode(cause) ?? 'E2E_RUNTIME_PERSISTENCE_FAILURE'}`,
+          cause,
         ),
       })
     }
@@ -949,7 +1197,14 @@ export class E2ERuntimeHost {
       const current = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
       if (current === undefined) throw confirmationHostError('E2E_RUNTIME_RUN_NOT_FOUND')
       this.requireInstallation(current)
-      if (approvalModeFromTrustedFacts(current.trustedExecutionFacts) !== 'local-confirmation') {
+      const mode = approvalModeFromTrustedFacts(current.trustedExecutionFacts)
+      const pending = current.trustedExecutionFacts['pending-local-approval']
+      const webAuthnSemanticConfirmation = mode === 'webauthn'
+        && typeof pending === 'object' && pending !== null
+        && (pending as { approvalType?: unknown }).approvalType === 'execution'
+        && typeof (pending as { summary?: unknown }).summary === 'object'
+        && (pending as { summary?: { semanticReview?: unknown } }).summary?.semanticReview !== undefined
+      if (mode !== 'local-confirmation' && !webAuthnSemanticConfirmation) {
         throw confirmationHostError('E2E_LOCAL_CONFIRMATION_MODE_MISMATCH')
       }
       const parsed = assertCurrentLocalApprovalConfirmation(
@@ -1811,6 +2066,68 @@ function parseCandidate(artifactType: ArtifactType, input: unknown): ArtifactDoc
   return parsed.data as ArtifactDocument
 }
 
+interface ExecutionWriteLeaseRequest {
+  leaseId: string
+  resourceKey: string
+  resourceFingerprint: string
+}
+
+function executionContractWriteLeaseRequests(
+  frozenArtifacts: Record<string, ArtifactDocument>,
+): ExecutionWriteLeaseRequest[] {
+  const source = frozenArtifacts['execution-contract']
+  if (source === undefined) throw runtimeHostError(
+    'E2E_RUNTIME_EXECUTION_CONTRACT_REQUIRED', 'artifact', '缺少冻结 Execution Contract',
+  )
+  const parsed = ArtifactSchemaRegistry['execution-contract'].parse(source)
+  const requests = parsed.content.dataNeeds
+    .filter((need) => need.mode === 'write')
+    .map((need) => ({
+      leaseId: need.leaseId,
+      resourceKey: need.resourceKey,
+      resourceFingerprint: need.resourceFingerprint,
+    }))
+  const leaseIds = new Set(requests.map((request) => request.leaseId))
+  const resourceKeys = new Set(requests.map((request) => request.resourceKey))
+  if (leaseIds.size !== requests.length || resourceKeys.size !== requests.length) {
+    throw runtimeHostError(
+      'E2E_RUNTIME_EXECUTION_LEASE_SET_INVALID', 'artifact',
+      'Execution Contract 写 dataNeeds 不得重复 leaseId 或 resourceKey',
+    )
+  }
+  return requests
+}
+
+function assertReservedExecutionLeases(
+  runId: string,
+  requests: ExecutionWriteLeaseRequest[],
+  leases: DataLease[],
+  now: Date,
+): void {
+  if (leases.length !== requests.length) throw runtimeHostError(
+    'E2E_RUNTIME_EXECUTION_LEASE_BINDING_MISMATCH', 'safety',
+    'Authority 返回的 Lease 数量与冻结 Execution Contract 不一致',
+  )
+  const byId = new Map(leases.map((lease) => [lease.leaseId, lease]))
+  if (byId.size !== leases.length) throw runtimeHostError(
+    'E2E_RUNTIME_EXECUTION_LEASE_BINDING_MISMATCH', 'safety', 'Authority 返回重复 Lease',
+  )
+  for (const request of requests) {
+    const lease = byId.get(request.leaseId)
+    if (lease === undefined || lease.runId !== runId || lease.status !== 'active'
+      || lease.resourceKey !== request.resourceKey
+      || lease.resourceFingerprint !== request.resourceFingerprint
+      || lease.exclusive !== true
+      || !Number.isSafeInteger(lease.fencingToken) || lease.fencingToken <= 0
+      || now.getTime() >= Date.parse(lease.expiresAt)) {
+      throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTION_LEASE_BINDING_MISMATCH', 'safety',
+        'Authority 返回的 Lease 未与当前 Run、资源或指纹闭合',
+      )
+    }
+  }
+}
+
 function requireManualResultWorkflow(snapshot: RuntimeRunSnapshot): void {
   if (!['execution-approved', 'compiled', 'diagnosing'].includes(snapshot.workflow.current)) {
     throw runtimeHostError(
@@ -1988,6 +2305,22 @@ function isSupplementalCandidate(current: WorkflowNode, artifactType: ArtifactTy
   return SUPPLEMENTAL_CANDIDATES[current]?.has(artifactType) === true
 }
 
+function assertSemanticStagePrerequisites(
+  artifactType: ArtifactType,
+  frozenArtifacts: Partial<Record<ArtifactType, ArtifactDocument>>,
+): void {
+  const required = artifactType === 'acceptance-scope'
+    ? ['project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation'] as const
+    : artifactType === 'coverage-universe'
+      ? ['requirement-model', 'interaction-flow', 'design-audit'] as const
+      : []
+  const missing = required.filter((type) => frozenArtifacts[type] === undefined)
+  if (missing.length > 0) throw runtimeHostError(
+    'E2E_RUNTIME_STAGE_PREREQUISITES_MISSING', 'artifact',
+    `提交 ${artifactType} 前必须先冻结同阶段资产：${missing.join(', ')}`,
+  )
+}
+
 function missingCapabilityCode(current: WorkflowNode): string {
   if (current === 'awaiting-scope-approval' || current === 'awaiting-execution-approval') {
     return 'E2E_RUNTIME_APPROVAL_NOT_READY'
@@ -2050,14 +2383,26 @@ function assertRuntimeGrantSubject(
 }
 
 function createRunResult(snapshot: RuntimeRunSnapshot): Record<string, unknown> {
-  return {
+  const sourceBundle = PrdSourceBundleSnapshotSchema.parse(
+    snapshot.trustedExecutionFacts['prd-source-bundle'],
+  )
+  return RuntimeCreateRunResultSchema.parse({
     runId: snapshot.runId,
     assetId: snapshot.assetId,
     projectIdentityDigest: snapshot.projectIdentityDigest,
     generationId: snapshot.runId,
     prdRevision: snapshot.artifactDigests['prd-source'],
+    sourceRevision: snapshot.artifactDigests['prd-source'],
+    understandingContractDigest: (snapshot.trustedExecutionFacts['prd-understanding-contract'] as {
+      sourceDigest: string
+    }).sourceDigest,
+    sourceBundle: sourceBundle.sources.map((source) => ({
+      sourceId: source.sourceId, kind: source.kind, ref: source.sourceRef,
+      mediaType: source.mediaType, origin: source.origin, relevance: source.relevance,
+      digest: source.normalizedDigest, byteLength: source.byteLength,
+    })),
     workflow: snapshot.workflow,
-  }
+  })
 }
 
 function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, unknown> {
@@ -2079,10 +2424,16 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
 const STATUS_COMMAND_BY_STATE: Partial<Record<WorkflowNode,
 { command: import('@mutil-skills/e2e-contracts').RuntimeStatusNextEdge['command']; missing: string[] }>> = {
   created: { command: 'submit-candidate', missing: ['prd-request'] },
-  'source-frozen': { command: 'submit-candidate', missing: ['acceptance-scope'] },
+  'source-frozen': { command: 'submit-candidate', missing: [
+    'project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
+  ] },
   'awaiting-scope-approval': { command: 'open-approval', missing: ['scope-or-lineage-decision'] },
-  'scope-approved': { command: 'submit-candidate', missing: ['requirement-model'] },
-  modeled: { command: 'submit-candidate', missing: ['coverage-universe'] },
+  'scope-approved': { command: 'submit-candidate', missing: [
+    'interaction-flow', 'design-audit', 'requirement-model',
+  ] },
+  modeled: { command: 'submit-candidate', missing: [
+    'interaction-flow', 'design-audit', 'coverage-universe',
+  ] },
   'coverage-audited': { command: 'open-approval', missing: ['discovery-approval'] },
   'discovery-approved': { command: 'run-preflight', missing: ['browser-preflight'] },
   'preflight-readonly': { command: 'submit-candidate', missing: ['browser-action-map'] },
@@ -2108,7 +2459,15 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
   minimumMissingInput: string[]
 } {
   const current = snapshot.workflow.current
-  const intent = STATUS_COMMAND_BY_STATE[current]
+  const prepared = PrdUnderstandingPreparedFactSchema.safeParse(
+    snapshot.trustedExecutionFacts['prd-understanding-prepared'],
+  )
+  const contract = PrdUnderstandingContractFactSchema.safeParse(
+    snapshot.trustedExecutionFacts['prd-understanding-contract'],
+  )
+  const intent = current === 'created' && !prepared.success
+    ? { command: 'prepare-prd-understanding' as const, missing: ['prd-understanding-prepared'] }
+    : STATUS_COMMAND_BY_STATE[current]
   const missing = current === 'diagnosing'
     ? runtimeFinalizationMissingInputs(snapshot, now)
     : intent?.missing.filter((item) => snapshot.artifactDigests[item] === undefined) ?? []
@@ -2122,6 +2481,9 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
     verifiedDigests: {
       runtimeInstallation: snapshot.runtimeInstallationDigest,
       workflowEventChain: snapshot.workflow.eventChainDigest,
+      ...(contract.success ? { 'prd-understanding-contract': contract.data.sourceDigest } : {}),
+      ...(prepared.success
+        ? { 'prd-understanding-projection': prepared.data.projection.projectionDigest } : {}),
       ...snapshot.artifactDigests,
     },
     minimumMissingInput: missing,
@@ -2226,6 +2588,82 @@ function runtimeRecords(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value)
     ? value.map(runtimeRecord).filter((item): item is Record<string, unknown> => item !== undefined)
     : []
+}
+
+function assertUnderstandingContractHeader(
+  source: string,
+  header: {
+    schemaVersion: '1.0.0'
+    contractId: string
+    contractVersion: number
+    contractStatus: 'confirmed-by-caller'
+    authorization: { status: 'confirmed-by-caller'; contractVersion: number; confirmedAt: string }
+  },
+): import('@mutil-skills/e2e-contracts').PrdUnderstandingContractMachineView {
+  const lines = source.replace(/\r\n?/g, '\n').split('\n')
+  if (lines[0] !== '---') throw runtimeHostError(
+    'E2E_RUNTIME_UNDERSTANDING_CONTRACT_HEADER_INVALID', 'input',
+    'requirements contract 必须以严格 YAML front matter 开始',
+  )
+  const closing = lines.indexOf('---', 1)
+  if (closing < 2) throw runtimeHostError(
+    'E2E_RUNTIME_UNDERSTANDING_CONTRACT_HEADER_INVALID', 'input',
+    'requirements contract 缺少闭合 YAML front matter',
+  )
+  const actual = new Map<string, string>()
+  for (const line of lines.slice(1, closing)) {
+    const separator = line.indexOf(':')
+    if (separator <= 0) throw runtimeHostError(
+      'E2E_RUNTIME_UNDERSTANDING_CONTRACT_HEADER_INVALID', 'input',
+      'requirements contract front matter 仅允许 key: value',
+    )
+    const key = line.slice(0, separator).trim()
+    const value = line.slice(separator + 1).trim()
+    if (actual.has(key) || value.length === 0) throw runtimeHostError(
+      'E2E_RUNTIME_UNDERSTANDING_CONTRACT_HEADER_INVALID', 'input',
+      'requirements contract front matter 的 key 必须唯一且值非空',
+    )
+    actual.set(key, value)
+  }
+  const expected = new Map([
+    ['schemaVersion', header.schemaVersion],
+    ['contractId', header.contractId],
+    ['contractVersion', String(header.contractVersion)],
+    ['contractStatus', header.contractStatus],
+    ['confirmationStatus', header.authorization.status],
+    ['confirmationContractVersion', String(header.authorization.contractVersion)],
+    ['confirmedAt', header.authorization.confirmedAt],
+  ])
+  if (actual.size !== expected.size
+    || [...expected].some(([key, value]) => actual.get(key) !== value)) {
+    throw runtimeHostError(
+      'E2E_RUNTIME_UNDERSTANDING_CONTRACT_HEADER_MISMATCH', 'input',
+      'create-run Header 与 requirements contract 冻结原文不一致',
+    )
+  }
+  const markerStart = '<!-- e2e-contract-machine-view:v1\n'
+  const markerEnd = '\n-->'
+  const start = source.indexOf(markerStart, lines.slice(0, closing + 1).join('\n').length)
+  const end = start < 0 ? -1 : source.indexOf(markerEnd, start + markerStart.length)
+  if (start < 0 || end < 0 || source.indexOf(markerStart, start + 1) >= 0) throw runtimeHostError(
+    'E2E_RUNTIME_UNDERSTANDING_CONTRACT_MACHINE_VIEW_INVALID', 'input',
+    'requirements contract 必须包含唯一 e2e-contract-machine-view:v1',
+  )
+  let candidate: unknown
+  try {
+    candidate = JSON.parse(source.slice(start + markerStart.length, end))
+  } catch (cause) {
+    throw runtimeHostError(
+      'E2E_RUNTIME_UNDERSTANDING_CONTRACT_MACHINE_VIEW_INVALID', 'input',
+      'requirements contract machine view 必须是严格 JSON', cause,
+    )
+  }
+  const parsed = PrdUnderstandingContractMachineViewSchema.safeParse(candidate)
+  if (!parsed.success) throw runtimeHostError(
+    'E2E_RUNTIME_UNDERSTANDING_CONTRACT_MACHINE_VIEW_INVALID', 'input',
+    'requirements contract machine view 未通过严格 schema', parsed.error,
+  )
+  return parsed.data
 }
 
 function decodeUtf8(bytes: Uint8Array, label: string): string {
@@ -2407,7 +2845,16 @@ function safeExecutionCauseCode(cause: unknown): string | undefined {
   // E2EError created across that package boundary is not guaranteed to satisfy instanceof.
   // Only project the fixed-format code; never expose the foreign error message or stack.
   if (typeof cause === 'object' && cause !== null && 'code' in cause
-    && typeof cause.code === 'string' && /^E2E_[A-Z0-9_]+$/.test(cause.code)) return cause.code
+    && typeof cause.code === 'string' && /^E2E_[A-Z0-9_]+$/.test(cause.code)) {
+    // Resource settlement deliberately wraps the operation error and every cleanup error.
+    // Prefer the nested fixed code so operators can distinguish the execution failure that
+    // triggered cleanup from the generic settlement wrapper without leaking raw messages.
+    if (cause.code === 'E2E_RUNTIME_CLEANUP_FAILED' && 'cause' in cause) {
+      const nested = safeExecutionCauseCode(cause.cause)
+      if (nested !== undefined) return nested
+    }
+    return cause.code
+  }
   if (cause instanceof AggregateError) {
     for (const error of cause.errors) {
       const code = safeExecutionCauseCode(error)

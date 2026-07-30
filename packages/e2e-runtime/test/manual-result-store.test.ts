@@ -349,7 +349,8 @@ function manualRunFixture(): { snapshot: RuntimeRunSnapshot; result: ManualResul
   const model = structuredClone(artifacts['requirement-model']!)
   const coverage = rebindArtifact(structuredClone(artifacts['coverage-universe']!), (content: any) => {
     content.obligations.push({
-      obligationId: 'COV-MANUAL-1', reqId: 'REQ-1', ruleIds: ['RULE-1'], nodeIds: [],
+      obligationId: 'COV-MANUAL-1', reqId: 'REQ-1', clauseIds: ['CLAUSE-1'],
+      ruleIds: ['RULE-1'], oracleIds: ['ORACLE-1'], nodeIds: [],
       actor: 'USER', transitionId: 'not-applicable', scenario: '人工核验关键视觉结果',
       necessity: 'required', applicabilityRuleId: 'APPLICABILITY-1',
       disposition: { kind: 'manual', manualProcedureId: 'MANUAL-1', blocking: true },

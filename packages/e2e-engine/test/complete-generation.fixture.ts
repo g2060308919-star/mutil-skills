@@ -1,4 +1,6 @@
 import { canonicalizeJson, digestApprovalProjection, digestArtifactContent, digestBytes, digestText,
+  digestPrdClause, digestPrdClauseInventory,
+  digestPrdUnderstandingProjection, digestPrdUnderstandingQuote,
   deriveExecutionResultId,
   canonicalGrantApprovalSubjectDigest,
   digestCleanupPlanDefinition,
@@ -16,6 +18,30 @@ const d = (value: string) => digestText('fixture/v1', value)
 const context = {
   assetId: 'ASSET-1', generationId: 'GEN-1', prdRevision: d('prd'),
   engineVersion: '1.0.0', createdAt: '2026-07-12T00:00:00.000Z', fencingToken: 7,
+}
+
+function fixtureUnderstandingProjection(statement: string) {
+  const value = {
+    schemaVersion: '1.0.0' as const, contractId: 'CONTRACT-FIXTURE', contractVersion: 1,
+    contractStatus: 'confirmed-by-caller' as const, sourceRevision: context.prdRevision,
+    contractSourceDigest: d('understanding-contract'),
+    sources: [{ sourceId: 'SOURCE-1', kind: 'file' as const, ref: 'fixture',
+      origin: { kind: 'text' as const, ref: 'fixture' },
+      relevance: 'target' as const, digest: d('source'), byteLength: 7 }],
+    nodes: [{ nodeId: 'REQ-1', kind: 'REQ' as const, statement,
+      provenance: { kind: 'source-fact' as const, anchors: [{ sourceId: 'SOURCE-1',
+        sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 12 },
+        quote: statement, quoteDigest: digestPrdUnderstandingQuote(statement) }] },
+      responsibility: '首页', upstreamNodeIds: [], downstreamNodeIds: [],
+      acceptanceCriteria: ['首页标题可见'] }],
+    pendingQuestions: [], route: { skillName: 'e2e' as const, steps: [{ stepId: 'E2E-1',
+      inputNodeIds: ['REQ-1'], output: 'E2E 报告', constraints: [], dependencyStepIds: [],
+      completionCondition: 'REQ-1 已覆盖' }] },
+    authorization: { status: 'confirmed-by-caller' as const, contractVersion: 1,
+      authorizedNodeIds: ['REQ-1'], confirmedAt: '2026-07-12T00:00:00.000Z' },
+    projectionDigest: '',
+  }
+  return { ...value, projectionDigest: digestPrdUnderstandingProjection(value) }
 }
 const provenance: RuntimeProvenance = {
   runtimeVersion: '0.0.0', runtimeInstallationDigest: d('runtime-installation'), protocolVersion: '1.0.0',
@@ -196,6 +222,10 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
   const attemptCase = { caseId: 'CASE-1', retryPolicy: 'read-automation-max-2' as const, initialChainDigest,
     events: [attemptStarted.event, attemptTerminal.event], selection: {
       status: 'selected' as const, attemptId, slot: 0, eventChainDigest } }
+  const clauseMaterial = { clauseId: 'CLAUSE-1', sourceId: 'SOURCE-1', kind: 'functional' as const,
+    sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 12 },
+    originalText: '首页标题必须可见', normalizedText: '首页标题必须可见' }
+  const clause = { ...clauseMaterial, textDigest: digestPrdClause(clauseMaterial) }
   const drafts: any = {
     'project-policy': draft('design/project-policy.json', {
       policyVersion: '1.0.0', environments: [{ environmentId: 'TEST', baseOrigin: 'https://example.test' }],
@@ -212,12 +242,14 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       productSpace: 'PRODUCT', title: '最小完整 PRD',
       sourceDescriptors: [{ sourceId: 'SOURCE-1', kind: 'text', ref: 'fixture' }],
       userRequest: '验证只读页面', testWorkspaceId: 'WORKSPACE-1', secretRefs: [],
+      understanding: fixtureUnderstandingProjection(clauseMaterial.originalText),
     }),
     'prd-manifest': draft('prd/prd-manifest.json', {
       prdId: 'PRD-1', assetId: context.assetId, revision: context.prdRevision,
       normalizedPrdDigest: d('normalized-prd'),
       sources: [{ sourceId: 'SOURCE-1', digest: d('source'), byteLength: 7 }], attachments: [],
       sourceCacheIndexDigest: d('source-cache'),
+      clauses: [clause], clauseInventoryDigest: digestPrdClauseInventory([clause]),
     }),
     'prd-diff': draft('prd/prd-diff.json', {
       previousRevision: d('previous-prd'), currentRevision: context.prdRevision, sectionChanges: [],
@@ -231,9 +263,10 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       candidateDigests: [d('candidate')], selectedDigest: d('candidate'),
     }),
     'acceptance-scope': draft('design/acceptance-scope.json', {
-      includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['PRD-1'] }], exclusions: [], ambiguities: [],
+      includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['CLAUSE-1'] }], exclusions: [], ambiguities: [],
       dependencies: [], visualScope: { required: false, refs: [] },
       browserScope: { browserIds: ['CHROMIUM'], viewportIds: ['DESKTOP'] },
+      clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] }],
       scopeDecision: { decisionId: 'SCOPE-1', status: 'pending' },
     }),
     'requirement-model': draft('design/requirement-model.json', {
@@ -241,9 +274,10 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
       modelDecisionDigest: d('model-decision'), requirements: [{
         reqId: 'REQ-1', revision: 1, title: '读取首页', actors: ['USER'], entities: ['PAGE'],
         preconditions: [], rules: [{ ruleId: 'RULE-1', category: 'business', statement: '首页可见',
-          sourceRefs: ['PRD-1'], certainty: 'explicit' }], states: [], transitions: [],
-        observableOutcomes: [{ oracleId: 'ORACLE-1', statement: '标题可见' }], applicability: [],
-        sourceRefs: ['PRD-1'], status: 'active',
+          sourceRefs: ['CLAUSE-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'] }], states: [], transitions: [],
+        observableOutcomes: [{ oracleId: 'ORACLE-1', ruleId: 'RULE-1', statement: '标题可见',
+          sourceRefs: ['CLAUSE-1'] }], applicability: [],
+        sourceRefs: ['CLAUSE-1'], status: 'active',
       }],
     }),
     'interaction-flow': draft('design/interaction-flow.json', { flows: [{
@@ -254,7 +288,8 @@ export function completeGenerationFixture(): BuildCompleteGenerationInput {
     }] }),
     'coverage-universe': draft('design/coverage-universe.json', {
       coveragePolicyDigest: d('coverage-policy'), pairwiseSeed: 1, universeDigest: d('universe'),
-      obligations: [{ obligationId: 'COV-1', reqId: 'REQ-1', ruleIds: ['RULE-1'],
+      obligations: [{ obligationId: 'COV-1', reqId: 'REQ-1', clauseIds: ['CLAUSE-1'],
+        ruleIds: ['RULE-1'], oracleIds: ['ORACLE-1'],
         nodeIds: ['NODE-ENTRY', 'NODE-EXIT'], actor: 'USER', transitionId: 'not-applicable',
         scenario: '读取首页', necessity: 'required', applicabilityRuleId: 'APPLICABILITY-1',
         disposition: { kind: 'automated', caseIds: ['CASE-1'] } }],
@@ -797,6 +832,7 @@ function predictedContentDigest(artifactType: string, artifactDraft: any): strin
 function predictedContentDigestFor(contextValue: BuildCompleteGenerationInput['context'], artifactType: string, artifactDraft: any): string {
   const schemaVersion = artifactType === 'browser-action-map' ? '2.1.0'
     : artifactType === 'execution-contract' ? '1.1.0'
+      : artifactType === 'prd-request' ? '2.0.0'
       : ['approval-grants', 'browser-preflight', 'run-bundle', 'project-policy']
           .includes(artifactType) ? '2.0.0' : '1.0.0'
   const envelope = {

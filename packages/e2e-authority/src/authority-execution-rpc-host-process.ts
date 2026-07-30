@@ -1,5 +1,6 @@
 import { LocalApprovalAuthority } from './local-approval-authority.js'
 import { LocalLeaseAuthority } from './local-lease-authority.js'
+import { provisionWriteApprovalLeases } from './write-lease-provisioning.js'
 import { AuthenticatedRpcServer, startAuthenticatedRpcLoopbackServer } from './authenticated-rpc.js'
 import { registerAuthorityExecutionRpcOperations } from './authority-execution-rpc.js'
 import {
@@ -388,6 +389,12 @@ async function handleFinalizeApproval(message: Record<string, any>): Promise<voi
       runId: pending.runId, installationDigest: pending.installationDigest,
       approvalType: pending.approvalType, subjectDigest: pending.subjectDigest,
     }
+    if (!leaseAuthority) throw rpcHostError('E2E_RPC_HOST_START_FAILED')
+    await provisionWriteApprovalLeases({
+      leaseAuthority,
+      subject,
+      runId: approvalBinding.runId,
+    })
     const grant = await approvalAuthority.finalizeApprovalGrant({
       subject,
       approvalSessionRef: message.input.sessionId,
@@ -429,6 +436,12 @@ async function handleRecoverApproval(message: Record<string, any>): Promise<void
       sendToParent({ type: 'approval-recovered', requestId, result: { found: false } })
       return
     }
+    if (!leaseAuthority) throw rpcHostError('E2E_RPC_HOST_START_FAILED')
+    await provisionWriteApprovalLeases({
+      leaseAuthority,
+      subject,
+      runId: approvalBinding.runId,
+    })
     const context = await approvalAuthority.activatePersistedGrant({ grant: recovered.grant, approvalBinding })
     try { registerApprovalGrant(executionRpc, hostConfig, context) }
     catch {

@@ -219,7 +219,11 @@ export function projectCompilerInputFromArtifacts(
           source: text(program.source), sourceDigest: text(program.sourceDigest),
           cleanupSource: text(program.cleanupSource), cleanupSourceDigest: text(program.cleanupSourceDigest),
           dataLeaseId: text(program.dataLeaseId), cleanupPlanId: text(program.cleanupPlanId),
-          timeoutMs: number(program.timeoutMs), cleanupTimeoutMs: number(cleanupPlan.timeoutMs) })
+          timeoutMs: number(program.timeoutMs), cleanupTimeoutMs: number(cleanupPlan.timeoutMs),
+          oracleCheckpoints: records(program.oracleCheckpoints).map((checkpoint) => ({
+            checkpointId: text(checkpoint.checkpointId), oracleId: text(checkpoint.oracleId),
+            expectedJson: text(checkpoint.expectedJson), expectedDigest: text(checkpoint.expectedDigest),
+          })) })
       } else if (effect === 'read') {
         actions.push({ kind: 'assertText', actionId, target: text(step.semanticTarget),
           expected: text(oracles[0]!.statement) })

@@ -4,7 +4,7 @@ import {
   parseArtifactDocument,
 } from '@mutil-skills/e2e-contracts'
 import {
-  auditFinalReportFactBinding, auditVerdictFactBinding, buildCompleteGeneration, validateGeneration,
+  auditArtifactSemantics, auditFinalReportFactBinding, auditVerdictFactBinding, buildCompleteGeneration, validateGeneration,
   auditRuntimeProvenanceBinding, createCompletePublicationAuditor, PatternPrivacyScanner,
   type BuildCompleteGenerationInput,
 } from '../src/index.js'
@@ -330,6 +330,12 @@ describe('完整 generation builder', () => {
       reqId: 'REQ-1', ruleId: 'RULE-1', obligationId: 'COV-1', caseId: 'CASE-1',
       stepId: 'STEP-1', evidenceId: 'EVIDENCE-1', evidencePath: 'evidence/case-1.json',
     }])
+    expect(report.semanticTraceability).toEqual([{
+      clauseId: 'CLAUSE-1', sourceId: 'SOURCE-1',
+      sourceSpan: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 12 },
+      originalText: '首页标题必须可见', disposition: 'modeled',
+      requirementId: 'REQ-1', ruleId: 'RULE-1', oracleId: 'ORACLE-1',
+    }])
   })
 
   test('FinalReport dispositions 从 scope exclusion 事实投影，不编造状态', () => {
@@ -617,6 +623,15 @@ describe('完整 generation builder', () => {
     expect(() => buildCompleteGeneration(input)).not.toThrow()
   })
 
+  test('full-playwright 依靠可信 Compiler 与 Discovery 证明，不被误判为未证明源码', () => {
+    const input = completeWriteGenerationFixture()
+    setFixtureRegressionProfile(input, 'full-playwright')
+    ;(input.drafts['execution-contract'].content as any).runtimeIsolation = null
+    ;(input.drafts['run-bundle'].content as any).runtimeIsolationPolicyDigest = 'not-applicable'
+    refreshFixtureApproval(input)
+    expect(() => buildCompleteGeneration(input)).not.toThrow()
+  })
+
   test('production-isolated 缺少 runtime isolation policy 时仍然 fail closed', () => {
     const input = completeWriteGenerationFixture()
     setFixtureRegressionProfile(input, 'production-isolated')
@@ -820,7 +835,9 @@ describe('完整 generation builder', () => {
     ;(complete.drafts['browser-action-map'].content as any).actions[0].effect = 'reversible-write'
     ;(complete.drafts['execution-contract'].content as any).actionIntents[0].effect = 'reversible-write'
     ;(complete.drafts['execution-contract'].content as any).dataNeeds = [
-      { leaseId: 'LEASE-1', resourceKey: 'RESOURCE-1', mode: 'write' },
+      { leaseId: 'LEASE-1', resourceKey: 'RESOURCE-1',
+        resourceFingerprint: 'sha256:1111111111111111111111111111111111111111111111111111111111111111',
+        mode: 'write' },
     ]
     ;(complete.drafts['data-leases'].content as any).leases = [{
       leaseId: 'LEASE-1', resourceDigest: 'sha256:1111111111111111111111111111111111111111111111111111111111111111',
@@ -885,6 +902,38 @@ describe('完整 generation builder', () => {
     refreshFixtureApproval(input)
     expect(() => buildCompleteGeneration(input))
       .toThrow(/E2E_GENERATION_EXECUTION_OUTCOME_CAPABILITY_MISMATCH/)
+  })
+
+  test('full-playwright 执行回执与同 operation 的 Run Bundle Capability 可以闭合', () => {
+    const built = buildCompleteGeneration(completeWriteGenerationFixture())
+    const artifacts = structuredClone(built.artifacts) as any[]
+    const runBundle = artifacts.find((artifact) => artifact.artifactType === 'run-bundle').content
+    const browserResults = artifacts.find((artifact) => artifact.artifactType === 'browser-results').content
+    const caseResult = browserResults.caseResults[0]
+    const receipt = caseResult.executionOutcomeReceipts[0]
+    const capability = receipt.capability
+    capability.operation = 'full-playwright'
+    runBundle.signedCapabilities[0].operation = 'full-playwright'
+    runBundle.signedCapabilities[0].digest = digestText(
+      'approval-capability/v1', canonicalizeJson(capability),
+    )
+    caseResult.stepResults[0].evidenceIds = [`EVIDENCE-${receipt.actionId}`]
+    const checkpointEvidence = ['SCREENSHOT', 'DOM', 'URL', 'TRACE']
+      .map((kind) => `CHECKPOINT-1-${kind}`)
+    caseResult.stepResults[0].oracleCheckpoints = [{ evidenceIds: checkpointEvidence }]
+    receipt.evidenceIds = [
+      ...['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `BEFORE-${kind}`),
+      ...checkpointEvidence,
+      ...(['AFTER', 'CLEANUP'] as const).flatMap((stage) =>
+        ['SCREENSHOT', 'DOM', 'URL', 'TRACE'].map((kind) => `${stage}-${kind}`)),
+    ]
+    receipt.evidenceIds.push(`GATEWAY-${receipt.gateway.executionSessionId}`)
+    receipt.evidenceSetDigest = digestText(
+      'execution-outcome-evidence-set/v1', canonicalizeJson([...receipt.evidenceIds].sort()),
+    )
+    const codes = auditArtifactSemantics(artifacts, []).findings.map((finding) => finding.code)
+    expect(codes).not.toContain('E2E_GENERATION_EXECUTION_OUTCOME_CAPABILITY_MISMATCH')
+    expect(codes).not.toContain('E2E_GENERATION_EXECUTION_OUTCOME_CONTEXT_MISMATCH')
   })
 
   test('写 Gateway execution session 错绑时，即使重新签名 Gateway audit 也拒绝发布', () => {
@@ -967,7 +1016,9 @@ function completeWriteGenerationFixture(): BuildCompleteGenerationInput {
   ;(input.drafts['browser-action-map'].content as any).actions[0].effect = 'reversible-write'
   ;(input.drafts['execution-contract'].content as any).actionIntents[0].effect = 'reversible-write'
   ;(input.drafts['execution-contract'].content as any).dataNeeds = [
-    { leaseId: 'LEASE-1', resourceKey: 'RESOURCE-1', mode: 'write' },
+    { leaseId: 'LEASE-1', resourceKey: 'RESOURCE-1',
+      resourceFingerprint: 'sha256:1111111111111111111111111111111111111111111111111111111111111111',
+      mode: 'write' },
   ]
   ;(input.drafts['data-leases'].content as any).leases = [{
     leaseId: 'LEASE-1', resourceDigest: 'sha256:1111111111111111111111111111111111111111111111111111111111111111',

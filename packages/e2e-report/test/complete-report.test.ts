@@ -19,6 +19,7 @@ describe('renderCompleteReport', () => {
       '真实链路结果', '故障注入结果', 'Case 详情', 'Network Gateway 审计', '浏览器健康发现',
       '诊断、自愈与重试', '写入副作用与清理', '回归资产与独立执行', '剩余风险与建议动作',
       'Runtime 与隔离证明',
+      'PRD 原文到 Oracle 语义追踪',
     ]
     let previous = -1
     for (const heading of headings) {
@@ -41,6 +42,7 @@ describe('renderCompleteReport', () => {
     expect(report.html).toContain('执行 Profile：trusted-read-only')
     expect(report.html).toContain('业务失败（已观测）')
     expect(report.markdown).toContain('REQ-1')
+    expect(report.markdown).toContain('审核员可以查看订单。')
     expect(report.markdown).toContain('evidence/CASE-REAL-1.png')
     expect(report.markdown).toContain('Runtime installation：sha256:')
     expect(report.markdown).toContain('源码仓库独立：是')

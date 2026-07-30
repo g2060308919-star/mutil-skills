@@ -67,12 +67,16 @@ function createCandidates(model: RequirementModel, nodes: InteractionNode[], pol
     for (const applicability of requirement.applicability.filter((item) => item.required && item.dimension === 'actor').sort(byId('value'))) {
       candidates.push(candidate({
         kind: 'actor', reqId: requirement.reqId, actor: applicability.value,
+        clauseIds: requirement.sourceRefs,
+        oracleIds: requirement.observableOutcomes.map((oracle) => oracle.oracleId),
         scenario: 'required-actor', applicabilityRuleId: `actor:${applicability.value}`,
       }))
     }
     for (const node of nodes.filter((item) => item.reqId === requirement.reqId && isCriticalNode(item)).sort(byId('nodeId'))) {
       candidates.push(candidate({
         kind: 'critical-node', reqId: requirement.reqId, nodeIds: [node.nodeId],
+        clauseIds: requirement.sourceRefs,
+        oracleIds: requirement.observableOutcomes.map((oracle) => oracle.oracleId),
         scenario: 'critical-interaction', applicabilityRuleId: `node:${node.nodeId}`,
       }))
     }
@@ -84,6 +88,7 @@ function createCandidates(model: RequirementModel, nodes: InteractionNode[], pol
       for (const scenario of [...scenarios].sort()) {
         candidates.push(candidate({
           kind: 'rule', reqId: requirement.reqId, ruleIds: [rule.ruleId], scenario,
+          clauseIds: rule.sourceRefs, oracleIds: rule.oracleIds,
           applicabilityRuleId: `rule:${rule.ruleId}:${scenario}`,
         }))
       }
@@ -91,6 +96,8 @@ function createCandidates(model: RequirementModel, nodes: InteractionNode[], pol
     for (const transition of [...requirement.transitions].sort(byId('transitionId'))) {
       candidates.push(candidate({
         kind: 'transition', reqId: requirement.reqId, transitionId: transition.transitionId,
+        clauseIds: requirement.sourceRefs,
+        oracleIds: requirement.observableOutcomes.map((oracle) => oracle.oracleId),
         scenario: 'state-transition', applicabilityRuleId: `transition:${transition.transitionId}`,
       }))
     }
@@ -101,7 +108,9 @@ function createCandidates(model: RequirementModel, nodes: InteractionNode[], pol
 function candidate(input: {
   kind: CoverageObligationCandidate['kind']
   reqId: string
+  clauseIds: string[]
   ruleIds?: string[]
+  oracleIds: string[]
   nodeIds?: string[]
   actor?: string
   transitionId?: string
@@ -111,7 +120,9 @@ function candidate(input: {
   const key = {
     kind: input.kind,
     reqId: input.reqId,
+    clauseIds: input.clauseIds,
     ruleIds: input.ruleIds ?? [],
+    oracleIds: input.oracleIds,
     nodeIds: input.nodeIds ?? [],
     actor: input.actor ?? 'not-applicable',
     transitionId: input.transitionId ?? 'not-applicable',

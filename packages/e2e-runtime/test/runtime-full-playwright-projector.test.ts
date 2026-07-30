@@ -7,6 +7,7 @@ import {
   digestApprovalProjection,
   digestArtifactContent,
   digestCleanupPlanDefinition,
+  digestOracleCheckpointValue,
   digestText,
   type ArtifactDocument,
   type SignedWriteGrant,
@@ -21,7 +22,7 @@ import type { RuntimeRunSnapshot } from '../src/run-store.js'
 const d = (value: string) => digestText('runtime-full-playwright-projector-test/v1', value)
 
 export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
-  const source = "await page.goto('https://test.example.com/app')\nstate.changed = true"
+  const source = "await page.goto('https://test.example.com/app')\nawait checkpoint({ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', actual: true })\nstate.changed = true"
   const cleanupSource = "await page.goto('https://test.example.com/reset')\nreturn 'verified-clean'"
   const requests = [
     { intentId: 'DOCUMENT', method: 'GET', canonicalOrigin: 'https://test.example.com', exactPath: '/app',
@@ -35,7 +36,10 @@ export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
     schemaVersion: 'full-playwright/v1' as const, caseId: 'CASE-1', stepId: 'STEP-1', actionId: 'ACTION-1',
     source, sourceDigest: computeFullPlaywrightSourceDigest(source), cleanupSource,
     cleanupSourceDigest: computeFullPlaywrightCleanupSourceDigest(cleanupSource), dataLeaseId: 'LEASE-1',
-    cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000, networkRequests: requests,
+    cleanupPlanId: 'CLEANUP-1', timeoutMs: 30_000,
+    oracleCheckpoints: [{ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1',
+      expectedJson: 'true', expectedDigest: digestOracleCheckpointValue('true') }],
+    networkRequests: requests,
   }
   const cleanupPlan = {
     schemaVersion: '2.0.0' as const, transport: 'browser-local' as const, cleanupPlanId: 'CLEANUP-1',
@@ -59,7 +63,8 @@ export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
     caseQueue: [{ ordinal: 0, caseId: 'CASE-1' }], readHttpRequests: [], actionIntents: [{ actionId: 'ACTION-1',
       effect: 'reversible-write' as const, intentDigest: program.sourceDigest, requestIds: [] }],
     writeCleanupPlans: [cleanupPlan], fullPlaywrightPrograms: [program],
-    dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'app:fixture', mode: 'write' as const }],
+    dataNeeds: [{ leaseId: 'LEASE-1', resourceKey: 'app:fixture',
+      resourceFingerprint: d('target'), mode: 'write' as const }],
     manualProcedures: [], evidencePolicyDigest: d('evidence'), runtimeIsolation: null, unresolvedItems: [],
   }
   const actionMapContent = {
@@ -100,7 +105,8 @@ export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
     preflightDigest: d('preflight'), actions: [{ actionId: 'ACTION-1', transport: 'browser-local' as const,
       operation: 'full-playwright' as const, effect: 'reversible-write' as const,
       programDigest: program.sourceDigest, cleanupProgramDigest: program.cleanupSourceDigest,
-      dataLeaseId: 'LEASE-1', fencingToken: 1, cleanupPlanDigest, requests }],
+      dataLeaseId: 'LEASE-1', resourceKey: 'app:fixture', fencingToken: 1,
+      cleanupPlanDigest, requests }],
   }
   const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
   const grant: SignedWriteGrant = {
@@ -114,7 +120,7 @@ export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
     signature: 'A'.repeat(86),
   }
   return {
-    schemaVersion: '1.5.0', runId: 'RUN-1', assetId: 'ASSET-1', projectIdentityDigest: d('project'),
+    schemaVersion: '1.6.0', runId: 'RUN-1', assetId: 'ASSET-1', projectIdentityDigest: d('project'),
     runtimeInstallationDigest: d('installation'), workflow: 'approved' as never, artifactDigests: {},
     frozenArtifacts: { 'test-cases': testCases, 'execution-contract': execution,
       'browser-action-map': actionMap, 'run-bundle': runBundle },

@@ -1,6 +1,14 @@
 {
   "name": "@mutil-skills/template",
-  "version": "0.0.0",
+  "version": "0.4.5",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/g2060308919-star/mutil-skills.git",
+    "directory": "packages/template"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "files": [
     "dist/src",
@@ -11,5 +19,9 @@
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js"
     }
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

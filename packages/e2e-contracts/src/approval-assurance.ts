@@ -26,6 +26,70 @@ export const ApprovalEffectSchema = z.enum([
   'read', 'reversible-write', 'irreversible-write', 'injection', 'privacy-unlock', 'manual',
 ])
 
+const SemanticIdSchema = z.string().min(1).max(256)
+const SemanticOracleSchema = z.object({
+  oracleId: SemanticIdSchema,
+  ruleId: SemanticIdSchema,
+  statement: z.string().min(1).max(64 * 1024),
+  sourceRefs: z.array(z.string().min(1).max(4 * 1024)).min(1).max(1_000),
+}).strict()
+
+const SemanticClauseBaseSchema = z.object({
+  clauseId: SemanticIdSchema,
+  sourceId: SemanticIdSchema,
+  kind: z.enum([
+    'functional', 'validation', 'state', 'error', 'visual', 'permission',
+    'non-functional', 'out-of-scope', 'context',
+  ]),
+  sourceSpan: z.object({
+    startLine: z.number().int().positive(), startColumn: z.number().int().positive(),
+    endLine: z.number().int().positive(), endColumn: z.number().int().positive(),
+  }).strict(),
+  originalText: z.string().min(1).max(1024 * 1024),
+  normalizedText: z.string().min(1).max(1024 * 1024),
+})
+
+const SemanticClauseSchema = z.discriminatedUnion('disposition', [
+  SemanticClauseBaseSchema.extend({
+    disposition: z.literal('modeled'),
+    requirementIds: z.array(SemanticIdSchema).min(1).max(1_000),
+  }).strict(),
+  SemanticClauseBaseSchema.extend({
+    disposition: z.literal('excluded'), reason: z.string().min(1).max(64 * 1024),
+    decisionId: SemanticIdSchema,
+  }).strict(),
+  SemanticClauseBaseSchema.extend({
+    disposition: z.literal('not-applicable'), reason: z.string().min(1).max(64 * 1024),
+    decisionId: SemanticIdSchema,
+  }).strict(),
+  SemanticClauseBaseSchema.extend({
+    disposition: z.literal('ambiguous'), ambiguityId: SemanticIdSchema,
+  }).strict(),
+])
+
+export const PrdSemanticReviewSchema = z.object({
+  prd: z.object({
+    sourceRef: z.string().min(1).max(4 * 1024),
+    normalizedText: z.string().min(1).max(1024 * 1024),
+    normalizedDigest: DigestSchema,
+    byteLength: z.number().int().positive().max(16 * 1024 * 1024),
+  }).strict(),
+  clauses: z.array(SemanticClauseSchema).min(1).max(100_000),
+  requirements: z.array(z.object({
+    reqId: SemanticIdSchema,
+    title: z.string().min(1).max(64 * 1024),
+    sourceRefs: z.array(z.string().min(1).max(4 * 1024)).min(1).max(1_000),
+    rules: z.array(z.object({
+      ruleId: SemanticIdSchema,
+      statement: z.string().min(1).max(64 * 1024),
+      sourceRefs: z.array(z.string().min(1).max(4 * 1024)).min(1).max(1_000),
+      oracleMapping: z.enum(['explicit', 'requirement-level']),
+      oracles: z.array(SemanticOracleSchema).min(1).max(1_000),
+    }).strict()).min(1).max(10_000),
+  }).strict()).min(1).max(10_000),
+  reviewDigest: DigestSchema,
+}).strict()
+
 export const LocalApprovalSummarySchema = z.object({
   runId: SafeIdSchema,
   approvalType: ApprovalTypeSchema,
@@ -45,6 +109,7 @@ export const LocalApprovalSummarySchema = z.object({
   injectionClassifications: UniqueSafeIdsSchema,
   subjectDigest: DigestSchema,
   expiresAt: z.string().datetime({ offset: true }),
+  semanticReview: PrdSemanticReviewSchema.optional(),
 }).strict()
 
 export const OpenApprovalResultSchema = z.discriminatedUnion('status', [
@@ -79,4 +144,5 @@ export type RiskTier = z.infer<typeof RiskTierSchema>
 export type ApprovalType = z.infer<typeof ApprovalTypeSchema>
 export type ApprovalEffect = z.infer<typeof ApprovalEffectSchema>
 export type LocalApprovalSummary = z.infer<typeof LocalApprovalSummarySchema>
+export type PrdSemanticReview = z.infer<typeof PrdSemanticReviewSchema>
 export type OpenApprovalResult = z.infer<typeof OpenApprovalResultSchema>

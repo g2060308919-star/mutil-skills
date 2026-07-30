@@ -122,6 +122,7 @@ export interface HttpWriteApprovalAction {
   actionId: string
   effect: 'reversible-write'
   dataLeaseId: string
+  resourceKey: string
   fencingToken: number
   cleanupPlanDigest: string
   requests: HttpIntent[]
@@ -135,6 +136,7 @@ export interface BrowserLocalWriteApprovalAction {
   programDigest: string
   cleanupProgramDigest: string
   dataLeaseId: string
+  resourceKey: string
   fencingToken: number
   cleanupPlanDigest: string
   requests: HttpIntent[]

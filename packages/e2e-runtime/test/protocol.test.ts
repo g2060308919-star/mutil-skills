@@ -18,7 +18,7 @@ import {
 } from '../src/protocol.js'
 
 const digest = `sha256:${'0'.repeat(64)}`
-const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.2.1 -- repo-e2e install-runtime --version 0.2.1'
+const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.4.5 -- repo-e2e install-runtime --version 0.4.5'
 const doctorRequest = {
   schemaVersion: '1.0.0',
   requestId: 'REQ-1',
@@ -53,7 +53,7 @@ describe('Runtime protocol', () => {
     expect(response).toMatchObject({
       schemaVersion: '1.0.0',
       requestId: 'REQ-1',
-      runtime: { version: '0.2.1', installationDigest: digest },
+      runtime: { version: '0.4.5', installationDigest: digest },
       ok: false,
       error: {
         code: 'E2E_RUNTIME_NOT_INSTALLED',
@@ -68,6 +68,7 @@ describe('Runtime protocol', () => {
   test.each([
     'E2E_RUNTIME_PACKAGE_VERSION_SKEW',
     'E2E_RUNTIME_STATE_MIGRATION_REQUIRED',
+    'E2E_RUNTIME_UNDERSTANDING_MIGRATION_REQUIRED',
   ])('%s 在公开协议中固定映射为 migration-required', (code) => {
     const response = runtimeErrorResponse('REQ-MIGRATION', new E2EError({
       code,
@@ -243,7 +244,7 @@ describe('repo-e2e CLI protocol slice', () => {
     const exitCode = await runCli(['--version'], Readable.from([]), stdout.stream, stderr.stream)
 
     expect(exitCode).toBe(0)
-    expect(stdout.text()).toBe('0.2.1\n')
+    expect(stdout.text()).toBe('0.4.5\n')
     expect(stderr.text()).toBe('')
   })
 
@@ -332,6 +333,21 @@ describe('repo-e2e CLI protocol slice', () => {
       },
     })
     expect(stdout.text()).not.toContain('stack')
+    expect(stderr.text()).toBe('')
+  })
+
+  test('rejects rpc stdin above 4 MiB before JSON parsing or Host dispatch', async () => {
+    const stdout = captureWritable()
+    const stderr = captureWritable()
+    const exitCode = await runCli(
+      ['rpc'], Readable.from([Buffer.alloc(4 * 1024 * 1024 + 1, 0x20)]),
+      stdout.stream, stderr.stream,
+    )
+    expect(exitCode).toBe(2)
+    expect(RuntimeResponseEnvelopeSchema.parse(JSON.parse(stdout.text()))).toMatchObject({
+      requestId: 'UNKNOWN', ok: false,
+      error: { code: 'E2E_RUNTIME_REQUEST_TOO_LARGE', category: 'input' },
+    })
     expect(stderr.text()).toBe('')
   })
 

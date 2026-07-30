@@ -25,7 +25,9 @@ export const finalReportFixture = {
     reasonCodes: ['E2E_GATEWAY_AUDIT_INVALID'], cannotClaim: ['不能宣称全部必要 Case 已可靠执行'],
     businessFailuresObserved: [], advisoryFailures: [],
     metrics: {
+      clauseDispositionCoverage: valueMetric,
       requirementDesignCoverage: valueMetric, ruleCoverage: valueMetric, criticalNodeCoverage: valueMetric,
+      oracleCoverage: valueMetric, caseDesignCoverage: valueMetric,
       roleCoverage: valueMetric,
       stateTransitionCoverage: { status: 'not-applicable', numerator: 0, denominator: 0, reason: '无状态转换' },
       scenarioCategoryCoverage: valueMetric, automationDispositionCoverage: valueMetric,
@@ -34,6 +36,12 @@ export const finalReportFixture = {
     },
     scope: [{ id: 'REQ-1', digest: digest('d') }],
     traceability: [{ fromId: 'REQ-1', toId: 'RULE-1', kind: 'defines' }],
+    semanticTraceability: [{
+      clauseId: 'CLAUSE-1', sourceId: 'SOURCE-1',
+      sourceSpan: { startLine: 10, startColumn: 1, endLine: 10, endColumn: 20 },
+      originalText: '审核员可以查看订单。', disposition: 'modeled',
+      requirementId: 'REQ-1', ruleId: 'RULE-1', oracleId: 'ORACLE-1',
+    }],
     realResults: [{ id: realResultId, digest: digest('e') }],
     injectionResults: [{ id: injectionResultId, digest: digest('f') }],
     manualResults: [{ id: 'MANUAL-1', digest: digest('1'), approvalMode: 'local-confirmation',
