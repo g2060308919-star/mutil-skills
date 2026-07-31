@@ -3,6 +3,7 @@ import {
   ArtifactSchemaRegistry,
   RuntimeDoctorReportSchema,
   RuntimeCreateRunResultSchema,
+  RuntimeCompilePrdRunResultSchema,
   RuntimePreparePrdUnderstandingResultSchema,
   RuntimeResponseEnvelopeSchema,
   RuntimeStatusResultSchema,
@@ -112,6 +113,8 @@ import {
   assertPrdUnderstandingLinkedCandidate,
   preparePrdUnderstandingProjection,
 } from './prd-understanding-validator.js'
+import { compilePrdRun } from './prd-run-compiler.js'
+import { createCaseSchedule } from './multi-case-scheduler.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -181,6 +184,7 @@ export class E2ERuntimeHost {
       if (reservation.kind === 'pending'
         && request.command !== 'open-approval'
         && request.command !== 'confirm-approval'
+        && request.command !== 'compile-prd-run'
         && request.command !== 'submit-candidate'
         && request.command !== 'run-preflight'
         && request.command !== 'execute-run'
@@ -206,6 +210,9 @@ export class E2ERuntimeHost {
       if (request.command === 'create-run') return await this.createRun(request, requestDigest)
       if (request.command === 'prepare-prd-understanding') {
         return await this.preparePrdUnderstanding(request, requestDigest)
+      }
+      if (request.command === 'compile-prd-run') {
+        return await this.compilePrdRun(request, requestDigest)
       }
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
@@ -349,7 +356,7 @@ export class E2ERuntimeHost {
     }).prdRevision
     const timestamp = this.dependencies.now().toISOString()
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.6.0',
+      schemaVersion: '1.7.0',
       runId,
       assetId: request.payload.assetId,
       projectIdentityDigest: identity.digest,
@@ -483,6 +490,95 @@ export class E2ERuntimeHost {
           response,
         }),
         'prd-understanding-prepared',
+        lock,
+      )
+      return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
+  }
+
+  private async compilePrdRun(
+    request: Extract<RuntimeRequestEnvelope, { command: 'compile-prd-run' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      if (snapshot.workflow.current !== 'created') throw runtimeHostError(
+        'E2E_RUNTIME_PRD_RUN_COMPILE_STATE_MISMATCH',
+        'input',
+        'PRD Run 只能在 created 状态且 requirements projection 已冻结后编译',
+      )
+      const prepared = PrdUnderstandingPreparedFactSchema.safeParse(
+        snapshot.trustedExecutionFacts['prd-understanding-prepared'],
+      )
+      if (!prepared.success) throw runtimeHostError(
+        'E2E_RUNTIME_PRD_UNDERSTANDING_NOT_PREPARED',
+        'input',
+        '缺少 Runtime 冻结的唯一 requirements projection',
+      )
+      let plan: ReturnType<typeof compilePrdRun>
+      try {
+        plan = compilePrdRun({
+          understanding: prepared.data.projection,
+          design: request.payload.design,
+        })
+      } catch (cause) {
+        const code = safeExecutionCauseCode(cause)
+        if (code?.startsWith('E2E_RUNTIME_PRD_RUN_') === true) {
+          throw runtimeHostError(code, 'input', '声明式设计未与 requirements contract 完整闭合')
+        }
+        throw cause
+      }
+      if (snapshot.compiledPrdRun !== undefined
+        && canonicalizeJson(snapshot.compiledPrdRun) !== canonicalizeJson(plan)) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_PRD_RUN_ALREADY_COMPILED',
+          'input',
+          '同一 Run 已绑定不同声明式设计，禁止替换编译计划',
+        )
+      }
+      const persistedPlan = snapshot.compiledPrdRun ?? plan
+      const schedule = snapshot.caseSchedule ?? createCaseSchedule(
+        persistedPlan,
+        this.dependencies.now().toISOString(),
+      )
+      if (schedule.compilerDigest !== persistedPlan.compilerDigest) throw runtimeHostError(
+        'E2E_RUNTIME_CASE_SCHEDULE_BINDING_INVALID',
+        'artifact',
+        '持久 Case 调度与编译计划摘要不一致',
+      )
+      const response = this.successResponse(request.requestId, RuntimeCompilePrdRunResultSchema.parse({
+        runId: snapshot.runId,
+        compilerDigest: persistedPlan.compilerDigest,
+        caseCount: persistedPlan.cases.length,
+        review: {
+          contractProjectionDigest: persistedPlan.contractProjectionDigest,
+          caseIds: persistedPlan.cases.map((testCase) => testCase.caseId),
+          mappedAcceptanceCount: persistedPlan.cases.reduce(
+            (total, testCase) => total + testCase.oracles.length,
+            0,
+          ),
+        },
+        unresolvedItems: [],
+        nextRequiredDecision: 'scope',
+      }))
+      const outcome = await this.dependencies.runStore.updateRunOutcome(
+        identity.digest,
+        snapshot.runId,
+        request.requestId,
+        requestDigest,
+        (current) => ({
+          snapshot: {
+            ...current,
+            compiledPrdRun: persistedPlan,
+            caseSchedule: schedule,
+            updatedAt: this.dependencies.now().toISOString(),
+          },
+          response,
+        }),
+        'prd-run-compiled',
         lock,
       )
       return RuntimeResponseEnvelopeSchema.parse(outcome)
@@ -2467,6 +2563,8 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
   )
   const intent = current === 'created' && !prepared.success
     ? { command: 'prepare-prd-understanding' as const, missing: ['prd-understanding-prepared'] }
+    : current === 'created' && snapshot.compiledPrdRun === undefined
+      ? { command: 'compile-prd-run' as const, missing: ['declarative-prd-run-design'] }
     : STATUS_COMMAND_BY_STATE[current]
   const missing = current === 'diagnosing'
     ? runtimeFinalizationMissingInputs(snapshot, now)
@@ -2484,6 +2582,10 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
       ...(contract.success ? { 'prd-understanding-contract': contract.data.sourceDigest } : {}),
       ...(prepared.success
         ? { 'prd-understanding-projection': prepared.data.projection.projectionDigest } : {}),
+      ...(snapshot.compiledPrdRun === undefined
+        ? {} : { 'compiled-prd-run': snapshot.compiledPrdRun.compilerDigest }),
+      ...(snapshot.caseSchedule === undefined
+        ? {} : { 'case-schedule': snapshot.caseSchedule.scheduleDigest }),
       ...snapshot.artifactDigests,
     },
     minimumMissingInput: missing,

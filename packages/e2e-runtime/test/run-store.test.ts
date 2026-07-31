@@ -366,7 +366,7 @@ describe('runtime run store', () => {
 
     const migrated = await openStore(roots)
     await expect(migrated.getRun(digest('1'), 'RUN-1')).resolves.toMatchObject({
-      schemaVersion: '1.6.0', runRevision: 0, frozenArtifacts: {},
+      schemaVersion: '1.7.0', runRevision: 0, frozenArtifacts: {},
       trustedExecutionFacts: { 'approval-mode': 'webauthn' },
       writeAttempts: {}, executionResults: {
         readEnvironment: {}, realEnvironment: {}, gatewayInjection: {},
@@ -376,7 +376,7 @@ describe('runtime run store', () => {
     const afterFirstOpen = readRunStoreSnapshotForTest(roots.home)
     const firstRows = (afterFirstOpen.journals as Record<string, Array<Record<string, unknown>>>)[key]!
     expect(firstRows.at(-1)?.event).toMatchObject({
-      kind: 'runtime-state-migrated', fromSchemaVersion: '1.0.0', toSchemaVersion: '1.6.0',
+      kind: 'runtime-state-migrated', fromSchemaVersion: '1.0.0', toSchemaVersion: '1.7.0',
     })
 
     const reopened = await openStore(roots)

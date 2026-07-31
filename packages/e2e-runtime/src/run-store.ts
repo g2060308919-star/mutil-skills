@@ -9,6 +9,7 @@ import {
   RuntimeResponseEnvelopeSchema,
   type ManualResult,
   type ArtifactDocument,
+  type CompiledPrdRunPlan,
   type WorkflowState,
 } from '@mutil-skills/e2e-contracts'
 import { transitionWorkflow, type PendingWorkflowDecision } from '@mutil-skills/e2e-engine'
@@ -33,6 +34,7 @@ import {
   PendingLocalApprovalConfirmationSchema,
   type PendingLocalApprovalConfirmation,
 } from './local-approval-confirmations.js'
+import type { RuntimeCaseSchedule } from './multi-case-scheduler.js'
 
 const EMPTY_DIGEST = `sha256:${'0'.repeat(64)}`
 const LEASE_MILLISECONDS = 30_000
@@ -79,8 +81,8 @@ export interface RuntimeTrustedFactCapability {
 }
 
 export interface RuntimeRunSnapshot {
-  /** 1.1–1.5 仅作为显式迁移输入兼容；Store 读取与写回始终规范化为 1.6。 */
-  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0'
+  /** 1.1–1.6 仅作为显式迁移输入兼容；Store 读取与写回始终规范化为 1.7。 */
+  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.7.0'
   runId: string
   assetId: string
   projectIdentityDigest: string
@@ -98,6 +100,10 @@ export interface RuntimeRunSnapshot {
   frozenArtifacts: Record<string, ArtifactDocument>
   /** 仅 Runtime 内部可信执行链产生；外部 submit-candidate 永远不能写入。 */
   trustedExecutionFacts: Record<string, unknown>
+  /** Runtime 从唯一 requirements projection 确定性生成；调用者不能提交摘要或 ID。 */
+  compiledPrdRun?: CompiledPrdRunPlan
+  /** Runtime 持久化的串行多 Case 调度游标。 */
+  caseSchedule?: RuntimeCaseSchedule
   /** 写动作的 durable 状态机；恢复只能 reconcile，绝不能据此重放动作。 */
   writeAttempts?: Record<string, RuntimeWriteAttemptRecord>
   /** real 与 injection 分域持久化；注入结果永远不能覆盖真实环境结果。 */
@@ -1452,7 +1458,7 @@ export class RuntimeRunStore {
         const snapshot = parseStoreSnapshot(serialized)
         let changed = false
         for (const [key, raw] of Object.entries(snapshot.runs)) {
-          if (isPlainRecord(raw) && raw.schemaVersion === '1.6.0') continue
+          if (isPlainRecord(raw) && raw.schemaVersion === '1.7.0') continue
           const rows = snapshot.journals[key]
           if (!Array.isArray(rows) || rows.length === 0) {
             throw journalIntegrityError('legacy Run 缺少可验证 journal，拒绝迁移')

@@ -1,6 +1,7 @@
 import {
   ArtifactSchemaRegistry,
   ArtifactTypeSchema,
+  CompiledPrdRunPlanSchema,
   ManualResultSchema,
   SignedGrantSchema,
   AssetIdSchema,
@@ -25,6 +26,11 @@ import {
   PrdUnderstandingContractFactSchema,
   PrdUnderstandingPreparedFactSchema,
 } from './local-approval-confirmations.js'
+import {
+  createLegacySingleCaseSchedule,
+  parseCaseSchedule,
+  type RuntimeCaseSchedule,
+} from './multi-case-scheduler.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const RunIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -349,7 +355,7 @@ const RuntimePublicationRecordSchema = z.object({
 }).strict()
 
 const RuntimeRunSnapshotSchema = z.object({
-  schemaVersion: z.literal('1.6.0'),
+  schemaVersion: z.literal('1.7.0'),
   runId: RunIdSchema,
   assetId: AssetIdSchema,
   projectIdentityDigest: DigestSchema,
@@ -364,6 +370,15 @@ const RuntimeRunSnapshotSchema = z.object({
   artifactDigests: z.record(DigestSchema),
   frozenArtifacts: FrozenArtifactsSchema,
   trustedExecutionFacts: TrustedExecutionFactsSchema,
+  compiledPrdRun: CompiledPrdRunPlanSchema.optional(),
+  caseSchedule: z.custom<RuntimeCaseSchedule>((value) => {
+    try {
+      parseCaseSchedule(value)
+      return true
+    } catch {
+      return false
+    }
+  }, 'Case schedule 必须通过摘要和状态不变量校验').optional(),
   writeAttempts: WriteAttemptsSchema,
   executionResults: RuntimeExecutionResultsSchema,
   requestResponses: z.record(z.object({
@@ -451,6 +466,11 @@ export const RuntimeStateMigrationRegistry: Readonly<Record<string, RuntimeState
     ...snapshot,
     schemaVersion: '1.6.0',
   }),
+  '1.6.0': (snapshot) => ({
+    ...snapshot,
+    schemaVersion: '1.7.0',
+    ...legacySingleCaseSchedule(snapshot),
+  }),
 })
 
 export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
@@ -462,7 +482,7 @@ export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
   }
   let candidateVersion = sourceVersion
   const visited = new Set<string>()
-  while (candidateVersion !== '1.6.0') {
+  while (candidateVersion !== '1.7.0') {
     if (visited.has(candidateVersion)) throw migrationRequired(sourceVersion)
     visited.add(candidateVersion)
     const migrator = RuntimeStateMigrationRegistry[candidateVersion]
@@ -479,6 +499,27 @@ export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
     return RuntimeRunSnapshotSchema.parse(JSON.parse(canonicalizeJson(parsed.data))) as RuntimeRunSnapshot
   } catch (cause) {
     throw migrationRequired(sourceVersion, cause)
+  }
+}
+
+function legacySingleCaseSchedule(
+  snapshot: Readonly<Record<string, unknown>>,
+): { caseSchedule: RuntimeCaseSchedule } | Record<string, never> {
+  if (snapshot.caseSchedule !== undefined) return {}
+  const frozenArtifacts = snapshot.frozenArtifacts
+  if (!plain(frozenArtifacts)) return {}
+  const testCases = frozenArtifacts['test-cases']
+  if (!plain(testCases) || !plain(testCases.content)) return {}
+  const cases = testCases.content.cases
+  if (!Array.isArray(cases) || cases.length !== 1 || !plain(cases[0])) return {}
+  const testCase = cases[0]
+  if (typeof testCase.caseId !== 'string' || typeof testCase.actor !== 'string') return {}
+  return {
+    caseSchedule: createLegacySingleCaseSchedule({
+      caseId: testCase.caseId,
+      actor: testCase.actor,
+      failurePolicy: testCase.necessity === 'required' ? 'stop-required' : 'continue',
+    }, typeof snapshot.createdAt === 'string' ? snapshot.createdAt : new Date(0).toISOString()),
   }
 }
 

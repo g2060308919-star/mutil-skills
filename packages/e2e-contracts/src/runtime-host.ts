@@ -8,6 +8,9 @@ import {
 import { WorkflowNodeSchema, WorkflowStateSchema } from './workflow.js'
 import { ApprovalGrantSubjectSchema, canonicalGrantApprovalType } from './approval-subject.js'
 import { ManualResultDraftSchema } from './manual-result.js'
+import {
+  DeclarativePrdRunDesignSchema,
+} from './declarative-prd-run.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -83,6 +86,15 @@ const commandSchemas = [
     payload: z.object({
       runId: SafeIdSchema,
       projection: PrdUnderstandingProjectionDraftSchema,
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('compile-prd-run'),
+    projectRoot: z.string().min(1),
+    payload: z.object({
+      runId: SafeIdSchema,
+      design: DeclarativePrdRunDesignSchema,
     }).strict(),
   }).strict(),
   z.object({
@@ -217,7 +229,7 @@ export const RuntimeDoctorReportSchema = z.object({
 
 export const RuntimeStatusNextEdgeSchema = z.object({
   command: z.enum([
-    'prepare-prd-understanding', 'submit-candidate', 'open-approval', 'confirm-approval',
+    'prepare-prd-understanding', 'compile-prd-run', 'submit-candidate', 'open-approval', 'confirm-approval',
     'run-preflight', 'prepare-manual-result',
     'finalize-manual-result-role', 'execute-run', 'resume-run', 'finalize-run', 'render-report',
   ]),
@@ -268,6 +280,19 @@ export const RuntimePreparePrdUnderstandingResultSchema = z.object({
   understanding: PrdUnderstandingProjectionSchema,
 }).strict()
 
+export const RuntimeCompilePrdRunResultSchema = z.object({
+  runId: SafeIdSchema,
+  compilerDigest: DigestSchema,
+  caseCount: z.number().int().positive().max(1_000),
+  review: z.object({
+    contractProjectionDigest: DigestSchema,
+    caseIds: z.array(SafeIdSchema).min(1).max(1_000),
+    mappedAcceptanceCount: z.number().int().positive(),
+  }).strict(),
+  unresolvedItems: z.array(z.string().min(1)).max(10_000),
+  nextRequiredDecision: z.literal('scope'),
+}).strict()
+
 export const RuntimeResponseEnvelopeSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
   requestId: SafeIdSchema,
@@ -298,6 +323,7 @@ export type RuntimeCreateRunResult = z.infer<typeof RuntimeCreateRunResultSchema
 export type RuntimePreparePrdUnderstandingResult = z.infer<
   typeof RuntimePreparePrdUnderstandingResultSchema
 >
+export type RuntimeCompilePrdRunResult = z.infer<typeof RuntimeCompilePrdRunResultSchema>
 
 function isPlainJsonObject(value: unknown): value is Record<string, JsonValue> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)

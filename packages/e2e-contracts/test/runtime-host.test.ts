@@ -133,6 +133,52 @@ describe('Runtime Host contracts', () => {
     expect(RuntimeRequestEnvelopeSchema.safeParse({ ...submitCandidateRequest, payload }).success).toBe(false)
   })
 
+  test('compile-prd-run 只接受声明式设计，不接受调用者伪造编译事实', () => {
+    const request = {
+      ...doctorRequest,
+      command: 'compile-prd-run',
+      projectRoot: '/tmp/project',
+      payload: {
+        runId: 'RUN-1',
+        design: {
+          schemaVersion: '1.0.0',
+          cases: [{
+            caseKey: 'stable-product',
+            title: '验证产品行为稳定',
+            actor: 'auditor',
+            contractNodeIds: ['REQ-1'],
+            actions: [{
+              actionKey: 'observe-product',
+              kind: 'full-playwright',
+              effect: 'read',
+              statement: '打开产品并观察稳定行为',
+            }],
+            oracles: [{
+              oracleKey: 'stable-product-oracle',
+              actionKey: 'observe-product',
+              contractNodeId: 'REQ-1',
+              acceptanceCriterion: 'Product behavior is stable',
+            }],
+            failurePolicy: 'stop-required',
+          }],
+        },
+      },
+    }
+
+    expect(RuntimeRequestEnvelopeSchema.safeParse(request).success).toBe(true)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...request,
+      payload: { ...request.payload, compilerDigest: `sha256:${'a'.repeat(64)}` },
+    }).success).toBe(false)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...request,
+      payload: {
+        ...request.payload,
+        design: { ...request.payload.design, artifactDigests: { forged: `sha256:${'b'.repeat(64)}` } },
+      },
+    }).success).toBe(false)
+  })
+
   test('requires resume-run payloads to include decision', () => {
     const { decision: _decision, ...payload } = resumeRunRequest.payload
     expect(RuntimeRequestEnvelopeSchema.safeParse({ ...resumeRunRequest, payload }).success).toBe(false)

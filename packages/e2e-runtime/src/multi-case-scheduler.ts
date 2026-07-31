@@ -63,6 +63,42 @@ export function createCaseSchedule(
   return sealSchedule(draft)
 }
 
+export function createLegacySingleCaseSchedule(
+  input: {
+    caseId: string
+    actor: string
+    failurePolicy: 'stop-required' | 'continue'
+  },
+  createdAt: string,
+): RuntimeCaseSchedule {
+  const compilerDigest = digestText(
+    'legacy-single-case-schedule/v1',
+    canonicalizeJson(input),
+  )
+  return sealSchedule({
+    schemaVersion: '1.0.0',
+    compilerDigest,
+    revision: 0,
+    status: 'active',
+    cases: [{
+      queueOrdinal: 0,
+      caseId: input.caseId,
+      actor: input.actor,
+      failurePolicy: input.failurePolicy,
+      state: 'pending',
+    }],
+    createdAt,
+    updatedAt: createdAt,
+  })
+}
+
+export function parseCaseSchedule(input: unknown): RuntimeCaseSchedule {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw schedulerError('E2E_RUNTIME_CASE_SCHEDULE_INVALID')
+  }
+  return validateSchedule(structuredClone(input) as RuntimeCaseSchedule)
+}
+
 export function startNextCase(
   input: RuntimeCaseSchedule,
   attempt: { attemptId: string; startedAt: string },

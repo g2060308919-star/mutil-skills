@@ -374,13 +374,73 @@ describe('E2ERuntimeHost', () => {
       'REQUEST-STATUS-AFTER-PREPARE', fixture.roots.project, created.runId as string,
     )))
     expect(status).toMatchObject({
-      state: 'created', nextEdge: { command: 'submit-candidate' },
-      minimumMissingInput: ['prd-request'],
+      state: 'created', nextEdge: { command: 'compile-prd-run' },
+      minimumMissingInput: ['declarative-prd-run-design'],
       verifiedDigests: {
         'prd-understanding-projection': digestPrdUnderstandingProjection(draft),
       },
     })
     await fixture.store.close()
+  })
+
+  test('compile-prd-run 原子持久化编译计划与 Case 调度', async () => {
+    const fixture = await hostFixture()
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-COMPILE-CREATE', fixture.roots.project),
+    ))
+    await prepareUnderstandingForRun(fixture, created, 'REQUEST-COMPILE-PREPARE')
+    const response = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-COMPILE-1'),
+      command: 'compile-prd-run',
+      projectRoot: fixture.roots.project,
+      payload: {
+        runId: created.runId,
+        design: {
+          schemaVersion: '1.0.0',
+          cases: [{
+            caseKey: 'stable-product',
+            title: '验证产品行为稳定',
+            actor: 'auditor',
+            contractNodeIds: ['REQ-1'],
+            actions: [{
+              actionKey: 'observe-product',
+              kind: 'full-playwright',
+              effect: 'read',
+              statement: '打开产品并观察稳定行为',
+            }],
+            oracles: [{
+              oracleKey: 'stable-product-oracle',
+              actionKey: 'observe-product',
+              contractNodeId: 'REQ-1',
+              acceptanceCriterion: 'Product behavior is stable',
+            }],
+            failurePolicy: 'stop-required',
+          }],
+        },
+      },
+    })))
+
+    expect(response).toMatchObject({
+      runId: created.runId,
+      caseCount: 1,
+      nextRequiredDecision: 'scope',
+      unresolvedItems: [],
+      review: {
+        contractProjectionDigest: expect.stringMatching(/^sha256:/),
+        caseIds: ['CASE-0001'],
+        mappedAcceptanceCount: 1,
+      },
+    })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(persisted?.compiledPrdRun?.cases).toHaveLength(1)
+    expect(persisted?.caseSchedule?.cases).toMatchObject([{
+      queueOrdinal: 0,
+      caseId: 'CASE-0001',
+      state: 'pending',
+    }])
+    expect(persisted?.caseSchedule?.compilerDigest).toBe(response.compilerDigest)
   })
 
   test('derives a publication-safe generation id from a protocol-valid lowercase request id', async () => {
