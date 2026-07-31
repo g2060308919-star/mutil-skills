@@ -32,8 +32,8 @@ E2E 发布先运行 `npm run verify:e2e-pack` 验证本地 tarball；发布全�
 正式 npm 发布由 [`.github/workflows/publish.yml`](./.github/workflows/publish.yml) 在精确版本
 Tag（`v<package.json.version>`）上执行。工作流使用 GitHub Actions OIDC 与 npm Trusted
 Publishing，不读取 `NPM_TOKEN`/`NODE_AUTH_TOKEN`：先运行类型、架构、全量测试和 workspace
-Golden，再按内部依赖拓扑逐包发布；相同版本只有 Registry SHA-512 与本地 tarball 完全一致时
-才允许幂等跳过，最后从 Registry 重装并运行正式 Golden。每个 `@mutil-skills/*` 包只需在 npm
+Golden，再按内部依赖拓扑逐包发布；相同版本只有 Registry 包与当前 Tag clean pack 的稳定文件
+内容摘要一致时才允许幂等跳过，最后从 Registry 重装并运行正式 Golden。每个 `@mutil-skills/*` 包只需在 npm
 Settings 中一次性登记 GitHub Trusted Publisher：仓库 `g2060308919-star/mutil-skills`、工作流
 文件 `publish.yml`、允许 `npm publish`。之后发布不再需要逐包浏览器认证。
 工作流在 Ubuntu 上执行全量代码验证，在固定 `macos-14` runner 上执行强制 Chromium sandbox

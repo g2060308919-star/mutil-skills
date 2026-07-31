@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Trusted Publishing 在同版本 tgz 封装字节变化时，下载 Registry 包并比较稳定文件内容摘要；内容相同则安全幂等跳过，内容不同仍拒绝覆盖，发布工作流可安全重跑。
+
 ## [0.4.7] - 2026-07-31
 
 ### Fixed

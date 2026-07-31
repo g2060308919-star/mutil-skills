@@ -1,11 +1,13 @@
 import { execFile, spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import ts from 'typescript'
+import {
+  packageArchiveContentIntegrity,
+  packageDirectoryContentIntegrity,
+} from './package-content-integrity.js'
 
 const execFileAsync = promisify(execFile)
 const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -271,7 +273,7 @@ export async function verifyInstalledReleasePackages(
     }
     if (verification?.packContentIntegrities !== undefined) {
       const installedRoot = dirname(installedPath)
-      const actualContentIntegrity = await packageContentIntegrity(installedRoot)
+      const actualContentIntegrity = await packageDirectoryContentIntegrity(installedRoot)
       const expectedContentIntegrity = verification.packContentIntegrities.get(releasePackage.name)
       if (actualContentIntegrity !== expectedContentIntegrity) {
         throw new Error(
@@ -304,32 +306,15 @@ export async function releasePackIntegrities(
   expected: ReleasePackageManifest[],
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>()
-  const extractionRoot = await mkdtemp(join(tmpdir(), 'mutil-release-pack-content-'))
-  try {
-    for (const [index, releasePackage] of expected.entries()) {
-      const filename = `${releasePackage.name.slice(1).replace('/', '-')}-${releasePackage.version}.tgz`
-      const archive = join(packsDir, filename)
-      const listing = await execFileAsync('tar', ['-tzf', archive], {
-        timeout: 60_000,
-        maxBuffer: 20 * 1024 * 1024,
-      })
-      const entries = listing.stdout.trim().split('\n').filter((entry) => entry.length > 0)
-      if (entries.length === 0 || entries.some((entry) =>
-        !entry.startsWith('package/')
-        || entry.includes('\\')
-        || entry.split('/').some((part) => part === '..'))) {
-        throw new Error(`发布 tarball 路径不安全: ${releasePackage.name}@${releasePackage.version}`)
-      }
-      const target = join(extractionRoot, String(index))
-      await mkdir(target, { mode: 0o700 })
-      await execFileAsync('tar', ['-xzf', archive, '-C', target], {
-        timeout: 60_000,
-        maxBuffer: 20 * 1024 * 1024,
-      })
-      result.set(releasePackage.name, await packageContentIntegrity(join(target, 'package')))
-    }
-  } finally {
-    await rm(extractionRoot, { recursive: true, force: true })
+  for (const releasePackage of expected) {
+    const filename = `${releasePackage.name.slice(1).replace('/', '-')}-${releasePackage.version}.tgz`
+    result.set(
+      releasePackage.name,
+      await packageArchiveContentIntegrity(
+        join(packsDir, filename),
+        `${releasePackage.name}@${releasePackage.version}`,
+      ),
+    )
   }
   return result
 }
@@ -353,37 +338,6 @@ async function registryReleaseIntegrities(
     result.set(releasePackage.name, integrity)
   }
   return result
-}
-
-async function packageContentIntegrity(root: string): Promise<string> {
-  const files: Array<{ path: string; mode: number; bytes: Buffer }> = []
-  async function visit(directory: string, prefix: string): Promise<void> {
-    const entries = (await readdir(directory, { withFileTypes: true }))
-      .sort((left, right) => left.name.localeCompare(right.name))
-    for (const entry of entries) {
-      if (prefix === '' && entry.name === 'node_modules') continue
-      const relativePath = prefix === '' ? entry.name : `${prefix}/${entry.name}`
-      const path = join(directory, entry.name)
-      if (entry.isDirectory()) {
-        await visit(path, relativePath)
-        continue
-      }
-      if (!entry.isFile()) throw new Error(`发布包包含非普通文件: ${relativePath}`)
-      const info = await lstat(path)
-      if (!info.isFile() || info.nlink !== 1) throw new Error(`发布包文件边界无效: ${relativePath}`)
-      // npm install 会把普通文件的 0600/0644 等 owner 权限归一化，但会保留
-      // 可执行语义。内容摘要只绑定跨 pack/install 稳定且影响使用行为的 exec bit。
-      files.push({ path: relativePath, mode: (info.mode & 0o111) === 0 ? 0 : 1, bytes: await readFile(path) })
-    }
-  }
-  await visit(root, '')
-  if (files.length === 0) throw new Error('发布包内容为空')
-  const hash = createHash('sha512')
-  for (const file of files) {
-    hash.update(`${Buffer.byteLength(file.path)}:${file.path}:${file.mode}:${file.bytes.byteLength}:`)
-    hash.update(file.bytes)
-  }
-  return `sha512-${hash.digest('base64')}`
 }
 
 function internalDependencyEntries(section: Record<string, string> | undefined): Array<[string, string]> {

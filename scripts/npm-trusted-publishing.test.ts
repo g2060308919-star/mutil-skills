@@ -55,6 +55,18 @@ describe('npm Trusted Publishing release helper', () => {
   test('仅跳过 Registry 中内容完整性完全相同的已发布包', () => {
     expect(decideRegistryPublication('sha512-local', undefined)).toBe('publish')
     expect(decideRegistryPublication('sha512-same', 'sha512-same')).toBe('skip')
+    expect(decideRegistryPublication(
+      'sha512-local-envelope',
+      'sha512-registry-envelope',
+      'sha512-same-content',
+      'sha512-same-content',
+    )).toBe('skip')
     expect(() => decideRegistryPublication('sha512-local', 'sha512-other')).toThrow('完整性冲突')
+    expect(() => decideRegistryPublication(
+      'sha512-local-envelope',
+      'sha512-registry-envelope',
+      'sha512-local-content',
+      'sha512-registry-content',
+    )).toThrow('完整性冲突')
   })
 })
