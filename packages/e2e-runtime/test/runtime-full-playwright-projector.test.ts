@@ -12,9 +12,13 @@ import {
   type ArtifactDocument,
   type SignedWriteGrant,
 } from '@mutil-skills/e2e-contracts'
-import { projectRuntimeFullPlaywrightSnapshot } from '../src/runtime-full-playwright-projector.js'
+import {
+  projectRuntimeFullPlaywrightCases,
+  projectRuntimeFullPlaywrightSnapshot,
+} from '../src/runtime-full-playwright-projector.js'
 import {
   authorizeRuntimeFullPlaywrightExecutor,
+  executeRuntimeFullPlaywrightCases,
   executeRuntimeFullPlaywright,
 } from '../src/trusted-action-runner.js'
 import type { RuntimeRunSnapshot } from '../src/run-store.js'
@@ -139,6 +143,13 @@ describe('Runtime full Playwright strict projector', () => {
     expect(Object.isFrozen(projected.program)).toBe(true)
   })
 
+  test('投影每个 scheduled full-playwright Case 且不合并身份', () => {
+    const projections = projectRuntimeFullPlaywrightCases(multiCaseFixture())
+    expect(projections.map((item) => item.caseId)).toEqual(['CASE-1', 'CASE-2', 'CASE-3'])
+    expect(projections.map((item) => item.actionId)).toEqual(['ACTION-1', 'ACTION-2', 'ACTION-3'])
+    expect(new Set(projections.map((item) => item.sourceSetDigest)).size).toBe(3)
+  })
+
   test.each([
     ['profile', (snapshot: RuntimeRunSnapshot) => {
       ;(snapshot.frozenArtifacts['execution-contract']!.content as any).executionProfile = 'trusted-reversible-write'
@@ -178,7 +189,96 @@ describe('Runtime full Playwright strict projector', () => {
     await expect(executeRuntimeFullPlaywright(capability, { snapshot, attemptId: 'ATTEMPT-2' }))
       .rejects.toThrow(/E2E_RUNTIME_FULL_PLAYWRIGHT_/)
   })
+
+  test('按 schedule 顺序执行三个独立 projection 并返回三个结果', async () => {
+    const snapshot = multiCaseFixture()
+    const calls: string[] = []
+    const capability = authorizeRuntimeFullPlaywrightExecutor(async ({ projection }) => {
+      calls.push(projection.caseId)
+      return runtimeOutput(projection.caseId, projection.actionId)
+    })
+    const outputs = await executeRuntimeFullPlaywrightCases(capability, {
+      snapshot, attemptIds: ['ATTEMPT-1', 'ATTEMPT-2', 'ATTEMPT-3'],
+    })
+    expect(outputs.map((item) => item.caseId)).toEqual(['CASE-1', 'CASE-2', 'CASE-3'])
+    expect(calls).toEqual(['CASE-1', 'CASE-2', 'CASE-3'])
+  })
 })
+
+function multiCaseFixture(): RuntimeRunSnapshot {
+  const snapshot = runtimeFullPlaywrightProjectionFixture()
+  const testCases = snapshot.frozenArtifacts['test-cases']!
+  const execution = snapshot.frozenArtifacts['execution-contract']!
+  const actionMap = snapshot.frozenArtifacts['browser-action-map']!
+  const runBundle = snapshot.frozenArtifacts['run-bundle']!
+  const testContent = testCases.content as any
+  const executionContent = execution.content as any
+  const actionContent = actionMap.content as any
+  const runContent = runBundle.content as any
+  const grant = snapshot.trustedExecutionFacts['signed-execution-grant'] as SignedWriteGrant
+
+  for (const ordinal of [2, 3]) {
+    const caseId = `CASE-${ordinal}`
+    const actionId = `ACTION-${ordinal}`
+    const stepId = `STEP-${ordinal}`
+    const leaseId = `LEASE-${ordinal}`
+    const cleanupPlanId = `CLEANUP-${ordinal}`
+    const capabilityId = `CAP-FULL-${ordinal}`
+    const program = structuredClone(executionContent.fullPlaywrightPrograms[0])
+    Object.assign(program, { caseId, actionId, stepId, dataLeaseId: leaseId, cleanupPlanId })
+    testContent.cases.push({
+      ...structuredClone(testContent.cases[0]), caseId, cleanupPlanId, dataNeedIds: [leaseId],
+      steps: [{ ...structuredClone(testContent.cases[0].steps[0]), stepId }],
+    })
+    const cleanupPlan = {
+      ...structuredClone(executionContent.writeCleanupPlans[0]),
+      cleanupPlanId, actionId, leaseId,
+    }
+    executionContent.fullPlaywrightPrograms.push(program)
+    executionContent.writeCleanupPlans.push(cleanupPlan)
+    executionContent.caseQueue.push({ ordinal: ordinal - 1, caseId })
+    executionContent.actionIntents.push({
+      ...structuredClone(executionContent.actionIntents[0]), actionId, intentDigest: program.sourceDigest,
+    })
+    executionContent.dataNeeds.push({
+      ...structuredClone(executionContent.dataNeeds[0]), leaseId, resourceKey: `app:fixture:${ordinal}`,
+    })
+    actionContent.fullPlaywrightPrograms.push(structuredClone(program))
+    actionContent.actions.push({
+      ...structuredClone(actionContent.actions[0]), caseId, actionId, stepId,
+      capabilities: [{ operation: 'full-playwright', capabilityId }],
+    })
+    const capability = {
+      ...structuredClone(grant.capabilities[0] as any),
+      capabilityId, actionId, dataLeaseId: leaseId,
+      cleanupPlanDigest: digestCleanupPlanDefinition(cleanupPlan),
+    }
+    grant.capabilities.push(capability)
+    grant.subject.actions.push({
+      ...structuredClone(grant.subject.actions[0] as any), actionId, dataLeaseId: leaseId,
+      resourceKey: `app:fixture:${ordinal}`, cleanupPlanDigest: capability.cleanupPlanDigest,
+    })
+    runContent.schedule.push({ ordinal: ordinal - 1, caseId, stepIds: [stepId], actionIds: [actionId] })
+    runContent.attemptPlans.push({ caseId, slots: 1 })
+    runContent.signedCapabilities.push({
+      capabilityId, actionId, operation: 'full-playwright', effect: 'reversible-write', maxUses: 1,
+      digest: digestText('approval-capability/v1', canonicalizeJson(capability)),
+    })
+  }
+  for (const document of [testCases, execution, actionMap, runBundle]) {
+    document.contentDigest = digestArtifactContent(
+      `artifact-content/${document.schemaVersion}/${document.artifactType}`,
+      document,
+    )
+  }
+  grant.subject.caseDigest = digestApprovalProjection('test-cases', testContent)
+  grant.subject.executionContractDigest = digestApprovalProjection('execution-contract', executionContent)
+  grant.subject.actionMapDigest = digestApprovalProjection('browser-action-map', actionContent)
+  grant.subject.runBundleProjectionDigest = digestApprovalProjection('run-bundle', runContent)
+  grant.subjectDigest = canonicalGrantApprovalSubjectDigest(grant.subject)
+  grant.approvalContext.subjectDigest = grant.subjectDigest
+  return snapshot
+}
 
 function runtimeOutput(caseId: string, actionId: string) {
   return { caseId, actionId, status: 'passed' as const, effectObservation: 'applied' as const,

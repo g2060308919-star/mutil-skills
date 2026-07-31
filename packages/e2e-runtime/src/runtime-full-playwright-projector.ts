@@ -31,6 +31,40 @@ export interface RuntimeFullPlaywrightProjection {
 export function projectRuntimeFullPlaywrightSnapshot(
   snapshot: RuntimeRunSnapshot,
 ): RuntimeFullPlaywrightProjection {
+  const projections = projectRuntimeFullPlaywrightCases(snapshot)
+  if (projections.length !== 1) {
+    throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_CASE_AMBIGUOUS')
+  }
+  return projections[0]!
+}
+
+export function projectRuntimeFullPlaywrightCases(
+  snapshot: RuntimeRunSnapshot,
+): RuntimeFullPlaywrightProjection[] {
+  const execution = frozen(snapshot, 'execution-contract')
+  const runBundle = frozen(snapshot, 'run-bundle')
+  const executionContent = execution.content as Record<string, unknown>
+  const runContent = runBundle.content as Record<string, unknown>
+  const programs = executionContent.fullPlaywrightPrograms
+  const schedule = runContent.schedule
+  if (!Array.isArray(programs) || programs.length === 0 || !Array.isArray(schedule)
+    || schedule.length !== programs.length) {
+    throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_CASE_SET_INVALID')
+  }
+  const programCaseIds = programs.map((value) => record(value) ? value.caseId : undefined)
+  const scheduleCaseIds = schedule.map((value) => record(value) ? value.caseId : undefined)
+  if (programCaseIds.some((value) => typeof value !== 'string')
+    || new Set(programCaseIds).size !== programCaseIds.length
+    || canonicalizeJson(programCaseIds) !== canonicalizeJson(scheduleCaseIds)) {
+    throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_CASE_SET_INVALID')
+  }
+  return programCaseIds.map((caseId) => projectRuntimeFullPlaywrightCase(snapshot, String(caseId)))
+}
+
+function projectRuntimeFullPlaywrightCase(
+  snapshot: RuntimeRunSnapshot,
+  requestedCaseId: string,
+): RuntimeFullPlaywrightProjection {
   const testCases = frozen(snapshot, 'test-cases')
   const execution = frozen(snapshot, 'execution-contract')
   const actionMap = frozen(snapshot, 'browser-action-map')
@@ -47,8 +81,10 @@ export function projectRuntimeFullPlaywrightSnapshot(
     || actionMapContent.executionProfile !== 'full-playwright') {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_PROFILE_REQUIRED')
   }
-  const actions = actionMapContent.actions
-  if (!Array.isArray(actions) || actions.length !== 1 || !record(actions[0])) {
+  const allActions = actionMapContent.actions
+  const actions = Array.isArray(allActions)
+    ? allActions.filter((candidate) => record(candidate) && candidate.caseId === requestedCaseId) : []
+  if (actions.length !== 1 || !record(actions[0])) {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_ACTION_AMBIGUOUS')
   }
   const action = actions[0]
@@ -59,8 +95,11 @@ export function projectRuntimeFullPlaywrightSnapshot(
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_ACTION_INVALID')
   }
   const programs = [executionContent.fullPlaywrightPrograms, actionMapContent.fullPlaywrightPrograms]
-    .map((value) => Array.isArray(value) && value.length === 1
-      ? FullPlaywrightProgramSchema.safeParse(value[0]) : undefined)
+    .map((value) => {
+      const matches = Array.isArray(value)
+        ? value.filter((candidate) => record(candidate) && candidate.caseId === requestedCaseId) : []
+      return matches.length === 1 ? FullPlaywrightProgramSchema.safeParse(matches[0]) : undefined
+    })
   if (programs.some((parsed) => parsed === undefined || !parsed.success)) {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_PROGRAM_INVALID')
   }
@@ -71,8 +110,10 @@ export function projectRuntimeFullPlaywrightSnapshot(
     || executionProgram.stepId !== action.stepId) {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_PROGRAM_BINDING_MISMATCH')
   }
-  const plans = executionContent.writeCleanupPlans
-  if (!Array.isArray(plans) || plans.length !== 1) {
+  const allPlans = executionContent.writeCleanupPlans
+  const plans = Array.isArray(allPlans)
+    ? allPlans.filter((candidate) => record(candidate) && candidate.actionId === executionProgram.actionId) : []
+  if (plans.length !== 1) {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_CLEANUP_AMBIGUOUS')
   }
   const parsedPlan = CleanupPlanDefinitionSchema.safeParse(plans[0])
@@ -90,14 +131,18 @@ export function projectRuntimeFullPlaywrightSnapshot(
     || steps.filter((step) => record(step) && step.stepId === executionProgram.stepId).length !== 1) {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_CASE_BINDING_MISMATCH')
   }
-  const intents = executionContent.actionIntents
-  const queue = executionContent.caseQueue
+  const intents = Array.isArray(executionContent.actionIntents)
+    ? executionContent.actionIntents.filter((candidate) =>
+      record(candidate) && candidate.actionId === executionProgram.actionId) : []
+  const queue = Array.isArray(executionContent.caseQueue)
+    ? executionContent.caseQueue.filter((candidate) =>
+      record(candidate) && candidate.caseId === executionProgram.caseId) : []
   const dataNeeds = executionContent.dataNeeds
   const matchingDataNeeds = Array.isArray(dataNeeds) ? dataNeeds.filter((need) => record(need)
     && need.leaseId === executionProgram.dataLeaseId && need.mode === 'write') : []
-  if (!Array.isArray(intents) || intents.length !== 1 || !record(intents[0])
+  if (intents.length !== 1 || !record(intents[0])
     || intents[0].actionId !== executionProgram.actionId || intents[0].effect !== 'reversible-write'
-    || !Array.isArray(queue) || queue.length !== 1 || !record(queue[0])
+    || queue.length !== 1 || !record(queue[0])
     || queue[0].caseId !== executionProgram.caseId
     || matchingDataNeeds.length !== 1) {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_CONTRACT_BINDING_MISMATCH')
@@ -153,13 +198,17 @@ export function projectRuntimeFullPlaywrightSnapshot(
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_TARGET_AMBIGUOUS')
   }
   const runContent = runBundle.content as Record<string, unknown>
-  const schedule = runContent.schedule
-  const signedCapabilities = runContent.signedCapabilities
-  if (!Array.isArray(schedule) || schedule.length !== 1 || !record(schedule[0])
+  const schedule = Array.isArray(runContent.schedule)
+    ? runContent.schedule.filter((candidate) =>
+      record(candidate) && candidate.caseId === executionProgram.caseId) : []
+  const signedCapabilities = Array.isArray(runContent.signedCapabilities)
+    ? runContent.signedCapabilities.filter((candidate) =>
+      record(candidate) && candidate.capabilityId === capability.capabilityId) : []
+  if (schedule.length !== 1 || !record(schedule[0])
     || schedule[0].caseId !== executionProgram.caseId
     || canonicalizeJson(schedule[0].stepIds) !== canonicalizeJson([executionProgram.stepId])
     || canonicalizeJson(schedule[0].actionIds) !== canonicalizeJson([executionProgram.actionId])
-    || !Array.isArray(signedCapabilities) || signedCapabilities.length !== 1
+    || signedCapabilities.length !== 1
     || !record(signedCapabilities[0]) || signedCapabilities[0].capabilityId !== capability.capabilityId
     || signedCapabilities[0].digest !== digestText('approval-capability/v1', canonicalizeJson(capability))) {
     throw projectionError('E2E_RUNTIME_FULL_PLAYWRIGHT_RUN_BUNDLE_MISMATCH')

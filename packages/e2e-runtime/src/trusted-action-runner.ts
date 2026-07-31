@@ -37,6 +37,7 @@ import {
   type RuntimeWriteExecutionOutput,
 } from './runtime-execution-batch.js'
 import {
+  projectRuntimeFullPlaywrightCases,
   projectRuntimeFullPlaywrightSnapshot,
   type RuntimeFullPlaywrightProjection,
 } from './runtime-full-playwright-projector.js'
@@ -172,6 +173,41 @@ export async function executeRuntimeFullPlaywright(
   }
   return new RuntimeExecutionBatch({ runId: input.snapshot.runId, attemptId: input.attemptId })
     .commitRealWrite(output)
+}
+
+export async function executeRuntimeFullPlaywrightCases(
+  capability: RuntimeFullPlaywrightExecutorCapability,
+  input: { snapshot: RuntimeRunSnapshot; attemptIds: string[] },
+): Promise<RuntimeWriteExecutionOutput[]> {
+  const backend = runtimeFullPlaywrightExecutors.get(capability)
+  if (!backend) throw trustedActionError(
+    'E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_CAPABILITY_INVALID',
+    'Full Playwright executor capability 未由生产装配层签发',
+  )
+  const projections = projectRuntimeFullPlaywrightCases(input.snapshot)
+  if (input.attemptIds.length !== projections.length
+    || input.attemptIds.some((attemptId) => !SafeIdSchema.safeParse(attemptId).success)
+    || new Set(input.attemptIds).size !== input.attemptIds.length) {
+    throw trustedActionError(
+      'E2E_RUNTIME_FULL_PLAYWRIGHT_ATTEMPT_SET_INVALID',
+      '每个 scheduled Case 必须绑定唯一 attemptId',
+    )
+  }
+  const outputs: RuntimeWriteExecutionOutput[] = []
+  for (const [index, projection] of projections.entries()) {
+    const attemptId = input.attemptIds[index]!
+    const output = parseRuntimeWriteExecutionOutput(await backend({
+      snapshot: structuredClone(input.snapshot), attemptId, projection,
+    }))
+    if (output.caseId !== projection.caseId || output.actionId !== projection.actionId) {
+      throw trustedActionError('E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_OUTPUT_INVALID',
+        'Full Playwright executor 输出未闭合 frozen case/action')
+    }
+    outputs.push(new RuntimeExecutionBatch({
+      runId: input.snapshot.runId, attemptId,
+    }).commitRealWrite(output))
+  }
+  return outputs
 }
 
 export async function executeRuntimeWrite(
