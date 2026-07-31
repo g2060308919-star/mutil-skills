@@ -1,4 +1,5 @@
 export { RUNTIME_PACKAGE_VERSION } from './protocol.js'
+export * from './prd-run-compiler.js'
 
 export {
   RuntimeDoctorProbeSchema,
