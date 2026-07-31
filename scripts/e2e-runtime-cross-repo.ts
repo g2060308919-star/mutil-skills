@@ -1,10 +1,13 @@
 import { execFile, spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { cp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import ts from 'typescript'
+import {
+  packageArchiveContentIntegrity,
+  packageDirectoryContentIntegrity,
+} from './package-content-integrity.js'
 
 const execFileAsync = promisify(execFile)
 const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -40,11 +43,14 @@ export interface CrossRepoRuntimeGoldenResult {
     executionProfile: 'full-playwright'
     status: 'passed'
     cleanupStatus: 'verified-clean'
+    caseCount: 3
+    caseIds: string[]
     reloadVerified: true
     jsonBodyVerified: true
     semanticReview: { reviewDigest: string; prd: { normalizedText: string } }
     report: { content: { verdict: string } }
     reportPath: string
+    standaloneReportRoot: string
   }
   todoMvc?: {
     executionProfile: 'full-playwright'
@@ -93,7 +99,8 @@ export async function runCrossRepoRuntimeGolden(input: {
   ])
 
   let installSpecs: string[]
-  let expectedPackIntegrities: ReadonlyMap<string, string> | undefined
+  let expectedPackContentIntegrities: ReadonlyMap<string, string> | undefined
+  let expectedRegistryIntegrities: ReadonlyMap<string, string> | undefined
   if (packageSource === 'workspace-tarballs') {
     await exec('npm', ['run', 'build'], SOURCE_ROOT, buildEnvironment(npmCache), 180_000)
     await copyPublicationSource(publicationSource)
@@ -121,7 +128,8 @@ export async function runCrossRepoRuntimeGolden(input: {
     if (releasePacksDir === undefined || !isAbsolute(releasePacksDir)) {
       throw new Error('Registry Golden 必须提供本次发布的绝对 tarball 目录')
     }
-    expectedPackIntegrities = await releasePackIntegrities(releasePacksDir, RELEASE_PACKAGES)
+    expectedPackContentIntegrities = await releasePackIntegrities(releasePacksDir, RELEASE_PACKAGES)
+    expectedRegistryIntegrities = await registryReleaseIntegrities(RELEASE_PACKAGES, npmCache)
     await cp(join(SOURCE_ROOT, 'scripts', 'e2e-runtime-cross-repo-child.mjs'),
       join(harnessRoot, 'runner.mjs'))
     await cp(join(SOURCE_ROOT, 'scripts', 'e2e-todomvc-app-spec.fixture.md'),
@@ -143,7 +151,14 @@ export async function runCrossRepoRuntimeGolden(input: {
   // 13 分钟；child 执行仍保持原有 10 分钟故障边界。
   ], input.project, installEnvironment(input.home, npmCache), 780_000)
   const installedReleasePackages = await verifyInstalledReleasePackages(
-    input.project, RELEASE_PACKAGES, expectedPackIntegrities,
+    input.project,
+    RELEASE_PACKAGES,
+    expectedPackContentIntegrities === undefined || expectedRegistryIntegrities === undefined
+      ? undefined
+      : {
+          packContentIntegrities: expectedPackContentIntegrities,
+          registryIntegrities: expectedRegistryIntegrities,
+        },
   )
 
   // Harness 也必须进入安装闭包：这样源码仓被移走、用户项目 node_modules 被删除后，
@@ -217,16 +232,24 @@ export async function loadWorkspaceReleasePackages(root: string): Promise<Releas
 export async function verifyInstalledReleasePackages(
   project: string,
   expected: ReleasePackageManifest[],
-  expectedPackIntegrities?: ReadonlyMap<string, string>,
+  verification?: {
+    packContentIntegrities?: ReadonlyMap<string, string>
+    registryIntegrities?: ReadonlyMap<string, string>
+  },
 ): Promise<string[]> {
+  if (verification !== undefined
+    && verification.packContentIntegrities === undefined
+    && verification.registryIntegrities === undefined) {
+    throw new Error('Registry 安装校验至少需要一种完整性来源')
+  }
   const expectedVersions = new Map(expected.map(({ name, version }) => [name, version]))
-  const lock = expectedPackIntegrities === undefined ? undefined
+  const lock = verification?.registryIntegrities === undefined ? undefined
     : JSON.parse(await readFile(join(project, 'package-lock.json'), 'utf8')) as unknown
-  if (expectedPackIntegrities !== undefined && !plainRecord(lock)) {
+  if (verification?.registryIntegrities !== undefined && !plainRecord(lock)) {
     throw new Error('Registry 安装缺少可验证 package-lock')
   }
   const lockPackages = lock === undefined ? undefined : (lock as Record<string, unknown>).packages
-  if (expectedPackIntegrities !== undefined && !plainRecord(lockPackages)) {
+  if (verification?.registryIntegrities !== undefined && !plainRecord(lockPackages)) {
     throw new Error('Registry 安装缺少 package-lock packages')
   }
   const dependencySections = [
@@ -240,12 +263,23 @@ export async function verifyInstalledReleasePackages(
       || installed.version !== releasePackage.version) {
       throw new Error(`Registry 安装包版本不一致: ${releasePackage.name}@${releasePackage.version}`)
     }
-    if (expectedPackIntegrities !== undefined) {
+    if (verification?.registryIntegrities !== undefined) {
       const lockEntry = (lockPackages as Record<string, unknown>)[`node_modules/${releasePackage.name}`]
-      const expectedIntegrity = expectedPackIntegrities.get(releasePackage.name)
+      const expectedIntegrity = verification.registryIntegrities.get(releasePackage.name)
       if (!plainRecord(lockEntry) || typeof lockEntry.integrity !== 'string'
         || lockEntry.version !== releasePackage.version || lockEntry.integrity !== expectedIntegrity) {
-        throw new Error(`Registry 包内容完整性不一致: ${releasePackage.name}@${releasePackage.version}`)
+        throw new Error(`Registry lock integrity 与 Registry 元数据不一致: ${releasePackage.name}@${releasePackage.version}`)
+      }
+    }
+    if (verification?.packContentIntegrities !== undefined) {
+      const installedRoot = dirname(installedPath)
+      const actualContentIntegrity = await packageDirectoryContentIntegrity(installedRoot)
+      const expectedContentIntegrity = verification.packContentIntegrities.get(releasePackage.name)
+      if (actualContentIntegrity !== expectedContentIntegrity) {
+        throw new Error(
+          `Registry 安装内容与发布 Tag pack 不一致: ${releasePackage.name}@${releasePackage.version}`
+          + ` expected=${expectedContentIntegrity ?? '<missing>'} actual=${actualContentIntegrity}`,
+        )
       }
     }
     for (const sectionName of dependencySections) {
@@ -274,8 +308,34 @@ export async function releasePackIntegrities(
   const result = new Map<string, string>()
   for (const releasePackage of expected) {
     const filename = `${releasePackage.name.slice(1).replace('/', '-')}-${releasePackage.version}.tgz`
-    const bytes = await readFile(join(packsDir, filename))
-    result.set(releasePackage.name, `sha512-${createHash('sha512').update(bytes).digest('base64')}`)
+    result.set(
+      releasePackage.name,
+      await packageArchiveContentIntegrity(
+        join(packsDir, filename),
+        `${releasePackage.name}@${releasePackage.version}`,
+      ),
+    )
+  }
+  return result
+}
+
+async function registryReleaseIntegrities(
+  expected: ReleasePackageManifest[],
+  npmCache: string,
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>()
+  for (const releasePackage of expected) {
+    const { stdout } = await exec('npm', [
+      'view',
+      `${releasePackage.name}@${releasePackage.version}`,
+      'dist.integrity',
+      '--json',
+    ], SOURCE_ROOT, buildEnvironment(npmCache), 60_000)
+    const integrity = JSON.parse(stdout) as unknown
+    if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(integrity)) {
+      throw new Error(`Registry 缺少有效 integrity: ${releasePackage.name}@${releasePackage.version}`)
+    }
+    result.set(releasePackage.name, integrity)
   }
   return result
 }
@@ -503,10 +563,13 @@ function parseResult(value: unknown): CrossRepoRuntimeGoldenResult {
     || result.fullPlaywright?.executionProfile !== 'full-playwright'
     || result.fullPlaywright.status !== 'passed'
     || result.fullPlaywright.cleanupStatus !== 'verified-clean'
+    || result.fullPlaywright.caseCount !== 3
+    || result.fullPlaywright.caseIds?.length !== 3
     || result.fullPlaywright.reloadVerified !== true
     || result.fullPlaywright.jsonBodyVerified !== true
     || !/^sha256:[a-f0-9]{64}$/.test(result.fullPlaywright.semanticReview?.reviewDigest)
     || result.fullPlaywright.report?.content?.verdict !== 'accepted'
+    || typeof result.fullPlaywright.standaloneReportRoot !== 'string'
     || (process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === '1'
       && (result.todoMvc?.executionProfile !== 'full-playwright'
         || result.todoMvc.status !== 'failed'

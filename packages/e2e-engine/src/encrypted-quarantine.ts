@@ -93,13 +93,39 @@ export class EncryptedQuarantine {
     if (manifest.status !== 'open') {
       throw quarantineError('E2E_QUARANTINE_RUN_NOT_WRITABLE', '隐私解锁后的恢复 Run 不允许继续捕获原始证据')
     }
-    if (manifest.files.some((record) => record.relativePath === input.relativePath)) {
-      throw quarantineError('E2E_QUARANTINE_EVIDENCE_EXISTS', '同一路径的原始证据已存在')
+    const plaintextDigest = digestBytes('quarantine-plaintext/v1', input.plaintext)
+    const existing = manifest.files.find((record) => record.relativePath === input.relativePath)
+    if (existing !== undefined) {
+      if (existing.byteLength !== input.plaintext.byteLength
+        || existing.plaintextDigest !== plaintextDigest) {
+        throw quarantineError('E2E_QUARANTINE_EVIDENCE_EXISTS', '同一路径的原始证据已存在且内容不同')
+      }
+      await this.assertSecureRunDirectories(input.runId)
+      const aad = evidenceAad({
+        runId: input.runId, keyId: manifest.keyId, relativePath: existing.relativePath,
+        pathDigest: existing.pathDigest, plaintextDigest: existing.plaintextDigest,
+        byteLength: existing.byteLength,
+      })
+      const envelope = SealedEvidenceEnvelopeSchema.parse(
+        JSON.parse((await readNoFollow(
+          join(this.runDirectory(input.runId), existing.ciphertextFile),
+        )).toString('utf8')),
+      )
+      if (envelope.aadDigest !== digestBytes('quarantine-aad/v1', aad)) {
+        throw quarantineError(
+          'E2E_QUARANTINE_AUTHENTICATION_FAILED',
+          '幂等证据重放发现密文 AAD 不匹配',
+        )
+      }
+      await this.record(
+        input.runId, input.actor, 'write', 'allowed',
+        'E2E_QUARANTINE_WRITE_IDEMPOTENT_REPLAY', targetDigest,
+      )
+      return { ...existing }
     }
     await this.assertSecureRunDirectories(input.runId)
     await this.record(input.runId, input.actor, 'write', 'allowed', 'E2E_QUARANTINE_WRITE_AUTHORIZED', targetDigest)
 
-    const plaintextDigest = digestBytes('quarantine-plaintext/v1', input.plaintext)
     const aad = evidenceAad({
       runId: input.runId, keyId: manifest.keyId, relativePath: input.relativePath,
       pathDigest: targetDigest, plaintextDigest, byteLength: input.plaintext.byteLength,

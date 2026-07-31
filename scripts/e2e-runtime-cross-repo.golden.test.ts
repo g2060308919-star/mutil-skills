@@ -91,9 +91,22 @@ describe('portable E2E runtime', () => {
       }
       expect(result.fullPlaywright).toMatchObject({
         executionProfile: 'full-playwright', status: 'passed', cleanupStatus: 'verified-clean',
+        caseCount: 3,
+        caseIds: ['CASE-0001', 'CASE-0002', 'CASE-0003'],
         reloadVerified: true, jsonBodyVerified: true,
         report: { content: { verdict: 'accepted' } },
       })
+      const standaloneFiles = await readdir(result.fullPlaywright.standaloneReportRoot, {
+        recursive: true,
+      })
+      expect(standaloneFiles.filter((path) => String(path).endsWith('.png'))).toHaveLength(3)
+      expect(standaloneFiles.filter((path) => String(path).endsWith('.zip')).length).toBeGreaterThanOrEqual(9)
+      const standaloneHtml = await readFile(
+        join(result.fullPlaywright.standaloneReportRoot, 'final-report.html'),
+        'utf8',
+      )
+      expect(standaloneHtml).toContain('<img src="evidence/CASE-0001/')
+      expect(standaloneHtml).toContain('下载 Playwright Trace')
       expect(result.fullPlaywright.semanticReview.reviewDigest).toMatch(/^sha256:/)
       expect(result.fullPlaywright.semanticReview.prd.normalizedText).toContain('JSON Body')
       if (process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === '1') {

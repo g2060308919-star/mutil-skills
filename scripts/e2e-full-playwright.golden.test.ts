@@ -180,6 +180,7 @@ test('真实 Chromium：受控完整 Playwright program 与独立 cleanup sessio
     "await expect(extraPage).toHaveTitle('extra')", 'await extra.close()',
     `const response = await request.post('${origin}/api', { data: { enabled: true, name: 'Ada' } })`,
     'await expect(response.ok()).toBeTruthy()',
+    "await checkpoint({ checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', actual: true })",
     'state.programCompleted = true',
   ].join('\n')
   const cleanupSource = [

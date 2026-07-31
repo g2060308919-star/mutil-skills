@@ -1,6 +1,8 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { promisify } from 'node:util'
 import { afterEach, describe, expect, test } from 'vitest'
 import {
   loadWorkspaceReleasePackages,
@@ -9,6 +11,7 @@ import {
 } from './e2e-runtime-cross-repo.js'
 
 const roots: string[] = []
+const execFileAsync = promisify(execFile)
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })))
@@ -51,19 +54,15 @@ describe('Registry 发布闭包校验', () => {
       .rejects.toThrow('Registry 包内部依赖清单不一致')
   })
 
-  test('Registry lockfile 的十四包完整性必须逐包等于本地待发布 tarball', async () => {
+  test('Registry lockfile 的十四包完整性必须逐包等于 Registry 元数据', async () => {
     const sourceRoot = join(import.meta.dirname, '..')
     const manifests = await loadWorkspaceReleasePackages(sourceRoot)
     const project = await mkdtemp(join(tmpdir(), 'mutil-registry-integrity-'))
-    const packs = join(project, 'packs')
     roots.push(project)
-    await mkdir(packs)
     const expected = new Map<string, string>()
     const lockPackages: Record<string, unknown> = {}
     for (const [index, manifest] of manifests.entries()) {
-      const filename = `${manifest.name.slice(1).replace('/', '-')}-${manifest.version}.tgz`
       const bytes = Buffer.from(`pack-${manifest.name}-${index}`)
-      await writeFile(join(packs, filename), bytes)
       const integrity = `sha512-${(await import('node:crypto')).createHash('sha512').update(bytes).digest('base64')}`
       expected.set(manifest.name, integrity)
       const manifestPath = join(project, 'node_modules', ...manifest.name.split('/'), 'package.json')
@@ -73,13 +72,67 @@ describe('Registry 发布闭包校验', () => {
     }
     await writeFile(join(project, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: lockPackages }))
 
-    await expect(releasePackIntegrities(packs, manifests)).resolves.toEqual(expected)
-    await expect(verifyInstalledReleasePackages(project, manifests, expected)).resolves.toHaveLength(14)
+    await expect(verifyInstalledReleasePackages(project, manifests, {
+      registryIntegrities: expected,
+    })).resolves.toHaveLength(14)
     lockPackages[`node_modules/${manifests[0]!.name}`] = {
       version: manifests[0]!.version, integrity: `sha512-${'A'.repeat(88)}`,
     }
     await writeFile(join(project, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: lockPackages }))
-    await expect(verifyInstalledReleasePackages(project, manifests, expected))
-      .rejects.toThrow('Registry 包内容完整性不一致')
+    await expect(verifyInstalledReleasePackages(project, manifests, {
+      registryIntegrities: expected,
+    })).rejects.toThrow('Registry lock integrity 与 Registry 元数据不一致')
+  })
+
+  test('相同包内容不受 gzip metadata 影响，安装内容被篡改仍会拒绝', async () => {
+    const sourceRoot = join(import.meta.dirname, '..')
+    const manifests = await loadWorkspaceReleasePackages(sourceRoot)
+    const root = await mkdtemp(join(tmpdir(), 'mutil-registry-content-'))
+    const firstPacks = join(root, 'packs-first')
+    const secondPacks = join(root, 'packs-second')
+    const stagingPackage = join(root, 'staging', 'package')
+    roots.push(root)
+    await Promise.all([
+      mkdir(firstPacks),
+      mkdir(secondPacks),
+      mkdir(stagingPackage, { recursive: true }),
+    ])
+
+    for (const manifest of manifests) {
+      const filename = `${manifest.name.slice(1).replace('/', '-')}-${manifest.version}.tgz`
+      await writeFile(join(stagingPackage, 'package.json'), JSON.stringify(manifest))
+      await writeFile(join(stagingPackage, 'payload.txt'), `payload:${manifest.name}\n`)
+      await chmod(join(stagingPackage, 'payload.txt'), 0o600)
+      await execFileAsync('tar', ['-czf', join(firstPacks, filename), '-C', dirname(stagingPackage), 'package'])
+      const secondBytes = await readFile(join(firstPacks, filename))
+      secondBytes[4] = 0x01
+      secondBytes[5] = 0x02
+      secondBytes[6] = 0x03
+      secondBytes[7] = 0x04
+      await writeFile(join(secondPacks, filename), secondBytes)
+    }
+
+    const first = await releasePackIntegrities(firstPacks, manifests)
+    const second = await releasePackIntegrities(secondPacks, manifests)
+    expect(second).toEqual(first)
+
+    const project = join(root, 'project')
+    for (const manifest of manifests) {
+      const installedRoot = join(project, 'node_modules', ...manifest.name.split('/'))
+      await mkdir(installedRoot, { recursive: true })
+      await writeFile(join(installedRoot, 'package.json'), JSON.stringify(manifest))
+      await writeFile(join(installedRoot, 'payload.txt'), `payload:${manifest.name}\n`)
+    }
+    await expect(verifyInstalledReleasePackages(project, manifests, {
+      packContentIntegrities: first,
+    })).resolves.toHaveLength(14)
+
+    await writeFile(
+      join(project, 'node_modules', '@mutil-skills', 'e2e-contracts', 'payload.txt'),
+      'tampered\n',
+    )
+    await expect(verifyInstalledReleasePackages(project, manifests, {
+      packContentIntegrities: first,
+    })).rejects.toThrow('Registry 安装内容与发布 Tag pack 不一致')
   })
 })

@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Trusted Publishing 在同版本 tgz 封装字节变化时，下载 Registry 包并比较稳定文件内容摘要；内容相同则安全幂等跳过，内容不同仍拒绝覆盖，发布工作流可安全重跑。
+
+## [0.4.7] - 2026-07-31
+
+### Fixed
+
+- Registry Golden 将 npm Registry 的 `dist.integrity` 与安装 lockfile 对账，并以忽略 gzip metadata 和普通文件权限归一化、但保留可执行语义的文件内容摘要，对账当前 Tag 的 clean pack 与安装目录；不再把两次 `npm pack` 的封装字节误当作稳定内容身份。
+- 正式发布门在构建、打包和 Golden 前强制执行 TypeScript clean build，避免被忽略的旧 `dist` 或增量声明产物进入本地发布真相。
+
+## [0.4.6] - 2026-07-31
+
+### Added
+
+- 新增 `PRDRunCompiler`，将冻结的 PRD 契约编译为可持久化的多 Case 执行计划，并建立 Requirement、Rule、Oracle、Obligation、Case 与执行结果之间的可追踪关系。
+- 新增可恢复的多 Case 调度器；每个 Case 使用独立 Gateway 会话与隔离尝试，进程中断后从未完成 Case 继续，已完成 Case 不重放。
+- 新增生产级原始 PNG 截图和 Playwright Trace 证据发布；JSON、Markdown、HTML 报告可直接定位每个 Case 的浏览器证据。
+- 新增 500 Requirement、2000 Rule、5000 Obligation、1000 Case 的 p95 性能证明，以及 loopback、进程、文件系统、Profile、系统浏览器宿主能力矩阵。
+
+### Changed
+
+- Runtime 正式跨仓 Golden 扩展为三个真实浏览器 Case，覆盖表单输入、Popup、多页面、带 JSON Body 的写请求、Cleanup 与 Reload 验证。
+- 最终化、审计、隔离区与事实合并改为多 Case 模型，并保证并发证据封存不会破坏隔离区清单。
+- E2E 领域模型和关键恢复、证据、脱仓运行决策补入 `CONTEXT.md` 与 ADR。
+
 ## [0.4.5] - 2026-07-29
 
 ### Fixed

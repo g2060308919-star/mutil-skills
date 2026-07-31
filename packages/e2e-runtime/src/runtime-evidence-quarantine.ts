@@ -60,7 +60,15 @@ export function createProductionEvidenceQuarantine(input: {
   const actor = input.actor ?? { subject: 'runtime:evidence-capture', roles: ['e2e-runner'] }
   const ttlMs = input.ttlMs ?? 24 * 60 * 60 * 1_000
   return authorizeRuntimeEvidenceQuarantine(async ({ runId, attemptId, evidence }) => {
-    await input.quarantine.createRun({ runId, ttlMs, actor })
+    try {
+      await input.quarantine.createRun({ runId, ttlMs, actor })
+    } catch (error) {
+      if (!(error instanceof Error
+        && (error as NodeJS.ErrnoException).code === 'EEXIST')) throw error
+      // 一个 PRD Run 可以串行执行多个 Case。目录已存在时，后续 writeEvidence
+      // 会重新校验 active manifest、密文对象和 attempt 唯一路径，不能把任意
+      // 预建目录当成可信 Quarantine。
+    }
     const records: RuntimeQuarantinedEvidenceFacts['records'] = []
     for (const [evidenceType, bytes] of [
       ['screenshot', evidence.screenshot], ['dom', evidence.dom],

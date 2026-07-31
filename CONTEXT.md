@@ -1,4 +1,4 @@
-# Schema Template Skills CLI Core 术语表
+# mutil-skills 领域与架构术语表
 
 本文档描述一个围绕 schema 驱动内容、可复用 template、skill、CLI 入口和业务中立 core 构建的 monorepo 架构词汇。
 
@@ -87,3 +87,74 @@ _避免使用_：app、runtime
 **Core**：
 提供跨 package 技术原语的 package，必须保持不含 skill、template 或 schema 特定业务语义。
 _避免使用_：common business logic、shared domain helpers
+
+## E2E 领域
+
+E2E 系统的权威数据流是：
+
+```text
+Requirements Contract
+→ PRDRunCompiler
+→ Artifact Graph
+→ MultiCaseScheduler
+→ Browser Runtime / Gateway / Authority
+→ Evidence Bundle
+→ Engine Verdict
+→ Final Report
+```
+
+**Requirements Contract**：
+调用者确认的唯一 PRD 语义契约，包含来源绑定节点、验收条件、依赖和 E2E route。Runtime 不重新总结或猜测该契约。
+_避免使用_：PRD summary、second requirements model
+
+**PRDRunCompiler**：
+Runtime 内的确定性深模块。它把 Requirements Contract 和声明式 Case/Action/Oracle 设计编译为规范化 Run 计划，独占生成稳定 ID、摘要和绑定关系。它不调用模型，也不接受调用者提供的 Artifact digest、审批结果或 verdict。
+_避免使用_：Skill artifact assembler、LLM compiler
+
+**Declarative E2E Design**：
+Skill 或模型可以提出的 Case、Action、Oracle、定位候选、网络意图和 Cleanup 意图。它只描述测试语义，不包含可信执行事实或宿主代码。
+_避免使用_：generated Node program、caller-signed artifact
+
+**Artifact Graph**：
+同一 Generation 内 PRD、范围、需求、覆盖、Case、执行、证据和结果 Artifact 的封闭引用图。摘要、引用完整性和 schema 由 Runtime/Engine 复算。
+_避免使用_：loose JSON files、Skill-owned state
+
+**MultiCaseScheduler**：
+Runtime 拥有的持久串行 Case 调度器。每个 Case 有独立 actor、attempt、Gateway/Lease 绑定、Evidence、Cleanup 和 terminal；已完成 Case 不因后续失败或恢复而重放。
+_避免使用_：mega Case、for-loop in Skill
+
+**Case Attempt**：
+一个 Case 的单次受控执行身份。写操作的 effect 为 unknown 时，不得自动创建新 Attempt。
+_避免使用_：retry counter only、replayed write
+
+**Runtime Host**：
+E2E 唯一 RPC、工作流和恢复权威。它协调 Contracts、Engine、Authority、Gateway、Browser Runtime、Artifact Store 和 Report；Skill 不复制其状态机。
+_避免使用_：backend service、Skill runtime
+
+**Authority**：
+审批、能力、租约、reservation、结果回执和签名事实的权威边界。调用方布尔值不能替代 Authority 事实。
+_避免使用_：approved flag、caller role claim
+
+**Gateway**：
+浏览器外的出站和副作用强制边界。所有目标请求按冻结 intent、capability 和次数匹配，页面或测试程序不能绕过它直连目标。
+_避免使用_：page.route mock、optional proxy
+
+**Browser Runtime**：
+使用系统 Chrome 或显式托管 Chromium、一次性 Profile 和受控 Playwright session 执行已批准 Action 的模块。它不能读取日常浏览器 Profile。
+_避免使用_：daily Chrome automation、arbitrary Playwright host
+
+**Standalone Run Workspace**：
+与 Git、业务仓库和当前工作目录解耦的单 Run 输出目录。默认位于 `~/.mutil-skills/e2e/reports/<asset-id>/<run-id>/`，也可以显式指定 `outputRoot`。
+_避免使用_：mandatory .biztest、Git evidence directory
+
+**Evidence Bundle**：
+Standalone Run Workspace 中按 Case/Checkpoint 绑定的原始截图、原始 Trace、经策略处理的 DOM、manifest 和报告。原始截图保持浏览器 bytes 不变，但仍校验媒体、来源、路径、权限和摘要；DOM、console、network、storage 不因截图策略而绕过 quarantine、扫描与必要脱敏。
+_避免使用_：untracked screenshot、report attachment without digest
+
+**Host Capability Proof**：
+对 loopback、进程、POSIX 文件系统、浏览器和一次性 Profile 等宿主能力的机器证明。声明 required 的能力必须真实执行，不能通过条件 skip 冒充通过。
+_避免使用_：environment boolean、silent skip
+
+**Verdict**：
+Engine 根据冻结 Artifact 和实际执行事实复算的唯一终态。Report 只渲染，Skill 只转述。
+_避免使用_：LLM conclusion、report-calculated status

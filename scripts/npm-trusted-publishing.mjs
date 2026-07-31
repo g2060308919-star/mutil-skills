@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { packageArchiveContentIntegrity } from './package-content-integrity.ts'
 
 const SOURCE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const INTERNAL_SCOPE = '@mutil-skills/'
@@ -73,9 +74,15 @@ export function topologicalReleaseOrder(manifests, rootVersion) {
   return ordered
 }
 
-export function decideRegistryPublication(localIntegrity, registryIntegrity) {
+export function decideRegistryPublication(
+  localIntegrity,
+  registryIntegrity,
+  localContentIntegrity,
+  registryContentIntegrity,
+) {
   if (registryIntegrity === undefined) return 'publish'
   if (registryIntegrity === localIntegrity) return 'skip'
+  if (localContentIntegrity !== undefined && localContentIntegrity === registryContentIntegrity) return 'skip'
   throw new Error(`Registry 已存在相同版本但完整性冲突: local=${localIntegrity}, registry=${registryIntegrity}`)
 }
 
@@ -85,12 +92,34 @@ async function main() {
   const manifests = await loadWorkspaceManifests(SOURCE_ROOT)
   const ordered = topologicalReleaseOrder(manifests, rootManifest.version)
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'mutil-trusted-publish-'))
+  const registryPacksRoot = join(temporaryRoot, 'registry')
   const results = []
   try {
+    await mkdir(registryPacksRoot)
     for (const manifest of ordered) {
       const pack = await packWorkspace(manifest.name, temporaryRoot)
       const registryIntegrity = await readRegistryIntegrity(manifest.name, manifest.version)
-      const decision = decideRegistryPublication(pack.integrity, registryIntegrity)
+      let registryContentIntegrity
+      if (registryIntegrity !== undefined && registryIntegrity !== pack.integrity) {
+        const registryPack = await packRegistryPackage(
+          manifest.name,
+          manifest.version,
+          registryPacksRoot,
+        )
+        registryContentIntegrity = await packageArchiveContentIntegrity(
+          registryPack.path,
+          `${manifest.name}@${manifest.version} from Registry`,
+        )
+      }
+      const localContentIntegrity = registryContentIntegrity === undefined
+        ? undefined
+        : await packageArchiveContentIntegrity(pack.path, `${manifest.name}@${manifest.version} from Tag`)
+      const decision = decideRegistryPublication(
+        pack.integrity,
+        registryIntegrity,
+        localContentIntegrity,
+        registryContentIntegrity,
+      )
       if (decision === 'publish') {
         await runNpm(['publish', pack.path, '--access', 'public'], SOURCE_ROOT)
         await waitForRegistryIntegrity(manifest.name, manifest.version, pack.integrity)
@@ -125,6 +154,18 @@ async function packWorkspace(packageName, destination) {
   if (!Array.isArray(parsed) || parsed.length !== 1
     || typeof parsed[0]?.filename !== 'string' || typeof parsed[0]?.integrity !== 'string') {
     throw new Error(`npm pack 未返回 ${packageName} 的唯一完整性结果`)
+  }
+  return { path: join(destination, parsed[0].filename), integrity: parsed[0].integrity }
+}
+
+async function packRegistryPackage(name, version, destination) {
+  const output = await runNpm([
+    'pack', `${name}@${version}`, '--json', '--pack-destination', destination,
+  ], SOURCE_ROOT)
+  const parsed = JSON.parse(output)
+  if (!Array.isArray(parsed) || parsed.length !== 1
+    || typeof parsed[0]?.filename !== 'string' || typeof parsed[0]?.integrity !== 'string') {
+    throw new Error(`npm Registry pack 未返回 ${name}@${version} 的唯一完整性结果`)
   }
   return { path: join(destination, parsed[0].filename), integrity: parsed[0].integrity }
 }

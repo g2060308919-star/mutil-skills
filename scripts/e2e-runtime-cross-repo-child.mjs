@@ -371,8 +371,34 @@ async function executeFullPlaywrightGolden(input) {
     evidencePolicyDigest: runtimeProductionSanitizerPolicyDigest(),
     understandingContractDigest: requiredString(created, 'understandingContractDigest'),
     sourceBundle: requiredArray(created, 'sourceBundle'),
+    caseCount: 3,
   })
   await prepareUnderstanding(runId, 'PREPARE-FULL-UNDERSTANDING', fixture.semanticArtifacts['prd-request'])
+  await invoke('COMPILE-FULL-PLAYWRIGHT', 'compile-prd-run', {
+    runId,
+    design: {
+      schemaVersion: '1.0.0',
+      cases: Array.from({ length: 3 }, (_, index) => ({
+        caseKey: `full-playwright-${index + 1}`,
+        title: `完整浏览器交互、清理与恢复 ${index + 1}`,
+        actor: 'auditor',
+        contractNodeIds: ['REQ-ORDER-1'],
+        actions: [{
+          actionKey: 'execute',
+          kind: 'full-playwright',
+          effect: 'reversible-write',
+          statement: '执行表单、Popup、多页面、JSON Body、Cleanup 与 Reload 验收',
+        }],
+        oracles: [{
+          oracleKey: 'accepted',
+          actionKey: 'execute',
+          contractNodeId: 'REQ-ORDER-1',
+          acceptanceCriterion: '订单验收行为符合预期',
+        }],
+        failurePolicy: 'continue',
+      })),
+    },
+  })
   await submit(runId, 'SUBMIT-FULL-PRD', 'created', 'prd-request', fixture.semanticArtifacts['prd-request'])
   for (const artifactType of ['project-policy', 'prd-manifest', 'prd-diff', 'semantic-generation']) {
     await submit(runId, `SUBMIT-FULL-${artifactType}`, 'source-frozen', artifactType,
@@ -418,30 +444,36 @@ async function executeFullPlaywrightGolden(input) {
   await submit(runId, 'SUBMIT-FULL-REGRESSION', 'execution-approved', 'regression-manifest',
     fixture.regressionManifest)
   const executed = await invoke('EXECUTE-FULL-PLAYWRIGHT', 'execute-run', { runId })
-  const executionResult = requiredRecord(executed, 'result')
-  const executionCleanup = requiredRecord(executionResult, 'cleanup')
-  if (executed.status !== 'passed' || executionCleanup.status !== 'verified-clean') {
-    throw new Error(`full execution:${safeCode(executed.status)}:${safeCode(executionCleanup.status)}`)
+  const executionCases = requiredArray(executed, 'cases')
+  const cleanupStatuses = executionCases.map((result) =>
+    requiredString(requiredRecord(result, 'cleanup'), 'status'))
+  if (executed.status !== 'passed' || executionCases.length !== 3
+    || cleanupStatuses.some((status) => status !== 'verified-clean')) {
+    throw new Error(`full execution:${safeCode(executed.status)}:${cleanupStatuses.map(safeCode).join(',')}`)
   }
   if (applicationState !== fixture.expected.cleanupState
     || !receivedApiBodies.includes(fixture.expected.jsonBody)
-    || rootReadsAfterReset < 2) {
+    || rootReadsAfterReset < 6) {
     throw new Error('E2E_RUNTIME_FULL_PLAYWRIGHT_EXTERNAL_ASSERTION_FAILED')
   }
   const finalized = await invoke('FINALIZE-FULL-PLAYWRIGHT', 'finalize-run', { runId })
   if (finalized.terminalVerdict !== 'accepted') {
     throw new Error(`full finalization:${safeCode(finalized.terminalVerdict)}`)
   }
-  await invoke('REPORT-FULL-PLAYWRIGHT', 'render-report', { runId })
+  const rendered = await invoke('REPORT-FULL-PLAYWRIGHT', 'render-report', { runId })
   const reportPath = join(projectRoot, '.biztest', 'assets', 'ASSET-FULL-1',
     'generations', runId, 'run', 'final-report.json')
   const report = JSON.parse(await readFile(reportPath, 'utf8'))
   return {
     runId, executionProfile: 'full-playwright', status: executed.status,
-    cleanupStatus: executionCleanup.status,
-    reloadVerified: applicationState === 'clean' && rootReadsAfterReset >= 2,
+    cleanupStatus: cleanupStatuses.every((status) => status === 'verified-clean')
+      ? 'verified-clean' : 'failed',
+    caseCount: executionCases.length,
+    caseIds: executionCases.map((result) => requiredString(result, 'caseId')),
+    reloadVerified: applicationState === 'clean' && rootReadsAfterReset >= 6,
     jsonBodyVerified: receivedApiBodies.includes(fixture.expected.jsonBody),
     semanticReview: review, report, reportPath,
+    standaloneReportRoot: requiredString(rendered, 'standaloneReportRoot'),
   }
 }
 

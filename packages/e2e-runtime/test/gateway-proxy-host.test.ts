@@ -19,6 +19,9 @@ afterEach(async () => {
 })
 
 const loopbackAvailable = await canBindLoopback()
+if (process.env.E2E_REQUIRED_TEST_CAPABILITIES?.split(',').includes('loopback') && !loopbackAvailable) {
+  throw new Error('E2E_HOST_CAPABILITY_NOT_EXECUTED:loopback')
+}
 
 describe.skipIf(!loopbackAvailable)(
   '真实 loopback transport（默认 sandbox 不可用时跳过，不计为功能通过）',

@@ -9,6 +9,8 @@ import {
   digestApprovalProjection,
   digestArtifactContent,
   digestBytes,
+  digestCompiledPrdRunPlan,
+  deriveExecutionResultId,
   digestPrdClause,
   digestPrdClauseInventory,
   digestPrdUnderstandingProjection,
@@ -18,6 +20,7 @@ import {
   type ArtifactType,
   type ApprovalGrantSubject,
   type SignedDiscoveryGrant,
+  type SignedGrant,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
 } from '@mutil-skills/e2e-contracts'
@@ -28,10 +31,11 @@ import { describe, expect, test, vi } from 'vitest'
 import { createRuntimeTestRoots } from './fixtures.js'
 import type { RuntimeInstallation } from '../src/runtime-discovery.js'
 import { E2ERuntimeHost } from '../src/runtime-host.js'
-import { RuntimeRunStore } from '../src/run-store.js'
+import { RuntimeRunStore, type RuntimeRunSnapshot } from '../src/run-store.js'
 import { SecureProjectFileReader } from '../src/secure-project-files.js'
 import {
   authorizeRuntimeInjectionExecutor,
+  authorizeRuntimeFullPlaywrightExecutor,
   authorizeRuntimeReadExecutor,
   authorizeRuntimeWriteExecutor,
 } from '../src/trusted-action-runner.js'
@@ -40,9 +44,14 @@ import { authorizeRuntimeWriteProduction } from '../src/runtime-write-production
 import type { RuntimeAuthorityHost } from '../src/authority-host.js'
 import type { ProjectPublisher } from '../src/project-publisher.js'
 import { projectionFixture } from './trusted-action-runner.test.js'
+import {
+  multiCaseFixture,
+  runtimeFullPlaywrightOutput,
+} from './runtime-full-playwright-projector.test.js'
 import { injectionOutput, realWriteOutput, runtimeWriteDigest } from './runtime-write-fixtures.js'
 import { authorizeRuntimeGenerationFinalizer } from '../src/runtime-generation-finalizer.js'
 import { authorizeRuntimeEvidenceQuarantine } from '../src/runtime-evidence-quarantine.js'
+import { createCaseSchedule } from '../src/multi-case-scheduler.js'
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`
 
@@ -374,13 +383,73 @@ describe('E2ERuntimeHost', () => {
       'REQUEST-STATUS-AFTER-PREPARE', fixture.roots.project, created.runId as string,
     )))
     expect(status).toMatchObject({
-      state: 'created', nextEdge: { command: 'submit-candidate' },
-      minimumMissingInput: ['prd-request'],
+      state: 'created', nextEdge: { command: 'compile-prd-run' },
+      minimumMissingInput: ['declarative-prd-run-design'],
       verifiedDigests: {
         'prd-understanding-projection': digestPrdUnderstandingProjection(draft),
       },
     })
     await fixture.store.close()
+  })
+
+  test('compile-prd-run 原子持久化编译计划与 Case 调度', async () => {
+    const fixture = await hostFixture()
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-COMPILE-CREATE', fixture.roots.project),
+    ))
+    await prepareUnderstandingForRun(fixture, created, 'REQUEST-COMPILE-PREPARE')
+    const response = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-COMPILE-1'),
+      command: 'compile-prd-run',
+      projectRoot: fixture.roots.project,
+      payload: {
+        runId: created.runId,
+        design: {
+          schemaVersion: '1.0.0',
+          cases: [{
+            caseKey: 'stable-product',
+            title: '验证产品行为稳定',
+            actor: 'auditor',
+            contractNodeIds: ['REQ-1'],
+            actions: [{
+              actionKey: 'observe-product',
+              kind: 'full-playwright',
+              effect: 'read',
+              statement: '打开产品并观察稳定行为',
+            }],
+            oracles: [{
+              oracleKey: 'stable-product-oracle',
+              actionKey: 'observe-product',
+              contractNodeId: 'REQ-1',
+              acceptanceCriterion: 'Product behavior is stable',
+            }],
+            failurePolicy: 'stop-required',
+          }],
+        },
+      },
+    })))
+
+    expect(response).toMatchObject({
+      runId: created.runId,
+      caseCount: 1,
+      nextRequiredDecision: 'scope',
+      unresolvedItems: [],
+      review: {
+        contractProjectionDigest: expect.stringMatching(/^sha256:/),
+        caseIds: ['CASE-0001'],
+        mappedAcceptanceCount: 1,
+      },
+    })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(persisted?.compiledPrdRun?.cases).toHaveLength(1)
+    expect(persisted?.caseSchedule?.cases).toMatchObject([{
+      queueOrdinal: 0,
+      caseId: 'CASE-0001',
+      state: 'pending',
+    }])
+    expect(persisted?.caseSchedule?.compilerDigest).toBe(response.compilerDigest)
   })
 
   test('derives a publication-safe generation id from a protocol-valid lowercase request id', async () => {
@@ -1310,6 +1379,234 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('execute-run 通过正式 Host 持久串行调度三个 full-playwright Case', async () => {
+    const calls: Array<{ caseId: string; attemptId: string }> = []
+    const fixture = await hostFixture({
+      executeFullPlaywrightRun: async ({ snapshot, attemptId, projection }) => {
+        calls.push({ caseId: projection.caseId, attemptId })
+        expect(snapshot.writeAttempts?.[attemptId]).toMatchObject({
+          state: 'prepared',
+          actionId: projection.actionId,
+          executionFencingToken: snapshot.executionAttempt?.fencingToken,
+        })
+        return {
+          ...runtimeFullPlaywrightOutput(projection.caseId, projection.actionId),
+          finalizationFacts: {
+            gatewayAudit: { caseId: projection.caseId },
+            cleanup: { caseId: projection.caseId },
+            executionOutcomeReceipt: { caseId: projection.caseId },
+            executionOutcomeVerifierMaterial: { caseId: projection.caseId },
+            gatewayAuditVerifierMaterial: { caseId: projection.caseId },
+            browserMeasurements: { caseId: projection.caseId },
+            isolationMeasurements: { caseId: projection.caseId },
+          },
+        }
+      },
+    })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-MULTI-FULL', fixture.roots.project),
+    ))
+    const projected = multiCaseFixture()
+    const grant = structuredClone(
+      projected.trustedExecutionFacts['signed-execution-grant'],
+    ) as SignedGrant
+    grant.approvalContext.runId = created.runId as string
+    grant.approvalContext.installationDigest = installation.installationDigest
+    const plan = compiledPlanForMultiCase(projected)
+    await fixture.store.beginRequest('SEED-MULTI-FULL', digest('7'))
+    const lock = await fixture.store.acquireRunLock(
+      created.projectIdentityDigest as string,
+      created.runId as string,
+    )
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string,
+      created.runId as string,
+      'SEED-MULTI-FULL',
+      digest('7'),
+      (snapshot) => ({
+        snapshot: {
+          ...snapshot,
+          artifactDigests: {
+            ...snapshot.artifactDigests,
+            ...Object.fromEntries(Object.entries(projected.frozenArtifacts)
+              .map(([key, artifact]) => [key, artifact.contentDigest])),
+          },
+          frozenArtifacts: projected.frozenArtifacts,
+          trustedExecutionFacts: {
+            ...snapshot.trustedExecutionFacts,
+            ...projected.trustedExecutionFacts,
+            'signed-execution-grant': grant,
+          },
+          compiledPrdRun: plan,
+          caseSchedule: createCaseSchedule(plan, '2026-07-17T00:00:00.000Z'),
+          workflow: { current: 'compiled', sequence: 9, eventChainDigest: digest('8') },
+        },
+        response: { seeded: true },
+      }),
+      'test-seed-multi-full',
+      lock,
+    )
+    await lock.close()
+
+    const result = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-EXECUTE-MULTI-FULL'),
+      command: 'execute-run',
+      projectRoot: fixture.roots.project,
+      payload: { runId: created.runId },
+    })))
+
+    expect(result).toMatchObject({
+      status: 'passed',
+      cases: [
+        { caseId: 'CASE-1', status: 'passed' },
+        { caseId: 'CASE-2', status: 'passed' },
+        { caseId: 'CASE-3', status: 'passed' },
+      ],
+      schedule: {
+        status: 'terminal',
+        cases: [{ state: 'passed' }, { state: 'passed' }, { state: 'passed' }],
+      },
+      workflow: { current: 'diagnosing' },
+    })
+    expect(calls.map((item) => item.caseId)).toEqual(['CASE-1', 'CASE-2', 'CASE-3'])
+    expect(new Set(calls.map((item) => item.attemptId)).size).toBe(3)
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string,
+      created.runId as string,
+    )
+    expect(persisted?.caseSchedule?.cases.map((item) => item.state))
+      .toEqual(['passed', 'passed', 'passed'])
+    expect(Object.keys(persisted?.executionResults?.realEnvironment ?? {})).toEqual([
+      'ACTION-1', 'ACTION-2', 'ACTION-3',
+    ])
+    const finalizationFacts = persisted?.trustedExecutionFacts[
+      'finalization-execution-facts'
+    ] as { realEnvironment?: Record<string, unknown> } | undefined
+    expect(Object.keys(finalizationFacts?.realEnvironment ?? {})).toEqual([
+      deriveExecutionResultId('CASE-1', 'real-environment'),
+      deriveExecutionResultId('CASE-2', 'real-environment'),
+      deriveExecutionResultId('CASE-3', 'real-environment'),
+    ])
+    expect(Object.values(persisted?.writeAttempts ?? {}).every(
+      (attempt) => attempt.state === 'outcome-committed',
+    )).toBe(true)
+    await fixture.store.close()
+  })
+
+  test('resume-run 从第二个 running Case 恢复且不重放已完成 Case', async () => {
+    const calls: string[] = []
+    let crashed = false
+    const recover = vi.fn(async () => ({
+      status: 'recovered' as const, writeState: 'prepared' as const,
+      next: 'resume-full-playwright', browserCalls: 0 as const,
+    }))
+    const fixture = await hostFixture({
+      writeRecovery: { recover },
+      executeFullPlaywrightRun: async ({ projection }) => {
+        calls.push(projection.caseId)
+        if (projection.caseId === 'CASE-2' && !crashed) {
+          crashed = true
+          throw Object.assign(new Error('simulated crash'), { code: 'E2E_RUNTIME_BROWSER_TEST_CRASH' })
+        }
+        return runtimeFullPlaywrightOutput(projection.caseId, projection.actionId)
+      },
+    })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-MULTI-RESUME', fixture.roots.project),
+    ))
+    const projected = multiCaseFixture()
+    const grant = structuredClone(
+      projected.trustedExecutionFacts['signed-execution-grant'],
+    ) as SignedGrant
+    grant.approvalContext.runId = created.runId as string
+    grant.approvalContext.installationDigest = installation.installationDigest
+    const plan = compiledPlanForMultiCase(projected)
+    await fixture.store.beginRequest('SEED-MULTI-RESUME', digest('a'))
+    const seedLock = await fixture.store.acquireRunLock(
+      created.projectIdentityDigest as string,
+      created.runId as string,
+    )
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string,
+      created.runId as string,
+      'SEED-MULTI-RESUME',
+      digest('a'),
+      (snapshot) => ({
+        snapshot: {
+          ...snapshot,
+          artifactDigests: {
+            ...snapshot.artifactDigests,
+            ...Object.fromEntries(Object.entries(projected.frozenArtifacts)
+              .map(([key, artifact]) => [key, artifact.contentDigest])),
+          },
+          frozenArtifacts: projected.frozenArtifacts,
+          trustedExecutionFacts: {
+            ...snapshot.trustedExecutionFacts,
+            ...projected.trustedExecutionFacts,
+            'signed-execution-grant': grant,
+          },
+          compiledPrdRun: plan,
+          caseSchedule: createCaseSchedule(plan, '2026-07-17T00:00:00.000Z'),
+          workflow: { current: 'compiled', sequence: 9, eventChainDigest: digest('b') },
+        },
+        response: { seeded: true },
+      }),
+      'test-seed-multi-resume',
+      seedLock,
+    )
+    await seedLock.close()
+    const execute = RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-EXECUTE-MULTI-RESUME'),
+      command: 'execute-run',
+      projectRoot: fixture.roots.project,
+      payload: { runId: created.runId },
+    })
+    expect(await handleRequest(fixture.host, execute)).toMatchObject({
+      ok: false, error: { code: 'E2E_RUNTIME_EXECUTION_RECOVERY_REQUIRED' },
+    })
+    const interrupted = await fixture.store.getRun(
+      created.projectIdentityDigest as string,
+      created.runId as string,
+    )
+    expect(interrupted?.caseSchedule?.cases.map((item) => item.state))
+      .toEqual(['passed', 'running', 'pending'])
+    const interruptedAttemptId = interrupted?.caseSchedule?.cases[1]?.attemptId
+    expect(interruptedAttemptId).toMatch(/^ATTEMPT-/)
+
+    const resumed = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-RESUME-MULTI'),
+      command: 'resume-run',
+      projectRoot: fixture.roots.project,
+      payload: {
+        runId: created.runId,
+        decision: { kind: 'recover-write-attempt', expectedAttemptId: interruptedAttemptId },
+      },
+    })))
+    expect(resumed).toMatchObject({
+      recoveredAttemptId: interruptedAttemptId,
+      status: 'passed',
+      schedule: {
+        status: 'terminal',
+        cases: [{ state: 'passed' }, { state: 'passed' }, { state: 'passed' }],
+      },
+    })
+    expect(calls).toEqual(['CASE-1', 'CASE-2', 'CASE-2', 'CASE-3'])
+    expect(recover).toHaveBeenCalledWith({
+      projectIdentityDigest: created.projectIdentityDigest,
+      runId: created.runId,
+      attemptId: interruptedAttemptId,
+    })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string,
+      created.runId as string,
+    )
+    expect(persisted?.executionAttempt).toBeUndefined()
+    expect(Object.keys(persisted?.executionResults?.realEnvironment ?? {})).toEqual([
+      'ACTION-1', 'ACTION-2', 'ACTION-3',
+    ])
+    await fixture.store.close()
+  })
+
   test.each(['write', 'injection'] as const)(
     'execute-run 通过 Host 调用可信 %s executor，并在同一 fenced attempt 内持久化分域结果',
     async (mode) => {
@@ -1987,6 +2284,7 @@ async function hostFixture(options: {
   executeReadOnlyRun?: Parameters<typeof authorizeRuntimeReadExecutor>[0]
   executeWriteRun?: Parameters<typeof authorizeRuntimeWriteExecutor>[0]
   executeInjectionRun?: Parameters<typeof authorizeRuntimeInjectionExecutor>[0]
+  executeFullPlaywrightRun?: Parameters<typeof authorizeRuntimeFullPlaywrightExecutor>[0]
   preflight?: Parameters<typeof authorizeRuntimePreflight>[0]
   authorityHostFactory?: () => Promise<Pick<RuntimeAuthorityHost, 'requestApproval'>>
   writeRecovery?: Parameters<typeof authorizeRuntimeWriteProduction>[0]['recovery']
@@ -2035,6 +2333,11 @@ async function hostFixture(options: {
     ...(options.executeInjectionRun === undefined ? {} : {
       injectionExecutor: authorizeRuntimeInjectionExecutor(options.executeInjectionRun),
     }),
+    ...(options.executeFullPlaywrightRun === undefined ? {} : {
+      fullPlaywrightExecutor: authorizeRuntimeFullPlaywrightExecutor(
+        options.executeFullPlaywrightRun,
+      ),
+    }),
     ...(options.preflight === undefined ? {} : {
       preflightExecutor: authorizeRuntimePreflight(options.preflight),
     }),
@@ -2081,6 +2384,50 @@ function executionFactsFor(
     'signed-execution-grant': execution,
     'browser-preflight': preflight,
   }
+}
+
+function compiledPlanForMultiCase(snapshot: RuntimeRunSnapshot) {
+  const cases = (
+    snapshot.frozenArtifacts['test-cases']!.content as {
+      cases: Array<{ caseId: string; title: string; actor: string }>
+    }
+  ).cases
+  const actions = (
+    snapshot.frozenArtifacts['browser-action-map']!.content as {
+      actions: Array<{ caseId: string; actionId: string }>
+    }
+  ).actions
+  const draft = {
+    schemaVersion: '1.0.0' as const,
+    contractProjectionDigest: digest('6'),
+    cases: cases.map((testCase, index) => {
+      const action = actions.find((candidate) => candidate.caseId === testCase.caseId)!
+      return {
+        queueOrdinal: index,
+        caseId: testCase.caseId,
+        caseKey: `case-${index + 1}`,
+        title: testCase.title,
+        actor: testCase.actor,
+        contractNodeIds: [`REQ-${index + 1}`],
+        actions: [{
+          actionId: action.actionId,
+          actionKey: `action-${index + 1}`,
+          kind: 'full-playwright' as const,
+          effect: 'reversible-write' as const,
+          statement: action.actionId,
+        }],
+        oracles: [{
+          oracleId: `ORACLE-${index + 1}`,
+          oracleKey: `oracle-${index + 1}`,
+          actionId: action.actionId,
+          contractNodeId: `REQ-${index + 1}`,
+          acceptanceCriterion: `criterion-${index + 1}`,
+        }],
+        failurePolicy: 'continue' as const,
+      }
+    }),
+  }
+  return { ...draft, compilerDigest: digestCompiledPrdRunPlan(draft) }
 }
 
 function executionGrantForMode(mode: 'write' | 'injection', runId: string) {

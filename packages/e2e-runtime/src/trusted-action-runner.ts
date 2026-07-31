@@ -37,9 +37,16 @@ import {
   type RuntimeWriteExecutionOutput,
 } from './runtime-execution-batch.js'
 import {
+  projectRuntimeFullPlaywrightCases,
   projectRuntimeFullPlaywrightSnapshot,
   type RuntimeFullPlaywrightProjection,
 } from './runtime-full-playwright-projector.js'
+import {
+  completeCase,
+  parseCaseSchedule,
+  startNextCase,
+  type RuntimeCaseSchedule,
+} from './multi-case-scheduler.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 export interface TrustedReadAction {
@@ -172,6 +179,125 @@ export async function executeRuntimeFullPlaywright(
   }
   return new RuntimeExecutionBatch({ runId: input.snapshot.runId, attemptId: input.attemptId })
     .commitRealWrite(output)
+}
+
+export async function executeRuntimeFullPlaywrightCases(
+  capability: RuntimeFullPlaywrightExecutorCapability,
+  input: { snapshot: RuntimeRunSnapshot; attemptIds: string[] },
+): Promise<RuntimeWriteExecutionOutput[]> {
+  const backend = runtimeFullPlaywrightExecutors.get(capability)
+  if (!backend) throw trustedActionError(
+    'E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_CAPABILITY_INVALID',
+    'Full Playwright executor capability 未由生产装配层签发',
+  )
+  const projections = projectRuntimeFullPlaywrightCases(input.snapshot)
+  if (input.attemptIds.length !== projections.length
+    || input.attemptIds.some((attemptId) => !SafeIdSchema.safeParse(attemptId).success)
+    || new Set(input.attemptIds).size !== input.attemptIds.length) {
+    throw trustedActionError(
+      'E2E_RUNTIME_FULL_PLAYWRIGHT_ATTEMPT_SET_INVALID',
+      '每个 scheduled Case 必须绑定唯一 attemptId',
+    )
+  }
+  const outputs: RuntimeWriteExecutionOutput[] = []
+  for (const [index, projection] of projections.entries()) {
+    const attemptId = input.attemptIds[index]!
+    const output = parseRuntimeWriteExecutionOutput(await backend({
+      snapshot: structuredClone(input.snapshot), attemptId, projection,
+    }))
+    if (output.caseId !== projection.caseId || output.actionId !== projection.actionId) {
+      throw trustedActionError('E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_OUTPUT_INVALID',
+        'Full Playwright executor 输出未闭合 frozen case/action')
+    }
+    outputs.push(new RuntimeExecutionBatch({
+      runId: input.snapshot.runId, attemptId,
+    }).commitRealWrite(output))
+  }
+  return outputs
+}
+
+export async function executeScheduledRuntimeFullPlaywrightCases(
+  capability: RuntimeFullPlaywrightExecutorCapability,
+  input: {
+    snapshot: RuntimeRunSnapshot
+    schedule: RuntimeCaseSchedule
+    attemptIds: string[]
+    resumeAttemptId?: string
+    now(): string
+    persistSchedule(schedule: RuntimeCaseSchedule): Promise<void>
+    prepareCase?(input: {
+      schedule: RuntimeCaseSchedule
+      projection: RuntimeFullPlaywrightProjection
+      attemptId: string
+    }): Promise<RuntimeRunSnapshot>
+    completeCase?(input: {
+      schedule: RuntimeCaseSchedule
+      projection: RuntimeFullPlaywrightProjection
+      attemptId: string
+      output: RuntimeWriteExecutionOutput
+    }): Promise<void>
+  },
+): Promise<{ outputs: RuntimeWriteExecutionOutput[]; schedule: RuntimeCaseSchedule }> {
+  const backend = runtimeFullPlaywrightExecutors.get(capability)
+  if (!backend) throw trustedActionError(
+    'E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_CAPABILITY_INVALID',
+    'Full Playwright executor capability 未由生产装配层签发',
+  )
+  const projections = projectRuntimeFullPlaywrightCases(input.snapshot)
+  let schedule = parseCaseSchedule(input.schedule)
+  if (input.attemptIds.length !== projections.length
+    || input.attemptIds.some((attemptId) => !SafeIdSchema.safeParse(attemptId).success)
+    || new Set(input.attemptIds).size !== input.attemptIds.length
+    || canonicalizeJson(schedule.cases.map((item) => item.caseId))
+      !== canonicalizeJson(projections.map((item) => item.caseId))) {
+    throw trustedActionError(
+      'E2E_RUNTIME_FULL_PLAYWRIGHT_SCHEDULE_BINDING_INVALID',
+      '持久 schedule、projection 与 attempt 集合未严格闭合',
+    )
+  }
+  const outputs: RuntimeWriteExecutionOutput[] = []
+  for (const [index, projection] of projections.entries()) {
+    const scheduled = schedule.cases[index]
+    const resuming = scheduled?.state === 'running'
+      && scheduled.attemptId === input.resumeAttemptId
+      && schedule.currentCaseId === projection.caseId
+    if (scheduled?.state !== 'pending' && !resuming) continue
+    const attemptId = resuming ? scheduled.attemptId! : input.attemptIds[index]!
+    if (!resuming) {
+      schedule = startNextCase(schedule, {
+        attemptId,
+        startedAt: input.now(),
+      })
+      await input.persistSchedule(schedule)
+    }
+    const executionSnapshot = resuming || input.prepareCase === undefined
+      ? input.snapshot
+      : await input.prepareCase({ schedule, projection, attemptId })
+    const output = new RuntimeExecutionBatch({
+      runId: input.snapshot.runId,
+      attemptId,
+    }).commitRealWrite(parseRuntimeWriteExecutionOutput(await backend({
+      snapshot: structuredClone(executionSnapshot),
+      attemptId,
+      projection,
+    })))
+    outputs.push(output)
+    schedule = completeCase(schedule, {
+      caseId: projection.caseId,
+      attemptId,
+      status: output.status === 'passed' ? 'passed'
+        : output.status === 'safety-blocked' ? 'safety-blocked'
+          : output.status === 'environment-blocked' ? 'unable' : 'failed',
+      effectObservation: output.effectObservation === 'proven-not-applied'
+        ? 'not-applied' : output.effectObservation,
+      cleanupStatus: output.cleanup.status,
+      completedAt: input.now(),
+    })
+    if (input.completeCase === undefined) await input.persistSchedule(schedule)
+    else await input.completeCase({ schedule, projection, attemptId, output })
+    if (schedule.status !== 'active') break
+  }
+  return { outputs, schedule }
 }
 
 export async function executeRuntimeWrite(

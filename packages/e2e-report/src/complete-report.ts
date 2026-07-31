@@ -322,6 +322,7 @@ table{border-collapse:collapse;width:100%;font-size:.9375rem}th,td{border:1px so
 .table-scroll{overflow-x:auto}.report-controls{margin:1rem 0 2rem;padding:1rem;border:1px solid var(--line);background:var(--surface)}.report-controls h2{margin-top:0;border:0;font-size:1.125rem}
 .control-row{display:grid;grid-template-columns:minmax(14rem,2fr) minmax(10rem,1fr) minmax(10rem,1fr) auto;gap:1rem;align-items:end}.control-row label{display:block;font-weight:650;margin-bottom:.25rem}.control-row input,.control-row select{width:100%;min-height:2.5rem;border:1px solid #8b969f;background:#fff;padding:.5rem}.control-actions{display:flex;gap:.5rem}.control-actions button{min-height:2.5rem;border:1px solid var(--accent);background:#fff;color:var(--accent);padding:.5rem .75rem;font-weight:650;cursor:pointer}.control-actions button:last-child{background:var(--accent);color:#fff}
 .case-detail{border:1px solid var(--line);margin:.75rem 0;background:#fff}.case-detail summary{cursor:pointer;font-weight:700;padding:.75rem;background:var(--surface)}.case-body{padding:0 .75rem 1rem}.case-detail[hidden]{display:none}
+.evidence-screenshot{margin:.25rem 0}.evidence-screenshot img{display:block;max-width:min(100%,48rem);height:auto;border:1px solid var(--line)}.evidence-screenshot figcaption{margin-top:.25rem}
 @media(max-width:48rem){body{padding-inline:.75rem}.control-row{grid-template-columns:1fr}.control-actions{flex-wrap:wrap}table{font-size:.8125rem}th,td{padding:.4rem}}
 @media print{body{max-width:none;padding:0;color:#000}.report-controls{display:none!important}a{color:#000;text-decoration:none}section{break-inside:avoid}details{break-inside:avoid}details>.case-body{display:block!important}h2{break-after:avoid}}
 @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
@@ -453,6 +454,14 @@ function markdownEvidenceLinks(links: string[]): string | MarkdownFragment {
 }
 
 function htmlEvidenceLink(path: string, label: string): HtmlFragment {
+  if (path.endsWith('.png')) return {
+    kind: 'html-fragment',
+    value: `<figure class="evidence-screenshot"><img src="${html(path)}" alt="验收截图 ${html(label)}" loading="lazy"><figcaption><a href="${html(path)}">${html(label)}</a></figcaption></figure>`,
+  }
+  if (path.endsWith('.zip') && path.toLocaleLowerCase('en-US').includes('trace')) return {
+    kind: 'html-fragment',
+    value: `<a href="${html(path)}" download>下载 Playwright Trace</a>`,
+  }
   return { kind: 'html-fragment', value: `<a href="${html(path)}">${html(label)}</a>` }
 }
 

@@ -46,6 +46,7 @@ import {
 import { isExactRuntimeVersion } from './runtime-manifest.js'
 import { E2ERuntimeHost } from './runtime-host.js'
 import { ProjectPublisher } from './project-publisher.js'
+import { StandaloneEvidencePublisher } from './standalone-evidence-publisher.js'
 import { RuntimeRunStore, type RuntimeRunSnapshot } from './run-store.js'
 import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js'
 import { assertSameProjectIdentity, resolveProjectIdentity } from './project-identity.js'
@@ -644,6 +645,11 @@ export async function runCli(
         }),
         ...(projectPublisherFactory === undefined ? {} : {
           projectPublisherFactory,
+        }),
+        ...(request.command !== 'render-report' ? {} : {
+          standaloneEvidencePublisher: new StandaloneEvidencePublisher({
+            homeDir: dependencies.homeDir,
+          }),
         }),
       })
       response = await host.handle(request, requestBytes)

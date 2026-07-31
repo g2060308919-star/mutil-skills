@@ -1,6 +1,6 @@
 {
   "name": "@mutil-skills/cli",
-  "version": "0.4.5",
+  "version": "0.4.7",
   "repository": {
     "type": "git",
     "url": "https://github.com/g2060308919-star/mutil-skills.git",
@@ -27,12 +27,12 @@
     }
   },
   "dependencies": {
-    "@mutil-skills/core": "0.4.5",
-    "@mutil-skills/foundation": "0.4.5",
-    "@mutil-skills/hooks": "0.4.5",
-    "@mutil-skills/schema": "0.4.5",
-    "@mutil-skills/skills": "0.4.5",
-    "@mutil-skills/template": "0.4.5"
+    "@mutil-skills/core": "0.4.7",
+    "@mutil-skills/foundation": "0.4.7",
+    "@mutil-skills/hooks": "0.4.7",
+    "@mutil-skills/schema": "0.4.7",
+    "@mutil-skills/skills": "0.4.7",
+    "@mutil-skills/template": "0.4.7"
   },
   "license": "MIT",
   "engines": {

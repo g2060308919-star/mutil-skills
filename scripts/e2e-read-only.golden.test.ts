@@ -49,8 +49,8 @@ describe('PRD-driven read-only golden path', () => {
     { name: 'accepted 主链', fixtureText: '待审核', expectedCaseStatus: 'passed' as const,
       expectedVerdict: 'accepted' as const, blockedCase: undefined, sanitizerCanaryDetected: true,
       reportTitle: undefined, exerciseCrashRecovery: true, mixedDispositions: false },
-    { name: 'blocked Case 不生成假测试并发布 incomplete 报告', fixtureText: '待审核',
-      expectedCaseStatus: 'passed' as const, expectedVerdict: 'incomplete' as const,
+    { name: 'blocked Case 不生成假测试并发布 artifact-blocked 报告', fixtureText: '待审核',
+      expectedCaseStatus: 'passed' as const, expectedVerdict: 'artifact-blocked' as const,
       blockedCase: { caseId: 'CASE-BLOCKED-CANVAS', title: '订单趋势画布语义验收',
         stepId: 'STEP-BLOCKED-CANVAS', actionId: 'ACTION-BLOCKED-CANVAS',
         reasonCode: 'E2E_COMPILER_ACTION_UNSUPPORTED' }, sanitizerCanaryDetected: true,
@@ -133,10 +133,12 @@ describe('PRD-driven read-only golden path', () => {
         requirements: [{
           reqId: 'REQ-ORDER-1', revision: 1, title: '展示订单列表', actors: ['auditor'], entities: ['order'],
           preconditions: [], states: [], transitions: [],
-          observableOutcomes: [{ oracleId: 'ORACLE-ORDER-VISIBLE', statement: '显示待审核订单' }],
-          sourceRefs: ['prd:审核流程'], status: 'active',
+          observableOutcomes: [{ oracleId: 'ORACLE-ORDER-VISIBLE', ruleId: 'RULE-ORDER-1',
+            statement: '显示待审核订单', sourceRefs: ['CLAUSE-ORDER-1'] }],
+          sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
           applicability: [{ dimension: 'actor', value: 'auditor', required: true }],
-          rules: [{ ruleId: 'RULE-ORDER-1', category: 'business', statement: '显示待审核订单', sourceRefs: ['prd:1'], certainty: 'explicit' }],
+          rules: [{ ruleId: 'RULE-ORDER-1', category: 'business', statement: '显示待审核订单',
+            sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit', oracleIds: ['ORACLE-ORDER-VISIBLE'] }],
         }],
       },
       nodes: [{ nodeId: 'NODE-LIST', reqId: 'REQ-ORDER-1', kind: 'page', title: '订单列表', effect: 'read', hasOracle: true }],
@@ -507,7 +509,10 @@ describe('PRD-driven read-only golden path', () => {
         createPersistedAttemptVerdictDependencies(persistedAttemptAudit,
           (result) => authority.verifyManualResult(result)))
       expect(caseResult.status).toBe(expectedCaseStatus)
-      expect(active).toMatchObject({ generationId: 'GENERATION-1', terminalVerdict: expectedVerdict })
+      expect(active, JSON.stringify({
+        verdict: finalReport.content.verdict,
+        reasonCodes: finalReport.content.reasonCodes,
+      })).toMatchObject({ generationId: 'GENERATION-1', terminalVerdict: expectedVerdict })
       expect(finalReport).toMatchObject({ generationId: 'GENERATION-1', content: { verdict: expectedVerdict } })
       expect(generationManifest).toMatchObject({
         generationId: 'GENERATION-1',
@@ -544,7 +549,8 @@ describe('PRD-driven read-only golden path', () => {
         expect(await reportPage.locator('body').textContent()).toContain(crossBrowserLimitation)
         if (reportTitle) {
           expect(finalReport.content.title).toBe(reportTitle)
-          expect(await reportPage.locator('img').count()).toBe(0)
+          expect(await reportPage.locator('img[src="x"]').count()).toBe(0)
+          expect(await reportPage.locator('img[onerror]').count()).toBe(0)
           expect(await reportPage.locator('body').textContent()).toContain(reportTitle)
           expect(await reportPage.evaluate(() =>
             (globalThis as typeof globalThis & { __E2E_XSS_EXECUTED__?: boolean }).__E2E_XSS_EXECUTED__))
@@ -586,8 +592,8 @@ describe('PRD-driven read-only golden path', () => {
         expect(finalReport.content.dispositions).toEqual(expect.arrayContaining([
           expect.objectContaining({ id: blockedCase.caseId, kind: 'blocked', status: 'blocked' }),
         ]))
-        expect(finalReport.content.verdict).toBe('incomplete')
-        expect(finalReport.content.reasonCodes).toContain('VERDICT_REQUIRED_CASE_MISSING')
+        expect(finalReport.content.verdict).toBe('artifact-blocked')
+        expect(finalReport.content.reasonCodes).toContain('E2E_CASE_DESIGN_INCOMPLETE')
         expect(finalReport.content.metrics.executionCoverage.status).toBe('value')
         expect(finalReport.content.metrics.executionCoverage.percentage).toBeLessThan(100)
         expect(finalReport.content.caseDetails.filter((item: { status: string }) => item.status === 'passed'))

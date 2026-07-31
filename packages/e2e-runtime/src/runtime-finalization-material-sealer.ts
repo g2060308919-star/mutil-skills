@@ -105,15 +105,37 @@ export class RuntimeFinalizationMaterialSealer {
       throw sealerError('E2E_RUNTIME_FINALIZATION_INJECTION_SIGNED_AUDIT_MISSING')
     }
     if (writeResults.length > 0) {
-      if (writeResults.length !== 1) throw sealerError('E2E_RUNTIME_FINALIZATION_WRITE_RESULT_SET_INCOMPLETE')
-      const write = parseRuntimeWriteExecutionOutput(writeResults[0])
-      if (write.finalizationFacts === undefined) {
+      const parsedWrites = writeResults.map((candidate) => parseRuntimeWriteExecutionOutput(candidate))
+      const scheduledCaseIds = snapshot.caseSchedule?.cases
+        .filter((item) => item.attemptId !== undefined)
+        .map((item) => item.caseId)
+      const writes = scheduledCaseIds === undefined ? parsedWrites : scheduledCaseIds.map((caseId) => {
+        const matches = parsedWrites.filter((write) => write.caseId === caseId)
+        if (matches.length !== 1) {
+          throw sealerError('E2E_RUNTIME_FINALIZATION_MULTI_WRITE_SCHEDULE_MISMATCH')
+        }
+        return matches[0]!
+      })
+      if (writes.length !== parsedWrites.length) {
+        throw sealerError('E2E_RUNTIME_FINALIZATION_MULTI_WRITE_SCHEDULE_MISMATCH')
+      }
+      if (writes.some((write) => write.finalizationFacts === undefined)) {
         throw sealerError('E2E_RUNTIME_FINALIZATION_WRITE_FACTS_MISSING')
       }
-      const material = await this.sealWrite(snapshot, write)
+      // 每个 Case 都会向同一个 Run 的 Quarantine manifest 追加净化证据。
+      // EncryptedQuarantine 的 manifest 是原子替换文件而非并发事务；并行 seal
+      // 会让多个调用基于同一 revision 写回，造成已生成密文从清单中丢失。
+      const materials: PersistedRuntimeFinalizationMaterial[] = []
+      for (const write of writes) materials.push(await this.sealWrite(snapshot, write))
+      const material = materials.length === 1
+        ? materials[0]!
+        : await this.mergeWriteMaterials(snapshot, writes, materials)
       if (injectionResults.length === 0) return material
+      if (writes.length !== 1) {
+        throw sealerError('E2E_RUNTIME_FINALIZATION_MULTI_WRITE_INJECTION_UNSUPPORTED')
+      }
       if (injectionResults.length !== 1) throw sealerError('E2E_RUNTIME_FINALIZATION_INJECTION_RESULT_SET_INCOMPLETE')
-      return await this.sealInjection(snapshot, material, write, injection!)
+      return await this.sealInjection(snapshot, material, writes[0]!, injection!)
     }
     if (injectionResults.length > 0) throw sealerError('E2E_RUNTIME_INJECTION_REAL_RESULT_REQUIRED')
     const external = this.requireExternalArtifacts(snapshot)
@@ -362,9 +384,9 @@ export class RuntimeFinalizationMaterialSealer {
       throw sealerError('E2E_RUNTIME_FINALIZATION_MIXED_REAL_RESULT_SET_UNSUPPORTED')
     }
     const intents = records(executionContract.actionIntents)
-    const dataNeeds = records(executionContract.dataNeeds)
-    if (intents.length !== 1 || intents[0]!.actionId !== write.actionId
-      || intents[0]!.effect !== 'reversible-write' || dataNeeds.length !== 1) {
+      .filter((candidate) => candidate.actionId === write.actionId)
+    const allDataNeeds = records(executionContract.dataNeeds)
+    if (intents.length !== 1 || intents[0]!.effect !== 'reversible-write') {
       throw sealerError('E2E_RUNTIME_FINALIZATION_WRITE_CONTRACT_INCOMPLETE')
     }
     const resultId = deriveExecutionResultId(write.caseId, 'real-environment')
@@ -382,15 +404,21 @@ export class RuntimeFinalizationMaterialSealer {
     )
     const receipt = ExecutionOutcomeReceiptSchema.parse(facts.executionOutcomeReceipt)
     const cleanupPlans = records(executionContract.writeCleanupPlans)
+      .filter((candidate) => candidate.actionId === write.actionId)
     if (cleanupPlans.length !== 1) throw sealerError('E2E_RUNTIME_FINALIZATION_CLEANUP_PLAN_MISSING')
     const cleanupPlan = CleanupPlanDefinitionSchema.parse(cleanupPlans[0])
     const capabilities = executionGrant.capabilities.filter((candidate) => candidate.actionId === write.actionId)
     const capability = capabilities[0]
-    const dataNeed = dataNeeds[0]!
     if (capabilities.length !== 1 || capability === undefined || !('effect' in capability)
       || capability.effect !== 'reversible-write'
       || !('dataLeaseId' in capability) || !('cleanupPlanDigest' in capability)
-      || !('fencingToken' in capability) || !('requests' in capability)
+      || !('fencingToken' in capability) || !('requests' in capability)) {
+      throw sealerError('E2E_RUNTIME_FINALIZATION_WRITE_LEASE_BINDING_INVALID')
+    }
+    const dataNeeds = allDataNeeds.filter((candidate) =>
+      candidate.leaseId === capability.dataLeaseId)
+    const dataNeed = dataNeeds[0]
+    if (dataNeeds.length !== 1 || dataNeed === undefined
       || dataNeed.leaseId !== capability.dataLeaseId || dataNeed.mode !== 'write'
       || cleanupPlan.actionId !== write.actionId || cleanupPlan.leaseId !== capability.dataLeaseId
       || digestCleanupPlanDefinition(cleanupPlan) !== capability.cleanupPlanDigest) {
@@ -492,19 +520,20 @@ export class RuntimeFinalizationMaterialSealer {
       'project-policy', 'acceptance-scope', 'requirement-model', 'coverage-universe',
       'test-cases', 'execution-contract', 'browser-action-map',
     ] as const
-    const runBundleContent = {
-      runId: snapshot.runId,
-      allInputRefs: approvalInputTypes.map((type) => ({
-        artifactId: external[type].artifactId,
-        digest: digestApprovalProjection(type, external[type].content),
-      })),
-      schedule: [{ ordinal: 0, caseId: write.caseId, stepIds: [text(step.stepId)], actionIds: [write.actionId] }],
-      attemptPlans: [{ caseId: write.caseId, slots: 1 }],
-      signedCapabilities: approvalCapabilities(executionGrant),
-      secretRefs: records(executionContract.identities).map((identity) => text(identity.secretRef)),
-      runtimePolicyDigest: text(record(projectPolicy.runtimePolicy).digest),
-      runtimeIsolationPolicyDigest: 'not-applicable',
-    }
+    const frozenRunBundle = snapshot.frozenArtifacts['run-bundle']
+    const runBundleContent = frozenRunBundle?.content ?? {
+        runId: snapshot.runId,
+        allInputRefs: approvalInputTypes.map((type) => ({
+          artifactId: external[type].artifactId,
+          digest: digestApprovalProjection(type, external[type].content),
+        })),
+        schedule: [{ ordinal: 0, caseId: write.caseId, stepIds: [text(step.stepId)], actionIds: [write.actionId] }],
+        attemptPlans: [{ caseId: write.caseId, slots: 1 }],
+        signedCapabilities: approvalCapabilities(executionGrant),
+        secretRefs: records(executionContract.identities).map((identity) => text(identity.secretRef)),
+        runtimePolicyDigest: text(record(projectPolicy.runtimePolicy).digest),
+        runtimeIsolationPolicyDigest: 'not-applicable',
+      }
     const runBundle = resolveFrozenRunBundle(
       snapshot, runBundleContent, this.dependencies.authority,
     )
@@ -636,6 +665,216 @@ export class RuntimeFinalizationMaterialSealer {
         gatewayAudit: facts.gatewayAuditVerifierMaterial,
         executionOutcome: facts.executionOutcomeVerifierMaterial,
         sanitizer: sanitizer.verifierMaterial,
+      },
+    })
+  }
+
+  private async mergeWriteMaterials(
+    snapshot: RuntimeRunSnapshot,
+    writes: RuntimeWriteExecutionOutput[],
+    materials: PersistedRuntimeFinalizationMaterial[],
+  ): Promise<PersistedRuntimeFinalizationMaterial> {
+    if (writes.length < 2 || writes.length !== materials.length) {
+      throw sealerError('E2E_RUNTIME_FINALIZATION_MULTI_WRITE_SET_INVALID')
+    }
+    const caseIds = writes.map((write) => write.caseId)
+    const actionIds = writes.map((write) => write.actionId)
+    if (new Set(caseIds).size !== caseIds.length || new Set(actionIds).size !== actionIds.length) {
+      throw sealerError('E2E_RUNTIME_FINALIZATION_MULTI_WRITE_IDENTITY_DUPLICATE')
+    }
+    const maps = materials.map((material) =>
+      new Map(material.artifacts.map((entry) => [entry.artifact.artifactType, entry.artifact])))
+    const base = materials[0]!
+    const baseMap = maps[0]!
+    const stableTypes = [
+      ...EXTERNAL_TYPES, 'manual-results', 'run-bundle', 'diagnosis',
+    ] as const satisfies readonly ArtifactType[]
+    for (const type of stableTypes) {
+      const expected = baseMap.get(type)
+      if (expected === undefined || maps.some((map) =>
+        canonicalizeJson(map.get(type)) !== canonicalizeJson(expected))) {
+        throw sealerError(`E2E_RUNTIME_FINALIZATION_MULTI_WRITE_ARTIFACT_DRIFT:${type}`)
+      }
+    }
+    const sharedProvenance = ({ gatewayPolicyDigest: _casePolicy, ...shared }: RuntimeProvenance) => shared
+    if (materials.some((material) =>
+      canonicalizeJson(sharedProvenance(material.provenance))
+        !== canonicalizeJson(sharedProvenance(base.provenance)))) {
+      throw sealerError('E2E_RUNTIME_FINALIZATION_MULTI_WRITE_PROVENANCE_DRIFT')
+    }
+    const mergedProvenance: RuntimeProvenance = {
+      ...base.provenance,
+      gatewayPolicyDigest: digestText(
+        'runtime-multi-case-gateway-policy-set/v1',
+        canonicalizeJson(materials.map((material, index) => ({
+          caseId: writes[index]!.caseId,
+          resultId: deriveExecutionResultId(writes[index]!.caseId, 'real-environment'),
+          gatewayPolicyDigest: material.provenance.gatewayPolicyDigest,
+        }))),
+      ),
+    }
+
+    const preflightContents = maps.map((map) =>
+      record(map.get('browser-preflight')?.content, 'E2E_RUNTIME_FINALIZATION_MULTI_WRITE_PREFLIGHT_MISSING'))
+    const generationEnvelope = finalizationArtifactEnvelope(snapshot)
+    const commonPreflight = preflightContents[0]!
+    for (const candidate of preflightContents.slice(1)) {
+      for (const key of [
+        'discoveryGrantId', 'authorityPreflightDigest', 'observedActor',
+        'observedIdentity', 'status',
+      ] as const) {
+        if (canonicalizeJson(candidate[key]) !== canonicalizeJson(commonPreflight[key])) {
+          throw sealerError('E2E_RUNTIME_FINALIZATION_MULTI_WRITE_PREFLIGHT_DRIFT')
+        }
+      }
+    }
+    const browserPreflight = createArtifact(snapshot, 'browser-preflight', {
+      ...commonPreflight,
+      checks: uniqueCanonical(preflightContents.flatMap((content) => records(content.checks))),
+      actorChecks: uniqueCanonical(preflightContents.flatMap((content) => records(content.actorChecks))),
+      leaseChecks: uniqueCanonical(preflightContents.flatMap((content) => records(content.leaseChecks))),
+      gatewayChecks: uniqueCanonical(preflightContents.flatMap((content) => records(content.gatewayChecks))),
+      sandboxChecks: uniqueCanonical(preflightContents.flatMap((content) => records(content.sandboxChecks))),
+    }, this.dependencies.authority, generationEnvelope.createdAt, generationEnvelope.engineVersion)
+
+    const runBundle = baseMap.get('run-bundle')
+    if (runBundle === undefined) throw sealerError('E2E_RUNTIME_FINALIZATION_MULTI_WRITE_RUN_BUNDLE_MISSING')
+    const executionGrant = SignedGrantSchema.parse(snapshot.trustedExecutionFacts['signed-execution-grant'])
+    const discoveryGrant = SignedGrantSchema.parse(snapshot.trustedExecutionFacts['signed-discovery-grant'])
+    const freshness = await this.dependencies.authority.issueApprovalFreshnessReceipt({
+      grant: executionGrant,
+      currentSubject: executionGrant.subject,
+      expectedCapabilities: approvalCapabilities(executionGrant),
+      browserPreflight: {
+        artifactDigest: browserPreflight.contentDigest,
+        discoveryGrantId: discoveryGrant.grantId,
+        authorityPreflightDigest: text(commonPreflight.authorityPreflightDigest),
+      },
+      runBundle: { artifactDigest: runBundle.contentDigest, content: runBundle.content },
+    })
+    const approvalGrants = createArtifact(snapshot, 'approval-grants', {
+      runBundleDigest: runBundle.contentDigest,
+      approvalAssurance: approvalAssuranceForMode(
+        approvalModeFromTrustedFacts(snapshot.trustedExecutionFacts),
+      ),
+      grants: [freshness],
+    }, this.dependencies.authority, freshness.checkedAt)
+
+    const leaseContents = maps.map((map) =>
+      record(map.get('data-leases')?.content, 'E2E_RUNTIME_FINALIZATION_MULTI_WRITE_LEASES_MISSING'))
+    const dataLeases = createArtifact(snapshot, 'data-leases', {
+      leases: leaseContents.flatMap((content) => records(content.leases)),
+      allocatorEpoch: Math.max(...leaseContents.map((content) =>
+        number(content.allocatorEpoch, 'E2E_RUNTIME_FINALIZATION_MULTI_WRITE_LEASE_EPOCH_INVALID'))),
+    }, this.dependencies.authority)
+
+    const workflowContents = maps.map((map) =>
+      record(map.get('workflow-events')?.content, 'E2E_RUNTIME_FINALIZATION_MULTI_WRITE_WORKFLOW_MISSING'))
+    const attemptCases = workflowContents.flatMap((content) => records(content.attemptCases))
+    const workflowContent = {
+      runId: snapshot.runId,
+      attemptCases,
+      workflowDigest: digestText('workflow-events/v2', canonicalizeJson({
+        runId: snapshot.runId, attemptCases,
+      })),
+    }
+    const workflowEvents = createArtifact(
+      snapshot, 'workflow-events', workflowContent, this.dependencies.authority,
+    )
+
+    const resultContents = maps.map((map) =>
+      record(map.get('browser-results')?.content, 'E2E_RUNTIME_FINALIZATION_MULTI_WRITE_RESULTS_MISSING'))
+    const browserResults = createArtifact(snapshot, 'browser-results', {
+      runId: snapshot.runId,
+      executedBrowserIds: [...new Set(resultContents.flatMap((content) => strings(content.executedBrowserIds)))],
+      caseResults: resultContents.flatMap((content) => records(content.caseResults)),
+      startedAt: resultContents.map((content) => text(content.startedAt)).sort()[0]!,
+      finishedAt: resultContents.map((content) => text(content.finishedAt)).sort().at(-1)!,
+    }, this.dependencies.authority)
+
+    const gatewaySessions = materials.map((material, index) => {
+      const facts = writes[index]!.finalizationFacts!
+      return {
+        resultId: deriveExecutionResultId(writes[index]!.caseId, 'real-environment'),
+        domain: 'real-environment' as const,
+        audit: stripGatewaySessions(record(material.gatewayAudit) as GatewayPublicationAudit),
+        verifierMaterial: record(facts.gatewayAuditVerifierMaterial) as GatewayAuditVerifierMaterial,
+      }
+    })
+    const gatewayContent = {
+      ...stripGatewaySessions(record(base.gatewayAudit) as GatewayPublicationAudit),
+      sessions: gatewaySessions,
+    }
+    const gatewayAudit = createArtifact(
+      snapshot, 'gateway-audit', gatewayContent, this.dependencies.authority,
+    )
+
+    const evidenceContents = maps.map((map) =>
+      record(map.get('browser-evidence')?.content, 'E2E_RUNTIME_FINALIZATION_MULTI_WRITE_EVIDENCE_MISSING'))
+    const evidencePolicies = new Set(evidenceContents.map((content) => text(content.evidencePolicyDigest)))
+    if (evidencePolicies.size !== 1) {
+      throw sealerError('E2E_RUNTIME_FINALIZATION_MULTI_WRITE_EVIDENCE_POLICY_DRIFT')
+    }
+    const browserEvidence = createArtifact(snapshot, 'browser-evidence', {
+      evidencePolicyDigest: text(evidenceContents[0]!.evidencePolicyDigest),
+      artifacts: evidenceContents.flatMap((content) => records(content.artifacts)),
+      caseCoverage: evidenceContents.flatMap((content) => records(content.caseCoverage)),
+      sanitizerProofs: evidenceContents.flatMap((content) => records(content.sanitizerProofs)),
+      privacyReviews: evidenceContents.flatMap((content) => records(content.privacyReviews)),
+    }, this.dependencies.authority)
+
+    const cleanupContents = maps.map((map) =>
+      record(map.get('cleanup-results')?.content, 'E2E_RUNTIME_FINALIZATION_MULTI_WRITE_CLEANUP_MISSING'))
+    const cleanupResults = createArtifact(snapshot, 'cleanup-results', {
+      leaseResults: cleanupContents.flatMap((content) => records(content.leaseResults)),
+    }, this.dependencies.authority)
+    const replacements = new Map<ArtifactType, ArtifactDocument>([
+      ['browser-preflight', browserPreflight],
+      ['approval-grants', approvalGrants],
+      ['data-leases', dataLeases],
+      ['workflow-events', workflowEvents],
+      ['browser-results', browserResults],
+      ['gateway-audit', gatewayAudit],
+      ['browser-evidence', browserEvidence],
+      ['cleanup-results', cleanupResults],
+    ])
+    const artifacts = base.artifacts.map((entry) => ({
+      ...entry,
+      artifact: replacements.get(entry.artifact.artifactType) ?? entry.artifact,
+    }))
+    const attemptId = `ATTEMPT-MULTI-${digestText(
+      'runtime-multi-case-attempt/v1', canonicalizeJson(materials.map((material) => material.attemptId)),
+    ).slice(7, 39)}`
+    const allPassed = writes.every((write) => write.status === 'passed')
+    return createPersistedRuntimeFinalizationMaterial({
+      runId: snapshot.runId,
+      attemptId,
+      artifacts,
+      execution: {
+        runId: snapshot.runId,
+        attemptId,
+        realEnvironmentResults: writes,
+        injectionResults: [],
+      },
+      gatewayAudit: gatewayContent,
+      evidence: materials.flatMap((material) => material.evidence),
+      cleanup: materials.flatMap((material) => material.cleanup),
+      provenance: mergedProvenance,
+      reportPresentation: {
+        ...base.reportPresentation,
+        injectionBoundary: '多个真实环境 Case 按 resultId 独立保存；本代未包含故障注入结果。',
+        recommendations: allPassed
+          ? ['持续验证全部 Case 的 cleanup 与回归测试。']
+          : ['修复失败 Case 后创建新一代验收。'],
+      },
+      verifierMaterials: {
+        ...base.verifierMaterials,
+        gatewayAudit: materials.flatMap((material) =>
+          materialList(material.verifierMaterials.gatewayAudit)),
+        executionOutcome: materials.flatMap((material) =>
+          materialList(material.verifierMaterials.executionOutcome)),
+        sanitizer: materials.flatMap((material) =>
+          materialList(material.verifierMaterials.sanitizer)),
       },
     })
   }
@@ -1222,6 +1461,22 @@ function records(value: unknown): Array<Record<string, any>> {
 function text(value: unknown, code = 'E2E_RUNTIME_FINALIZATION_FACT_INVALID'): string {
   if (typeof value !== 'string' || value.length === 0) throw sealerError(code)
   return value
+}
+function number(value: unknown, code = 'E2E_RUNTIME_FINALIZATION_FACT_INVALID'): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) throw sealerError(code)
+  return value
+}
+function uniqueCanonical<T>(values: T[]): T[] {
+  const seen = new Set<string>()
+  return values.filter((value) => {
+    const digest = canonicalizeJson(value)
+    if (seen.has(digest)) return false
+    seen.add(digest)
+    return true
+  })
+}
+function materialList(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [value]
 }
 function sealerError(code: string, cause?: unknown): E2EError {
   return new E2EError({ code, category: 'artifact', message: code, retryable: false, cause })

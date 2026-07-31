@@ -196,6 +196,104 @@ describe('RuntimeFinalizationMaterialSealer', () => {
     ])
   })
 
+  test('多 Case material 聚合为独立 result、lease、evidence 与 verifier 集合', async () => {
+    const prepared = writeSnapshot()
+    const sealer = new RuntimeFinalizationMaterialSealer({
+      quarantine: prepared.quarantine as never,
+      authority: prepared.authority as never,
+      runtimeVersion: '0.1.0', contractsVersion: '0.1.0', engineVersion: '0.1.0',
+      playwrightVersion: '1.61.1',
+    })
+    const first = await sealer.seal(prepared.snapshot)
+    const second = structuredClone(first)
+    second.attemptId = 'ATTEMPT-2'
+    second.execution.attemptId = 'ATTEMPT-2'
+    second.provenance.gatewayPolicyDigest = digestText(
+      'write-sealer/multi-case/v1',
+      'gateway-policy-2',
+    )
+    const secondWrite = structuredClone(first.execution.realEnvironmentResults[0]!) as any
+    secondWrite.caseId = 'CASE-2'
+    secondWrite.actionId = 'ACTION-2'
+    second.execution.realEnvironmentResults = [secondWrite]
+    second.evidence = second.evidence.map((item) => ({
+      ...item,
+      evidenceId: 'EVIDENCE-ACTION-2',
+      relativePath: 'evidence/ACTION-2.dom.json',
+      quarantinePath: 'sanitized/EVIDENCE-ACTION-2.json',
+    }))
+    const content = (type: string) => second.artifacts
+      .find(({ artifact }) => artifact.artifactType === type)!.artifact.content as any
+    content('browser-preflight').leaseChecks[0].id = 'LEASE-2'
+    content('data-leases').leases[0].leaseId = 'LEASE-2'
+    const attemptCase = content('workflow-events').attemptCases[0]
+    attemptCase.caseId = 'CASE-2'
+    attemptCase.selection.attemptId = 'ATTEMPT-2'
+    for (const event of attemptCase.events) {
+      event.caseId = 'CASE-2'
+      event.attemptId = 'ATTEMPT-2'
+    }
+    const result = content('browser-results').caseResults[0]
+    result.resultId = deriveExecutionResultId('CASE-2', 'real-environment')
+    result.caseId = 'CASE-2'
+    result.attemptId = 'ATTEMPT-2'
+    result.stepResults[0].actionId = 'ACTION-2'
+    result.stepResults[0].evidenceIds = ['EVIDENCE-ACTION-2']
+    result.evidenceRefs = ['EVIDENCE-ACTION-2']
+    result.cleanupRef = 'LEASE-2'
+    const evidence = content('browser-evidence')
+    evidence.artifacts[0].evidenceId = 'EVIDENCE-ACTION-2'
+    evidence.artifacts[0].resultId = deriveExecutionResultId('CASE-2', 'real-environment')
+    evidence.artifacts[0].caseId = 'CASE-2'
+    evidence.artifacts[0].relativePath = 'evidence/ACTION-2.dom.json'
+    evidence.caseCoverage[0] = { caseId: 'CASE-2', evidenceIds: ['EVIDENCE-ACTION-2'] }
+    evidence.sanitizerProofs[0].evidenceId = 'EVIDENCE-ACTION-2'
+    evidence.privacyReviews[0].evidenceId = 'EVIDENCE-ACTION-2'
+    content('cleanup-results').leaseResults[0].leaseId = 'LEASE-2'
+    const merged = await (sealer as unknown as {
+      mergeWriteMaterials(
+        snapshot: RuntimeRunSnapshot,
+        writes: any[],
+        materials: any[],
+      ): Promise<ReturnType<typeof createPersistedRuntimeFinalizationMaterial>>
+    }).mergeWriteMaterials(prepared.snapshot, [
+      first.execution.realEnvironmentResults[0]!, secondWrite,
+    ], [first, second])
+    const artifact = (type: string) => merged.artifacts
+      .find((item) => item.artifact.artifactType === type)!.artifact.content as any
+
+    expect(merged.execution.realEnvironmentResults).toHaveLength(2)
+    expect(artifact('browser-results').caseResults.map((item: any) => item.resultId)).toEqual([
+      deriveExecutionResultId('CASE-1', 'real-environment'),
+      deriveExecutionResultId('CASE-2', 'real-environment'),
+    ])
+    expect(artifact('gateway-audit').sessions).toHaveLength(2)
+    expect(artifact('data-leases').leases.map((item: any) => item.leaseId)).toEqual(['LEASE-1', 'LEASE-2'])
+    expect(artifact('browser-evidence').artifacts.map((item: any) => item.evidenceId))
+      .toEqual(['EVIDENCE-ACTION-1', 'EVIDENCE-ACTION-2'])
+    expect(merged.verifierMaterials.executionOutcome).toHaveLength(2)
+    expect(merged.artifacts.find(({ artifact: candidate }) =>
+      candidate.artifactType === 'browser-preflight')?.artifact.createdAt).toBe(
+      first.artifacts.find(({ artifact: candidate }) =>
+        candidate.artifactType === 'run-bundle')?.artifact.createdAt,
+    )
+    expect(merged.provenance.gatewayPolicyDigest).toBe(digestText(
+      'runtime-multi-case-gateway-policy-set/v1',
+      canonicalizeJson([
+        {
+          caseId: 'CASE-1',
+          resultId: deriveExecutionResultId('CASE-1', 'real-environment'),
+          gatewayPolicyDigest: first.provenance.gatewayPolicyDigest,
+        },
+        {
+          caseId: 'CASE-2',
+          resultId: deriveExecutionResultId('CASE-2', 'real-environment'),
+          gatewayPolicyDigest: second.provenance.gatewayPolicyDigest,
+        },
+      ]),
+    ))
+  })
+
   test('full-playwright 的阶段与 Oracle checkpoint 签名原始证据可通过正式 finalization', async () => {
     const sessionId = 'SESSION-WRITE-1'
     const rawEvidenceIds = [

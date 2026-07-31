@@ -55,6 +55,24 @@ describe('EncryptedQuarantine encryption boundary', () => {
     })).resolves.toEqual(plaintext)
   })
 
+  test('精确重放同一路径时返回原记录，内容漂移时拒绝覆盖', async () => {
+    const { quarantine } = await fixture()
+    await quarantine.createRun({ runId: 'RUN-1', ttlMs: 60_000, actor: runner })
+    const input = {
+      runId: 'RUN-1',
+      relativePath: 'raw/ATTEMPT-1/screenshot.bin',
+      plaintext: Buffer.from('same-evidence'),
+      actor: runner,
+    }
+    const first = await quarantine.writeEvidence(input)
+
+    await expect(quarantine.writeEvidence(input)).resolves.toEqual(first)
+    await expect(quarantine.writeEvidence({
+      ...input,
+      plaintext: Buffer.from('changed-evidence'),
+    })).rejects.toMatchObject({ code: 'E2E_QUARANTINE_EVIDENCE_EXISTS' })
+  })
+
   test('fails authentication after ciphertext tampering and records the denied access', async () => {
     const { root, audit, quarantine } = await fixture()
     await quarantine.createRun({ runId: 'RUN-1', ttlMs: 60_000, actor: runner })

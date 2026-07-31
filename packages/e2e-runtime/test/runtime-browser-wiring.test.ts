@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from 'vitest'
 import { readFile, rm, writeFile } from 'node:fs/promises'
 import {
   bindRuntimeCapabilityProofToBrowserSelection,
+  assertRuntimeFullPlaywrightProjectionCurrent,
   consumeRpcConnectionCredential,
   createAuditedRuntimeReadAuthority,
   createRuntimeFixedHttpWriteEvidence,
@@ -28,8 +29,14 @@ import {
 import { systemChromeClosureDigest } from '../src/system-chrome.js'
 import { readBrowserSelection, writeBrowserSelection } from '../src/runtime-user-config.js'
 import { createRuntimeTestRoots } from './fixtures.js'
-import { projectRuntimeFullPlaywrightSnapshot } from '../src/runtime-full-playwright-projector.js'
-import { runtimeFullPlaywrightProjectionFixture } from './runtime-full-playwright-projector.test.js'
+import {
+  projectRuntimeFullPlaywrightCases,
+  projectRuntimeFullPlaywrightSnapshot,
+} from '../src/runtime-full-playwright-projector.js'
+import {
+  multiCaseFixture,
+  runtimeFullPlaywrightProjectionFixture,
+} from './runtime-full-playwright-projector.test.js'
 
 describe('Runtime browser production wiring cleanup', () => {
   test('Discovery preflight 将已签 HTML 与静态资源请求完整投影到 Gateway', () => {
@@ -75,6 +82,16 @@ describe('Runtime browser production wiring cleanup', () => {
     })).toBe(runnerResultDigest)
     expect(runtimeFullPlaywrightRunnerResultDigest({ resultDigest: runnerResultDigest }))
       .toBe(runnerResultDigest)
+  })
+
+  test('生产 full-playwright freshness 复验当前 Case，不把多 Case 错判为歧义', () => {
+    const snapshot = multiCaseFixture()
+    const all = projectRuntimeFullPlaywrightCases(snapshot)
+    expect(all).toHaveLength(3)
+    expect(() => assertRuntimeFullPlaywrightProjectionCurrent(snapshot, all[1]!)).not.toThrow()
+    expect(() => assertRuntimeFullPlaywrightProjectionCurrent(snapshot, {
+      ...all[1]!, sourceSetDigest: digestText('test/v1', 'changed'),
+    })).toThrow(/E2E_RUNTIME_FULL_PLAYWRIGHT_PROJECTION_CHANGED/)
   })
 
   test('full-playwright 在生产执行前用冻结 RunBundle 与可信 Preflight 即时签发 freshness', async () => {

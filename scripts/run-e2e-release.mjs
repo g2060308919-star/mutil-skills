@@ -32,6 +32,11 @@ async function run(releaseMode) {
       npm_config_loglevel: 'error',
       npm_config_update_notifier: 'false',
     }
+    await execute('environment/build-clean', process.execPath, [
+      join(sourceRoot, 'node_modules', 'typescript', 'bin', 'tsc'),
+      '-b',
+      '--clean',
+    ], sourceRoot, npmEnvironment)
     await execute('environment/build', 'npm', ['run', 'build'], sourceRoot, npmEnvironment)
     await execute('environment/pack', 'npm', [
       'pack', '--workspaces', '--pack-destination', packs,

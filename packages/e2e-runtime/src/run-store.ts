@@ -9,6 +9,7 @@ import {
   RuntimeResponseEnvelopeSchema,
   type ManualResult,
   type ArtifactDocument,
+  type CompiledPrdRunPlan,
   type WorkflowState,
 } from '@mutil-skills/e2e-contracts'
 import { transitionWorkflow, type PendingWorkflowDecision } from '@mutil-skills/e2e-engine'
@@ -33,6 +34,8 @@ import {
   PendingLocalApprovalConfirmationSchema,
   type PendingLocalApprovalConfirmation,
 } from './local-approval-confirmations.js'
+import type { RuntimeCaseSchedule } from './multi-case-scheduler.js'
+import { parseCaseSchedule } from './multi-case-scheduler.js'
 
 const EMPTY_DIGEST = `sha256:${'0'.repeat(64)}`
 const LEASE_MILLISECONDS = 30_000
@@ -79,8 +82,8 @@ export interface RuntimeTrustedFactCapability {
 }
 
 export interface RuntimeRunSnapshot {
-  /** 1.1–1.5 仅作为显式迁移输入兼容；Store 读取与写回始终规范化为 1.6。 */
-  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0'
+  /** 1.1–1.6 仅作为显式迁移输入兼容；Store 读取与写回始终规范化为 1.7。 */
+  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.7.0'
   runId: string
   assetId: string
   projectIdentityDigest: string
@@ -98,6 +101,10 @@ export interface RuntimeRunSnapshot {
   frozenArtifacts: Record<string, ArtifactDocument>
   /** 仅 Runtime 内部可信执行链产生；外部 submit-candidate 永远不能写入。 */
   trustedExecutionFacts: Record<string, unknown>
+  /** Runtime 从唯一 requirements projection 确定性生成；调用者不能提交摘要或 ID。 */
+  compiledPrdRun?: CompiledPrdRunPlan
+  /** Runtime 持久化的串行多 Case 调度游标。 */
+  caseSchedule?: RuntimeCaseSchedule
   /** 写动作的 durable 状态机；恢复只能 reconcile，绝不能据此重放动作。 */
   writeAttempts?: Record<string, RuntimeWriteAttemptRecord>
   /** real 与 injection 分域持久化；注入结果永远不能覆盖真实环境结果。 */
@@ -114,6 +121,7 @@ export interface RuntimeRunSnapshot {
 export interface RuntimeExecutionAttempt {
   attemptId: string
   requestId: string
+  requestDigest?: string
   fencingToken: number
   revision: number
   startedAt: string
@@ -980,6 +988,7 @@ export class RuntimeRunStore {
       const attempt: RuntimeExecutionAttempt = {
         attemptId: `ATTEMPT-${randomUUID()}`,
         requestId: input.requestId,
+        requestDigest: input.requestDigest,
         fencingToken: claim.fencingToken,
         revision,
         startedAt: input.startedAt,
@@ -1030,8 +1039,20 @@ export class RuntimeRunStore {
         && durableWrite.requestId === input.requestId
         && durableWrite.requestDigest === input.requestDigest
         && durableWrite.executionFencingToken === input.attempt.fencingToken
+      const multiCaseAdvanced = current.caseSchedule?.status === 'terminal'
+        && current.caseSchedule.cases.every((item) =>
+          ['passed', 'failed', 'unable', 'safety-blocked'].includes(item.state))
+        && current.caseSchedule.cases.every((item) => {
+          if (item.attemptId === undefined) return item.state === 'unable'
+          const attempt = current.writeAttempts?.[item.attemptId]
+          return attempt !== undefined
+            && attempt.requestId === input.requestId
+            && attempt.requestDigest === input.requestDigest
+            && attempt.executionFencingToken === input.attempt.fencingToken
+            && (attempt.state === 'outcome-committed' || attempt.state === 'effect-unknown')
+        })
       if (canonicalizeJson(current.executionAttempt) !== canonicalizeJson(input.attempt)
-        || ((current.runRevision ?? 0) !== input.attempt.revision && !writeAdvanced)
+        || ((current.runRevision ?? 0) !== input.attempt.revision && !writeAdvanced && !multiCaseAdvanced)
         || current.workflow.current !== 'running-real') throw runtimeStoreError(
         'E2E_RUNTIME_EXECUTION_ATTEMPT_FENCED', 'execution attempt/revision 已改变，拒绝陈旧结果',
       )
@@ -1061,6 +1082,101 @@ export class RuntimeRunStore {
     const ownerClaim = executionOwnerClaims.get(input.owner)
     if (ownerClaim?.store === this) ownerClaim.released = true
     return response
+  }
+
+  async resumeExecutionAttempt(input: {
+    projectIdentityDigest: string
+    runId: string
+    expectedAttemptId: string
+    lock: RuntimeRunLock
+  }): Promise<{
+    snapshot: RuntimeRunSnapshot
+    attempt: RuntimeExecutionAttempt
+    owner: RuntimeExecutionOwner
+  }> {
+    let ownerClaim!: { key: string; ownerNonce: string; fencingToken: number }
+    const resumed = await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      const raw = store.runs[key]
+      if (raw === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+      const current = migrateRuntimeRunSnapshot(raw)
+      const attempt = current.executionAttempt
+      if (current.workflow.current !== 'running-real' || attempt === undefined
+        || attempt.attemptId !== input.expectedAttemptId) throw runtimeStoreError(
+        'E2E_RUNTIME_EXECUTION_RESUME_MISMATCH',
+        '只允许恢复当前完全匹配的 running-real execution attempt',
+      )
+      const ownerKey = executionOwnerKey(key)
+      const existingOwner = store.leases[ownerKey]
+      const now = this.#now()
+      if (existingOwner !== undefined && Date.parse(existingOwner.expiresAt) > now.getTime()) {
+        throw runtimeStoreError('E2E_RUNTIME_EXECUTION_OWNER_ACTIVE', 'Run 仍有活跃 execution owner')
+      }
+      ownerClaim = {
+        key: ownerKey,
+        ownerNonce: `${this.#processNonce}:execution-resume:${randomUUID()}`,
+        fencingToken: (existingOwner?.fencingToken ?? 0) + 1,
+      }
+      store.leases[ownerKey] = {
+        ownerNonce: ownerClaim.ownerNonce,
+        fencingToken: ownerClaim.fencingToken,
+        expiresAt: new Date(now.getTime() + this.#leaseMilliseconds).toISOString(),
+      }
+      appendRunSnapshotJournal(store, key, 'trusted-execution-resumed', attempt.requestId)
+      return { snapshot: structuredClone(current), attempt: structuredClone(attempt) }
+    })
+    const owner = Object.freeze({
+      heartbeatIntervalMs: Math.max(10, Math.floor(this.#leaseMilliseconds / 3)),
+      renew: async () => await this.#renewExecutionOwner(owner),
+      release: async () => await this.#releaseExecutionOwner(owner),
+    }) as RuntimeExecutionOwner
+    executionOwnerClaims.set(owner, { store: this, ...ownerClaim, released: false })
+    return { ...resumed, owner }
+  }
+
+  async checkpointCaseSchedule(input: {
+    projectIdentityDigest: string
+    runId: string
+    attempt: RuntimeExecutionAttempt
+    owner: RuntimeExecutionOwner
+    schedule: RuntimeCaseSchedule
+    eventKind: 'multi-case-started' | 'multi-case-completed'
+    updatedAt: string
+    update?(snapshot: RuntimeRunSnapshot): RuntimeRunSnapshot
+    lock: RuntimeRunLock
+  }): Promise<RuntimeRunSnapshot> {
+    return await this.#mutate((store) => {
+      verifyStoreSnapshot(store)
+      const key = runKey(input.projectIdentityDigest, input.runId)
+      this.#requireCurrentLease(store, key, input.lock)
+      this.#requireExecutionOwner(store, executionOwnerKey(key), input.owner)
+      const raw = store.runs[key]
+      if (raw === undefined) throw runtimeStoreError('E2E_RUNTIME_RUN_NOT_FOUND', 'Run 不存在')
+      const current = migrateRuntimeRunSnapshot(raw)
+      if (canonicalizeJson(current.executionAttempt) !== canonicalizeJson(input.attempt)
+        || current.workflow.current !== 'running-real') throw runtimeStoreError(
+        'E2E_RUNTIME_EXECUTION_ATTEMPT_FENCED',
+        'Case schedule checkpoint 未绑定当前 running execution attempt',
+      )
+      const schedule = parseCaseSchedule(input.schedule)
+      if (current.compiledPrdRun !== undefined
+        && schedule.compilerDigest !== current.compiledPrdRun.compilerDigest) throw runtimeStoreError(
+        'E2E_RUNTIME_CASE_SCHEDULE_BINDING_INVALID',
+        'Case schedule 与编译计划摘要不一致',
+      )
+      const updated = input.update?.(current) ?? current
+      const persisted = migrateRuntimeRunSnapshot({
+        ...updated,
+        runRevision: (current.runRevision ?? 0) + 1,
+        caseSchedule: schedule,
+        updatedAt: input.updatedAt,
+      })
+      store.runs[key] = persisted
+      appendRunSnapshotJournal(store, key, input.eventKind, input.attempt.requestId)
+      return structuredClone(persisted)
+    })
   }
 
   async authorizeTrustedFactWrite(
@@ -1452,7 +1568,7 @@ export class RuntimeRunStore {
         const snapshot = parseStoreSnapshot(serialized)
         let changed = false
         for (const [key, raw] of Object.entries(snapshot.runs)) {
-          if (isPlainRecord(raw) && raw.schemaVersion === '1.6.0') continue
+          if (isPlainRecord(raw) && raw.schemaVersion === '1.7.0') continue
           const rows = snapshot.journals[key]
           if (!Array.isArray(rows) || rows.length === 0) {
             throw journalIntegrityError('legacy Run 缺少可验证 journal，拒绝迁移')

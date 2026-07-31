@@ -3,6 +3,7 @@ import {
   ArtifactSchemaRegistry,
   RuntimeDoctorReportSchema,
   RuntimeCreateRunResultSchema,
+  RuntimeCompilePrdRunResultSchema,
   RuntimePreparePrdUnderstandingResultSchema,
   RuntimeResponseEnvelopeSchema,
   RuntimeStatusResultSchema,
@@ -60,6 +61,7 @@ import {
   assertRuntimeReadSnapshotReady,
   executeRuntimeInjection,
   executeRuntimeFullPlaywright,
+  executeScheduledRuntimeFullPlaywrightCases,
   executeRuntimeRead,
   executeRuntimeWrite,
   type RuntimeInjectionExecutorCapability,
@@ -112,6 +114,9 @@ import {
   assertPrdUnderstandingLinkedCandidate,
   preparePrdUnderstandingProjection,
 } from './prd-understanding-validator.js'
+import { compilePrdRun } from './prd-run-compiler.js'
+import { createCaseSchedule } from './multi-case-scheduler.js'
+import type { StandaloneEvidencePublisher } from './standalone-evidence-publisher.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -149,6 +154,7 @@ export interface RuntimeHostDependencies {
   preflightExecutor?: RuntimePreflightCapability
   writeProduction?: RuntimeWriteProductionCapability
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
+  standaloneEvidencePublisher?: Pick<StandaloneEvidencePublisher, 'publishRuntimeState'>
   generationFinalizer?: RuntimeGenerationFinalizationCapability
   finalizationMaterialSealer?: RuntimeFinalizationMaterialSealerCapability
   evidenceQuarantine?: RuntimeEvidenceQuarantineCapability
@@ -181,6 +187,7 @@ export class E2ERuntimeHost {
       if (reservation.kind === 'pending'
         && request.command !== 'open-approval'
         && request.command !== 'confirm-approval'
+        && request.command !== 'compile-prd-run'
         && request.command !== 'submit-candidate'
         && request.command !== 'run-preflight'
         && request.command !== 'execute-run'
@@ -206,6 +213,9 @@ export class E2ERuntimeHost {
       if (request.command === 'create-run') return await this.createRun(request, requestDigest)
       if (request.command === 'prepare-prd-understanding') {
         return await this.preparePrdUnderstanding(request, requestDigest)
+      }
+      if (request.command === 'compile-prd-run') {
+        return await this.compilePrdRun(request, requestDigest)
       }
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
@@ -349,7 +359,7 @@ export class E2ERuntimeHost {
     }).prdRevision
     const timestamp = this.dependencies.now().toISOString()
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.6.0',
+      schemaVersion: '1.7.0',
       runId,
       assetId: request.payload.assetId,
       projectIdentityDigest: identity.digest,
@@ -489,6 +499,95 @@ export class E2ERuntimeHost {
     })
   }
 
+  private async compilePrdRun(
+    request: Extract<RuntimeRequestEnvelope, { command: 'compile-prd-run' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      if (snapshot.workflow.current !== 'created') throw runtimeHostError(
+        'E2E_RUNTIME_PRD_RUN_COMPILE_STATE_MISMATCH',
+        'input',
+        'PRD Run 只能在 created 状态且 requirements projection 已冻结后编译',
+      )
+      const prepared = PrdUnderstandingPreparedFactSchema.safeParse(
+        snapshot.trustedExecutionFacts['prd-understanding-prepared'],
+      )
+      if (!prepared.success) throw runtimeHostError(
+        'E2E_RUNTIME_PRD_UNDERSTANDING_NOT_PREPARED',
+        'input',
+        '缺少 Runtime 冻结的唯一 requirements projection',
+      )
+      let plan: ReturnType<typeof compilePrdRun>
+      try {
+        plan = compilePrdRun({
+          understanding: prepared.data.projection,
+          design: request.payload.design,
+        })
+      } catch (cause) {
+        const code = safeExecutionCauseCode(cause)
+        if (code?.startsWith('E2E_RUNTIME_PRD_RUN_') === true) {
+          throw runtimeHostError(code, 'input', '声明式设计未与 requirements contract 完整闭合')
+        }
+        throw cause
+      }
+      if (snapshot.compiledPrdRun !== undefined
+        && canonicalizeJson(snapshot.compiledPrdRun) !== canonicalizeJson(plan)) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_PRD_RUN_ALREADY_COMPILED',
+          'input',
+          '同一 Run 已绑定不同声明式设计，禁止替换编译计划',
+        )
+      }
+      const persistedPlan = snapshot.compiledPrdRun ?? plan
+      const schedule = snapshot.caseSchedule ?? createCaseSchedule(
+        persistedPlan,
+        this.dependencies.now().toISOString(),
+      )
+      if (schedule.compilerDigest !== persistedPlan.compilerDigest) throw runtimeHostError(
+        'E2E_RUNTIME_CASE_SCHEDULE_BINDING_INVALID',
+        'artifact',
+        '持久 Case 调度与编译计划摘要不一致',
+      )
+      const response = this.successResponse(request.requestId, RuntimeCompilePrdRunResultSchema.parse({
+        runId: snapshot.runId,
+        compilerDigest: persistedPlan.compilerDigest,
+        caseCount: persistedPlan.cases.length,
+        review: {
+          contractProjectionDigest: persistedPlan.contractProjectionDigest,
+          caseIds: persistedPlan.cases.map((testCase) => testCase.caseId),
+          mappedAcceptanceCount: persistedPlan.cases.reduce(
+            (total, testCase) => total + testCase.oracles.length,
+            0,
+          ),
+        },
+        unresolvedItems: [],
+        nextRequiredDecision: 'scope',
+      }))
+      const outcome = await this.dependencies.runStore.updateRunOutcome(
+        identity.digest,
+        snapshot.runId,
+        request.requestId,
+        requestDigest,
+        (current) => ({
+          snapshot: {
+            ...current,
+            compiledPrdRun: persistedPlan,
+            caseSchedule: schedule,
+            updatedAt: this.dependencies.now().toISOString(),
+          },
+          response,
+        }),
+        'prd-run-compiled',
+        lock,
+      )
+      return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
+  }
+
   private async renderReport(
     request: Extract<RuntimeRequestEnvelope, { command: 'render-report' }>,
     requestDigest: string,
@@ -505,6 +604,36 @@ export class E2ERuntimeHost {
         expectedGenerationId: snapshot.runId,
         expectedProjectIdentityDigest: identity.digest,
       })
+      let standaloneReportRoot: string | undefined
+      if (runtimeUsesFullPlaywright(snapshot)) {
+        const standalone = this.dependencies.standaloneEvidencePublisher
+        if (standalone === undefined) {
+          throw blockedError('E2E_RUNTIME_STANDALONE_EVIDENCE_NOT_READY')
+        }
+        const cases = Object.values(snapshot.executionResults?.realEnvironment ?? {}).map((result) => {
+          const attempts = Object.values(snapshot.writeAttempts ?? {})
+            .filter((attempt) => attempt.actionId === result.actionId)
+          if (attempts.length !== 1) throw runtimeHostError(
+            'E2E_RUNTIME_EVIDENCE_ATTEMPT_BINDING_INVALID',
+            'artifact',
+            '执行结果必须唯一绑定一个持久 WriteAttempt 才能发布原始证据',
+          )
+          return {
+            caseId: result.caseId,
+            actionId: result.actionId,
+            attemptId: attempts[0]!.attemptId,
+          }
+        })
+        standaloneReportRoot = await standalone.publishRuntimeState({
+          assetId: snapshot.assetId,
+          runId: snapshot.runId,
+          generationDigest: publication.active.generationDigest,
+          ...(request.payload.outputRoot === undefined
+            ? {} : { outputRoot: request.payload.outputRoot }),
+          rendered: publication.rendered,
+          cases,
+        })
+      }
       const response = this.successResponse(request.requestId, {
         runId: snapshot.runId,
         assetId: snapshot.assetId,
@@ -512,6 +641,7 @@ export class E2ERuntimeHost {
         generationDigest: publication.active.generationDigest,
         terminalVerdict: publication.active.terminalVerdict,
         report: publication.rendered,
+        ...(standaloneReportRoot === undefined ? {} : { standaloneReportRoot }),
       })
       const outcome = await this.dependencies.runStore.readRunOutcome(
         identity.digest,
@@ -1595,6 +1725,17 @@ export class E2ERuntimeHost {
     requestWasPending: boolean,
   ): Promise<RuntimeResponseEnvelope> {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    const preview = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+    if (preview !== undefined && preview.workflow.current === 'compiled'
+      && runtimeUsesFullPlaywright(preview)
+      && (preview.caseSchedule?.cases.length ?? 0) > 1) {
+      return await this.executeMultiCaseFullPlaywrightRun(
+        request,
+        requestDigest,
+        requestWasPending,
+        identity.digest,
+      )
+    }
     const startLock = await this.dependencies.runStore.acquireRunLock(identity.digest, request.payload.runId)
     let started: Awaited<ReturnType<RuntimeRunStore['beginExecutionAttempt']>> | undefined
     let executionMode: 'read' | 'write' | 'injection' | 'full-playwright' | undefined
@@ -1881,7 +2022,8 @@ export class E2ERuntimeHost {
               ...snapshot.trustedExecutionFacts,
               ...(injectionExecution !== undefined && quarantinedEvidence !== undefined ? {
                 'quarantined-evidence': mergeDomainTrustedFact(
-                  snapshot, 'quarantined-evidence', injectionExecution.resultId, quarantinedEvidence,
+                  snapshot, 'quarantined-evidence', 'gatewayInjection',
+                  injectionExecution.resultId, quarantinedEvidence,
                 ),
               } : quarantinedEvidence === undefined ? {} : {
                 'quarantined-evidence': quarantinedEvidence,
@@ -1894,7 +2036,8 @@ export class E2ERuntimeHost {
               }),
               ...(persistedInjectionExecution?.finalizationFacts === undefined ? {} : {
                 'finalization-execution-facts': mergeDomainTrustedFact(
-                  snapshot, 'finalization-execution-facts', persistedInjectionExecution.resultId,
+                  snapshot, 'finalization-execution-facts', 'gatewayInjection',
+                  persistedInjectionExecution.resultId,
                   persistedInjectionExecution.finalizationFacts,
                 ),
               }),
@@ -1929,6 +2072,384 @@ export class E2ERuntimeHost {
       })))
   }
 
+  private async executeMultiCaseFullPlaywrightRun(
+    request: Extract<RuntimeRequestEnvelope, { command: 'execute-run' | 'resume-run' }>,
+    requestDigest: string,
+    requestWasPending: boolean,
+    projectIdentityDigest: string,
+    resumeAttemptId?: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    if (this.dependencies.fullPlaywrightExecutor === undefined) {
+      throw blockedError('E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_NOT_READY')
+    }
+    const startLock = await this.dependencies.runStore.acquireRunLock(
+      projectIdentityDigest,
+      request.payload.runId,
+    )
+    let started: Awaited<ReturnType<RuntimeRunStore['beginExecutionAttempt']>> | undefined
+    try {
+      const current = await this.dependencies.runStore.getRun(
+        projectIdentityDigest,
+        request.payload.runId,
+      )
+      if (current === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(current)
+      if (resumeAttemptId !== undefined) {
+        const scheduleCase = current.caseSchedule?.cases.find((item) =>
+          item.state === 'running' && item.attemptId === resumeAttemptId)
+        if (current.workflow.current !== 'running-real'
+          || current.executionAttempt === undefined
+          || scheduleCase === undefined
+          || current.caseSchedule?.currentCaseId !== scheduleCase.caseId) {
+          throw runtimeHostError(
+            'E2E_RUNTIME_CASE_SCHEDULE_RECOVERY_MISMATCH',
+            'safety',
+            'resume-run 未绑定当前 running Case 与 execution attempt',
+          )
+        }
+        started = await this.dependencies.runStore.resumeExecutionAttempt({
+          projectIdentityDigest,
+          runId: current.runId,
+          expectedAttemptId: current.executionAttempt.attemptId,
+          lock: startLock,
+        })
+      } else if (requestWasPending && current.workflow.current === 'running-real'
+        && current.executionAttempt?.requestId === request.requestId) throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTION_RECOVERY_REQUIRED',
+        'safety',
+        '多 Case execute-run 已持久化 running attempt；必须显式 resume-run，禁止重放',
+      )
+      if (resumeAttemptId === undefined && (current.workflow.current !== 'compiled'
+        || current.caseSchedule === undefined
+        || current.compiledPrdRun === undefined)) throw runtimeHostError(
+        'E2E_RUNTIME_CASE_SCHEDULE_NOT_READY',
+        'artifact',
+        '多 Case 执行需要 Runtime 编译计划和持久 schedule',
+      )
+      if (resumeAttemptId === undefined) started = await this.dependencies.runStore.beginExecutionAttempt({
+        projectIdentityDigest,
+        runId: current.runId,
+        requestId: request.requestId,
+        requestDigest,
+        startedAt: this.dependencies.now().toISOString(),
+        lock: startLock,
+        toRunning: (snapshot) => ({
+          ...snapshot,
+          workflow: transitionWorkflow({
+            state: snapshot.workflow,
+            next: 'running-real',
+            reason: 'trusted multi-case full-playwright execution started',
+            timestamp: this.dependencies.now().toISOString(),
+            engineVersion: this.dependencies.installation.version,
+          }).state,
+          updatedAt: this.dependencies.now().toISOString(),
+        }),
+      })
+    } finally {
+      await startLock.close()
+    }
+    if (started === undefined) throw runtimeHostError(
+      'E2E_RUNTIME_EXECUTION_START_MISSING',
+      'internal',
+      '多 Case execution attempt 启动结果缺失',
+    )
+    const executionRequestId = started.attempt.requestId
+    const executionRequestDigest = started.attempt.requestDigest
+    if (executionRequestDigest === undefined) throw runtimeHostError(
+      'E2E_RUNTIME_EXECUTION_REQUEST_DIGEST_MISSING',
+      'safety',
+      '旧 execution attempt 缺少 requestDigest，不能自动恢复多 Case',
+    )
+    const attemptIds = started.snapshot.caseSchedule!.cases.map((item) =>
+      item.attemptId ?? `ATTEMPT-${randomUUID()}`)
+    let result: Awaited<ReturnType<typeof executeScheduledRuntimeFullPlaywrightCases>>
+    try {
+      result = await executeWithOwnerHeartbeat(started.owner, async () =>
+        await executeScheduledRuntimeFullPlaywrightCases(
+          this.dependencies.fullPlaywrightExecutor!,
+          {
+            snapshot: started!.snapshot,
+            schedule: started!.snapshot.caseSchedule!,
+            attemptIds,
+            ...(resumeAttemptId === undefined ? {} : { resumeAttemptId }),
+            now: () => this.dependencies.now().toISOString(),
+            persistSchedule: async (schedule) => {
+              const lock = await this.dependencies.runStore.acquireRunLock(
+                projectIdentityDigest,
+                request.payload.runId,
+              )
+              try {
+                await this.dependencies.runStore.checkpointCaseSchedule({
+                  projectIdentityDigest,
+                  runId: request.payload.runId,
+                  attempt: started!.attempt,
+                  owner: started!.owner,
+                  schedule,
+                  eventKind: 'multi-case-started',
+                  updatedAt: this.dependencies.now().toISOString(),
+                  lock,
+                })
+              } finally {
+                await lock.close()
+              }
+            },
+            prepareCase: async ({ projection, attemptId }) => {
+              const lock = await this.dependencies.runStore.acquireRunLock(
+                projectIdentityDigest,
+                request.payload.runId,
+              )
+              try {
+                await this.dependencies.runStore.prepareWriteAttempt({
+                  projectIdentityDigest,
+                  runId: request.payload.runId,
+                  requestId: executionRequestId,
+                  requestDigest: executionRequestDigest,
+                  attemptId,
+                  actionId: projection.actionId,
+                  lease: {
+                    leaseId: projection.capability.dataLeaseId,
+                    fencingToken: projection.capability.fencingToken,
+                    targetFingerprintDigest: projection.targetFingerprint,
+                  },
+                  executionFencingToken: started!.attempt.fencingToken,
+                  ownerMarker: createRuntimeOwnedResourceMarker({
+                    runtimeInstallationDigest: started!.snapshot.runtimeInstallationDigest,
+                    projectIdentityDigest,
+                    runId: request.payload.runId,
+                    attemptId,
+                    ownerNonce: `OWNER-${randomUUID()}`,
+                  }),
+                  preparedAt: this.dependencies.now().toISOString(),
+                  lock,
+                })
+                const snapshot = await this.dependencies.runStore.getRun(
+                  projectIdentityDigest,
+                  request.payload.runId,
+                )
+                if (snapshot === undefined) throw runtimeHostError(
+                  'E2E_RUNTIME_RUN_NOT_FOUND',
+                  'input',
+                  'Case WriteAttempt 准备后 Run 不存在',
+                )
+                return snapshot
+              } finally {
+                await lock.close()
+              }
+            },
+            completeCase: async ({ schedule, attemptId, output }) => {
+              const persistedOutput = omitEphemeralWriteEvidence(output)
+              let quarantined: RuntimeQuarantinedEvidenceFacts | undefined
+              if (output.evidence !== undefined) {
+                if (this.dependencies.evidenceQuarantine === undefined) {
+                  throw blockedError('E2E_RUNTIME_EVIDENCE_QUARANTINE_NOT_READY')
+                }
+                try {
+                  quarantined = await quarantineRuntimeEvidence(
+                    this.dependencies.evidenceQuarantine,
+                    {
+                      runId: request.payload.runId,
+                      attemptId,
+                      evidence: output.evidence,
+                    },
+                  )
+                } finally {
+                  output.evidence.screenshot.fill(0)
+                  output.evidence.dom.fill(0)
+                }
+              }
+              const lock = await this.dependencies.runStore.acquireRunLock(
+                projectIdentityDigest,
+                request.payload.runId,
+              )
+              try {
+                let record = await this.dependencies.runStore.getWriteAttempt(
+                  projectIdentityDigest,
+                  request.payload.runId,
+                  attemptId,
+                )
+                if (record === undefined) throw runtimeHostError(
+                  'E2E_RUNTIME_WRITE_ATTEMPT_NOT_FOUND',
+                  'safety',
+                  '多 Case executor 返回后缺少持久 WriteAttempt',
+                )
+                if (record.state === 'prepared') {
+                  record = await this.dependencies.runStore.observeWriteReservation({
+                    projectIdentityDigest,
+                    runId: request.payload.runId,
+                    attemptId,
+                    reservationId: output.gatewayCommit.reservationId,
+                    observedAt: this.dependencies.now().toISOString(),
+                    expectedRecordDigest: record.recordDigest,
+                    lock,
+                  })
+                }
+                if (record.state === 'reservation-observed') {
+                  record = await this.dependencies.runStore.prepareWriteOutcome({
+                    projectIdentityDigest,
+                    runId: request.payload.runId,
+                    attemptId,
+                    outcomeDigest: output.gatewayCommit.outcomeReceiptDigest,
+                    receiptDigest: output.gatewayCommit.reservationReceiptDigest,
+                    preparedAt: this.dependencies.now().toISOString(),
+                    lock,
+                  })
+                }
+                if (record.state === 'outcome-prepared') {
+                  await this.dependencies.runStore.commitWriteOutcome({
+                    projectIdentityDigest,
+                    runId: request.payload.runId,
+                    attemptId,
+                    outcomeDigest: output.gatewayCommit.outcomeReceiptDigest,
+                    receiptDigest: output.gatewayCommit.reservationReceiptDigest,
+                    committedAt: this.dependencies.now().toISOString(),
+                    expectedRecordDigest: record.recordDigest,
+                    lock,
+                  })
+                }
+                await this.dependencies.runStore.checkpointCaseSchedule({
+                  projectIdentityDigest,
+                  runId: request.payload.runId,
+                  attempt: started!.attempt,
+                  owner: started!.owner,
+                  schedule,
+                  eventKind: 'multi-case-completed',
+                  updatedAt: this.dependencies.now().toISOString(),
+                  update: (snapshot) => ({
+                    ...snapshot,
+                    executionResults: {
+                      readEnvironment: { ...(snapshot.executionResults?.readEnvironment ?? {}) },
+                      realEnvironment: {
+                        ...(snapshot.executionResults?.realEnvironment ?? {}),
+                        [persistedOutput.actionId]: persistedOutput,
+                      },
+                      gatewayInjection: { ...(snapshot.executionResults?.gatewayInjection ?? {}) },
+                    },
+                    trustedExecutionFacts: {
+                      ...snapshot.trustedExecutionFacts,
+                      ...(quarantined === undefined ? {} : {
+                        'quarantined-evidence': mergeDomainTrustedFact(
+                          snapshot,
+                          'quarantined-evidence',
+                          'realEnvironment',
+                          deriveExecutionResultId(persistedOutput.caseId, 'real-environment'),
+                          quarantined,
+                        ),
+                      }),
+                      ...(persistedOutput.finalizationFacts === undefined ? {} : {
+                        'finalization-execution-facts': mergeDomainTrustedFact(
+                          snapshot,
+                          'finalization-execution-facts',
+                          'realEnvironment',
+                          deriveExecutionResultId(persistedOutput.caseId, 'real-environment'),
+                          persistedOutput.finalizationFacts,
+                        ),
+                      }),
+                    },
+                  }),
+                  lock,
+                })
+              } finally {
+                await lock.close()
+              }
+            },
+          },
+        ))
+    } catch (cause) {
+      const causeCode =
+        safeExecutionCauseCode(cause) ?? 'E2E_RUNTIME_EXECUTION_CAUSE_UNAVAILABLE'
+      let releaseCause: unknown
+      try {
+        await started.owner.release()
+      } catch (error) {
+        releaseCause = error
+      }
+      throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTION_RECOVERY_REQUIRED',
+        'safety',
+        `多 Case 执行未闭合（${causeCode}）；已持久化 cursor，必须显式恢复且不得重放 terminal Case`,
+        releaseCause === undefined ? cause : new AggregateError([cause, releaseCause]),
+      )
+    }
+    if (result.schedule.status !== 'terminal') {
+      let releaseCause: unknown
+      try {
+        await started.owner.release()
+      } catch (error) {
+        releaseCause = error
+      }
+      throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTION_RECOVERY_REQUIRED',
+        'safety',
+        '多 Case 执行停在 Cleanup/恢复边，禁止进入最终化',
+        releaseCause,
+      )
+    }
+    const next = result.schedule.cases.some((testCase) => testCase.state === 'safety-blocked')
+      ? 'safety-blocked'
+      : result.schedule.cases.some((testCase) => testCase.state === 'unable')
+        ? 'environment-blocked'
+        : 'diagnosing'
+    const executionStatus = result.schedule.cases.every((testCase) => testCase.state === 'passed')
+      ? 'passed'
+      : result.schedule.cases.some((testCase) => testCase.state === 'safety-blocked')
+        ? 'safety-blocked'
+        : result.schedule.cases.some((testCase) => testCase.state === 'unable')
+          ? 'environment-blocked'
+          : 'failed'
+    const finalWorkflow = transitionWorkflow({
+      state: started.snapshot.workflow,
+      next,
+      reason: 'trusted multi-case full-playwright execution completed',
+      timestamp: this.dependencies.now().toISOString(),
+      engineVersion: this.dependencies.installation.version,
+    }).state
+    const response = this.successResponse(executionRequestId, {
+      runId: request.payload.runId,
+      status: executionStatus,
+      cases: result.outputs.map((output) => omitEphemeralWriteEvidence(output)),
+      schedule: result.schedule,
+      loadedGeneratedSourceFiles: [],
+      workflow: finalWorkflow,
+    })
+    const lock = await this.dependencies.runStore.acquireRunLock(
+      projectIdentityDigest,
+      request.payload.runId,
+    )
+    try {
+      const completed = RuntimeResponseEnvelopeSchema.parse(
+        await this.dependencies.runStore.completeExecutionAttempt({
+          projectIdentityDigest,
+          runId: request.payload.runId,
+          requestId: executionRequestId,
+          requestDigest: executionRequestDigest,
+          attempt: started.attempt,
+          owner: started.owner,
+          response,
+          lock,
+          complete: (snapshot) => ({
+            ...snapshot,
+            workflow: finalWorkflow,
+            updatedAt: this.dependencies.now().toISOString(),
+          }),
+        }),
+      )
+      if (resumeAttemptId === undefined) return completed
+      return await this.completeGlobalResponse(
+        request.requestId,
+        requestDigest,
+        this.successResponse(request.requestId, {
+          runId: request.payload.runId,
+          recoveredAttemptId: resumeAttemptId,
+          status: executionStatus,
+          cases: result.outputs.map((output) => omitEphemeralWriteEvidence(output)),
+          schedule: result.schedule,
+        }),
+      )
+    } finally {
+      await lock.close()
+    }
+  }
+
   private async resumeRun(
     request: Extract<RuntimeRequestEnvelope, { command: 'resume-run' }>,
     requestDigest: string,
@@ -1942,12 +2463,23 @@ export class E2ERuntimeHost {
       let recoverFullPlaywright = false
       try { recoverFullPlaywright = snapshot !== undefined
         && runtimeExecutionMode(snapshot) === 'full-playwright' } catch { /* legacy recovery */ }
+      const recoverMultiCase = recoverFullPlaywright
+        && (snapshot?.caseSchedule?.cases.length ?? 0) > 1
       if (recoverFullPlaywright && this.dependencies.fullPlaywrightExecutor === undefined) {
         throw blockedError('E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_NOT_READY')
       }
       const result = await recoverRuntimeProductionWrite(production, { projectIdentityDigest: identity.digest,
         runId: request.payload.runId, attemptId: decision.expectedAttemptId })
-      const fullPlaywrightTerminal = recoverFullPlaywright
+      if (recoverMultiCase && result.status === 'recovered') {
+        return await this.executeMultiCaseFullPlaywrightRun(
+          request,
+          requestDigest,
+          false,
+          identity.digest,
+          decision.expectedAttemptId,
+        )
+      }
+      const fullPlaywrightTerminal = recoverFullPlaywright && !recoverMultiCase
         ? await executeRuntimeFullPlaywright(this.dependencies.fullPlaywrightExecutor!, {
           snapshot: snapshot!, attemptId: decision.expectedAttemptId,
         }) : undefined
@@ -2177,6 +2709,12 @@ function runtimeExecutionMode(snapshot: RuntimeRunSnapshot): 'read' | 'write' | 
     'E2E_RUNTIME_ACTION_SET_UNSUPPORTED', 'safety', 'execute-run 只接受唯一冻结 action',
   )
   return (actions[0] as Record<string, unknown>).effect === 'reversible-write' ? 'write' : 'read'
+}
+
+function runtimeUsesFullPlaywright(snapshot: RuntimeRunSnapshot): boolean {
+  const content = snapshot.frozenArtifacts['execution-contract']?.content
+  return typeof content === 'object' && content !== null && !Array.isArray(content)
+    && (content as Record<string, unknown>).executionProfile === 'full-playwright'
 }
 
 function runtimeSingleActionBinding(snapshot: RuntimeRunSnapshot): { caseId: string; actionId: string } {
@@ -2467,6 +3005,8 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
   )
   const intent = current === 'created' && !prepared.success
     ? { command: 'prepare-prd-understanding' as const, missing: ['prd-understanding-prepared'] }
+    : current === 'created' && snapshot.compiledPrdRun === undefined
+      ? { command: 'compile-prd-run' as const, missing: ['declarative-prd-run-design'] }
     : STATUS_COMMAND_BY_STATE[current]
   const missing = current === 'diagnosing'
     ? runtimeFinalizationMissingInputs(snapshot, now)
@@ -2484,6 +3024,10 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
       ...(contract.success ? { 'prd-understanding-contract': contract.data.sourceDigest } : {}),
       ...(prepared.success
         ? { 'prd-understanding-projection': prepared.data.projection.projectionDigest } : {}),
+      ...(snapshot.compiledPrdRun === undefined
+        ? {} : { 'compiled-prd-run': snapshot.compiledPrdRun.compilerDigest }),
+      ...(snapshot.caseSchedule === undefined
+        ? {} : { 'case-schedule': snapshot.caseSchedule.scheduleDigest }),
       ...snapshot.artifactDigests,
     },
     minimumMissingInput: missing,
@@ -2507,7 +3051,9 @@ function runtimeFinalizationMissingInputs(snapshot: RuntimeRunSnapshot, now: Dat
   const reads = Object.values(snapshot.executionResults?.readEnvironment ?? {})
   const writes = Object.values(snapshot.executionResults?.realEnvironment ?? {})
   const injections = Object.values(snapshot.executionResults?.gatewayInjection ?? {})
-  if (reads.length + writes.length !== 1) missing.push('exactly-one-real-execution-result')
+  if (reads.length > 0 && writes.length > 0) missing.push('mixed-real-execution-result-domains')
+  if (reads.length === 0 && writes.length === 0) missing.push('real-execution-result')
+  if (reads.length > 1) missing.push('exactly-one-read-execution-result')
   if (reads.length === 1) {
     if (injections.length > 0) missing.push('write-baseline-for-injection')
     for (const fact of [
@@ -2517,12 +3063,19 @@ function runtimeFinalizationMissingInputs(snapshot: RuntimeRunSnapshot, now: Dat
       if (snapshot.trustedExecutionFacts[fact] === undefined) missing.push(`trusted-fact:${fact}`)
     }
   }
-  if (writes.length === 1) {
-    const write = runtimeRecord(writes[0])
-    if (write?.finalizationFacts === undefined) missing.push('trusted-fact:write-finalization-facts')
-    const cleanup = runtimeRecord(write?.cleanup)
-    if (cleanup === undefined || !['verified-clean', 'failed', 'unknown'].includes(String(cleanup.status))) {
-      missing.push('write-cleanup-terminal-result')
+  if (writes.length > 0) {
+    for (const candidate of writes) {
+      const write = runtimeRecord(candidate)
+      if (write?.finalizationFacts === undefined) missing.push('trusted-fact:write-finalization-facts')
+      const cleanup = runtimeRecord(write?.cleanup)
+      if (cleanup === undefined || !['verified-clean', 'failed', 'unknown'].includes(String(cleanup.status))) {
+        missing.push('write-cleanup-terminal-result')
+      }
+    }
+    if (snapshot.caseSchedule !== undefined
+      && (snapshot.caseSchedule.status !== 'terminal'
+        || snapshot.caseSchedule.cases.filter((item) => item.attemptId !== undefined).length !== writes.length)) {
+      missing.push('multi-case-schedule-terminal-binding')
     }
   }
   if (injections.length > 1) missing.push('exactly-one-injection-result')
@@ -2740,8 +3293,9 @@ function omitEphemeralInjectionEvidence(
 function mergeDomainTrustedFact(
   snapshot: RuntimeRunSnapshot,
   key: 'finalization-execution-facts' | 'quarantined-evidence',
-  injectionResultId: string,
-  injectionFact: unknown,
+  domain: 'realEnvironment' | 'gatewayInjection',
+  resultId: string,
+  fact: unknown,
 ): Record<string, unknown> {
   const existing = snapshot.trustedExecutionFacts[key]
   const container = isDomainTrustedFact(existing)
@@ -2758,7 +3312,7 @@ function mergeDomainTrustedFact(
     container.realEnvironment[resultId] = key === 'finalization-execution-facts'
       ? real.finalizationFacts ?? existing : existing
   }
-  container.gatewayInjection[injectionResultId] = structuredClone(injectionFact)
+  container[domain][resultId] = structuredClone(fact)
   return container
 }
 
