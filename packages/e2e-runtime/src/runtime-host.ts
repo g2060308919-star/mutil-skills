@@ -115,6 +115,7 @@ import {
 } from './prd-understanding-validator.js'
 import { compilePrdRun } from './prd-run-compiler.js'
 import { createCaseSchedule } from './multi-case-scheduler.js'
+import type { StandaloneEvidencePublisher } from './standalone-evidence-publisher.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -152,6 +153,7 @@ export interface RuntimeHostDependencies {
   preflightExecutor?: RuntimePreflightCapability
   writeProduction?: RuntimeWriteProductionCapability
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
+  standaloneEvidencePublisher?: Pick<StandaloneEvidencePublisher, 'publishRuntimeState'>
   generationFinalizer?: RuntimeGenerationFinalizationCapability
   finalizationMaterialSealer?: RuntimeFinalizationMaterialSealerCapability
   evidenceQuarantine?: RuntimeEvidenceQuarantineCapability
@@ -601,6 +603,36 @@ export class E2ERuntimeHost {
         expectedGenerationId: snapshot.runId,
         expectedProjectIdentityDigest: identity.digest,
       })
+      let standaloneReportRoot: string | undefined
+      if (runtimeUsesFullPlaywright(snapshot)) {
+        const standalone = this.dependencies.standaloneEvidencePublisher
+        if (standalone === undefined) {
+          throw blockedError('E2E_RUNTIME_STANDALONE_EVIDENCE_NOT_READY')
+        }
+        const cases = Object.values(snapshot.executionResults?.realEnvironment ?? {}).map((result) => {
+          const attempts = Object.values(snapshot.writeAttempts ?? {})
+            .filter((attempt) => attempt.actionId === result.actionId)
+          if (attempts.length !== 1) throw runtimeHostError(
+            'E2E_RUNTIME_EVIDENCE_ATTEMPT_BINDING_INVALID',
+            'artifact',
+            '执行结果必须唯一绑定一个持久 WriteAttempt 才能发布原始证据',
+          )
+          return {
+            caseId: result.caseId,
+            actionId: result.actionId,
+            attemptId: attempts[0]!.attemptId,
+          }
+        })
+        standaloneReportRoot = await standalone.publishRuntimeState({
+          assetId: snapshot.assetId,
+          runId: snapshot.runId,
+          generationDigest: publication.active.generationDigest,
+          ...(request.payload.outputRoot === undefined
+            ? {} : { outputRoot: request.payload.outputRoot }),
+          rendered: publication.rendered,
+          cases,
+        })
+      }
       const response = this.successResponse(request.requestId, {
         runId: snapshot.runId,
         assetId: snapshot.assetId,
@@ -608,6 +640,7 @@ export class E2ERuntimeHost {
         generationDigest: publication.active.generationDigest,
         terminalVerdict: publication.active.terminalVerdict,
         report: publication.rendered,
+        ...(standaloneReportRoot === undefined ? {} : { standaloneReportRoot }),
       })
       const outcome = await this.dependencies.runStore.readRunOutcome(
         identity.digest,
@@ -2273,6 +2306,12 @@ function runtimeExecutionMode(snapshot: RuntimeRunSnapshot): 'read' | 'write' | 
     'E2E_RUNTIME_ACTION_SET_UNSUPPORTED', 'safety', 'execute-run 只接受唯一冻结 action',
   )
   return (actions[0] as Record<string, unknown>).effect === 'reversible-write' ? 'write' : 'read'
+}
+
+function runtimeUsesFullPlaywright(snapshot: RuntimeRunSnapshot): boolean {
+  const content = snapshot.frozenArtifacts['execution-contract']?.content
+  return typeof content === 'object' && content !== null && !Array.isArray(content)
+    && (content as Record<string, unknown>).executionProfile === 'full-playwright'
 }
 
 function runtimeSingleActionBinding(snapshot: RuntimeRunSnapshot): { caseId: string; actionId: string } {

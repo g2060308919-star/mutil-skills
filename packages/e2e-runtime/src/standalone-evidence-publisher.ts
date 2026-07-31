@@ -3,6 +3,7 @@ import {
   lstat,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rename,
   rm,
@@ -31,11 +32,83 @@ export interface StandaloneEvidencePublishInput {
   evidence: StandaloneEvidenceFile[]
 }
 
+export interface StandaloneRuntimeEvidencePublishInput extends Omit<
+  StandaloneEvidencePublishInput,
+  'evidence'
+> {
+  cases: Array<{
+    caseId: string
+    actionId: string
+    attemptId: string
+  }>
+}
+
 export class StandaloneEvidencePublisher {
   readonly #homeDir: string
 
   constructor(options: { homeDir: string }) {
     this.#homeDir = resolve(options.homeDir)
+  }
+
+  async publishRuntimeState(input: StandaloneRuntimeEvidencePublishInput): Promise<string> {
+    if (input.cases.length === 0 || input.cases.length > 1_000
+      || input.cases.some((item) => !SAFE_ID.test(item.caseId)
+        || !SAFE_ID.test(item.actionId) || !SAFE_ID.test(item.attemptId))
+      || new Set(input.cases.map((item) => item.caseId)).size !== input.cases.length) {
+      throw publisherError('E2E_EVIDENCE_RUNTIME_BINDING_INVALID', 'Runtime Case/Action/Attempt 绑定无效')
+    }
+    const stateRoot = join(this.#homeDir, '.mutil-skills', 'runtime', 'e2e', 'state')
+    const evidence: StandaloneEvidenceFile[] = []
+    for (const item of input.cases) {
+      const recoveryDirectory = digestText(
+        'runtime-full-playwright-recovery-directory/v1',
+        item.attemptId,
+      ).slice(7, 39)
+      const recoveryRoot = join(stateRoot, 'full-playwright-recovery', recoveryDirectory)
+      evidence.push({
+        caseId: item.caseId,
+        checkpointId: item.actionId,
+        kind: 'screenshot',
+        relativePath: `evidence/${item.caseId}/${item.actionId}.png`,
+        bytes: await readRuntimeEvidenceFile(
+          stateRoot,
+          join(recoveryRoot, 'screenshot.bin'),
+          16 * 1024 * 1024,
+        ),
+      }, {
+        caseId: item.caseId,
+        checkpointId: `${item.actionId}-DOM`,
+        kind: 'dom',
+        relativePath: `evidence/${item.caseId}/${item.actionId}.html`,
+        bytes: await readRuntimeEvidenceFile(
+          stateRoot,
+          join(recoveryRoot, 'dom.bin'),
+          4 * 1024 * 1024,
+        ),
+      })
+      const traceRoot = join(stateRoot, 'full-playwright-traces', item.attemptId)
+      const traceNames = (await readdir(traceRoot)).filter((name) =>
+        /^[A-Za-z0-9._-]+\.zip$/.test(name)).sort()
+      if (traceNames.length === 0 || traceNames.length > 10_000) throw publisherError(
+        'E2E_EVIDENCE_RUNTIME_TRACE_MISSING',
+        '生产 Playwright 执行没有可发布的 Trace',
+      )
+      for (const [index, name] of traceNames.entries()) {
+        const checkpointId = `TRACE-${String(index + 1).padStart(3, '0')}`
+        evidence.push({
+          caseId: item.caseId,
+          checkpointId,
+          kind: 'trace',
+          relativePath: `evidence/${item.caseId}/trace-${String(index + 1).padStart(3, '0')}-${name}`,
+          bytes: await readRuntimeEvidenceFile(
+            stateRoot,
+            join(traceRoot, name),
+            256 * 1024 * 1024,
+          ),
+        })
+      }
+    }
+    return await this.publish({ ...input, evidence })
   }
 
   async publish(input: StandaloneEvidencePublishInput): Promise<string> {
@@ -100,6 +173,26 @@ export class StandaloneEvidencePublisher {
     }
     return finalRoot
   }
+}
+
+async function readRuntimeEvidenceFile(
+  stateRoot: string,
+  path: string,
+  maxBytes: number,
+): Promise<Buffer> {
+  const normalizedStateRoot = resolve(stateRoot)
+  const normalizedPath = resolve(path)
+  if (!normalizedPath.startsWith(`${normalizedStateRoot}/`)) throw publisherError(
+    'E2E_EVIDENCE_RUNTIME_PATH_INVALID',
+    'Runtime evidence 路径越出状态根',
+  )
+  const info = await lstat(normalizedPath)
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1
+    || info.size <= 0 || info.size > maxBytes
+    || normalizePlatformAlias(await realpath(normalizedPath)) !== normalizePlatformAlias(normalizedPath)) {
+    throw publisherError('E2E_EVIDENCE_RUNTIME_FILE_UNSAFE', 'Runtime evidence 不是安全的唯一正规文件')
+  }
+  return await readFile(normalizedPath)
 }
 
 interface OutputFile {

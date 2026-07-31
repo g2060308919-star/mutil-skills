@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from 'vitest'
-import { access, lstat, mkdtemp, readFile, rm, stat, symlink } from 'node:fs/promises'
+import { access, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { StandaloneEvidencePublisher } from '../src/standalone-evidence-publisher.js'
+import { digestText } from '@mutil-skills/e2e-contracts'
 
 const roots: string[] = []
 afterEach(async () => await Promise.all(roots.splice(0).map(async (root) =>
@@ -40,6 +41,44 @@ describe('StandaloneEvidencePublisher', () => {
         kind: 'trace', digest: expect.stringMatching(/^sha256:/), byteLength: trace.byteLength,
       },
     })
+  })
+
+  test('从 Runtime 状态目录发布生产截图、DOM 与 Playwright Trace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'e2e-standalone-runtime-')); roots.push(root)
+    const home = join(root, 'home')
+    const publisher = new StandaloneEvidencePublisher({ homeDir: home })
+    const attemptId = 'ATTEMPT-PRODUCTION-1'
+    const stateRoot = join(home, '.mutil-skills', 'runtime', 'e2e', 'state')
+    const recoveryDirectory = digestText(
+      'runtime-full-playwright-recovery-directory/v1',
+      attemptId,
+    ).slice(7, 39)
+    const recoveryRoot = join(stateRoot, 'full-playwright-recovery', recoveryDirectory)
+    const traceRoot = join(stateRoot, 'full-playwright-traces', attemptId)
+    const screenshot = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1])
+    const dom = Buffer.from('<main>已验收</main>')
+    const trace = Buffer.from([0x50, 0x4b, 0x03, 0x04, 1])
+    await mkdir(recoveryRoot, { recursive: true, mode: 0o700 })
+    await mkdir(traceRoot, { recursive: true, mode: 0o700 })
+    await writeFile(join(recoveryRoot, 'screenshot.bin'), screenshot, { mode: 0o600 })
+    await writeFile(join(recoveryRoot, 'dom.bin'), dom, { mode: 0o600 })
+    await writeFile(join(traceRoot, 'program-after.zip'), trace, { mode: 0o600 })
+
+    const published = await publisher.publishRuntimeState({
+      assetId: 'ASSET-1',
+      runId: 'RUN-1',
+      generationDigest: `sha256:${'a'.repeat(64)}`,
+      outputRoot: join(root, 'standalone-runtime-report'),
+      rendered: { json: '{}', markdown: '# report', html: '<html></html>' },
+      cases: [{ caseId: 'CASE-1', actionId: 'ACTION-1', attemptId }],
+    })
+
+    expect(await readFile(join(published, 'evidence/CASE-1/ACTION-1.png'))).toEqual(screenshot)
+    expect(await readFile(join(published, 'evidence/CASE-1/ACTION-1.html'))).toEqual(dom)
+    expect(await readFile(join(
+      published,
+      'evidence/CASE-1/trace-001-program-after.zip',
+    ))).toEqual(trace)
   })
 
   test('uses the standalone HOME default and never requires a repository', async () => {

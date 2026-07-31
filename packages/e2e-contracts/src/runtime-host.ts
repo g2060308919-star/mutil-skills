@@ -182,7 +182,9 @@ const commandSchemas = [
     ...RuntimeRequestHeaderShape,
     command: z.literal('render-report'),
     projectRoot: z.string().min(1),
-    payload: RunIdPayloadSchema,
+    payload: RunIdPayloadSchema.extend({
+      outputRoot: z.string().min(1).optional(),
+    }).strict(),
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
