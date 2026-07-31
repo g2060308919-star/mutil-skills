@@ -67,6 +67,7 @@ Skill 不再拥有 Artifact 顺序、摘要计算、状态转换、多 Case curs
 interface CompilePrdRunInput {
   requirementsContract: string
   sources: readonly PrdSourceInput[]
+  declarativeDesign: DeclarativeE2EDesignInput
   projectPolicy: ProjectPolicyInput
   environment: ExecutionEnvironmentInput
   scopeDecisions: readonly ScopeDecisionInput[]
@@ -75,6 +76,8 @@ interface CompilePrdRunInput {
 ```
 
 `requirementsContract` 必须是已由调用者确认且 route 指向 `e2e` 的唯一契约原文。Compiler 不调用模型，不重新总结 PRD，只从契约节点、验收条件、来源和显式策略确定性投影。
+
+`declarativeDesign` 只允许描述 Case、Action、Oracle、页面定位候选、网络意图和 Cleanup 意图。它不得携带 Artifact ID、content digest、签名、审批结果、状态、verdict、宿主路径、环境变量或任意 Node.js 代码。Skill/模型可以提出该声明式设计，但 Runtime 必须把它与 requirements contract 的节点和验收条件完整绑定，然后独占生成低层 Artifact、ID、摘要、引用图与执行计划。Playwright source 仍只能由受信 Compiler 根据已批准声明式输入生成。
 
 ### 输出
 
