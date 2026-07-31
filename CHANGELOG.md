@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-07-31
+
+### Fixed
+
+- Registry Golden 将 npm Registry 的 `dist.integrity` 与安装 lockfile 对账，并以忽略 gzip metadata 和普通文件权限归一化、但保留可执行语义的文件内容摘要，对账当前 Tag 的 clean pack 与安装目录；不再把两次 `npm pack` 的封装字节误当作稳定内容身份。
+- 正式发布门在构建、打包和 Golden 前强制执行 TypeScript clean build，避免被忽略的旧 `dist` 或增量声明产物进入本地发布真相。
+
 ## [0.4.6] - 2026-07-31
 
 ### Added

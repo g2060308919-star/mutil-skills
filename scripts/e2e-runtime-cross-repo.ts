@@ -1,8 +1,9 @@
 import { execFile, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { cp, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
 import ts from 'typescript'
 
@@ -96,7 +97,8 @@ export async function runCrossRepoRuntimeGolden(input: {
   ])
 
   let installSpecs: string[]
-  let expectedPackIntegrities: ReadonlyMap<string, string> | undefined
+  let expectedPackContentIntegrities: ReadonlyMap<string, string> | undefined
+  let expectedRegistryIntegrities: ReadonlyMap<string, string> | undefined
   if (packageSource === 'workspace-tarballs') {
     await exec('npm', ['run', 'build'], SOURCE_ROOT, buildEnvironment(npmCache), 180_000)
     await copyPublicationSource(publicationSource)
@@ -124,7 +126,8 @@ export async function runCrossRepoRuntimeGolden(input: {
     if (releasePacksDir === undefined || !isAbsolute(releasePacksDir)) {
       throw new Error('Registry Golden 必须提供本次发布的绝对 tarball 目录')
     }
-    expectedPackIntegrities = await releasePackIntegrities(releasePacksDir, RELEASE_PACKAGES)
+    expectedPackContentIntegrities = await releasePackIntegrities(releasePacksDir, RELEASE_PACKAGES)
+    expectedRegistryIntegrities = await registryReleaseIntegrities(RELEASE_PACKAGES, npmCache)
     await cp(join(SOURCE_ROOT, 'scripts', 'e2e-runtime-cross-repo-child.mjs'),
       join(harnessRoot, 'runner.mjs'))
     await cp(join(SOURCE_ROOT, 'scripts', 'e2e-todomvc-app-spec.fixture.md'),
@@ -146,7 +149,14 @@ export async function runCrossRepoRuntimeGolden(input: {
   // 13 分钟；child 执行仍保持原有 10 分钟故障边界。
   ], input.project, installEnvironment(input.home, npmCache), 780_000)
   const installedReleasePackages = await verifyInstalledReleasePackages(
-    input.project, RELEASE_PACKAGES, expectedPackIntegrities,
+    input.project,
+    RELEASE_PACKAGES,
+    expectedPackContentIntegrities === undefined || expectedRegistryIntegrities === undefined
+      ? undefined
+      : {
+          packContentIntegrities: expectedPackContentIntegrities,
+          registryIntegrities: expectedRegistryIntegrities,
+        },
   )
 
   // Harness 也必须进入安装闭包：这样源码仓被移走、用户项目 node_modules 被删除后，
@@ -220,16 +230,24 @@ export async function loadWorkspaceReleasePackages(root: string): Promise<Releas
 export async function verifyInstalledReleasePackages(
   project: string,
   expected: ReleasePackageManifest[],
-  expectedPackIntegrities?: ReadonlyMap<string, string>,
+  verification?: {
+    packContentIntegrities?: ReadonlyMap<string, string>
+    registryIntegrities?: ReadonlyMap<string, string>
+  },
 ): Promise<string[]> {
+  if (verification !== undefined
+    && verification.packContentIntegrities === undefined
+    && verification.registryIntegrities === undefined) {
+    throw new Error('Registry 安装校验至少需要一种完整性来源')
+  }
   const expectedVersions = new Map(expected.map(({ name, version }) => [name, version]))
-  const lock = expectedPackIntegrities === undefined ? undefined
+  const lock = verification?.registryIntegrities === undefined ? undefined
     : JSON.parse(await readFile(join(project, 'package-lock.json'), 'utf8')) as unknown
-  if (expectedPackIntegrities !== undefined && !plainRecord(lock)) {
+  if (verification?.registryIntegrities !== undefined && !plainRecord(lock)) {
     throw new Error('Registry 安装缺少可验证 package-lock')
   }
   const lockPackages = lock === undefined ? undefined : (lock as Record<string, unknown>).packages
-  if (expectedPackIntegrities !== undefined && !plainRecord(lockPackages)) {
+  if (verification?.registryIntegrities !== undefined && !plainRecord(lockPackages)) {
     throw new Error('Registry 安装缺少 package-lock packages')
   }
   const dependencySections = [
@@ -243,12 +261,23 @@ export async function verifyInstalledReleasePackages(
       || installed.version !== releasePackage.version) {
       throw new Error(`Registry 安装包版本不一致: ${releasePackage.name}@${releasePackage.version}`)
     }
-    if (expectedPackIntegrities !== undefined) {
+    if (verification?.registryIntegrities !== undefined) {
       const lockEntry = (lockPackages as Record<string, unknown>)[`node_modules/${releasePackage.name}`]
-      const expectedIntegrity = expectedPackIntegrities.get(releasePackage.name)
+      const expectedIntegrity = verification.registryIntegrities.get(releasePackage.name)
       if (!plainRecord(lockEntry) || typeof lockEntry.integrity !== 'string'
         || lockEntry.version !== releasePackage.version || lockEntry.integrity !== expectedIntegrity) {
-        throw new Error(`Registry 包内容完整性不一致: ${releasePackage.name}@${releasePackage.version}`)
+        throw new Error(`Registry lock integrity 与 Registry 元数据不一致: ${releasePackage.name}@${releasePackage.version}`)
+      }
+    }
+    if (verification?.packContentIntegrities !== undefined) {
+      const installedRoot = dirname(installedPath)
+      const actualContentIntegrity = await packageContentIntegrity(installedRoot)
+      const expectedContentIntegrity = verification.packContentIntegrities.get(releasePackage.name)
+      if (actualContentIntegrity !== expectedContentIntegrity) {
+        throw new Error(
+          `Registry 安装内容与发布 Tag pack 不一致: ${releasePackage.name}@${releasePackage.version}`
+          + ` expected=${expectedContentIntegrity ?? '<missing>'} actual=${actualContentIntegrity}`,
+        )
       }
     }
     for (const sectionName of dependencySections) {
@@ -275,12 +304,86 @@ export async function releasePackIntegrities(
   expected: ReleasePackageManifest[],
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>()
-  for (const releasePackage of expected) {
-    const filename = `${releasePackage.name.slice(1).replace('/', '-')}-${releasePackage.version}.tgz`
-    const bytes = await readFile(join(packsDir, filename))
-    result.set(releasePackage.name, `sha512-${createHash('sha512').update(bytes).digest('base64')}`)
+  const extractionRoot = await mkdtemp(join(tmpdir(), 'mutil-release-pack-content-'))
+  try {
+    for (const [index, releasePackage] of expected.entries()) {
+      const filename = `${releasePackage.name.slice(1).replace('/', '-')}-${releasePackage.version}.tgz`
+      const archive = join(packsDir, filename)
+      const listing = await execFileAsync('tar', ['-tzf', archive], {
+        timeout: 60_000,
+        maxBuffer: 20 * 1024 * 1024,
+      })
+      const entries = listing.stdout.trim().split('\n').filter((entry) => entry.length > 0)
+      if (entries.length === 0 || entries.some((entry) =>
+        !entry.startsWith('package/')
+        || entry.includes('\\')
+        || entry.split('/').some((part) => part === '..'))) {
+        throw new Error(`发布 tarball 路径不安全: ${releasePackage.name}@${releasePackage.version}`)
+      }
+      const target = join(extractionRoot, String(index))
+      await mkdir(target, { mode: 0o700 })
+      await execFileAsync('tar', ['-xzf', archive, '-C', target], {
+        timeout: 60_000,
+        maxBuffer: 20 * 1024 * 1024,
+      })
+      result.set(releasePackage.name, await packageContentIntegrity(join(target, 'package')))
+    }
+  } finally {
+    await rm(extractionRoot, { recursive: true, force: true })
   }
   return result
+}
+
+async function registryReleaseIntegrities(
+  expected: ReleasePackageManifest[],
+  npmCache: string,
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>()
+  for (const releasePackage of expected) {
+    const { stdout } = await exec('npm', [
+      'view',
+      `${releasePackage.name}@${releasePackage.version}`,
+      'dist.integrity',
+      '--json',
+    ], SOURCE_ROOT, buildEnvironment(npmCache), 60_000)
+    const integrity = JSON.parse(stdout) as unknown
+    if (typeof integrity !== 'string' || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(integrity)) {
+      throw new Error(`Registry 缺少有效 integrity: ${releasePackage.name}@${releasePackage.version}`)
+    }
+    result.set(releasePackage.name, integrity)
+  }
+  return result
+}
+
+async function packageContentIntegrity(root: string): Promise<string> {
+  const files: Array<{ path: string; mode: number; bytes: Buffer }> = []
+  async function visit(directory: string, prefix: string): Promise<void> {
+    const entries = (await readdir(directory, { withFileTypes: true }))
+      .sort((left, right) => left.name.localeCompare(right.name))
+    for (const entry of entries) {
+      if (prefix === '' && entry.name === 'node_modules') continue
+      const relativePath = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) {
+        await visit(path, relativePath)
+        continue
+      }
+      if (!entry.isFile()) throw new Error(`发布包包含非普通文件: ${relativePath}`)
+      const info = await lstat(path)
+      if (!info.isFile() || info.nlink !== 1) throw new Error(`发布包文件边界无效: ${relativePath}`)
+      // npm install 会把普通文件的 0600/0644 等 owner 权限归一化，但会保留
+      // 可执行语义。内容摘要只绑定跨 pack/install 稳定且影响使用行为的 exec bit。
+      files.push({ path: relativePath, mode: (info.mode & 0o111) === 0 ? 0 : 1, bytes: await readFile(path) })
+    }
+  }
+  await visit(root, '')
+  if (files.length === 0) throw new Error('发布包内容为空')
+  const hash = createHash('sha512')
+  for (const file of files) {
+    hash.update(`${Buffer.byteLength(file.path)}:${file.path}:${file.mode}:${file.bytes.byteLength}:`)
+    hash.update(file.bytes)
+  }
+  return `sha512-${hash.digest('base64')}`
 }
 
 function internalDependencyEntries(section: Record<string, string> | undefined): Array<[string, string]> {

@@ -4,9 +4,9 @@
   "name": "PRD 驱动 E2E 浏览器验收",
   "source": {
     "type": "github",
-    "url": "https://github.com/g2060308919-star/mutil-skills/blob/v0.4.6/packages/skills/skills/testing/e2e/SKILL.md",
-    "rawUrl": "https://raw.githubusercontent.com/g2060308919-star/mutil-skills/v0.4.6/packages/skills/skills/testing/e2e/SKILL.md",
-    "ref": "v0.4.6"
+    "url": "https://github.com/g2060308919-star/mutil-skills/blob/v0.4.7/packages/skills/skills/testing/e2e/SKILL.md",
+    "rawUrl": "https://raw.githubusercontent.com/g2060308919-star/mutil-skills/v0.4.7/packages/skills/skills/testing/e2e/SKILL.md",
+    "ref": "v0.4.7"
   },
   "requires": [
     {
@@ -18,7 +18,7 @@
       "whenMissing": {
         "action": "prompt-install",
         "package": "@mutil-skills/e2e-runtime",
-        "version": "0.4.6",
+        "version": "0.4.7",
         "terminalState": "environment-blocked",
         "reasonCode": "E2E_RUNTIME_HOST_UNAVAILABLE"
       }
