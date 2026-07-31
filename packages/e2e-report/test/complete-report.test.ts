@@ -74,6 +74,23 @@ describe('renderCompleteReport', () => {
     expect(report.html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
   })
 
+  test('HTML 直接展示本地原始截图并提供 Playwright Trace 下载入口', () => {
+    const render = (reportModule as unknown as {
+      renderCompleteReport(input: unknown): { html: string }
+    }).renderCompleteReport
+    const withTrace = structuredClone(finalReport)
+    ;(withTrace.content.caseDetails[0]!.steps[0]!.evidenceLinks as string[]).push(
+      'evidence/CASE-REAL-1/playwright-trace.zip',
+    )
+    const report = render(withTrace)
+    expect(report.html).toContain(
+      '<img src="evidence/CASE-REAL-1.png" alt="验收截图 evidence/CASE-REAL-1.png"',
+    )
+    expect(report.html).toContain(
+      '<a href="evidence/CASE-REAL-1/playwright-trace.zip" download>下载 Playwright Trace</a>',
+    )
+  })
+
   test('Case expected/actual/oracle 等不可信文本在 Markdown 和 HTML 中统一转义', () => {
     const render = (reportModule as unknown as {
       renderCompleteReport(input: unknown): { markdown: string; html: string }

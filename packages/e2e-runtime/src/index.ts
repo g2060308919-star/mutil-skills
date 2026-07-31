@@ -1,6 +1,7 @@
 export { RUNTIME_PACKAGE_VERSION } from './protocol.js'
 export * from './prd-run-compiler.js'
 export * from './multi-case-scheduler.js'
+export * from './standalone-evidence-publisher.js'
 
 export {
   RuntimeDoctorProbeSchema,
