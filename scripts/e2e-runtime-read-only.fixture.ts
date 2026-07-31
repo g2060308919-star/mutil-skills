@@ -357,7 +357,12 @@ export function runtimeFullPlaywrightFixture(input: {
   runtimePolicyDigest?: string
   understandingContractDigest?: string
   sourceBundle?: RuntimeUnderstandingInput['sourceBundle']
+  caseCount?: number
 }) {
+  const caseCount = input.caseCount ?? 1
+  if (!Number.isSafeInteger(caseCount) || caseCount < 1 || caseCount > 3) {
+    throw new Error('runtime full Playwright fixture caseCount 必须为 1..3')
+  }
   const base = runtimeReadOnlyFixture(input)
   const origin = new URL(input.url).origin
   const targetFingerprint = d('full-playwright-target')
@@ -423,7 +428,7 @@ export function runtimeFullPlaywrightFixture(input: {
       expectedDigest: d('clean-state') }], timeoutMs: 30_000,
   }
   const cleanupPlanDigest = digestCleanupPlanDefinition(cleanupPlan)
-  const testCases = artifact(input, 'test-cases', {
+  let testCases = artifact(input, 'test-cases', {
     cases: [{
       caseId: 'CASE-FULL-1', revision: 1, obligationIds: ['COV-ORDER-1'],
       title: '完整浏览器交互与清理', actor: 'auditor', necessity: 'required', preconditions: [],
@@ -436,7 +441,7 @@ export function runtimeFullPlaywrightFixture(input: {
       retryPolicy: 'verified-not-applied-max-1', status: 'active',
     }], caseSetDigest: d('full-case-set'),
   })
-  const executionContract = artifact(input, 'execution-contract', {
+  let executionContract = artifact(input, 'execution-contract', {
     executionProfile: 'full-playwright', environment: 'test', baseOrigin: origin,
     browserMatrix: [{ browserId: 'chromium', channel: 'stable', viewportId: 'desktop' }],
     identities: [{
@@ -451,7 +456,7 @@ export function runtimeFullPlaywrightFixture(input: {
     manualProcedures: [], evidencePolicyDigest: input.evidencePolicyDigest ?? d('evidence-policy'),
     runtimeIsolation: null, unresolvedItems: [],
   })
-  const actionMap = artifact(input, 'browser-action-map', {
+  let actionMap = artifact(input, 'browser-action-map', {
     executionProfile: 'full-playwright', actionMapRevision: 1,
     pageIdentities: [{ pageId: 'PAGE-FULL-1', origin, assertionDigest: d('full-page') }],
     fullPlaywrightPrograms: [program], actions: [{
@@ -461,6 +466,14 @@ export function runtimeFullPlaywrightFixture(input: {
       capabilities: [{ operation: 'full-playwright', capabilityId: 'PENDING-FULL' }], requestIds: [],
     }], unmappedSteps: [], discoveredRisks: [],
   })
+  if (caseCount > 1) {
+    const expanded = expandFullPlaywrightArtifacts({
+      input, caseCount, testCases, executionContract, actionMap,
+    })
+    testCases = expanded.testCases
+    executionContract = expanded.executionContract
+    actionMap = expanded.actionMap
+  }
   const projectPolicy = replaceArtifactContent(base.semanticArtifacts['project-policy'], {
     ...(base.semanticArtifacts['project-policy'].content as Record<string, unknown>),
     originPolicies: [{ origin, allowRead: true, allowWrite: true }],
@@ -488,7 +501,9 @@ export function runtimeFullPlaywrightFixture(input: {
     ...obligation,
     scenario: '完整浏览器交互与清理',
     disposition: obligation.disposition.kind === 'automated'
-      ? { ...obligation.disposition, caseIds: ['CASE-FULL-1'] }
+      ? { ...obligation.disposition, caseIds: caseCount === 1
+          ? ['CASE-FULL-1']
+          : Array.from({ length: caseCount }, (_, index) => `CASE-${ordinalId(index + 1)}`) }
       : obligation.disposition,
   }))
   coverageContent.universeDigest = digestText('coverage-universe/v1', canonicalizeJson({
@@ -513,6 +528,9 @@ export function runtimeFullPlaywrightFixture(input: {
   const writeSubject = (discoveryGrantId: string, preflightDigest: string,
     decisions?: { scopeReceipt?: DecisionReceipt }) => {
     const scopeContent = decidedScope(decisions?.scopeReceipt)
+    const executionContent = executionContract.content as any
+    const testCaseContent = testCases.content as any
+    const actionContent = actionMap.content as any
     const allInputRefs = [
       ['project-policy', projectPolicy],
       ['acceptance-scope', { ...base.semanticArtifacts['acceptance-scope'], content: scopeContent }],
@@ -524,13 +542,30 @@ export function runtimeFullPlaywrightFixture(input: {
       digest: digestApprovalProjection(artifactType as Parameters<typeof digestApprovalProjection>[0],
         (document as ArtifactDocument).content),
     }))
+    const schedule = executionContent.caseQueue.map((queued: any) => {
+      const testCase = testCaseContent.cases.find((candidate: any) =>
+        candidate.caseId === queued.caseId)
+      const mappedActions = actionContent.actions.filter((candidate: any) =>
+        candidate.caseId === queued.caseId)
+      return {
+        ordinal: queued.ordinal,
+        caseId: queued.caseId,
+        stepIds: testCase.steps.map((step: any) => step.stepId),
+        actionIds: mappedActions.map((action: any) => action.actionId),
+      }
+    })
     const runBundleProjection = {
       runId: input.runId, allInputRefs,
-      schedule: [{ ordinal: 0, caseId: 'CASE-FULL-1', stepIds: ['STEP-FULL-1'],
-        actionIds: ['ACTION-FULL-1'] }],
-      attemptPlans: [{ caseId: 'CASE-FULL-1', slots: 1 }],
-      signedCapabilities: [{ capabilityId: 'PENDING-FULL', actionId: 'ACTION-FULL-1',
-        operation: 'full-playwright', effect: 'reversible-write', maxUses: 1, digest: d('pending-full') }],
+      schedule,
+      attemptPlans: schedule.map((item: any) => ({ caseId: item.caseId, slots: 1 })),
+      signedCapabilities: actionContent.actions.map((action: any) => ({
+        capabilityId: action.capabilities[0].capabilityId,
+        actionId: action.actionId,
+        operation: 'full-playwright',
+        effect: 'reversible-write',
+        maxUses: 1,
+        digest: d(`pending-full:${action.actionId}`),
+      })),
       secretRefs: ['SECRET-REF-LOCAL'],
       runtimePolicyDigest: ((projectPolicy.content as any).runtimePolicy as { digest: string }).digest,
       runtimeIsolationPolicyDigest: 'not-applicable',
@@ -548,22 +583,35 @@ export function runtimeFullPlaywrightFixture(input: {
       executionContractDigest: digestApprovalProjection('execution-contract', executionContract.content),
       runBundleProjectionDigest: digestApprovalProjection('run-bundle', runBundleProjection),
       environment: 'test' as const, baseOrigin: origin, actor: 'auditor', discoveryGrantId, preflightDigest,
-      actions: [{
-        actionId: 'ACTION-FULL-1', effect: 'reversible-write' as const,
-        dataLeaseId: 'LEASE-FULL-1', resourceKey: 'full:fixture', fencingToken: 1, cleanupPlanDigest,
-        transport: 'browser-local' as const, operation: 'full-playwright' as const,
-        programDigest: program.sourceDigest, cleanupProgramDigest: program.cleanupSourceDigest, requests,
-      }],
+      actions: executionContent.fullPlaywrightPrograms.map((candidate: any) => {
+        const plan = executionContent.writeCleanupPlans.find((item: any) =>
+          item.actionId === candidate.actionId)
+        const need = executionContent.dataNeeds.find((item: any) =>
+          item.leaseId === candidate.dataLeaseId)
+        return {
+          actionId: candidate.actionId, effect: 'reversible-write' as const,
+          dataLeaseId: candidate.dataLeaseId, resourceKey: need.resourceKey,
+          fencingToken: 1, cleanupPlanDigest: digestCleanupPlanDefinition(plan),
+          transport: 'browser-local' as const, operation: 'full-playwright' as const,
+          programDigest: candidate.sourceDigest,
+          cleanupProgramDigest: candidate.cleanupSourceDigest,
+          requests: candidate.networkRequests,
+        }
+      }),
     }
   }
   const regressionManifest = replaceArtifactContent(base.regressionManifest, (() => {
     const content = structuredClone(base.regressionManifest.content) as any
     content.executionProfile = 'full-playwright'
-    content.caseMappings = content.caseMappings.map((item: any) => ({ ...item, caseId: 'CASE-FULL-1',
-      testTitle: '完整浏览器交互与清理' }))
-    content.listResult.caseIds = ['CASE-FULL-1']
+    const caseIds = (testCases.content as any).cases.map((testCase: any) => testCase.caseId)
+    const mappingTemplate = content.caseMappings[0]
+    content.caseMappings = caseIds.map((caseId: string, index: number) => ({
+      ...structuredClone(mappingTemplate), caseId,
+      testTitle: `完整浏览器交互与清理 ${index + 1}`,
+    }))
+    content.listResult.caseIds = caseIds
     content.listResult.attestation.executionProfile = 'full-playwright'
-    content.listResult.attestation.discoveredCaseIds = ['CASE-FULL-1']
+    content.listResult.attestation.discoveredCaseIds = caseIds
     content.listResult.attestation.caseMappings = content.caseMappings
     return content
   })())
@@ -576,7 +624,12 @@ export function runtimeFullPlaywrightFixture(input: {
     discoverySubject: base.discoverySubject,
     writeSubject,
     regressionManifest,
-    expected: { jsonBody, cleanupState: 'clean', caseId: 'CASE-FULL-1', actionId: 'ACTION-FULL-1' },
+    expected: {
+      jsonBody,
+      cleanupState: 'clean',
+      caseId: caseCount === 1 ? 'CASE-FULL-1' : 'CASE-0001',
+      actionId: caseCount === 1 ? 'ACTION-FULL-1' : 'ACTION-0001-0001',
+    },
   }
 
   function request(intentId: string, method: string, exactPath: string, maxRequests: number,
@@ -584,6 +637,130 @@ export function runtimeFullPlaywrightFixture(input: {
     return { intentId, method, canonicalOrigin: origin, exactPath, query: [] as Array<[string, string]>,
       payload, targetFingerprint, maxRequests, expectedOrder }
   }
+}
+
+function expandFullPlaywrightArtifacts(input: {
+  input: Parameters<typeof runtimeFullPlaywrightFixture>[0]
+  caseCount: number
+  testCases: ArtifactDocument
+  executionContract: ArtifactDocument
+  actionMap: ArtifactDocument
+}): {
+  testCases: ArtifactDocument
+  executionContract: ArtifactDocument
+  actionMap: ArtifactDocument
+} {
+  const testContent = structuredClone(input.testCases.content) as any
+  const executionContent = structuredClone(input.executionContract.content) as any
+  const actionContent = structuredClone(input.actionMap.content) as any
+  const testTemplate = testContent.cases[0]
+  const programTemplate = executionContent.fullPlaywrightPrograms[0]
+  const cleanupTemplate = executionContent.writeCleanupPlans[0]
+  const intentTemplate = executionContent.actionIntents[0]
+  const dataNeedTemplate = executionContent.dataNeeds[0]
+  const actionTemplate = actionContent.actions[0]
+  const definitions = Array.from({ length: input.caseCount }, (_, index) => {
+    const ordinal = ordinalId(index + 1)
+    const caseId = `CASE-${ordinal}`
+    const actionId = `ACTION-${ordinal}-0001`
+    const stepId = `STEP-${ordinal}`
+    const leaseId = `LEASE-${ordinal}`
+    const cleanupPlanId = `CLEANUP-${ordinal}`
+    const checkpointId = `CHECKPOINT-FULL-${ordinal}`
+    const capabilityId = `PENDING-FULL-${ordinal}`
+    const requestIds = new Map<string, string>()
+    const networkRequests = programTemplate.networkRequests.map((candidate: any) => {
+      const intentId = `${candidate.intentId}-${ordinal}`
+      requestIds.set(candidate.intentId, intentId)
+      return { ...structuredClone(candidate), intentId }
+    })
+    const source = String(programTemplate.source)
+      .replace('CHECKPOINT-FULL-1', checkpointId)
+    const program = {
+      ...structuredClone(programTemplate),
+      caseId,
+      actionId,
+      stepId,
+      dataLeaseId: leaseId,
+      cleanupPlanId,
+      source,
+      sourceDigest: computeFullPlaywrightSourceDigest(source),
+      oracleCheckpoints: programTemplate.oracleCheckpoints.map((checkpoint: any) => ({
+        ...structuredClone(checkpoint), checkpointId,
+      })),
+      networkRequests,
+      networkRequestBodies: programTemplate.networkRequestBodies.map((body: any) => ({
+        ...structuredClone(body),
+        intentId: requestIds.get(body.intentId),
+      })),
+    }
+    const cleanupPlan = {
+      ...structuredClone(cleanupTemplate),
+      cleanupPlanId,
+      actionId,
+      leaseId,
+      cleanupProgramDigest: program.cleanupSourceDigest,
+      cleanupRequestIntentIds: cleanupTemplate.cleanupRequestIntentIds
+        .map((intentId: string) => requestIds.get(intentId)),
+    }
+    const testCase = {
+      ...structuredClone(testTemplate),
+      caseId,
+      title: `完整浏览器交互与清理 ${index + 1}`,
+      dataNeedIds: [leaseId],
+      cleanupPlanId,
+      steps: testTemplate.steps.map((step: any) => ({
+        ...structuredClone(step), stepId,
+      })),
+    }
+    const action = {
+      ...structuredClone(actionTemplate),
+      caseId,
+      actionId,
+      stepId,
+      capabilities: [{ operation: 'full-playwright', capabilityId }],
+    }
+    return {
+      caseId,
+      actionId,
+      stepId,
+      leaseId,
+      program,
+      cleanupPlan,
+      testCase,
+      action,
+      actionIntent: {
+        ...structuredClone(intentTemplate),
+        actionId,
+        intentDigest: program.sourceDigest,
+      },
+      dataNeed: {
+        ...structuredClone(dataNeedTemplate),
+        leaseId,
+        resourceKey: `full:fixture:${index + 1}`,
+      },
+    }
+  })
+  testContent.cases = definitions.map((item) => item.testCase)
+  testContent.caseSetDigest = d(`full-case-set:${input.caseCount}`)
+  executionContent.caseQueue = definitions.map((item, index) => ({
+    ordinal: index, caseId: item.caseId,
+  }))
+  executionContent.actionIntents = definitions.map((item) => item.actionIntent)
+  executionContent.writeCleanupPlans = definitions.map((item) => item.cleanupPlan)
+  executionContent.fullPlaywrightPrograms = definitions.map((item) => item.program)
+  executionContent.dataNeeds = definitions.map((item) => item.dataNeed)
+  actionContent.fullPlaywrightPrograms = definitions.map((item) => structuredClone(item.program))
+  actionContent.actions = definitions.map((item) => item.action)
+  return {
+    testCases: replaceArtifactContent(input.testCases, testContent),
+    executionContract: replaceArtifactContent(input.executionContract, executionContent),
+    actionMap: replaceArtifactContent(input.actionMap, actionContent),
+  }
+}
+
+function ordinalId(value: number): string {
+  return String(value).padStart(4, '0')
 }
 
 export function runtimeTodoMvcFullPlaywrightFixture(

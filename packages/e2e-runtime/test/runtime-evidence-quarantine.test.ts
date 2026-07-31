@@ -39,4 +39,55 @@ describe('production evidence quarantine integration', () => {
     expect(manifest).not.toContain(dom.toString('utf8'))
     provider.close()
   })
+
+  test('同一 Run 可按 attempt 追加多 Case 证据且精确重放保持幂等', async () => {
+    const roots = await createRuntimeTestRoots()
+    const provider = await RuntimeQuarantineSecretProvider.createForProject({
+      homeDir: roots.home,
+      projectRoot: roots.project,
+    })
+    const quarantine = new EncryptedQuarantine({
+      root: runtimeLayout(roots.home).quarantine,
+      secrets: provider,
+      audit: new InMemoryQuarantineAuditLog(),
+      now: () => new Date('2026-07-20T00:00:00.000Z'),
+    })
+    const capability = createProductionEvidenceQuarantine({ quarantine })
+    const firstEvidence = {
+      screenshot: Uint8Array.from([137, 80, 78, 71, 1]),
+      dom: Buffer.from('{"case":1}', 'utf8'),
+    }
+    const secondEvidence = {
+      screenshot: Uint8Array.from([137, 80, 78, 71, 2]),
+      dom: Buffer.from('{"case":2}', 'utf8'),
+    }
+
+    const first = await quarantineRuntimeEvidence(capability, {
+      runId: 'RUN-MULTI-CASE',
+      attemptId: 'ATTEMPT-1',
+      evidence: firstEvidence,
+    })
+    const second = await quarantineRuntimeEvidence(capability, {
+      runId: 'RUN-MULTI-CASE',
+      attemptId: 'ATTEMPT-2',
+      evidence: secondEvidence,
+    })
+    const replay = await quarantineRuntimeEvidence(capability, {
+      runId: 'RUN-MULTI-CASE',
+      attemptId: 'ATTEMPT-2',
+      evidence: secondEvidence,
+    })
+
+    expect(second.records.map(({ quarantinePath }) => quarantinePath)).toEqual([
+      'raw/ATTEMPT-2/screenshot.bin',
+      'raw/ATTEMPT-2/dom.bin',
+    ])
+    expect(replay).toEqual(second)
+    const manifest = JSON.parse(await readFile(
+      join(runtimeLayout(roots.home).quarantine, first.runId, 'manifest.json'),
+      'utf8',
+    )) as { files: unknown[] }
+    expect(manifest.files).toHaveLength(4)
+    provider.close()
+  })
 })

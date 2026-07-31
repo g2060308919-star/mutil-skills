@@ -40,11 +40,14 @@ export interface CrossRepoRuntimeGoldenResult {
     executionProfile: 'full-playwright'
     status: 'passed'
     cleanupStatus: 'verified-clean'
+    caseCount: 3
+    caseIds: string[]
     reloadVerified: true
     jsonBodyVerified: true
     semanticReview: { reviewDigest: string; prd: { normalizedText: string } }
     report: { content: { verdict: string } }
     reportPath: string
+    standaloneReportRoot: string
   }
   todoMvc?: {
     executionProfile: 'full-playwright'
@@ -503,10 +506,13 @@ function parseResult(value: unknown): CrossRepoRuntimeGoldenResult {
     || result.fullPlaywright?.executionProfile !== 'full-playwright'
     || result.fullPlaywright.status !== 'passed'
     || result.fullPlaywright.cleanupStatus !== 'verified-clean'
+    || result.fullPlaywright.caseCount !== 3
+    || result.fullPlaywright.caseIds?.length !== 3
     || result.fullPlaywright.reloadVerified !== true
     || result.fullPlaywright.jsonBodyVerified !== true
     || !/^sha256:[a-f0-9]{64}$/.test(result.fullPlaywright.semanticReview?.reviewDigest)
     || result.fullPlaywright.report?.content?.verdict !== 'accepted'
+    || typeof result.fullPlaywright.standaloneReportRoot !== 'string'
     || (process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === '1'
       && (result.todoMvc?.executionProfile !== 'full-playwright'
         || result.todoMvc.status !== 'failed'

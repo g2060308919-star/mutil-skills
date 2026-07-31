@@ -60,6 +60,16 @@ describe('MultiCaseScheduler', () => {
     })).toThrow(/E2E_RUNTIME_EFFECT_UNKNOWN_RETRY_DENIED/)
   })
 
+  test('持久 running Case 必须先对账，不能被误判为可 finalization', () => {
+    const state = startNextCase(
+      createCaseSchedule(planFixture(), '2026-07-31T00:00:00.000Z'),
+      { attemptId: 'ATTEMPT-1', startedAt: '2026-07-31T00:01:00.000Z' },
+    )
+    expect(recoverCaseSchedule(state).next).toEqual({
+      kind: 'reconcile', caseId: 'CASE-0001', attemptId: 'ATTEMPT-1',
+    })
+  })
+
   test('continue policy advances after an independently failed Case', () => {
     const plan = planFixture()
     plan.cases[0]!.failurePolicy = 'continue'

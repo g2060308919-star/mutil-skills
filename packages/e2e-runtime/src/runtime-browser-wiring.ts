@@ -89,7 +89,7 @@ import {
   type RuntimeFullPlaywrightExecutorCapability,
 } from './trusted-action-runner.js'
 import {
-  projectRuntimeFullPlaywrightSnapshot,
+  projectRuntimeFullPlaywrightCases,
   type RuntimeFullPlaywrightProjection,
 } from './runtime-full-playwright-projector.js'
 import type { RuntimeRunSnapshot } from './run-store.js'
@@ -921,9 +921,7 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
     if (writeAttempt === undefined || writeAttempt.state !== 'prepared') {
       throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_ATTEMPT_NOT_PREPARED')
     }
-    if (projectRuntimeFullPlaywrightSnapshot(snapshot).sourceSetDigest !== projection.sourceSetDigest) {
-      throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_PROJECTION_CHANGED')
-    }
+    assertRuntimeFullPlaywrightProjectionCurrent(snapshot, projection)
     const freshnessReceipt = await issueRuntimeFullPlaywrightExecutionFreshness({
       snapshot, projection, issuer: input.freshnessIssuer,
     })
@@ -1312,6 +1310,17 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
       for (const body of renderedBodies.values()) body.bytes.fill(0)
     }
   })
+}
+
+export function assertRuntimeFullPlaywrightProjectionCurrent(
+  snapshot: RuntimeRunSnapshot,
+  projection: RuntimeFullPlaywrightProjection,
+): void {
+  const matches = projectRuntimeFullPlaywrightCases(snapshot).filter((candidate) =>
+    candidate.caseId === projection.caseId && candidate.actionId === projection.actionId)
+  if (matches.length !== 1 || matches[0]!.sourceSetDigest !== projection.sourceSetDigest) {
+    throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_PROJECTION_CHANGED')
+  }
 }
 
 export async function renderRuntimeFullPlaywrightRequestBodies(

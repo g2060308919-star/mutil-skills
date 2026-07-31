@@ -48,6 +48,7 @@ const RuntimeExecutionAttemptSchema = z.object({
     z.string().regex(/^ATTEMPT-[a-f0-9-]{36}$/),
   ),
   requestId: RunIdSchema,
+  requestDigest: DigestSchema.optional(),
   fencingToken: z.number().int().positive(),
   revision: z.number().int().positive(),
   startedAt: z.string().datetime(),

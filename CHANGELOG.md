@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-07-31
+
+### Added
+
+- 新增 `PRDRunCompiler`，将冻结的 PRD 契约编译为可持久化的多 Case 执行计划，并建立 Requirement、Rule、Oracle、Obligation、Case 与执行结果之间的可追踪关系。
+- 新增可恢复的多 Case 调度器；每个 Case 使用独立 Gateway 会话与隔离尝试，进程中断后从未完成 Case 继续，已完成 Case 不重放。
+- 新增生产级原始 PNG 截图和 Playwright Trace 证据发布；JSON、Markdown、HTML 报告可直接定位每个 Case 的浏览器证据。
+- 新增 500 Requirement、2000 Rule、5000 Obligation、1000 Case 的 p95 性能证明，以及 loopback、进程、文件系统、Profile、系统浏览器宿主能力矩阵。
+
+### Changed
+
+- Runtime 正式跨仓 Golden 扩展为三个真实浏览器 Case，覆盖表单输入、Popup、多页面、带 JSON Body 的写请求、Cleanup 与 Reload 验证。
+- 最终化、审计、隔离区与事实合并改为多 Case 模型，并保证并发证据封存不会破坏隔离区清单。
+- E2E 领域模型和关键恢复、证据、脱仓运行决策补入 `CONTEXT.md` 与 ADR。
+
 ## [0.4.5] - 2026-07-29
 
 ### Fixed

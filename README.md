@@ -57,7 +57,7 @@ E2E Skill 负责从 PRD 编排需求、审批、受控浏览器执行、证据�
 3. 用户显式安装精确版本 Runtime：
 
    ```bash
-   npm exec --yes --package=@mutil-skills/e2e-runtime@0.4.5 -- repo-e2e install-runtime --version 0.4.5
+   npm exec --yes --package=@mutil-skills/e2e-runtime@0.4.6 -- repo-e2e install-runtime --version 0.4.6
    ```
 
 4. 验证并选择本机系统 Google Chrome。Runtime 只使用 Chrome executable，并为每次 Run 创建全新的一次性 Profile：

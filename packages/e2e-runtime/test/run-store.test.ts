@@ -495,6 +495,43 @@ describe('runtime run store', () => {
     await competing.close()
   })
 
+  test('多 Case 恢复可为同一持久 execution attempt 重新取得 fenced owner', async () => {
+    const roots = await createRuntimeTestRoots()
+    const store = await RuntimeRunStore.open({ homeDir: roots.home, projectRoot: roots.project })
+    await store.beginRequest('REQUEST-CREATE-RESUME', digest('a'))
+    const createLock = await store.acquireRunLock(digest('1'), 'RUN-1')
+    await store.createRunOutcome({
+      ...runSnapshot(),
+      workflow: { current: 'compiled', sequence: 9, eventChainDigest: digest('9') },
+    }, 'REQUEST-CREATE-RESUME', digest('a'), { ok: true }, createLock)
+    await createLock.close()
+    await store.beginRequest('REQUEST-EXECUTE-RESUME', digest('b'))
+    const startLock = await store.acquireRunLock(digest('1'), 'RUN-1')
+    const started = await store.beginExecutionAttempt({
+      projectIdentityDigest: digest('1'), runId: 'RUN-1',
+      requestId: 'REQUEST-EXECUTE-RESUME', requestDigest: digest('b'),
+      startedAt: '2026-07-17T00:00:00.000Z', lock: startLock,
+      toRunning: (snapshot) => ({ ...snapshot, workflow: transitionWorkflow({
+        state: snapshot.workflow, next: 'running-real', reason: 'test execution started',
+        timestamp: '2026-07-17T00:00:00.000Z', engineVersion: 'test',
+      }).state }),
+    })
+    await startLock.close()
+    await started.owner.release()
+
+    const resumeLock = await store.acquireRunLock(digest('1'), 'RUN-1')
+    const resumed = await store.resumeExecutionAttempt({
+      projectIdentityDigest: digest('1'), runId: 'RUN-1',
+      expectedAttemptId: started.attempt.attemptId, lock: resumeLock,
+    })
+    await resumeLock.close()
+    expect(resumed.attempt).toEqual(started.attempt)
+    expect(resumed.snapshot.executionAttempt?.requestDigest).toBe(digest('b'))
+    await expect(resumed.owner.renew()).resolves.toBeUndefined()
+    await resumed.owner.release()
+    await store.close()
+  })
+
   test('startup rejects deleted global history retained by a Run response', async () => {
     const roots = await createRuntimeTestRoots()
     const store = await openStore(roots)

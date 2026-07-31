@@ -512,7 +512,9 @@ async function publishResult(input: {
     evidenceAudit: { status: 'complete', total: input.result.evidence.length, complete: input.result.evidence.length, reasonCodes: [] },
     cleanupAudit: { status: 'complete', total: 0, complete: 0, reasonCodes: [] },
     coverageFacts: {
+      prdClauses: { covered: 1, total: 1 },
       requirementDesign: { covered: 1, total: 1 }, rules: { covered: 1, total: 1 },
+      oracles: { covered: 1, total: 1 }, cases: { covered: 1, total: 1 },
       criticalNodes: { covered: 1, total: 1 }, roles: { covered: input.result.status === 'input-blocked' ? 0 : 1, total: 1 },
       stateTransitions: { covered: 0, total: 0 }, scenarioCategories: { covered: 1, total: 1 },
     },
@@ -614,6 +616,9 @@ function approvedScopeArtifact(authority: LocalApprovalAuthority, decisionId: st
     dependencies: [],
     visualScope: { required: false, refs: [] },
     browserScope: { browserIds: ['CHROMIUM'], viewportIds: ['DESKTOP'] },
+    clauseDispositions: [{
+      clauseId: 'PRD-BODY', disposition: 'modeled' as const, requirementIds: ['REQ-LIST'],
+    }],
   }
   const receipt = authority.issueDecisionReceipt({
     kind: 'scope', decisionId, decisionStatus: 'approved',

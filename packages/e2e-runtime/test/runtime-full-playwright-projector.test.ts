@@ -6,6 +6,7 @@ import {
   computeFullPlaywrightSourceDigest,
   digestApprovalProjection,
   digestArtifactContent,
+  digestCompiledPrdRunPlan,
   digestCleanupPlanDefinition,
   digestOracleCheckpointValue,
   digestText,
@@ -20,8 +21,10 @@ import {
   authorizeRuntimeFullPlaywrightExecutor,
   executeRuntimeFullPlaywrightCases,
   executeRuntimeFullPlaywright,
+  executeScheduledRuntimeFullPlaywrightCases,
 } from '../src/trusted-action-runner.js'
 import type { RuntimeRunSnapshot } from '../src/run-store.js'
+import { createCaseSchedule, startNextCase } from '../src/multi-case-scheduler.js'
 
 const d = (value: string) => digestText('runtime-full-playwright-projector-test/v1', value)
 
@@ -179,7 +182,7 @@ describe('Runtime full Playwright strict projector', () => {
     const calls: string[] = []
     const capability = authorizeRuntimeFullPlaywrightExecutor(async ({ projection }) => {
       calls.push(projection.program.sourceDigest)
-      return runtimeOutput(projection.caseId, projection.actionId)
+      return runtimeFullPlaywrightOutput(projection.caseId, projection.actionId)
     })
     await expect(executeRuntimeFullPlaywright(capability, { snapshot, attemptId: 'ATTEMPT-1' }))
       .resolves.toMatchObject({ status: 'passed', actionId: 'ACTION-1' })
@@ -195,7 +198,7 @@ describe('Runtime full Playwright strict projector', () => {
     const calls: string[] = []
     const capability = authorizeRuntimeFullPlaywrightExecutor(async ({ projection }) => {
       calls.push(projection.caseId)
-      return runtimeOutput(projection.caseId, projection.actionId)
+      return runtimeFullPlaywrightOutput(projection.caseId, projection.actionId)
     })
     const outputs = await executeRuntimeFullPlaywrightCases(capability, {
       snapshot, attemptIds: ['ATTEMPT-1', 'ATTEMPT-2', 'ATTEMPT-3'],
@@ -203,9 +206,110 @@ describe('Runtime full Playwright strict projector', () => {
     expect(outputs.map((item) => item.caseId)).toEqual(['CASE-1', 'CASE-2', 'CASE-3'])
     expect(calls).toEqual(['CASE-1', 'CASE-2', 'CASE-3'])
   })
+
+  test('每个 Case 的 running 与 terminal 都先持久化，再调度下一个 Case', async () => {
+    const snapshot = multiCaseFixture()
+    const projections = projectRuntimeFullPlaywrightCases(snapshot)
+    const draft = {
+      schemaVersion: '1.0.0' as const,
+      contractProjectionDigest: d('contract'),
+      cases: projections.map((projection, index) => ({
+        queueOrdinal: index,
+        caseId: projection.caseId,
+        caseKey: `case-${index + 1}`,
+        title: projection.caseId,
+        actor: 'auditor',
+        contractNodeIds: [`REQ-${index + 1}`],
+        actions: [{
+          actionId: projection.actionId,
+          actionKey: `action-${index + 1}`,
+          kind: 'full-playwright' as const,
+          effect: 'reversible-write' as const,
+          statement: projection.actionId,
+        }],
+        oracles: [{
+          oracleId: `ORACLE-${index + 1}`,
+          oracleKey: `oracle-${index + 1}`,
+          actionId: projection.actionId,
+          contractNodeId: `REQ-${index + 1}`,
+          acceptanceCriterion: `criterion-${index + 1}`,
+        }],
+        failurePolicy: 'continue' as const,
+      })),
+    }
+    const plan = { ...draft, compilerDigest: digestCompiledPrdRunPlan(draft) }
+    const persisted: string[][] = []
+    const capability = authorizeRuntimeFullPlaywrightExecutor(async ({ projection }) =>
+      runtimeFullPlaywrightOutput(projection.caseId, projection.actionId))
+
+    const result = await executeScheduledRuntimeFullPlaywrightCases(capability, {
+      snapshot,
+      schedule: createCaseSchedule(plan, '2026-07-22T00:00:00.000Z'),
+      attemptIds: ['ATTEMPT-1', 'ATTEMPT-2', 'ATTEMPT-3'],
+      now: () => '2026-07-22T00:01:00.000Z',
+      persistSchedule: async (schedule) => {
+        persisted.push(schedule.cases.map((item) => item.state))
+      },
+    })
+
+    expect(result.schedule.cases.map((item) => item.state)).toEqual(['passed', 'passed', 'passed'])
+    expect(persisted).toEqual([
+      ['running', 'pending', 'pending'],
+      ['passed', 'pending', 'pending'],
+      ['passed', 'running', 'pending'],
+      ['passed', 'passed', 'pending'],
+      ['passed', 'passed', 'running'],
+      ['passed', 'passed', 'passed'],
+    ])
+  })
+
+  test('崩溃恢复从持久 running Case 继续且不重放已完成 Case', async () => {
+    const snapshot = multiCaseFixture()
+    const projections = projectRuntimeFullPlaywrightCases(snapshot)
+    const draft = {
+      schemaVersion: '1.0.0' as const,
+      contractProjectionDigest: d('resume-contract'),
+      cases: projections.map((projection, index) => ({
+        queueOrdinal: index, caseId: projection.caseId, caseKey: `resume-${index}`,
+        title: projection.caseId, actor: 'auditor', contractNodeIds: [`REQ-${index}`],
+        actions: [{ actionId: projection.actionId, actionKey: `action-${index}`,
+          kind: 'full-playwright' as const, effect: 'reversible-write' as const,
+          statement: projection.actionId }],
+        oracles: [{ oracleId: `ORACLE-${index}`, oracleKey: `oracle-${index}`,
+          actionId: projection.actionId, contractNodeId: `REQ-${index}`,
+          acceptanceCriterion: projection.caseId }],
+        failurePolicy: 'continue' as const,
+      })),
+    }
+    const plan = { ...draft, compilerDigest: digestCompiledPrdRunPlan(draft) }
+    const running = startNextCase(
+      createCaseSchedule(plan, '2026-07-22T00:00:00.000Z'),
+      { attemptId: 'ATTEMPT-RECOVERED', startedAt: '2026-07-22T00:01:00.000Z' },
+    )
+    const calls: Array<{ caseId: string; attemptId: string }> = []
+    const capability = authorizeRuntimeFullPlaywrightExecutor(async ({ projection, attemptId }) => {
+      calls.push({ caseId: projection.caseId, attemptId })
+      return runtimeFullPlaywrightOutput(projection.caseId, projection.actionId)
+    })
+    const result = await executeScheduledRuntimeFullPlaywrightCases(capability, {
+      snapshot,
+      schedule: running,
+      attemptIds: ['ATTEMPT-UNUSED', 'ATTEMPT-2', 'ATTEMPT-3'],
+      resumeAttemptId: 'ATTEMPT-RECOVERED',
+      now: () => '2026-07-22T00:02:00.000Z',
+      persistSchedule: async () => undefined,
+    })
+
+    expect(result.schedule.cases.map((item) => item.state)).toEqual(['passed', 'passed', 'passed'])
+    expect(calls).toEqual([
+      { caseId: 'CASE-1', attemptId: 'ATTEMPT-RECOVERED' },
+      { caseId: 'CASE-2', attemptId: 'ATTEMPT-2' },
+      { caseId: 'CASE-3', attemptId: 'ATTEMPT-3' },
+    ])
+  })
 })
 
-function multiCaseFixture(): RuntimeRunSnapshot {
+export function multiCaseFixture(): RuntimeRunSnapshot {
   const snapshot = runtimeFullPlaywrightProjectionFixture()
   const testCases = snapshot.frozenArtifacts['test-cases']!
   const execution = snapshot.frozenArtifacts['execution-contract']!
@@ -280,7 +384,7 @@ function multiCaseFixture(): RuntimeRunSnapshot {
   return snapshot
 }
 
-function runtimeOutput(caseId: string, actionId: string) {
+export function runtimeFullPlaywrightOutput(caseId: string, actionId: string) {
   return { caseId, actionId, status: 'passed' as const, effectObservation: 'applied' as const,
     resultDigest: d('result'), gatewayCommit: { reservationId: 'RESERVATION-1',
       reservationReceiptDigest: d('reservation'), outcomeReceiptDigest: d('outcome'), committed: true as const },

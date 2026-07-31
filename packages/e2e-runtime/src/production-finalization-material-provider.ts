@@ -228,7 +228,7 @@ function productionVerifiers(
   const gatewayMaterials = materialList(material.verifierMaterials.gatewayAudit)
   const sanitizerMaterials = materialList(material.verifierMaterials.sanitizer)
   const attemptMaterial = material.verifierMaterials.attemptEvent as never
-  const executionOutcomeMaterial = material.verifierMaterials.executionOutcome as never
+  const executionOutcomeMaterials = materialList(material.verifierMaterials.executionOutcome)
   const gateways = dependencies.gatewayVerifier === undefined
     ? gatewayMaterials.map((candidate) => LocalGatewayAuditVerifier.create(candidate as never)) : []
   const sanitizers = dependencies.sanitizerVerifier === undefined
@@ -236,8 +236,9 @@ function productionVerifiers(
       candidate as never, (candidate as { publicKeyDigest: string }).publicKeyDigest,
     )) : []
   const requiresExecutionOutcome = material.execution.realEnvironmentResults.length > 0
-  const executionOutcome = dependencies.executionOutcomeVerifier === undefined && requiresExecutionOutcome
-    ? LocalExecutionOutcomeVerifier.create(executionOutcomeMaterial) : undefined
+  const executionOutcomes = dependencies.executionOutcomeVerifier === undefined && requiresExecutionOutcome
+    ? executionOutcomeMaterials.map((candidate) =>
+      LocalExecutionOutcomeVerifier.create(candidate as never)) : []
   return {
     gatewayVerifier: dependencies.gatewayVerifier
       ?? ((signature) => gateways.some((gateway) => gateway.verifySignature(signature))),
@@ -252,7 +253,7 @@ function productionVerifiers(
       ?? createAttemptEventProofVerifier(attemptMaterial),
     ...(!requiresExecutionOutcome && dependencies.executionOutcomeVerifier === undefined ? {} : {
       executionOutcomeVerifier: dependencies.executionOutcomeVerifier
-        ?? ((receipt) => executionOutcome!.verifyReceipt(receipt)),
+        ?? ((receipt) => executionOutcomes.some((verifier) => verifier.verifyReceipt(receipt))),
     }),
   }
 }

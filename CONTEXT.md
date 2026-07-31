@@ -148,7 +148,7 @@ _避免使用_：daily Chrome automation、arbitrary Playwright host
 _避免使用_：mandatory .biztest、Git evidence directory
 
 **Evidence Bundle**：
-Standalone Run Workspace 中按 Case/Checkpoint 绑定的截图、Trace、DOM、manifest 和报告。原始截图保持浏览器 bytes 不变，但仍校验媒体、来源、路径、权限和摘要。
+Standalone Run Workspace 中按 Case/Checkpoint 绑定的原始截图、原始 Trace、经策略处理的 DOM、manifest 和报告。原始截图保持浏览器 bytes 不变，但仍校验媒体、来源、路径、权限和摘要；DOM、console、network、storage 不因截图策略而绕过 quarantine、扫描与必要脱敏。
 _避免使用_：untracked screenshot、report attachment without digest
 
 **Host Capability Proof**：

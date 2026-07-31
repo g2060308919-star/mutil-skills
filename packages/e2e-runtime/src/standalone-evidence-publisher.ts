@@ -57,7 +57,7 @@ export class StandaloneEvidencePublisher {
       || new Set(input.cases.map((item) => item.caseId)).size !== input.cases.length) {
       throw publisherError('E2E_EVIDENCE_RUNTIME_BINDING_INVALID', 'Runtime Case/Action/Attempt 绑定无效')
     }
-    const stateRoot = join(this.#homeDir, '.mutil-skills', 'runtime', 'e2e', 'state')
+    const stateRoot = join(this.#homeDir, '.mutil-skills', 'e2e', 'state')
     const evidence: StandaloneEvidenceFile[] = []
     for (const item of input.cases) {
       const recoveryDirectory = digestText(
@@ -74,16 +74,6 @@ export class StandaloneEvidencePublisher {
           stateRoot,
           join(recoveryRoot, 'screenshot.bin'),
           16 * 1024 * 1024,
-        ),
-      }, {
-        caseId: item.caseId,
-        checkpointId: `${item.actionId}-DOM`,
-        kind: 'dom',
-        relativePath: `evidence/${item.caseId}/${item.actionId}.html`,
-        bytes: await readRuntimeEvidenceFile(
-          stateRoot,
-          join(recoveryRoot, 'dom.bin'),
-          4 * 1024 * 1024,
         ),
       })
       const traceRoot = join(stateRoot, 'full-playwright-traces', item.attemptId)
@@ -148,6 +138,7 @@ export class StandaloneEvidencePublisher {
       if (existing !== manifestText) throw publisherError(
         'E2E_EVIDENCE_OUTPUT_CONFLICT', '同一 outputRoot 已存在不同验收证据',
       )
+      await verifyExistingPublication(finalRoot, files, manifestText)
       return finalRoot
     }
 
@@ -204,10 +195,19 @@ interface OutputFile {
 }
 
 function buildFiles(input: StandaloneEvidencePublishInput): OutputFile[] {
+  const evidenceSection = renderEvidenceSection(input.evidence)
   const reportFiles: OutputFile[] = [
     { kind: 'report-json', relativePath: 'final-report.json', bytes: Buffer.from(input.rendered.json) },
-    { kind: 'report-markdown', relativePath: 'final-report.md', bytes: Buffer.from(input.rendered.markdown) },
-    { kind: 'report-html', relativePath: 'final-report.html', bytes: Buffer.from(input.rendered.html) },
+    {
+      kind: 'report-markdown',
+      relativePath: 'final-report.md',
+      bytes: Buffer.from(`${input.rendered.markdown}${evidenceSection.markdown}`),
+    },
+    {
+      kind: 'report-html',
+      relativePath: 'final-report.html',
+      bytes: Buffer.from(insertHtmlEvidence(input.rendered.html, evidenceSection.html)),
+    },
   ]
   return [
     ...input.evidence.map((file): OutputFile => ({
@@ -240,7 +240,7 @@ function validateInput(input: StandaloneEvidencePublishInput): void {
 
 function safeRelativePath(path: string): boolean {
   return path.length > 0 && path.length <= 4096 && !isAbsolute(path)
-    && !path.includes('\\') && !path.includes(':')
+    && /^[A-Za-z0-9._/-]+$/.test(path)
     && path.split('/').every((part) => part !== '' && part !== '.' && part !== '..')
 }
 
@@ -263,10 +263,75 @@ async function assertExistingOutputSafe(path: string): Promise<void> {
     throw error
   })
   if (info === undefined) return
-  if (!info.isDirectory() || info.isSymbolicLink()
+  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077) !== 0
+    || (typeof process.getuid === 'function' && info.uid !== process.getuid())
     || normalizePlatformAlias(await realpath(path)) !== normalizePlatformAlias(resolve(path))) {
     throw publisherError('E2E_EVIDENCE_OUTPUT_ROOT_UNSAFE', 'outputRoot 必须是正规目录且不得是符号链接')
   }
+}
+
+async function verifyExistingPublication(
+  root: string,
+  files: OutputFile[],
+  manifestText: string,
+): Promise<void> {
+  const expected = [
+    ...files.map((file) => ({
+      relativePath: file.relativePath,
+      bytes: Buffer.from(file.bytes),
+    })),
+    { relativePath: 'manifest.json', bytes: Buffer.from(manifestText) },
+  ]
+  try {
+    for (const file of expected) {
+      const path = join(root, file.relativePath)
+      const info = await lstat(path)
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1
+        || (info.mode & 0o077) !== 0
+        || (typeof process.getuid === 'function' && info.uid !== process.getuid())
+        || normalizePlatformAlias(await realpath(path)) !== normalizePlatformAlias(resolve(path))) {
+        throw new Error('unsafe existing evidence file')
+      }
+      const bytes = await readFile(path)
+      if (!bytes.equals(file.bytes)) throw new Error('existing evidence bytes changed')
+    }
+  } catch (cause) {
+    throw publisherError(
+      'E2E_EVIDENCE_OUTPUT_INTEGRITY_INVALID',
+      '已存在的独立验收证据未通过逐文件完整性复验',
+      cause,
+    )
+  }
+}
+
+function renderEvidenceSection(evidence: StandaloneEvidenceFile[]): {
+  markdown: string
+  html: string
+} {
+  if (evidence.length === 0) return { markdown: '', html: '' }
+  const markdownItems = evidence.map((file) => file.kind === 'screenshot'
+    ? `- ${file.caseId} / ${file.checkpointId}: ![${file.caseId} / ${file.checkpointId}](${file.relativePath})`
+    : file.kind === 'trace'
+      ? `- ${file.caseId} / ${file.checkpointId}: [下载 Trace](${file.relativePath})`
+      : `- ${file.caseId} / ${file.checkpointId}: [查看 DOM](${file.relativePath})`)
+  const htmlItems = evidence.map((file) => file.kind === 'screenshot'
+    ? `<figure><img src="${file.relativePath}" alt="${file.caseId} / ${file.checkpointId}" loading="lazy"><figcaption>${file.caseId} / ${file.checkpointId}</figcaption></figure>`
+    : file.kind === 'trace'
+      ? `<p><a href="${file.relativePath}" download>${file.caseId} / ${file.checkpointId}：下载 Playwright Trace</a></p>`
+      : `<p><a href="${file.relativePath}">${file.caseId} / ${file.checkpointId}：查看 DOM</a></p>`)
+  return {
+    markdown: `\n\n## 浏览器验收证据\n\n${markdownItems.join('\n')}\n`,
+    html: `<section id="browser-acceptance-evidence"><h2>浏览器验收证据</h2>${htmlItems.join('')}</section>`,
+  }
+}
+
+function insertHtmlEvidence(html: string, section: string): string {
+  if (section === '') return html
+  for (const closing of ['</main>', '</body>', '</html>']) {
+    const index = html.lastIndexOf(closing)
+    if (index >= 0) return `${html.slice(0, index)}${section}${html.slice(index)}`
+  }
+  return `${html}${section}`
 }
 
 function normalizePlatformAlias(path: string): string {

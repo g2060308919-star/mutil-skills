@@ -30,6 +30,12 @@ describe('StandaloneEvidencePublisher', () => {
     expect(published).toBe(outputRoot)
     expect(await readFile(join(published, 'evidence/CASE-1/CHECKPOINT-1.png'))).toEqual(screenshot)
     expect(await readFile(join(published, 'evidence/CASE-1/playwright-trace.zip'))).toEqual(trace)
+    const html = await readFile(join(published, 'final-report.html'), 'utf8')
+    expect(html).toContain('<img src="evidence/CASE-1/CHECKPOINT-1.png"')
+    expect(html).toContain('href="evidence/CASE-1/playwright-trace.zip"')
+    const markdown = await readFile(join(published, 'final-report.md'), 'utf8')
+    expect(markdown).toContain('![CASE-1 / CHECKPOINT-1](evidence/CASE-1/CHECKPOINT-1.png)')
+    expect(markdown).toContain('[下载 Trace](evidence/CASE-1/playwright-trace.zip)')
     expect((await stat(published)).mode & 0o777).toBe(0o700)
     expect((await stat(join(published, 'evidence/CASE-1/CHECKPOINT-1.png'))).mode & 0o777).toBe(0o600)
     const manifest = JSON.parse(await readFile(join(published, 'manifest.json'), 'utf8'))
@@ -43,12 +49,12 @@ describe('StandaloneEvidencePublisher', () => {
     })
   })
 
-  test('从 Runtime 状态目录发布生产截图、DOM 与 Playwright Trace', async () => {
+  test('从 Runtime 状态目录发布生产截图与 Playwright Trace，但不发布原始 DOM', async () => {
     const root = await mkdtemp(join(tmpdir(), 'e2e-standalone-runtime-')); roots.push(root)
     const home = join(root, 'home')
     const publisher = new StandaloneEvidencePublisher({ homeDir: home })
     const attemptId = 'ATTEMPT-PRODUCTION-1'
-    const stateRoot = join(home, '.mutil-skills', 'runtime', 'e2e', 'state')
+    const stateRoot = join(home, '.mutil-skills', 'e2e', 'state')
     const recoveryDirectory = digestText(
       'runtime-full-playwright-recovery-directory/v1',
       attemptId,
@@ -74,7 +80,9 @@ describe('StandaloneEvidencePublisher', () => {
     })
 
     expect(await readFile(join(published, 'evidence/CASE-1/ACTION-1.png'))).toEqual(screenshot)
-    expect(await readFile(join(published, 'evidence/CASE-1/ACTION-1.html'))).toEqual(dom)
+    await expect(access(join(published, 'evidence/CASE-1/ACTION-1.html'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
     expect(await readFile(join(
       published,
       'evidence/CASE-1/trace-001-program-after.zip',
@@ -91,6 +99,28 @@ describe('StandaloneEvidencePublisher', () => {
     })
     expect(published).toBe(join(homeDir, '.mutil-skills/e2e/reports/ASSET-2/RUN-2'))
     await expect(access(join(published, 'final-report.html'))).resolves.toBeUndefined()
+  })
+
+  test('幂等重放会复验全部已发布文件，拒绝 manifest 未变但证据已被替换', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'e2e-standalone-replay-')); roots.push(root)
+    const outputRoot = join(root, 'report')
+    const publisher = new StandaloneEvidencePublisher({ homeDir: join(root, 'home') })
+    const input = {
+      ...baseInput(outputRoot),
+      evidence: [{
+        caseId: 'CASE-1', checkpointId: 'CHECKPOINT-1', kind: 'screenshot' as const,
+        relativePath: 'evidence/CASE-1/CHECKPOINT-1.png',
+        bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]),
+      }],
+    }
+    await publisher.publish(input)
+    await writeFile(
+      join(outputRoot, 'evidence/CASE-1/CHECKPOINT-1.png'),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 2]),
+    )
+    await expect(publisher.publish(input)).rejects.toMatchObject({
+      code: 'E2E_EVIDENCE_OUTPUT_INTEGRITY_INVALID',
+    })
   })
 
   test('rejects traversal, malformed media, and symlinked output roots', async () => {

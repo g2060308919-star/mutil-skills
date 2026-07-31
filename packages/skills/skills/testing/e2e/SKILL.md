@@ -10,13 +10,13 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 ## 默认首次使用流程
 
 1. 先加载 [prd-understanding.md](prd-understanding.md)。已有当前、已确认且 route 指向 `e2e` 的唯一 requirements contract 时直接复用；否则优先恰好调用一次已安装的 `$understand-prd`。若该外部 Skill 不可用，就由本 Skill 按 `prd-understanding.md` 内置流程完成同一次来源收集、问题闭合、节点化和契约确认；两条路径互斥，绝不执行两次，也不得另写一份 PRD 总结。
-2. 缺少 Runtime 时，只提示用户显式安装精确 `0.4.5`。
+2. 缺少 Runtime 时，只提示用户显式安装精确 `0.4.6`。
 3. 运行 `~/.mutil-skills/bin/repo-e2e configure-browser --system`，验证并选择系统 Google Chrome；只有系统 Chrome 不可用且用户明确选择兜底时，才运行 `install-browser` 安装托管 Chromium。
 4. 运行 `~/.mutil-skills/bin/repo-e2e configure-approval --mode local-confirmation`。默认流程不执行 `identity enroll`；WebAuthn 是用户显式选择的增强模式。
 5. 运行 `~/.mutil-skills/bin/repo-e2e doctor --json`；仅在 `ready:true` 后创建 Run。
-6. `create-run` 同时提交带严格 front matter 的唯一 requirements contract 原文、主 PRD 与执行所需依赖来源；把 Runtime 返回的 `understandingContractDigest`、`sourceRevision` 与 Source Bundle 绑定进同一契约的 E2E execution projection。调用一次 `prepare-prd-understanding`，让 Runtime 复算并持久化唯一 prepared projection；然后逐字复用返回值作为 `prd-request.understanding`，不得跳过 prepare 或替换投影。
+6. `create-run` 同时提交带严格 front matter 的唯一 requirements contract 原文、主 PRD 与执行所需依赖来源；把 Runtime 返回的 `understandingContractDigest`、`sourceRevision` 与 Source Bundle 绑定进同一契约的 E2E execution projection。调用一次 `prepare-prd-understanding`，让 Runtime 复算并持久化唯一 prepared projection。随后把声明式 Case、Action 和 Oracle 设计一次性交给 `compile-prd-run`；只使用 Runtime 返回的稳定 Case ID、Action ID、Oracle ID、`compilerDigest` 和 `caseSchedule`，不得由 Skill 生成或覆盖这些可信事实。
 7. Execution Approval 必须取得 Runtime 返回的 `semanticReview`，按“PRD 原文 → Clause 原文与处置 → Requirement → Rule → Oracle”完整展示；随后 Runtime 返回 `confirmation-required` 时，必须暂停并等待调用者明确确认，不得替用户确认，也不得继续执行后续边。这是对实际浏览器操作、环境和副作用的安全授权，不是第二次 PRD 理解。
-8. Runtime 完成最终化与报告渲染后，交付 `.biztest` 中的同代资产、脱敏证据和报告路径。
+8. Runtime 完成最终化后调用 `render-report`。需要指定位置时传 `outputRoot`；否则报告写入 `~/.mutil-skills/e2e/reports/<asset-id>/<run-id>/`。交付独立 Run Workspace 中的 JSON、Markdown、HTML、原始 PNG 和 Playwright Trace；`.biztest`、Git、CI Artifact 和对象存储只作为可选发布适配器。
 
 ## Runtime 能力门
 
@@ -26,7 +26,7 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 | --- | --- | --- |
 | Runtime Host | `doctor --json` 返回经过验证的 installation manifest、protocol major 和 safety probes | `environment-blocked / E2E_RUNTIME_HOST_UNAVAILABLE`，仅建议精确版本安装 |
 
-缺失时只展示以下精确建议，不得自行执行：`npm exec --yes --package=@mutil-skills/e2e-runtime@0.4.5 -- repo-e2e install-runtime --version 0.4.5`。不得探测、导入或建议安装 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Report、Store 等低层包。
+缺失时只展示以下精确建议，不得自行执行：`npm exec --yes --package=@mutil-skills/e2e-runtime@0.4.6 -- repo-e2e install-runtime --version 0.4.6`。不得探测、导入或建议安装 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Report、Store 等低层包。
 
 ## 固定 Runtime JSON 调用协议
 
@@ -34,9 +34,9 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 
 `ok:true` 时先按该命令的结果契约读取业务结果；每个业务命令成功后必须立即调用 `get-status`，发送新的严格请求。只有 `get-status` 的 `result` 是公共状态投影，并且必须严格拒绝未知字段、完整提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`。Skill 只原样转述该投影，不补值、不猜测下一边、不自行计算摘要。`ok:false` 时只转述 `error.code/category/terminalState/resumeState/details`；响应版本、requestId、Runtime 身份或字段闭包不合法时进入 `environment-blocked`，不得把传输成功当业务成功。
 
-同一状态有多个候选资产时，先按 `minimumMissingInput` 逐项提交全部 supplemental artifacts；只有阶段门资产本身成为最后一个缺失项时才提交它。`acceptance-scope` 前必须已有 project-policy、prd-manifest、prd-diff、semantic-generation；`coverage-universe` 前必须已有 requirement-model、interaction-flow、design-audit。Runtime 会拒绝任何提前跨越阶段的请求。
+`prepare-prd-understanding` 后必须先消费 `get-status` 返回的 `compile-prd-run` 边，并提交一份严格 `DeclarativePrdRunDesign`。Runtime 负责完整性检查、稳定 ID、摘要和串行 Case 调度；Skill 不得提交 `compilerDigest`、Artifact ID、审批事实或 verdict。`submit-candidate` 仅作为旧 Run 的兼容 interface；若 `get-status` 明确返回该边，仍只能按 `minimumMissingInput` 补交 Runtime 要求的兼容资产，不得自行跳过高层编译、状态边或阶段门。
 
-真实命令包括 `create-run`、`prepare-prd-understanding`、`submit-candidate`、`open-approval`、`confirm-approval`、`run-preflight`、`execute-run`、`prepare-manual-result`、`finalize-manual-result-role`、`finalize-run`、`get-status`、`"command":"resume-run"` 和 `"command":"render-report"`。恢复必须发送新的严格 `resume-run` envelope。本地模式下，人工 obligation 的 executor 与 reviewer 各需要一次独立、不可复用的确认；WebAuthn 模式继续使用两个不同登记身份。进入 `diagnosing` 且所需自动、人工和 N/A 事实齐全后发送 `finalize-run`，成功后再发送 `render-report`。不能把读取状态、重新执行或 Skill 自行渲染冒充恢复、最终化或报告命令。审批只认 Runtime 的主题绑定确认和 Authority 签名结果，不得把 `approved: true` 当作审批；secret 只传 `secretRef`，绝不传 secret value。
+真实命令包括 `create-run`、`prepare-prd-understanding`、`compile-prd-run`、兼容用 `submit-candidate`、`open-approval`、`confirm-approval`、`run-preflight`、`execute-run`、`prepare-manual-result`、`finalize-manual-result-role`、`finalize-run`、`get-status`、`"command":"resume-run"` 和 `"command":"render-report"`。恢复必须发送新的严格 `resume-run` envelope。本地模式下，人工 obligation 的 executor 与 reviewer 各需要一次独立、不可复用的确认；WebAuthn 模式继续使用两个不同登记身份。进入 `diagnosing` 且所需自动、人工和 N/A 事实齐全后发送 `finalize-run`，成功后再发送 `render-report`。不能把读取状态、重新执行或 Skill 自行渲染冒充恢复、最终化或报告命令。审批只认 Runtime 的主题绑定确认和 Authority 签名结果，不得把 `approved: true` 当作审批；secret 只传 `secretRef`，绝不传 secret value。
 
 ## 权威状态决策
 
@@ -57,7 +57,7 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 | 出站与副作用门 | [safety-gateway.md](safety-gateway.md) |
 | 真实/注入执行 | [browser-execution.md](browser-execution.md) |
 | 诊断与有界自愈 | [diagnosis-healing.md](diagnosis-healing.md) |
-| 证据、脱敏和 quarantine | [evidence-privacy.md](evidence-privacy.md) |
+| 原始截图/Trace、敏感文本证据和 quarantine | [evidence-privacy.md](evidence-privacy.md) |
 | Playwright 回归编译 | [regression-publication.md](regression-publication.md) |
 | Verdict 和报告 | [report-verdict.md](report-verdict.md) |
 | 同代原子发布与恢复 | [artifact-transaction.md](artifact-transaction.md) |
@@ -73,7 +73,7 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 - DiscoveryCapability 只允许冻结的静态导航和 DOM 读取；Execution Approval 前不执行 Case。
 - 真实链路不加载注入规则；正式注入只由浏览器外 Safety Gateway 执行并签名计数。
 - 写操作绑定 capability、attempt、DataLease 与 cleanup；每个写 action 必须生成、跨进程验签并落库一份结构化 `ExecutionOutcomeReceipt`，Authority reservation 的 outcomeDigest 必须等于回执 signedDigest；effect unknown 不自动重试。
-- raw evidence 只进入 Git 外 quarantine；只有脱敏、扫描和必要人工复核通过的证据可发布。
+- 原始 PNG 和 Playwright Trace 可以按产品决定原字节发布到本地独立 Run Workspace；Runtime 仍必须证明其 Case/Action/Attempt 来源并校验路径、媒体、摘要和权限。DOM、console、network、storage 等文本或结构化证据继续进入 Git 外 quarantine，并执行扫描、必要脱敏和人工复核。
 - AI/Skill 只能产出声明式需求、Case、Action 与 Oracle；Engine 先把已批准 PRD/scope/lineage 密封为 generation readiness，Host 再固定 Authority 信任根；可执行 Playwright 源码只能由重算 Artifact content digest、固定公钥验签的可信 Projector + Compiler 在空目录生成。`playwrightAction`、源码 bytes、hook、环境读取和 caller 自报 Case ID 永远不能进入 CompilerInput。
 - `trusted-read-only` 与 `trusted-reversible-write` 必须在运行前以 Host trust token 重验 V2 Discovery、Authority 当前 freshness、真实 Source Set（含 mediaType）、已审批 Run Bundle 的 runId、审批摘要和 Case/Action；执行时即时重建并递归密封快照、复验 CLI/Chrome、完成 token 级源码安全扫描，并用不可伪造、单次消费的 session 启动。读/写测试都只能调用同 session/launcher 派生的 loopback Bridge；Chrome/Proxy 路径、Bridge endpoint 和 RunGate 不接受逐 Run 自报。只读 Bridge 必须按已审批 `Case→Action` 映射收齐不可变结果集合；Browser Results 与 Evidence 必须来自该次 Bridge 触发的同一次真实浏览器执行，screenshot/DOM/Gateway summary 在 Runner 与发布入口之间以长度和内容 digest 双重绑定，不能事后重跑或用同长度 bytes 补证据。Chrome/Proxy 的 preflight check 必须来自执行前 Host opaque measurement capability，不能复制 execution fact；普通手写测试只能作为人工资产，或明确进入额外的 `production-isolated` Profile。
 - `publication-ready` 先冻结唯一 FinalizationSnapshot，再由 Artifact Store 原子切换 active；先提交后算 verdict 无效。

@@ -36,7 +36,6 @@ export function compilePrdRun(input: CompilePrdRunInput): CompiledPrdRunPlan {
     for (const oracle of testCase.oracles) {
       const key = criterionKey(oracle.contractNodeId, oracle.acceptanceCriterion)
       if (!expected.has(key)) throw compilerError('E2E_RUNTIME_PRD_RUN_ACCEPTANCE_UNKNOWN')
-      if (observed.has(key)) throw compilerError('E2E_RUNTIME_PRD_RUN_ACCEPTANCE_DUPLICATED')
       observed.add(key)
     }
   }

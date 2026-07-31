@@ -20,7 +20,20 @@ describe('PRDRunCompiler', () => {
     expect(first.compilerDigest).toMatch(/^sha256:/)
   })
 
-  test('blocks missing, altered, duplicated, or unauthorized acceptance mappings', () => {
+  test('允许多个独立场景覆盖同一验收条件', () => {
+    const repeated = inputFixture()
+    repeated.design.cases.push({
+      ...structuredClone(repeated.design.cases[0]!),
+      caseKey: 'case-1-negative',
+      title: '场景 1 负向验证',
+    })
+    const result = compilePrdRun(repeated)
+    expect(result.cases).toHaveLength(4)
+    expect(result.cases.filter((item) =>
+      item.oracles.some((oracle) => oracle.acceptanceCriterion === '结果 1 可见'))).toHaveLength(2)
+  })
+
+  test('blocks missing, altered, or unauthorized acceptance mappings', () => {
     const missing = inputFixture()
     missing.design.cases[0]!.oracles = []
     expect(() => compilePrdRun(missing)).toThrow(/E2E_RUNTIME_PRD_RUN_ACCEPTANCE_UNMAPPED/)
@@ -29,11 +42,10 @@ describe('PRDRunCompiler', () => {
     altered.design.cases[0]!.oracles[0]!.acceptanceCriterion = '模型自行弱化的预期'
     expect(() => compilePrdRun(altered)).toThrow(/E2E_RUNTIME_PRD_RUN_ACCEPTANCE_UNKNOWN/)
 
-    const duplicated = inputFixture()
-    duplicated.design.cases[1]!.oracles[0]!.contractNodeId = 'REQ-1'
-    duplicated.design.cases[1]!.oracles[0]!.acceptanceCriterion = '结果 1 可见'
-    duplicated.design.cases[1]!.contractNodeIds = ['REQ-1']
-    expect(() => compilePrdRun(duplicated)).toThrow(/E2E_RUNTIME_PRD_RUN_ACCEPTANCE_DUPLICATED/)
+    const unauthorized = inputFixture()
+    unauthorized.design.cases[0]!.contractNodeIds = ['REQ-UNKNOWN']
+    unauthorized.design.cases[0]!.oracles[0]!.contractNodeId = 'REQ-UNKNOWN'
+    expect(() => compilePrdRun(unauthorized)).toThrow(/E2E_RUNTIME_PRD_RUN_NODE_UNAUTHORIZED/)
   })
 })
 

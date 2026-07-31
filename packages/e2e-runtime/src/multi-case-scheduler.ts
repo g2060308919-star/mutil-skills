@@ -182,12 +182,22 @@ export function completeCase(
 export function recoverCaseSchedule(input: RuntimeCaseSchedule): {
   state: RuntimeCaseSchedule
   next: { kind: 'cleanup'; caseId: string }
+    | { kind: 'reconcile'; caseId: string; attemptId: string }
     | { kind: 'execute'; caseId: string }
     | { kind: 'finalize' }
 } {
   const state = validateSchedule(input)
   const cleanup = state.cases.find((item) => item.state === 'cleanup')
   if (cleanup !== undefined) return { state, next: { kind: 'cleanup', caseId: cleanup.caseId } }
+  const running = state.cases.find((item) => item.state === 'running')
+  if (running !== undefined) {
+    if (running.attemptId === undefined || state.currentCaseId !== running.caseId) {
+      throw schedulerError('E2E_RUNTIME_CASE_SCHEDULE_INVALID')
+    }
+    return { state, next: {
+      kind: 'reconcile', caseId: running.caseId, attemptId: running.attemptId,
+    } }
+  }
   const pending = state.cases.find((item) => item.state === 'pending')
   if (pending !== undefined && state.status === 'active') {
     return { state, next: { kind: 'execute', caseId: pending.caseId } }

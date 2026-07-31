@@ -184,12 +184,14 @@ describe('PRD-driven reversible-write golden path', () => {
         applicabilityRules: ['actor:operator'], requirements: [{
           reqId: 'REQ-ORDER-1', revision: 1, title: '批准订单并恢复测试数据', actors: ['operator'], entities: ['order'],
           preconditions: ['订单待审核'], rules: [{ ruleId: 'RULE-ORDER-1', category: 'business',
-            statement: '授权操作员可以批准待审核订单', sourceRefs: ['prd:1'], certainty: 'explicit' }],
+            statement: '授权操作员可以批准待审核订单', sourceRefs: ['CLAUSE-ORDER-1'], certainty: 'explicit',
+            oracleIds: ['ORACLE-ORDER-APPROVED'] }],
           states: [{ stateId: 'pending', title: '待审核' }, { stateId: 'approved', title: '已批准' }],
           transitions: [{ transitionId: 'TRANSITION-APPROVE', from: 'pending', action: '批准订单', to: 'approved' }],
-          observableOutcomes: [{ oracleId: 'ORACLE-ORDER-APPROVED', statement: '订单显示已批准' }],
+          observableOutcomes: [{ oracleId: 'ORACLE-ORDER-APPROVED', ruleId: 'RULE-ORDER-1',
+            statement: '订单显示已批准', sourceRefs: ['CLAUSE-ORDER-1'] }],
           applicability: [{ dimension: 'actor', value: 'operator', required: true }],
-          sourceRefs: ['prd:审核流程'], status: 'active',
+          sourceRefs: ['CLAUSE-ORDER-1'], status: 'active',
         }],
       },
       nodes: [{ nodeId: 'NODE-APPROVE', reqId: 'REQ-ORDER-1', kind: 'action', title: '批准订单',
@@ -560,7 +562,8 @@ describe('PRD-driven reversible-write golden path', () => {
             }))
             validationInput = complete.validationInput
             expect(complete.artifacts).toHaveLength(27)
-            expect(complete.terminalVerdict).toBe('accepted')
+            expect(complete.terminalVerdict, JSON.stringify(complete.artifacts.find((artifact) =>
+              artifact.artifactType === 'final-report')?.content)).toBe('accepted')
             return { terminalVerdict: complete.terminalVerdict,
               files: Object.fromEntries(complete.files.map((file) => [file.path, file.bytes])) }
           },
