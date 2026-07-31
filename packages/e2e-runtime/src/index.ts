@@ -3,6 +3,7 @@ export * from './prd-run-compiler.js'
 export * from './multi-case-scheduler.js'
 export * from './standalone-evidence-publisher.js'
 export * from './performance-proof.js'
+export * from './host-capability-proof.js'
 
 export {
   RuntimeDoctorProbeSchema,

@@ -11,6 +11,9 @@ import { canBindLoopback, createRuntimeTestRoots, listenOnLoopback } from './fix
 
 const digest = (value: string) => digestText('owned-resource-production-test/v1', value)
 const loopbackAvailable = await canBindLoopback()
+if (process.env.E2E_REQUIRED_TEST_CAPABILITIES?.split(',').includes('loopback') && !loopbackAvailable) {
+  throw new Error('E2E_HOST_CAPABILITY_NOT_EXECUTED:loopback')
+}
 
 describe('production owned-resource recovery adapters', () => {
   test('Browser profile 仅在 supervisor 明确死亡且 parent/profile inode 固定时原子隔离清理', async () => {

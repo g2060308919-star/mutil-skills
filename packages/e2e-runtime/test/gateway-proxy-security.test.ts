@@ -26,6 +26,9 @@ import { generateCACertificate } from 'mockttp'
 
 const handles: Array<{ close(): Promise<void> }> = []
 const loopbackAvailable = await canBindLoopback()
+if (process.env.E2E_REQUIRED_TEST_CAPABILITIES?.split(',').includes('loopback') && !loopbackAvailable) {
+  throw new Error('E2E_HOST_CAPABILITY_NOT_EXECUTED:loopback')
+}
 afterEach(async () => { await Promise.allSettled(handles.splice(0).reverse().map(async (item) => await item.close())) })
 
 test('Gateway IPC 拒绝错误 MAC、乱序和重放 envelope', () => {
