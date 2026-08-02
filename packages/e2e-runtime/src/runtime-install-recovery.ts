@@ -68,7 +68,7 @@ export async function recoverRuntimeInstallTransaction(
   const ownerPath = join(layout.root, OWNER_FILE)
   const ownerPresent = await exists(ownerPath)
   if (!ownerPresent) {
-    if (await exists(layout.installLock)) blocked('install owner marker 缺失但 lock 仍存在')
+    if (await exists(layout.installLock)) return await recoverOrphanedInstallLock(layout, operations)
     return { status: 'absent' }
   }
 
@@ -160,6 +160,65 @@ export async function recoverRuntimeInstallTransaction(
   } catch (error) {
     if (error instanceof Error && error.message.includes('E2E_RUNTIME_INSTALL_RECOVERY_BLOCKED')) throw error
     blocked(`installer recovery 证明失败: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+async function recoverOrphanedInstallLock(
+  layout: RuntimeLayout,
+  operations: RuntimeInstallRecoveryOperations,
+): Promise<RuntimeInstallRecoveryResult> {
+  try {
+    const binding = parseOwnerBinding(await readTrustedFile(layout.installLock))
+    await verifyRootBinding(layout, binding)
+    const processState = await operations.inspectOwnerProcess(binding.pid)
+    if (processState.status !== 'dead') blocked(
+      processState.status === 'alive' && processState.startIdentity === binding.processStartIdentity
+        ? 'owner marker 缺失但 installer owner 仍存活'
+        : 'owner marker 缺失且 installer owner 生死或 PID 复用状态不确定',
+    )
+    const staging = join(layout.root, binding.stagingName)
+    const stagingMetadata = await safeStagingMetadata(layout, staging)
+    const quarantine = join(layout.root, `.install-recovery-${binding.ownerNonce}`)
+    await mkdir(quarantine, { mode: 0o700 }).catch((error: unknown) => {
+      if (isNodeError(error, 'EEXIST')) blocked('installer recovery quarantine 已存在')
+      throw error
+    })
+    await chmod(quarantine, 0o700)
+    if (stagingMetadata !== undefined) {
+      const isolated = join(quarantine, 'staging')
+      await rename(staging, isolated)
+      const isolatedMetadata = await lstat(isolated)
+      if (isolatedMetadata.dev !== stagingMetadata.dev || isolatedMetadata.ino !== stagingMetadata.ino) {
+        blocked('orphan staging 在原子隔离时发生 path swap')
+      }
+    }
+    const lockIdentity = await lstat(layout.installLock)
+    const isolatedLock = join(quarantine, 'install.lock')
+    await rename(layout.installLock, isolatedLock)
+    const isolatedIdentity = await lstat(isolatedLock)
+    if (lockIdentity.dev !== isolatedIdentity.dev || lockIdentity.ino !== isolatedIdentity.ino) {
+      blocked('orphan install lock 在原子隔离时发生 path swap')
+    }
+    await syncDirectory(layout.root)
+
+    const tombstones = join(layout.root, TOMBSTONE_DIRECTORY)
+    await ensurePrivateDirectory(tombstones)
+    const tombstonePath = join(tombstones, `${binding.ownerNonce}.json`)
+    await writeExclusiveTrustedFile(tombstonePath, `${canonicalizeJson({
+      schemaVersion: '1.0.0',
+      ownerBindingDigest: digestText(
+        'e2e-runtime-install-owner-binding/v1', canonicalizeJson(binding),
+      ),
+      targetVersion: binding.targetVersion,
+      installationDigestIntent: 'unknown-owner-marker-missing',
+      outcome: 'aborted',
+    })}\n`)
+    await rm(quarantine, { recursive: true, force: false })
+    await syncDirectory(layout.root)
+    return { status: 'recovered', outcome: 'aborted', tombstonePath }
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('E2E_RUNTIME_INSTALL_RECOVERY_BLOCKED')) throw error
+    blocked(`orphan installer recovery 证明失败: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -321,7 +380,7 @@ function parseObject(bytes: Buffer): Record<string, unknown> {
   return value
 }
 
-async function verifyRootBinding(layout: RuntimeLayout, marker: RuntimeInstallOwnerMarker): Promise<void> {
+async function verifyRootBinding(layout: RuntimeLayout, marker: RuntimeInstallOwnerBinding): Promise<void> {
   const metadata = await lstat(layout.root)
   if (!metadata.isDirectory() || metadata.isSymbolicLink() || metadata.uid !== currentUid()
     || (metadata.mode & 0o777) !== 0o700 || await realpath(layout.root) !== marker.runtimeRoot.canonicalPath

@@ -88,6 +88,50 @@ describe('versioned runtime installer', () => {
       .rejects.toThrow(/E2E_RUNTIME_VERSION_CONFLICT/)
   })
 
+  test('treats npm lock metadata drift as the same Runtime content identity', async () => {
+    const roots = await createRuntimeTestRoots()
+    const install = async (resolved: string) => await installRuntime({
+      homeDir: roots.home,
+      version: '0.0.0',
+      installClosure: async ({ stagingPrefix }) => {
+        await writePreparedClosure(stagingPrefix, '0.0.0', 'same-runtime')
+        await writeFile(join(stagingPrefix, 'package-lock.json'), JSON.stringify({
+          lockfileVersion: 3,
+          packages: {
+            'node_modules/@mutil-skills/e2e-runtime': {
+              version: '0.0.0',
+              resolved,
+              integrity: `sha512-${'a'.repeat(88)}`,
+            },
+          },
+        }))
+      },
+    })
+
+    const first = await install('https://registry.npmjs.org/runtime.tgz')
+    const second = await install('https://registry.example.test/cache/runtime.tgz')
+
+    expect(second.installationDigest).toBe(first.installationDigest)
+    expect(second.contentDigest).toBe(first.contentDigest)
+    expect(second.registryIntegrity).toBe(`sha512-${'a'.repeat(88)}`)
+  })
+
+  test('rejects a same-version closure when executable identity changes', async () => {
+    const roots = await createRuntimeTestRoots()
+    const install = async (executable: boolean) => await installRuntime({
+      homeDir: roots.home,
+      version: '0.0.0',
+      installClosure: async ({ stagingPrefix }) => {
+        await writePreparedClosure(stagingPrefix, '0.0.0', 'same-runtime')
+        const helper = join(stagingPrefix, 'node_modules', '@mutil-skills', 'e2e-runtime', 'dist', 'helper.js')
+        await writeFile(helper, 'export default true\n', { mode: executable ? 0o755 : 0o644 })
+      },
+    })
+
+    await install(false)
+    await expect(install(true)).rejects.toThrow(/E2E_RUNTIME_VERSION_CONFLICT/)
+  })
+
   test('validates the requested version and installed package identity', async () => {
     const roots = await createRuntimeTestRoots()
     await expect(installRuntime({
@@ -427,20 +471,25 @@ describe('versioned runtime installer', () => {
     await expect(stat(fixture.stagingPath)).resolves.toMatchObject({})
   })
 
-  test('marker 缺失或 lock binding 不匹配时 fail closed', async () => {
+  test('owner marker 与 lock binding 不匹配时 fail closed', async () => {
     const missing = await staleInstallTransactionFixture({ phase: 'locked', lock: true, staging: false })
-    const ownerBytes = await readFile(missing.ownerPath)
-    await import('node:fs/promises').then(({ unlink }) => unlink(missing.ownerPath))
-    await expect(recoverRuntimeInstallTransaction(missing.layout, {
-      inspectOwnerProcess: async () => ({ status: 'dead' }),
-    })).rejects.toThrow(/E2E_RUNTIME_INSTALL_RECOVERY_BLOCKED/)
-    await writeFile(missing.ownerPath, ownerBytes, { mode: 0o600 })
     const lock = JSON.parse(await readFile(missing.lockPath, 'utf8'))
     lock.ownerNonce = 'f'.repeat(64)
     await writeFile(missing.lockPath, `${canonicalizeJson(lock)}\n`, { mode: 0o600 })
     await expect(recoverRuntimeInstallTransaction(missing.layout, {
       inspectOwnerProcess: async () => ({ status: 'dead' }),
     })).rejects.toThrow(/E2E_RUNTIME_INSTALL_RECOVERY_BLOCKED/)
+  })
+
+  test('owner marker 丢失但可信 lock 的 owner 已死亡时自动回收残留安装', async () => {
+    const fixture = await staleInstallTransactionFixture({ phase: 'staging', lock: true, staging: true })
+    await import('node:fs/promises').then(({ unlink }) => unlink(fixture.ownerPath))
+
+    await expect(recoverRuntimeInstallTransaction(fixture.layout, {
+      inspectOwnerProcess: async () => ({ status: 'dead' }),
+    })).resolves.toMatchObject({ status: 'recovered', outcome: 'aborted' })
+    await expect(stat(fixture.lockPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(fixture.stagingPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('staging symlink/path swap 时阻止恢复且不删除外部目录', async () => {
@@ -564,4 +613,21 @@ async function installFixture(
   return operations === undefined
     ? installRuntime(options)
     : installRuntimeWithOperations(options, operations)
+}
+
+async function writePreparedClosure(
+  stagingPrefix: string,
+  version: string,
+  body: string,
+): Promise<void> {
+  const packageRoot = join(stagingPrefix, 'node_modules', '@mutil-skills', 'e2e-runtime')
+  await mkdir(join(packageRoot, 'dist', 'src', 'bin'), { recursive: true })
+  await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+    name: '@mutil-skills/e2e-runtime', version,
+  }))
+  await writeFile(
+    join(packageRoot, 'dist', 'src', 'bin', 'repo-e2e.js'),
+    `#!/usr/bin/env node\n// ${body}\n`,
+    { mode: 0o755 },
+  )
 }

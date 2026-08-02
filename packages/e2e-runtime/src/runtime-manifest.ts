@@ -24,6 +24,12 @@ export interface RuntimeManifest {
   installationDigest: string
 }
 
+export interface RuntimeContentIdentity {
+  contentDigest: string
+  executableDigest: string
+  registryIntegrity?: string
+}
+
 export interface RuntimeOwnerMarker {
   schemaVersion: '1.0.0'
   product: '@mutil-skills/e2e-runtime'
@@ -77,6 +83,27 @@ export async function createRuntimeManifest(
       'e2e-runtime-installation/v1',
       canonicalizeJson(files),
     ),
+  }
+}
+
+/**
+ * 比较同一版本是否代表相同 Runtime 能力，而不是比较 npm 在本机生成的安装记录。
+ * package-lock 仍由 installation manifest 保护，但 registry URL 等非能力元数据不会制造假冲突。
+ */
+export async function createRuntimeContentIdentity(versionRoot: string): Promise<RuntimeContentIdentity> {
+  const root = resolve(versionRoot)
+  await assertDirectory(root, 'E2E_RUNTIME_MANIFEST_ROOT_INVALID', false)
+  const rootRealpath = await realpath(root)
+  const files: RuntimeManifestFile[] = []
+  const executables: string[] = []
+  await collectContentIdentityFiles(root, rootRealpath, '', files, executables)
+  files.sort(compareManifestFile)
+  executables.sort()
+  const registryIntegrity = await readRegistryIntegrity(root, rootRealpath)
+  return {
+    contentDigest: digestText('e2e-runtime-content/v1', canonicalizeJson(files)),
+    executableDigest: digestText('e2e-runtime-executables/v1', canonicalizeJson(executables)),
+    ...(registryIntegrity === undefined ? {} : { registryIntegrity }),
   }
 }
 
@@ -285,6 +312,70 @@ async function collectManifestFiles(
       digest: digestBytes('e2e-runtime-file/v1', bytes),
     })
   }
+}
+
+async function collectContentIdentityFiles(
+  directory: string,
+  rootRealpath: string,
+  relativeDirectory: string,
+  files: RuntimeManifestFile[],
+  executables: string[],
+): Promise<void> {
+  const entries = await readdir(directory, { withFileTypes: true })
+  entries.sort((left, right) => left.name.localeCompare(right.name))
+  for (const entry of entries) {
+    const relativePath = relativeDirectory === '' ? entry.name : posix.join(relativeDirectory, entry.name)
+    if (relativePath === RUNTIME_MANIFEST_FILE || isInstallerMetadata(relativePath)) continue
+    const absolutePath = join(directory, entry.name)
+    const metadata = await lstat(absolutePath)
+    if (metadata.isSymbolicLink() || metadata.uid !== currentUid()) {
+      runtimeError('E2E_RUNTIME_MANIFEST_UNSAFE_NODE', 'Runtime content identity 不接受 symlink 或非当前 owner 节点')
+    }
+    const resolved = await realpath(absolutePath)
+    assertWithin(rootRealpath, resolved, 'E2E_RUNTIME_MANIFEST_PATH_ESCAPE')
+    if (metadata.isDirectory()) {
+      await collectContentIdentityFiles(absolutePath, rootRealpath, relativePath, files, executables)
+      continue
+    }
+    if (!metadata.isFile() || metadata.nlink !== 1) {
+      runtimeError('E2E_RUNTIME_MANIFEST_UNSAFE_NODE', 'Runtime content identity 只接受单链接普通文件')
+    }
+    const bytes = await readSafeRegularFile(absolutePath, rootRealpath)
+    files.push({
+      path: relativePath,
+      byteLength: bytes.byteLength,
+      digest: digestBytes('e2e-runtime-content-file/v1', bytes),
+    })
+    if ((metadata.mode & 0o111) !== 0) executables.push(relativePath)
+  }
+}
+
+function compareManifestFile(left: RuntimeManifestFile, right: RuntimeManifestFile): number {
+  return left.path < right.path ? -1 : left.path > right.path ? 1 : 0
+}
+
+function isInstallerMetadata(relativePath: string): boolean {
+  return relativePath === 'package-lock.json'
+    || relativePath === 'npm-shrinkwrap.json'
+    || relativePath === 'node_modules/.package-lock.json'
+}
+
+async function readRegistryIntegrity(root: string, rootRealpath: string): Promise<string | undefined> {
+  const lockPath = join(root, 'package-lock.json')
+  let bytes: Buffer
+  try {
+    bytes = await readSafeRegularFile(lockPath, rootRealpath)
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')
+      || (error instanceof E2EError && error.code === 'E2E_RUNTIME_FILE_MISSING')) return undefined
+    throw error
+  }
+  let lock: unknown
+  try { lock = JSON.parse(bytes.toString('utf8')) } catch { return undefined }
+  if (!isRecord(lock) || !isRecord(lock.packages)) return undefined
+  const runtime = lock.packages['node_modules/@mutil-skills/e2e-runtime']
+  if (!isRecord(runtime) || typeof runtime.integrity !== 'string' || runtime.integrity.length > 512) return undefined
+  return runtime.integrity
 }
 
 async function readSafeRegularFile(

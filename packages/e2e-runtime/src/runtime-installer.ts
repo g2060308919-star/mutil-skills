@@ -24,6 +24,7 @@ import {
   assertDirectory,
   assertExactRuntimeVersion,
   createRuntimeCurrent,
+  createRuntimeContentIdentity,
   createRuntimeManifest,
   currentUid,
   readRuntimeCurrent,
@@ -51,6 +52,11 @@ export interface InstallRuntimeOptions {
 export interface RuntimeInstallResult {
   version: string
   installationDigest: string
+  /** Stable capability identity; optional only for injected legacy test adapters. */
+  contentDigest?: string
+  /** Executable-bit identity; optional only for injected legacy test adapters. */
+  executableDigest?: string
+  registryIntegrity?: string
   launcher: string
 }
 
@@ -175,6 +181,7 @@ export async function installRuntimeWithOperations(
       }
       await normalizeClosurePermissions(stagingPrefix)
       await validatePreparedRuntimeClosure(stagingPrefix, options.version)
+      const incomingIdentity = await createRuntimeContentIdentity(stagingPrefix)
       const manifest = await createRuntimeManifest(stagingPrefix)
       const manifestPath = join(stagingPrefix, RUNTIME_MANIFEST_FILE)
       await writeFile(manifestPath, `${canonicalizeJson(manifest)}\n`, {
@@ -194,8 +201,9 @@ export async function installRuntimeWithOperations(
       createdTarget = await placeVersionDirectory(stagingPrefix, target)
       if (createdTarget) await operations.fsyncVersions(layout.versions)
       const verified = await operations.verifyVersion(layout, options.version)
-      if (verified.manifest.installationDigest !== manifest.installationDigest) {
-        runtimeError('E2E_RUNTIME_VERSION_CONFLICT', '相同版本已存在但 installation digest 不同')
+      const installedIdentity = await createRuntimeContentIdentity(verified.versionRoot)
+      if (!sameRuntimeContentIdentity(installedIdentity, incomingIdentity)) {
+        runtimeError('E2E_RUNTIME_VERSION_CONFLICT', '相同版本已存在但 Runtime content identity 不同')
       }
       await transaction.markPublished()
       await activateRuntimeFiles(layout, verified, operations)
@@ -203,6 +211,10 @@ export async function installRuntimeWithOperations(
       return {
         version: verified.version,
         installationDigest: verified.manifest.installationDigest,
+        contentDigest: installedIdentity.contentDigest,
+        executableDigest: installedIdentity.executableDigest,
+        ...(installedIdentity.registryIntegrity === undefined
+          ? {} : { registryIntegrity: installedIdentity.registryIntegrity }),
         launcher: layout.bin,
       }
     } catch (error) {
@@ -218,6 +230,17 @@ export async function installRuntimeWithOperations(
       await transaction.release()
     }
   })()
+}
+
+function sameRuntimeContentIdentity(
+  left: Awaited<ReturnType<typeof createRuntimeContentIdentity>>,
+  right: Awaited<ReturnType<typeof createRuntimeContentIdentity>>,
+): boolean {
+  return left.contentDigest === right.contentDigest
+    && left.executableDigest === right.executableDigest
+    && (left.registryIntegrity === undefined
+      || right.registryIntegrity === undefined
+      || left.registryIntegrity === right.registryIntegrity)
 }
 
 export const runtimeInstallerOperations: RuntimeInstallerOperations = Object.freeze({
