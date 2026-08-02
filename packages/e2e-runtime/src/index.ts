@@ -5,6 +5,8 @@ export {
   confirmAcceptanceReview,
   type AcceptanceReviewReceipt,
 } from './acceptance-review.js'
+export { assertRunHandle, createRunHandle } from './run-handle.js'
+export { classifyRunCondition, projectRunStage } from './run-condition.js'
 
 export {
   RuntimeDoctorProbeSchema,

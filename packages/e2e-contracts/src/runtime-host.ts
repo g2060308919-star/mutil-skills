@@ -9,7 +9,12 @@ import { WorkflowNodeSchema, WorkflowStateSchema } from './workflow.js'
 import { ApprovalGrantSubjectSchema, canonicalGrantApprovalType } from './approval-subject.js'
 import { ManualResultDraftSchema } from './manual-result.js'
 import { AnyDeclarativePrdRunDesignSchema } from './declarative-prd-run.js'
-import { AcceptanceReviewSchema } from './e2e-flow.js'
+import {
+  AcceptanceReviewSchema,
+  RunConditionSchema,
+  RunHandleSchema,
+  RunStageSchema,
+} from './e2e-flow.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -278,6 +283,24 @@ export const RuntimeStatusResultSchema = z.object({
     status: z.enum(['required', 'confirmed']),
     receiptDigest: DigestSchema.optional(),
   }).strict().optional(),
+  handle: RunHandleSchema.optional(),
+  stage: RunStageSchema.optional(),
+  condition: RunConditionSchema.optional(),
+  preservedAssets: z.array(z.string().min(1)).max(100_000).optional(),
+  invalidatedAssets: z.array(z.string().min(1)).max(100_000).optional(),
+  semanticCases: z.array(z.object({
+    caseId: SafeIdSchema,
+    title: z.string().min(1).max(64 * 1024),
+    actor: SafeIdSchema,
+    contractNodeIds: z.array(SafeIdSchema).max(10_000),
+    oracleIds: z.array(SafeIdSchema).max(10_000),
+    executionLane: z.enum([
+      'preview-readonly', 'real-reversible-write', 'injection-simulated',
+    ]).optional(),
+    bindingStatus: z.enum(['pending', 'ready', 'blocked']),
+    blockerReasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/).optional(),
+  }).strict()).max(1_000).optional(),
+  remediation: z.array(z.string().min(1).max(64 * 1024)).max(32).optional(),
   pendingDecision: JsonValueSchema.optional(),
 }).strict()
 

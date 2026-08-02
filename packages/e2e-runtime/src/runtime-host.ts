@@ -124,6 +124,8 @@ import {
   buildAcceptanceReview,
   confirmAcceptanceReview,
 } from './acceptance-review.js'
+import { createRunHandle } from './run-handle.js'
+import { classifyRunCondition, projectRunStage } from './run-condition.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -3095,6 +3097,28 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
     prdRevision: snapshot.artifactDigests['prd-source'],
     workflow: snapshot.workflow,
     artifactDigests: snapshot.artifactDigests,
+    handle: createRunHandle(snapshot),
+    stage: projectRunStage(snapshot.workflow.current),
+    condition: classifyRunCondition(snapshot),
+    preservedAssets: [
+      ...Object.keys(snapshot.artifactDigests).sort(),
+      ...(snapshot.compiledPrdRun === undefined ? [] : ['compiled-prd-run']),
+    ],
+    invalidatedAssets: [],
+    semanticCases: (snapshot.compiledPrdRun?.cases ?? []).map((testCase) => ({
+      caseId: testCase.caseId,
+      title: testCase.title,
+      actor: testCase.actor,
+      contractNodeIds: testCase.contractNodeIds,
+      oracleIds: testCase.oracles.map((oracle) => oracle.oracleId),
+      ...(testCase.executionLane === undefined ? {} : { executionLane: testCase.executionLane }),
+      bindingStatus: snapshot.preflightBlocker !== undefined ? 'blocked'
+        : snapshot.trustedExecutionFacts['browser-preflight'] !== undefined
+          && snapshot.frozenArtifacts['browser-action-map'] !== undefined ? 'ready' : 'pending',
+      ...(snapshot.preflightBlocker === undefined
+        ? {} : { blockerReasonCode: snapshot.preflightBlocker.reasonCode }),
+    })),
+    remediation: runtimeRemediation(snapshot, acceptanceReview, reviewConfirmed),
     ...projection,
     ...(acceptanceReview === undefined ? {} : {
       acceptanceReview,
@@ -3106,6 +3130,20 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
       ? {} : { preflightBlocker: snapshot.preflightBlocker }),
     ...(snapshot.pendingDecision === undefined ? {} : { pendingDecision: snapshot.pendingDecision }),
   })
+}
+
+function runtimeRemediation(
+  snapshot: RuntimeRunSnapshot,
+  acceptanceReview: ReturnType<typeof acceptanceReviewForStatus>,
+  reviewConfirmed: boolean,
+): string[] {
+  if (snapshot.preflightBlocker !== undefined) return [
+    `修复 ${snapshot.preflightBlocker.reasonCode} 后对同一 Run 重新执行 run-preflight，无需重建需求资产。`,
+  ]
+  if (acceptanceReview !== undefined && !reviewConfirmed) return [
+    '请先展示 AcceptanceReview 的 PRD 原文到 Case 映射，再使用 reviewDigest 确认。',
+  ]
+  return []
 }
 
 const STATUS_COMMAND_BY_STATE: Partial<Record<WorkflowNode,
