@@ -1,6 +1,12 @@
 import type { Page } from 'playwright'
-import { E2EError, canonicalizeJson } from '@mutil-skills/e2e-contracts'
+import {
+  E2EError,
+  canonicalizeJson,
+  type PageIdentityPolicy,
+  type PageIdentitySignal,
+} from '@mutil-skills/e2e-contracts'
 import type { BrowserPageAdapter, ObservedPageIdentity } from './read-only-runner.js'
+import { evaluatePageIdentity, type PageIdentityEvaluation } from './page-identity-policy.js'
 
 export class PlaywrightPageAdapter implements BrowserPageAdapter {
   constructor(readonly page: Page) {}
@@ -21,6 +27,13 @@ export class PlaywrightPageAdapter implements BrowserPageAdapter {
       ...(role === null ? {} : { role }),
       ariaSignals,
     }
+  }
+
+  async evaluateIdentity(policy: PageIdentityPolicy): Promise<PageIdentityEvaluation> {
+    return await evaluatePageIdentity({
+      currentUrl: () => this.page.url(),
+      evaluateSignal: async (signal) => await this.evaluateSignal(signal),
+    }, policy)
   }
 
   async containsText(text: string): Promise<boolean> {
@@ -80,6 +93,31 @@ export class PlaywrightPageAdapter implements BrowserPageAdapter {
     if (Buffer.byteLength(serialized, 'utf8') > 4 * 1024 * 1024) throw evidenceLimit('dom')
     return serialized
   }
+
+  private async evaluateSignal(signal: PageIdentitySignal): Promise<{ matched: boolean; actual: string }> {
+    if (signal.kind === 'test-id') return await visible(this.page.getByTestId(signal.value))
+    if (signal.kind === 'role') {
+      return await visible(this.page.getByRole(signal.role, { name: signal.name, exact: true }))
+    }
+    if (signal.kind === 'css-visible') return await visible(this.page.locator(signal.selector))
+    if (signal.kind === 'visible-text') {
+      return await visible(this.page.getByText(signal.value, { exact: signal.exact }))
+    }
+    if (signal.kind === 'heading') {
+      return await visible(this.page.getByRole('heading', { name: signal.value, exact: signal.exact }))
+    }
+    const actual = await this.page.title()
+    return {
+      matched: signal.exact ? actual === signal.value : actual.includes(signal.value),
+      actual,
+    }
+  }
+}
+
+async function visible(locator: ReturnType<Page['locator']>): Promise<{ matched: boolean; actual: string }> {
+  const first = locator.first()
+  const matched = await first.count() > 0 && await first.isVisible()
+  return { matched, actual: matched ? 'visible' : 'missing' }
 }
 
 function evidenceLimit(kind: string): E2EError {

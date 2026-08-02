@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { PageIdentityPolicySchema } from './e2e-flow.js'
 import { RuntimeHttpHeaderSchema } from './runtime-http-action.js'
 import { AssetIdSchema, canonicalizeJson, digestCanonicalGrantApprovalSubject, digestText } from './common.js'
 import {
@@ -69,6 +70,7 @@ export const DiscoveryApprovalSubjectSchema = z.object({
     title: LimitedTextSchema,
     heading: LimitedTextSchema,
     ariaSignals: z.array(LimitedTextSchema).max(1_000),
+    policy: PageIdentityPolicySchema.optional(),
   }).strict(),
   bootstrapIntentsDigest: DigestSchema,
   requests: ReadHttpRequestSetSchema,

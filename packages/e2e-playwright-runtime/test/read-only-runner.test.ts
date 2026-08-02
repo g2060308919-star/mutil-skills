@@ -90,6 +90,52 @@ describe('runReadOnlyCase', () => {
     expect(result).toEqual({ status: 'safety-blocked', reasonCode: 'E2E_APPROVAL_GRANT_EXPIRED' })
   })
 
+  test('页面没有 heading 时使用已批准的声明式业务身份策略完成 preflight', async () => {
+    const page = fakePage() as ReturnType<typeof fakePage> & {
+      evaluateIdentity: () => Promise<{ matched: boolean }>
+    }
+    page.identity = async () => ({
+      url: 'https://test.example.com/orders', title: '', headings: [], ariaSignals: [],
+    })
+    page.evaluateIdentity = async () => ({
+      matched: true,
+      url: {
+        expectedOrigin: 'https://test.example.com', expectedPathPattern: '/orders',
+        actual: 'https://test.example.com/orders', matched: true,
+      },
+      signals: [{ kind: 'test-id', expected: 'orders-page', actual: 'visible', matched: true }],
+      matchedSignalCount: 1,
+      requiredSignalCount: 1,
+    })
+    const authorization = discoveryAuthorization()
+    const expectedPageIdentity = {
+      ...authorization.currentSubject.expectedPageIdentity,
+      policy: {
+        schemaVersion: '1.0.0' as const,
+        url: { origin: 'https://test.example.com', pathPattern: '/orders' },
+        signals: [{ kind: 'test-id' as const, value: 'orders-page' }],
+        match: { mode: 'all' as const },
+      },
+    }
+    authorization.currentSubject.expectedPageIdentity = expectedPageIdentity
+    authorization.grant.subject.expectedPageIdentity = expectedPageIdentity
+    const navigation = authorization.grant.capabilities.find((capability) =>
+      capability.operation === 'local-navigation')
+    if (navigation?.operation !== 'local-navigation') throw new Error('navigation capability missing')
+    navigation.expectedPageIdentityDigest = digestText(
+      'expected-page-identity/v1', canonicalizeJson(expectedPageIdentity),
+    )
+
+    const result = await runBrowserPreflight({
+      authorization,
+      runtime: { sandboxHealthy: true, gatewayConnected: true },
+      gatewayAudit: { received: 1, forwarded: 1, blocked: 0, byIntent: { 'INTENT-DOCUMENT': 1 } },
+      page, attemptId: 'ATTEMPT-PREFLIGHT-POLICY', actionId: 'ACTION-PREFLIGHT',
+    })
+
+    expect(result.status).toBe('ready')
+  })
+
   test('fails closed before navigation when the controlled runtime is not healthy', async () => {
     const page = fakePage()
     const result = await runReadOnlyCase({

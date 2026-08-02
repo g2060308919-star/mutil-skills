@@ -3738,6 +3738,22 @@ function matchesReadyPreflight(
 ): boolean {
   const observed = outcome.observedIdentity
   if (!observed) return false
+  const policy = subject.expectedPageIdentity.policy
+  if (policy !== undefined) {
+    const evaluation = outcome.pageIdentityEvaluation
+    const requiredSignalCount = policy.match.mode === 'all' ? policy.signals.length : policy.match.count
+    return evaluation !== undefined
+      && evaluation.policyDigest === digestText('page-identity-policy/v1', canonicalizeJson(policy))
+      && evaluation.matched
+      && evaluation.urlMatched
+      && canonicalUrl(evaluation.actualUrl) === canonicalUrl(observed.url)
+      && evaluation.requiredSignalCount === requiredSignalCount
+      && evaluation.matchedSignalCount === evaluation.signals.filter((signal) => signal.matched).length
+      && evaluation.matchedSignalCount >= requiredSignalCount
+      && evaluation.signals.length === policy.signals.length
+      && evaluation.signals.every((signal, index) => signal.kind === policy.signals[index]?.kind)
+      && (observed.role === undefined || observed.role === subject.actor)
+  }
   return canonicalUrl(observed.url) === canonicalUrl(subject.expectedPageIdentity.url)
     && observed.title === subject.expectedPageIdentity.title
     && observed.headings.includes(subject.expectedPageIdentity.heading)

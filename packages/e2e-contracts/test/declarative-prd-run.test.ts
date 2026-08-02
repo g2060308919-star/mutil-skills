@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import {
   CompiledPrdRunPlanSchema,
   DeclarativePrdRunDesignSchema,
+  DeclarativePrdRunDesignV2Schema,
   digestCompiledPrdRunPlan,
 } from '../src/declarative-prd-run.js'
 
@@ -43,6 +44,32 @@ describe('declarative PRD run contracts', () => {
     expect(CompiledPrdRunPlanSchema.parse(plan).compilerDigest).toBe(plan.compilerDigest)
     plan.cases[0]!.title = '漂移'
     expect(() => CompiledPrdRunPlanSchema.parse(plan)).toThrow(/compilerDigest/)
+  })
+
+  test('adds execution lane, page identity and fixture only in the compatible v2 contract', () => {
+    expect(DeclarativePrdRunDesignSchema.parse(designFixture()).schemaVersion).toBe('1.0.0')
+    const enriched = {
+      ...designFixture(),
+      schemaVersion: '2.0.0' as const,
+      cases: designFixture().cases.map((testCase) => ({
+        ...testCase,
+        executionLane: 'preview-readonly' as const,
+        fixture: {
+          actorRef: 'USER', preconditions: [], seedStrategy: 'pre-existing' as const,
+        },
+        locatorCandidates: [{ kind: 'test-id' as const, value: 'result-panel' }],
+        pageIdentityPolicy: {
+          schemaVersion: '1.0.0' as const,
+          url: { origin: 'https://example.test', pathPattern: '/results/**' },
+          signals: [{ kind: 'test-id' as const, value: 'results-page' }],
+          match: { mode: 'all' as const },
+        },
+      })),
+    }
+    expect(DeclarativePrdRunDesignV2Schema.parse(enriched).cases).toHaveLength(3)
+    expect(DeclarativePrdRunDesignV2Schema.safeParse({
+      ...enriched, cases: [{ ...enriched.cases[0], fixture: undefined }],
+    }).success).toBe(false)
   })
 })
 

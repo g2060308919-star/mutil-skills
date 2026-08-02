@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import {
+  canonicalizeJson,
   canonicalGrantApprovalSubjectDigest,
   digestText,
   type BrowserLocalReversibleWriteCapability,
@@ -149,6 +150,64 @@ describe('LocalApprovalAuthority browser-local write grants', () => {
       capabilityId: conflictingGrant.capabilities[0]!.capabilityId,
       outcome: { status: 'ready', observedIdentity: { url: subject.expectedPageIdentity.url,
         title: 'Public', headings: ['Public'], role: 'ordinary-user' } },
+    })).rejects.toMatchObject({ code: 'E2E_APPROVAL_PREFLIGHT_RESULT_INVALID' })
+  })
+
+  test('声明式页面身份策略通过时不再要求 heading，且拒绝伪造的策略摘要', async () => {
+    const authority = LocalApprovalAuthority.create({ issuer: 'AUTHORITY', keyId: 'KEY-1', now: () => NOW })
+    const policy = {
+      schemaVersion: '1.0.0' as const,
+      url: { origin: 'https://public.example.com', pathPattern: '/cards' },
+      signals: [{ kind: 'test-id' as const, value: 'cards-page' }],
+      match: { mode: 'all' as const },
+    }
+    const subject = {
+      schemaVersion: '1.1.0' as const, assetId: 'ASSET-CARDS', prdRevision: digest('cards-revision'),
+      scopeDigest: digest('cards-scope'), environment: 'test' as const,
+      baseOrigin: 'https://public.example.com', actor: 'visitor',
+      expectedPageIdentity: {
+        url: 'https://public.example.com/cards', title: 'Legacy placeholder',
+        heading: 'Legacy placeholder', ariaSignals: [], policy,
+      },
+      bootstrapIntentsDigest: digest('cards-bootstrap'), requests: [],
+      actions: [{ actionId: 'DISCOVERY-CARDS', operation: 'local-navigation' as const,
+        maxUses: 1 as const, requestIds: [] }],
+    }
+    const grant = await authority.issueDiscoveryGrant({
+      subject, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
+    })
+    const reservation = await authority.reserveForSubject({
+      grant, currentSubject: subject, capabilityId: grant.capabilities[0]!.capabilityId,
+      actionId: 'DISCOVERY-CARDS', attemptId: 'ATTEMPT-DISCOVERY-CARDS',
+    })
+    const evaluation = {
+      policyDigest: digestText('page-identity-policy/v1', canonicalizeJson(policy)),
+      matched: true, urlMatched: true, actualUrl: 'https://public.example.com/cards',
+      matchedSignalCount: 1, requiredSignalCount: 1,
+      signals: [{ kind: 'test-id' as const, matched: true }],
+    }
+    await expect(authority.completeDiscoveryPreflight({
+      grant, currentSubject: subject, reservationId: reservation.reservationId,
+      capabilityId: grant.capabilities[0]!.capabilityId,
+      outcome: { status: 'ready', observedIdentity: {
+        url: 'https://public.example.com/cards', title: '', headings: [],
+      }, pageIdentityEvaluation: evaluation },
+    })).resolves.toMatch(/^sha256:/)
+
+    const tamperedGrant = await authority.issueDiscoveryGrant({
+      subject, approver: { subject: 'os-user:qa', roles: ['e2e-approver'] }, ttlMs: 60_000,
+    })
+    const tamperedReservation = await authority.reserveForSubject({
+      grant: tamperedGrant, currentSubject: subject,
+      capabilityId: tamperedGrant.capabilities[0]!.capabilityId,
+      actionId: 'DISCOVERY-CARDS', attemptId: 'ATTEMPT-DISCOVERY-CARDS-TAMPERED',
+    })
+    await expect(authority.completeDiscoveryPreflight({
+      grant: tamperedGrant, currentSubject: subject, reservationId: tamperedReservation.reservationId,
+      capabilityId: tamperedGrant.capabilities[0]!.capabilityId,
+      outcome: { status: 'ready', observedIdentity: {
+        url: 'https://public.example.com/cards', title: '', headings: [],
+      }, pageIdentityEvaluation: { ...evaluation, policyDigest: digest('wrong-policy') } },
     })).rejects.toMatchObject({ code: 'E2E_APPROVAL_PREFLIGHT_RESULT_INVALID' })
   })
 
