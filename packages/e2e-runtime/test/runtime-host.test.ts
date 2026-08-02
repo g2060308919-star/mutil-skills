@@ -1935,6 +1935,98 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('页面身份规则修订保留语义资产并显式失效旧探测与 Discovery 授权', async () => {
+    const fixture = await hostFixture({ targetProbe: async () => ({
+      status: 'ready', observedUrl: 'http://localhost:3000/orders',
+      observedTitle: '订单', identityMatched: true,
+    }) })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-TARGET-REVISION', fixture.roots.project),
+    ))
+    const targetContract = {
+      schemaVersion: '1.0.0' as const,
+      targetUrl: 'http://localhost:3000/orders',
+      baseOrigin: 'http://localhost:3000',
+      environmentLabel: 'local',
+      pageIdentityPolicy: {
+        schemaVersion: '1.0.0' as const,
+        url: { origin: 'http://localhost:3000', pathPattern: '/orders/**' },
+        signals: [{ kind: 'test-id' as const, value: 'old-orders-page' }],
+        match: { mode: 'all' as const },
+      },
+      allowedNavigationOrigins: ['http://localhost:3000'],
+    }
+    await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-CONFIGURE-TARGET-OLD'), command: 'configure-target',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId, targetContract },
+    }))
+    await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-PROBE-TARGET-OLD'), command: 'probe-target',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    }))
+
+    await fixture.store.beginRequest('SEED-TARGET-REVISION-BLOCKER', digest('b'))
+    const projected = projectionFixture()
+    const lock = await fixture.store.acquireRunLock(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string, created.runId as string,
+      'SEED-TARGET-REVISION-BLOCKER', digest('b'),
+      (snapshot) => ({ snapshot: {
+        ...snapshot,
+        trustedExecutionFacts: {
+          ...snapshot.trustedExecutionFacts,
+          'signed-discovery-grant': executionFactsFor(projected, snapshot)['signed-discovery-grant'],
+        },
+        preflightBlocker: {
+          status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH',
+          blockedAt: '2026-08-02T08:00:00.000Z', attemptCount: 1,
+          resumeState: 'preflight-readonly',
+        },
+        workflow: { current: 'preflight-readonly', sequence: 6, eventChainDigest: digest('c') },
+      }, response: { seeded: true } }),
+      'test-seed-target-revision', lock,
+    )
+    await lock.close()
+
+    const revised = structuredClone(targetContract)
+    revised.pageIdentityPolicy.signals = [{ kind: 'test-id', value: 'orders-page' }]
+    const response = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-CONFIGURE-TARGET-NEW'), command: 'configure-target',
+      projectRoot: fixture.roots.project,
+      payload: { runId: created.runId, targetContract: revised },
+    })))
+    expect(response).toMatchObject({
+      runId: created.runId,
+      invalidation: {
+        reason: 'target-contract-changed',
+        preservedAssets: expect.arrayContaining(['prd-source-bundle']),
+        invalidatedAssets: expect.arrayContaining(['target-probe', 'signed-discovery-grant', 'browser-preflight']),
+      },
+    })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(persisted).toMatchObject({
+      workflow: { current: 'coverage-audited', sequence: 7 },
+      targetContract: { contract: revised },
+    })
+    expect(persisted).not.toHaveProperty('targetProbe')
+    expect(persisted).not.toHaveProperty('preflightBlocker')
+    expect(persisted?.trustedExecutionFacts).not.toHaveProperty('signed-discovery-grant')
+    expect(persisted?.trustedExecutionFacts['prd-source-bundle']).toBeDefined()
+    const status = successResult(await handleRequest(fixture.host, getStatusRequest(
+      'REQUEST-STATUS-TARGET-REVISION', fixture.roots.project, created.runId as string,
+    )))
+    expect(status).toMatchObject({
+      nextEdge: { command: 'probe-target' },
+      preservedAssets: expect.arrayContaining(['prd-source-bundle']),
+      invalidatedAssets: expect.arrayContaining(['target-probe', 'signed-discovery-grant']),
+    })
+    await fixture.store.close()
+  })
+
   test('Authority complete 成功但 fact 落盘失败时从持久 preparation 恢复且不重复浏览器动作', async () => {
     let browserPreparations = 0
     let authorityCompletions = 0

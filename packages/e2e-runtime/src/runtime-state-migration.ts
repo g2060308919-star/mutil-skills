@@ -1,6 +1,7 @@
 import {
   ArtifactSchemaRegistry,
   ArtifactTypeSchema,
+  AcceptanceReviewSchema,
   CompiledPrdRunPlanSchema,
   ManualResultSchema,
   SignedGrantSchema,
@@ -33,6 +34,7 @@ import {
 } from './multi-case-scheduler.js'
 import { TargetContractFactSchema } from './target-contract.js'
 import { TargetProbeFactSchema } from './target-probe.js'
+import { AcceptanceReviewReceiptSchema } from './acceptance-review.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const RunIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -61,6 +63,15 @@ const RuntimePreflightAttemptSchema = z.object({
   revision: z.number().int().positive(),
   startedAt: z.string().datetime(),
   preparation: RuntimePreflightPreparationSchema,
+}).strict()
+const TargetContractInvalidationFactSchema = z.object({
+  schemaVersion: z.literal('1.0.0'),
+  reason: z.literal('target-contract-changed'),
+  preservedAssets: z.array(z.string().min(1)).max(64),
+  invalidatedAssets: z.array(z.string().min(1)).max(64),
+  previousTargetContractDigest: DigestSchema,
+  nextTargetContractDigest: DigestSchema,
+  invalidatedAt: z.string().datetime(),
 }).strict()
 
 export const MAX_FROZEN_ARTIFACT_BYTES = 2 * 1024 * 1024
@@ -105,6 +116,7 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     'manual-results-by-id',
     'approval-mode', 'pending-local-approval', 'prd-source-snapshot', 'prd-source-bundle',
     'prd-understanding-contract', 'prd-understanding-prepared', 'prd-semantic-confirmation',
+    'acceptance-review', 'acceptance-review-receipt', 'target-contract-invalidation',
   ])
   if (Object.keys(facts).length > allowed.size) context.addIssue({ code: 'custom', message: '可信执行事实数量超限' })
   let trustedFactBytes = 0
@@ -161,6 +173,24 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     if (key === 'prd-semantic-confirmation') {
       if (!PrdSemanticConfirmationSchema.safeParse(value).success) context.addIssue({
         code: 'custom', path: [key], message: 'PRD 语义确认事实结构非法',
+      })
+      continue
+    }
+    if (key === 'acceptance-review') {
+      if (!AcceptanceReviewSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: '验收语义审查事实结构非法',
+      })
+      continue
+    }
+    if (key === 'acceptance-review-receipt') {
+      if (!AcceptanceReviewReceiptSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: '验收语义确认回执结构非法',
+      })
+      continue
+    }
+    if (key === 'target-contract-invalidation') {
+      if (!TargetContractInvalidationFactSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: 'TargetContract 失效事实结构非法',
       })
       continue
     }

@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'vitest'
 import type { WorkflowState } from '@mutil-skills/e2e-contracts'
 import {
-  createWorkflow, pauseWorkflow, resumeWorkflow, transitionWorkflow, workflowResumeAuthorizationDigest,
+  createWorkflow, invalidatePreflightForTargetChange, pauseWorkflow, resumeWorkflow,
+  transitionWorkflow, workflowResumeAuthorizationDigest,
 } from '../src/index.js'
 
 function state(current: WorkflowState['current']): WorkflowState {
@@ -125,6 +126,26 @@ describe('transitionWorkflow', () => {
       next: 'awaiting-execution-approval',
       reason: 'silent return',
     })).toThrowError(expect.objectContaining({ code: 'E2E_WORKFLOW_SUBJECT_CHANGE_REQUIRED' }))
+  })
+
+  test('目标身份变化以审计事件回退到 Discovery 前且不能从任意状态调用', () => {
+    const original = state('preflight-readonly')
+    const invalidated = invalidatePreflightForTargetChange({
+      state: original,
+      reason: 'page identity policy changed',
+      timestamp: '2026-08-02T08:00:00.000Z',
+      engineVersion: '0.4.7',
+    })
+
+    expect(invalidated.state).toMatchObject({
+      current: 'coverage-audited', sequence: original.sequence + 1,
+    })
+    expect(invalidated.event).toMatchObject({
+      previous: 'preflight-readonly', next: 'coverage-audited', commitVerified: false,
+    })
+    expect(() => invalidatePreflightForTargetChange({
+      state: state('running-real'), reason: 'unsafe rewind',
+    })).toThrowError(expect.objectContaining({ code: 'E2E_WORKFLOW_TARGET_INVALIDATION_DENIED' }))
   })
 
   test('publishes a verdict only after a verified atomic commit', () => {

@@ -37,6 +37,7 @@ import { randomUUID } from 'node:crypto'
 import {
   computePrdRevision,
   createWorkflow,
+  invalidatePreflightForTargetChange,
   transitionWorkflow,
 } from '@mutil-skills/e2e-engine'
 import { runtimeErrorResponse } from './protocol.js'
@@ -713,21 +714,41 @@ export class E2ERuntimeHost {
       const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
       if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
       this.requireInstallation(snapshot)
-      if (!['created', 'source-frozen', 'awaiting-scope-approval', 'scope-approved', 'modeled',
-        'coverage-audited'].includes(snapshot.workflow.current)) throw runtimeHostError(
+      const normalConfiguration = ['created', 'source-frozen', 'awaiting-scope-approval', 'scope-approved',
+        'modeled', 'coverage-audited'].includes(snapshot.workflow.current)
+      const recoverablePageIdentityRevision = snapshot.workflow.current === 'preflight-readonly'
+        && snapshot.preflightBlocker?.reasonCode === 'E2E_RUNTIME_PAGE_MISMATCH'
+        && snapshot.targetContract !== undefined
+        && snapshot.targetContract.contractDigest !== target.contractDigest
+      if (!normalConfiguration && !recoverablePageIdentityRevision) throw runtimeHostError(
         'E2E_TARGET_CONFIGURATION_STATE_MISMATCH', 'input',
-        '目标配置必须在 Discovery 授权前完成；已授权变更需显式失效下游资产',
+        '目标配置必须在 Discovery 授权前完成；仅页面身份不匹配可显式修订并失效下游资产',
       )
+      const invalidation = recoverablePageIdentityRevision
+        ? targetChangeInvalidationSummary(snapshot)
+        : undefined
       const response = this.successResponse(request.requestId, {
         runId: snapshot.runId, target,
+        ...(invalidation === undefined ? {} : { invalidation }),
       })
       return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
         identity.digest, snapshot.runId, request.requestId, requestDigest,
         (current) => {
+          if (recoverablePageIdentityRevision) return {
+            snapshot: invalidateTargetDependentSnapshot(
+              current, target, invalidation!, this.dependencies.now().toISOString(),
+              this.dependencies.installation.version,
+            ),
+            response,
+          }
+          if (current.targetContract?.contractDigest === target.contractDigest) return {
+            snapshot: { ...current, updatedAt: this.dependencies.now().toISOString() }, response,
+          }
           const { targetProbe: _invalidatedProbe, ...withoutProbe } = current
           return {
             snapshot: {
               ...withoutProbe,
+              runRevision: (current.runRevision ?? 0) + 1,
               targetContract: target,
               updatedAt: this.dependencies.now().toISOString(),
             },
@@ -2815,6 +2836,87 @@ export class E2ERuntimeHost {
 
 }
 
+const TARGET_INDEPENDENT_ARTIFACTS = new Set<ArtifactType>([
+  'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation',
+  'acceptance-scope', 'requirement-model', 'interaction-flow', 'coverage-universe',
+  'test-cases', 'design-audit', 'execution-contract',
+])
+
+const TARGET_DEPENDENT_TRUSTED_FACTS = new Set([
+  'pending-local-approval', 'signed-discovery-grant', 'browser-preflight',
+  'signed-execution-grant', 'prd-semantic-confirmation', 'manual-results-by-id',
+  'finalization-execution-facts', 'quarantined-evidence', 'finalization-material',
+])
+
+function targetChangeInvalidationSummary(snapshot: RuntimeRunSnapshot): {
+  reason: 'target-contract-changed'
+  preservedAssets: string[]
+  invalidatedAssets: string[]
+} {
+  return {
+    reason: 'target-contract-changed',
+    preservedAssets: [
+      ...Object.keys(snapshot.frozenArtifacts).filter((key) =>
+        TARGET_INDEPENDENT_ARTIFACTS.has(key as ArtifactType)),
+      'prd-source-bundle', 'compiled-prd-run', 'acceptance-review-confirmation',
+    ].filter((value, index, values) => values.indexOf(value) === index).sort(),
+    invalidatedAssets: [
+      'target-probe', 'signed-discovery-grant', 'browser-preflight',
+      'browser-action-map', 'signed-execution-grant', 'execution-results', 'final-report',
+    ],
+  }
+}
+
+function invalidateTargetDependentSnapshot(
+  snapshot: RuntimeRunSnapshot,
+  target: RuntimeRunSnapshot['targetContract'],
+  invalidation: ReturnType<typeof targetChangeInvalidationSummary>,
+  timestamp: string,
+  engineVersion: string,
+): RuntimeRunSnapshot {
+  const frozenArtifacts = Object.fromEntries(Object.entries(snapshot.frozenArtifacts)
+    .filter(([type]) => TARGET_INDEPENDENT_ARTIFACTS.has(type as ArtifactType)))
+  const artifactDigests = Object.fromEntries(Object.entries(snapshot.artifactDigests)
+    .filter(([type]) => type === 'prd-source' || type === 'project-policy-source'
+      || TARGET_INDEPENDENT_ARTIFACTS.has(type as ArtifactType)))
+  const trustedExecutionFacts = Object.fromEntries(Object.entries(snapshot.trustedExecutionFacts)
+    .filter(([type]) => !TARGET_DEPENDENT_TRUSTED_FACTS.has(type)))
+  trustedExecutionFacts['target-contract-invalidation'] = {
+    schemaVersion: '1.0.0', ...invalidation,
+    previousTargetContractDigest: snapshot.targetContract?.contractDigest,
+    nextTargetContractDigest: target?.contractDigest,
+    invalidatedAt: timestamp,
+  }
+  const workflow = invalidatePreflightForTargetChange({
+    state: snapshot.workflow,
+    reason: 'target-contract-changed: invalidate browser-bound assets and grants',
+    timestamp,
+    engineVersion,
+  }).state
+  const {
+    targetProbe: _targetProbe,
+    preflightAttempt: _preflightAttempt,
+    preflightBlocker: _preflightBlocker,
+    executionAttempt: _executionAttempt,
+    finalizationAttempt: _finalizationAttempt,
+    publication: _publication,
+    pendingDecision: _pendingDecision,
+    ...preserved
+  } = snapshot
+  return {
+    ...preserved,
+    runRevision: (snapshot.runRevision ?? 0) + 1,
+    targetContract: target,
+    workflow,
+    artifactDigests,
+    frozenArtifacts,
+    trustedExecutionFacts,
+    writeAttempts: {},
+    executionResults: { readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} },
+    updatedAt: timestamp,
+  }
+}
+
 function parseCandidate(artifactType: ArtifactType, input: unknown): ArtifactDocument {
   const parsed = ArtifactSchemaRegistry[artifactType].safeParse(input)
   if (!parsed.success) {
@@ -3134,8 +3236,8 @@ function assertAcceptanceReviewConfirmed(snapshot: RuntimeRunSnapshot): void {
 }
 
 function assertTargetReady(snapshot: RuntimeRunSnapshot): void {
-  const requiresTarget = snapshot.compiledPrdRun?.cases.some((testCase) =>
-    testCase.executionLane !== undefined) === true
+  const requiresTarget = snapshot.targetContract !== undefined
+    || snapshot.compiledPrdRun?.cases.some((testCase) => testCase.executionLane !== undefined) === true
   if (!requiresTarget) return
   if (snapshot.targetContract === undefined) throw runtimeHostError(
     'E2E_TARGET_CONTRACT_REQUIRED', 'input', '请先配置 TargetContract',
@@ -3225,6 +3327,7 @@ function createRunResult(snapshot: RuntimeRunSnapshot): Record<string, unknown> 
 
 function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, unknown> {
   const projection = runtimeStatusProjection(snapshot, now)
+  const targetInvalidation = targetInvalidationProjection(snapshot)
   const acceptanceReview = acceptanceReviewForStatus(snapshot)
   const receipt = AcceptanceReviewReceiptSchema.safeParse(
     snapshot.trustedExecutionFacts['acceptance-review-receipt'],
@@ -3245,11 +3348,11 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
     condition: classifyRunCondition(snapshot),
     ...(snapshot.targetContract === undefined ? {} : { target: snapshot.targetContract }),
     ...(snapshot.targetProbe === undefined ? {} : { targetProbe: snapshot.targetProbe }),
-    preservedAssets: [
+    preservedAssets: targetInvalidation?.preservedAssets ?? [
       ...Object.keys(snapshot.artifactDigests).sort(),
       ...(snapshot.compiledPrdRun === undefined ? [] : ['compiled-prd-run']),
     ],
-    invalidatedAssets: [],
+    invalidatedAssets: targetInvalidation?.invalidatedAssets ?? [],
     semanticCases: (snapshot.compiledPrdRun?.cases ?? []).map((testCase) => ({
       caseId: testCase.caseId,
       title: testCase.title,
@@ -3275,6 +3378,24 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
       ? {} : { preflightBlocker: snapshot.preflightBlocker }),
     ...(snapshot.pendingDecision === undefined ? {} : { pendingDecision: snapshot.pendingDecision }),
   })
+}
+
+function targetInvalidationProjection(snapshot: RuntimeRunSnapshot): {
+  preservedAssets: string[]
+  invalidatedAssets: string[]
+} | undefined {
+  const candidate = snapshot.trustedExecutionFacts['target-contract-invalidation']
+  if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return undefined
+  const record = candidate as Record<string, unknown>
+  if (record.reason !== 'target-contract-changed'
+    || !Array.isArray(record.preservedAssets)
+    || !record.preservedAssets.every((value) => typeof value === 'string')
+    || !Array.isArray(record.invalidatedAssets)
+    || !record.invalidatedAssets.every((value) => typeof value === 'string')) return undefined
+  return {
+    preservedAssets: [...record.preservedAssets] as string[],
+    invalidatedAssets: [...record.invalidatedAssets] as string[],
+  }
 }
 
 function runtimeRemediation(
@@ -3342,8 +3463,8 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
   const needsAcceptanceConfirmation = acceptanceReview !== undefined
     && (!acceptanceReceipt.success
       || acceptanceReceipt.data.reviewDigest !== acceptanceReview.reviewDigest)
-  const requiresTarget = snapshot.compiledPrdRun?.cases.some((testCase) =>
-    testCase.executionLane !== undefined) === true
+  const requiresTarget = snapshot.targetContract !== undefined
+    || snapshot.compiledPrdRun?.cases.some((testCase) => testCase.executionLane !== undefined) === true
   const targetProbeReady = snapshot.targetProbe?.status === 'ready'
     && snapshot.targetProbe.targetContractDigest === snapshot.targetContract?.contractDigest
   const intent = requiresTarget && snapshot.targetContract === undefined
