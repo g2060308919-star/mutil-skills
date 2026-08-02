@@ -18,7 +18,7 @@ import {
 } from '../src/protocol.js'
 
 const digest = `sha256:${'0'.repeat(64)}`
-const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.4.7 -- repo-e2e install-runtime --version 0.4.7'
+const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.5.0 -- repo-e2e install-runtime --version 0.5.0'
 const doctorRequest = {
   schemaVersion: '1.0.0',
   requestId: 'REQ-1',
@@ -53,7 +53,7 @@ describe('Runtime protocol', () => {
     expect(response).toMatchObject({
       schemaVersion: '1.0.0',
       requestId: 'REQ-1',
-      runtime: { version: '0.4.7', installationDigest: digest },
+      runtime: { version: '0.5.0', installationDigest: digest },
       ok: false,
       error: {
         code: 'E2E_RUNTIME_NOT_INSTALLED',
@@ -101,7 +101,7 @@ describe('repo-e2e CLI protocol slice', () => {
     const stdout = captureWritable()
     const handle = vi.fn(async (request: any) => RuntimeResponseEnvelopeSchema.parse({
       schemaVersion: '1.0.0', requestId: request.requestId,
-      runtime: { version: '0.4.7', installationDigest: digest }, ok: true,
+      runtime: { version: '0.5.0', installationDigest: digest }, ok: true,
       result: { runId: request.payload.runId, state: 'created' },
     }))
     const code = await runCli(
@@ -125,7 +125,7 @@ describe('repo-e2e CLI protocol slice', () => {
         nextEdge: commands.length === 1 ? { command: 'run-preflight' } : { command: 'submit-candidate' },
       } : { runId: 'RUN-1', status: 'ready' }
       return RuntimeResponseEnvelopeSchema.parse({ schemaVersion: '1.0.0', requestId: request.requestId,
-        runtime: { version: '0.4.7', installationDigest: digest }, ok: true, result }
+        runtime: { version: '0.5.0', installationDigest: digest }, ok: true, result }
       )
     })
     const stdout = captureWritable()
@@ -283,7 +283,7 @@ describe('repo-e2e CLI protocol slice', () => {
     const exitCode = await runCli(['--version'], Readable.from([]), stdout.stream, stderr.stream)
 
     expect(exitCode).toBe(0)
-    expect(stdout.text()).toBe('0.4.7\n')
+    expect(stdout.text()).toBe('0.5.0\n')
     expect(stderr.text()).toBe('')
   })
 

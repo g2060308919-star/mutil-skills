@@ -134,7 +134,7 @@ describe('transitionWorkflow', () => {
       state: original,
       reason: 'page identity policy changed',
       timestamp: '2026-08-02T08:00:00.000Z',
-      engineVersion: '0.4.7',
+      engineVersion: '0.5.0',
     })
 
     expect(invalidated.state).toMatchObject({

@@ -87,7 +87,7 @@ describe('E2EFacade', () => {
   test('Runtime 错误保留 reasonCode、requestId、runId 和 remediation', async () => {
     const host = { handle: async (request: RuntimeRequestEnvelope) => RuntimeResponseEnvelopeSchema.parse({
       schemaVersion: '1.0.0', requestId: request.requestId,
-      runtime: { version: '0.4.7', installationDigest: d('9') }, ok: false,
+      runtime: { version: '0.5.0', installationDigest: d('9') }, ok: false,
       error: { code: 'E2E_RUNTIME_PAGE_MISMATCH', category: 'environment',
         message: '页面身份不匹配', terminalState: 'environment-blocked', retryable: true,
         details: { remediation: '更新页面身份策略' } },
@@ -139,7 +139,7 @@ describe('E2EFacade', () => {
 function success(requestId: string, result: unknown): RuntimeResponseEnvelope {
   return RuntimeResponseEnvelopeSchema.parse({
     schemaVersion: '1.0.0', requestId,
-    runtime: { version: '0.4.7', installationDigest: d('9') }, ok: true, result,
+    runtime: { version: '0.5.0', installationDigest: d('9') }, ok: true, result,
   })
 }
 

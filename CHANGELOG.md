@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-02
+
+> 升级说明：Skill、Runtime 与全部 `@mutil-skills/*` 包必须统一使用 `0.5.0`；`AcceptanceReview` 和 Semantic Case 执行投影新增严格字段，禁止与 0.4.x 闭包混装。
+
 ### Added
 
 - 新增 Runtime-owned `TargetContract`、可配置 `PageIdentityPolicy`、非权威 Target Probe、`AcceptanceReview`、`RunHandle`、可恢复 Run Condition 和静态 Run Status Workspace。
