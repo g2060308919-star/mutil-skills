@@ -97,6 +97,45 @@ describe('Runtime protocol', () => {
 })
 
 describe('repo-e2e CLI protocol slice', () => {
+  test('status --run 生成 get-status envelope，用户不需手写 JSON', async () => {
+    const stdout = captureWritable()
+    const handle = vi.fn(async (request: any) => RuntimeResponseEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId: request.requestId,
+      runtime: { version: '0.4.7', installationDigest: digest }, ok: true,
+      result: { runId: request.payload.runId, state: 'created' },
+    }))
+    const code = await runCli(
+      ['status', '--run', 'RUN-1'], Readable.from([]), stdout.stream, captureWritable().stream,
+      { ...minimalCliDependencies(), runtimeHost: { handle } },
+    )
+    expect(code).toBe(0)
+    expect(handle).toHaveBeenCalledWith(expect.objectContaining({
+      command: 'get-status', payload: { runId: 'RUN-1' },
+    }), expect.any(Uint8Array))
+    expect(JSON.parse(stdout.text())).toMatchObject({ ok: true, result: { runId: 'RUN-1' } })
+  })
+
+  test('retry --run 自动跟随可恢复 nextEdge，不允许通用重放写动作', async () => {
+    const commands: string[] = []
+    const handle = vi.fn(async (request: any) => {
+      commands.push(request.command)
+      const result = request.command === 'get-status' ? {
+        runId: 'RUN-1', condition: { kind: commands.length === 1 ? 'blocked-retryable' : 'ready',
+          ...(commands.length === 1 ? { reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH', resumeStage: 'preflight' } : {}) },
+        nextEdge: commands.length === 1 ? { command: 'run-preflight' } : { command: 'submit-candidate' },
+      } : { runId: 'RUN-1', status: 'ready' }
+      return RuntimeResponseEnvelopeSchema.parse({ schemaVersion: '1.0.0', requestId: request.requestId,
+        runtime: { version: '0.4.7', installationDigest: digest }, ok: true, result }
+      )
+    })
+    const stdout = captureWritable()
+    expect(await runCli(
+      ['retry', '--run', 'RUN-1'], Readable.from([]), stdout.stream, captureWritable().stream,
+      { ...minimalCliDependencies(), runtimeHost: { handle } },
+    )).toBe(0)
+    expect(commands).toEqual(['get-status', 'run-preflight', 'get-status'])
+    expect(JSON.parse(stdout.text())).toMatchObject({ ok: true, result: { condition: { kind: 'ready' } } })
+  })
   test('configure-browser --system delegates only to controlled system Chrome configuration', async () => {
     const stdout = captureWritable()
     const configureSystemBrowser = vi.fn(async (input: {
