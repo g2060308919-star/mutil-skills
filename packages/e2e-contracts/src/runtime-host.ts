@@ -239,6 +239,14 @@ export const RuntimeStatusNextEdgeSchema = z.object({
   expectedState: WorkflowNodeSchema,
 }).strict()
 
+export const RuntimePreflightBlockerSchema = z.object({
+  status: z.enum(['input-blocked', 'environment-blocked']),
+  reasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/),
+  blockedAt: z.string().datetime(),
+  attemptCount: z.number().int().positive(),
+  resumeState: z.literal('preflight-readonly'),
+}).strict()
+
 export const RuntimeStatusResultSchema = z.object({
   runId: SafeIdSchema,
   assetId: SafeIdSchema,
@@ -252,6 +260,7 @@ export const RuntimeStatusResultSchema = z.object({
   nextEdge: RuntimeStatusNextEdgeSchema.nullable(),
   verifiedDigests: z.record(DigestSchema),
   minimumMissingInput: z.array(z.string().min(1)).max(32),
+  preflightBlocker: RuntimePreflightBlockerSchema.optional(),
   pendingDecision: JsonValueSchema.optional(),
 }).strict()
 
@@ -321,6 +330,7 @@ export type RuntimeDoctorProbe = z.infer<typeof RuntimeDoctorProbeSchema>
 export type RuntimeDoctorReport = z.infer<typeof RuntimeDoctorReportSchema>
 export type RuntimeStatusNextEdge = z.infer<typeof RuntimeStatusNextEdgeSchema>
 export type RuntimeStatusResult = z.infer<typeof RuntimeStatusResultSchema>
+export type RuntimePreflightBlocker = z.infer<typeof RuntimePreflightBlockerSchema>
 export type RuntimeCreateRunResult = z.infer<typeof RuntimeCreateRunResultSchema>
 export type RuntimePreparePrdUnderstandingResult = z.infer<
   typeof RuntimePreparePrdUnderstandingResultSchema

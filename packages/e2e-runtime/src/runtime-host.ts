@@ -359,7 +359,7 @@ export class E2ERuntimeHost {
     }).prdRevision
     const timestamp = this.dependencies.now().toISOString()
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.7.0',
+      schemaVersion: '1.8.0',
       runId,
       assetId: request.payload.assetId,
       projectIdentityDigest: identity.digest,
@@ -1587,8 +1587,12 @@ export class E2ERuntimeHost {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     let initial = await this.readLockedRun(identity.digest, request.payload.runId)
     this.requireInstallation(initial)
-    if (initial.workflow.current !== 'discovery-approved') throw runtimeHostError(
-      'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH', 'input', 'run-preflight 仅允许 discovery-approved Run',
+    const isRetry = initial.workflow.current === 'preflight-readonly'
+      && initial.preflightBlocker !== undefined
+      && initial.trustedExecutionFacts['browser-preflight'] === undefined
+    if (initial.workflow.current !== 'discovery-approved' && !isRetry) throw runtimeHostError(
+      'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH', 'input',
+      'run-preflight 仅允许 discovery-approved 或带可恢复阻断的 preflight-readonly Run',
     )
     let durablePreparation = initial.preflightAttempt !== undefined
     let result: Awaited<ReturnType<typeof finalizeRuntimePreflight>>
@@ -1659,18 +1663,32 @@ export class E2ERuntimeHost {
           || current.workflow.eventChainDigest !== initial.workflow.eventChainDigest) throw runtimeHostError(
           'E2E_RUNTIME_PREFLIGHT_FENCED', 'safety', '预检期间 Run revision 已改变，拒绝落入陈旧结果',
         )
-        const entered = transitionWorkflow({
-          state: current.workflow, next: 'preflight-readonly', reason: `browser preflight ${result.output.status}`,
-          timestamp: this.dependencies.now().toISOString(),
-          engineVersion: this.dependencies.installation.version,
-        }).state
-        const finalWorkflow = result.output.status === 'ready' ? entered : transitionWorkflow({
+        const timestamp = this.dependencies.now().toISOString()
+        const entered = current.workflow.current === 'discovery-approved'
+          ? transitionWorkflow({
+            state: current.workflow, next: 'preflight-readonly',
+            reason: `browser preflight ${result.output.status}`,
+            timestamp,
+            engineVersion: this.dependencies.installation.version,
+          }).state
+          : current.workflow
+        const recoverableBlocker = result.output.status === 'input-blocked'
+          || result.output.status === 'environment-blocked'
+          ? {
+            status: result.output.status,
+            reasonCode: result.output.reasonCode!,
+            blockedAt: timestamp,
+            attemptCount: (current.preflightBlocker?.attemptCount ?? 0) + 1,
+            resumeState: 'preflight-readonly' as const,
+          }
+          : undefined
+        const finalWorkflow = result.output.status === 'safety-blocked' ? transitionWorkflow({
           state: entered,
-          next: result.output.status,
+          next: 'safety-blocked',
           reason: result.output.reasonCode ?? 'browser preflight blocked',
-          timestamp: this.dependencies.now().toISOString(),
+          timestamp,
           engineVersion: this.dependencies.installation.version,
-        }).state
+        }).state : entered
         const response = this.successResponse(request.requestId, {
           runId: current.runId, status: result.output.status,
           ...(result.output.reasonCode === undefined ? {} : { reasonCode: result.output.reasonCode }),
@@ -1686,10 +1704,14 @@ export class E2ERuntimeHost {
               capability, requestId: request.requestId, requestDigest,
               factType: 'browser-preflight', fact: result.fact, response,
               update: (snapshot) => {
-                const { preflightAttempt: _completedPreflight, ...withoutPreflight } = snapshot
+                const {
+                  preflightAttempt: _completedPreflight,
+                  preflightBlocker: _completedBlocker,
+                  ...withoutPreflight
+                } = snapshot
                 return {
                   ...withoutPreflight, workflow: finalWorkflow,
-                  updatedAt: this.dependencies.now().toISOString(),
+                  updatedAt: timestamp,
                 }
               },
             }),
@@ -1698,11 +1720,17 @@ export class E2ERuntimeHost {
         return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
           identity.digest, current.runId, request.requestId, requestDigest,
           (snapshot) => {
-            const { preflightAttempt: _completedPreflight, ...withoutPreflight } = snapshot
+            const {
+              preflightAttempt: _completedPreflight,
+              preflightBlocker: _previousBlocker,
+              ...withoutPreflight
+            } = snapshot
             return {
               snapshot: {
                 ...withoutPreflight, runRevision: (snapshot.runRevision ?? 0) + 1,
-                workflow: finalWorkflow, updatedAt: this.dependencies.now().toISOString(),
+                workflow: finalWorkflow,
+                ...(recoverableBlocker === undefined ? {} : { preflightBlocker: recoverableBlocker }),
+                updatedAt: timestamp,
               },
               response,
             }
@@ -2955,6 +2983,8 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
     workflow: snapshot.workflow,
     artifactDigests: snapshot.artifactDigests,
     ...projection,
+    ...(snapshot.preflightBlocker === undefined
+      ? {} : { preflightBlocker: snapshot.preflightBlocker }),
     ...(snapshot.pendingDecision === undefined ? {} : { pendingDecision: snapshot.pendingDecision }),
   })
 }
@@ -3003,14 +3033,21 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
   const contract = PrdUnderstandingContractFactSchema.safeParse(
     snapshot.trustedExecutionFacts['prd-understanding-contract'],
   )
-  const intent = current === 'created' && !prepared.success
+  const intent = current === 'preflight-readonly' && snapshot.preflightBlocker !== undefined
+    ? {
+      command: 'run-preflight' as const,
+      missing: [`browser-preflight-retry:${snapshot.preflightBlocker.reasonCode}`],
+    }
+    : current === 'created' && !prepared.success
     ? { command: 'prepare-prd-understanding' as const, missing: ['prd-understanding-prepared'] }
     : current === 'created' && snapshot.compiledPrdRun === undefined
       ? { command: 'compile-prd-run' as const, missing: ['declarative-prd-run-design'] }
     : STATUS_COMMAND_BY_STATE[current]
   const missing = current === 'diagnosing'
     ? runtimeFinalizationMissingInputs(snapshot, now)
-    : intent?.missing.filter((item) => snapshot.artifactDigests[item] === undefined) ?? []
+    : snapshot.preflightBlocker !== undefined
+      ? intent?.missing ?? []
+      : intent?.missing.filter((item) => snapshot.artifactDigests[item] === undefined) ?? []
   return {
     state: current,
     nextEdge: intent === undefined ? null : {

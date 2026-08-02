@@ -1795,6 +1795,97 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('环境预检阻断保留原 Run，修复后可以在同一 Run 重试', async () => {
+    let attempts = 0
+    const fixture = await hostFixture({ preflight: async () => {
+      attempts += 1
+      if (attempts === 1) return {
+        status: 'environment-blocked' as const,
+        reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH',
+        observedIdentity: {
+          url: 'http://localhost:3000/loading', title: '加载中', headings: [], role: 'auditor',
+        },
+      }
+      return {
+        status: 'ready' as const, reservationId: 'RESERVATION-RETRY', preflightDigest: digest('1'),
+        observedIdentity: {
+          url: 'http://localhost:3000/orders', title: '订单', headings: ['订单列表'], role: 'auditor',
+        },
+        browserMeasurement: {
+          browserMeasurementDigest: digest('2'), browserClosureDigest: digest('3'),
+          browserExecutableDigest: digest('4'), gatewaySessionMeasurementDigest: digest('5'),
+          canaryProofDigest: digest('6'),
+        },
+        gatewayPolicyDigest: digest('7'), authorityOutcomeDigest: digest('8'),
+        authorityReceiptDigest: digest('a'), gatewayAuditDigest: digest('d'),
+      }
+    } })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-PREFLIGHT-RETRY', fixture.roots.project),
+    ))
+    const projected = projectionFixture()
+    await fixture.store.beginRequest('SEED-DISCOVERY-RETRY', digest('b'))
+    const lock = await fixture.store.acquireRunLock(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string, created.runId as string,
+      'SEED-DISCOVERY-RETRY', digest('b'),
+      (snapshot) => ({ snapshot: {
+        ...snapshot,
+        trustedExecutionFacts: {
+          'signed-discovery-grant': executionFactsFor(projected, snapshot)['signed-discovery-grant'],
+        },
+        workflow: { current: 'discovery-approved', sequence: 5, eventChainDigest: digest('c') },
+      }, response: { seeded: true } }),
+      'test-seed-discovery-retry', lock,
+    )
+    await lock.close()
+
+    const first = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-PREFLIGHT-BLOCKED'), command: 'run-preflight',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })))
+    expect(first).toMatchObject({
+      runId: created.runId, status: 'environment-blocked',
+      reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH', workflow: { current: 'preflight-readonly' },
+    })
+    const blocked = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(blocked).toMatchObject({
+      workflow: { current: 'preflight-readonly' },
+      preflightBlocker: {
+        status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH', attemptCount: 1,
+        resumeState: 'preflight-readonly',
+      },
+    })
+    const status = successResult(await handleRequest(fixture.host, getStatusRequest(
+      'REQUEST-STATUS-PREFLIGHT-RETRY', fixture.roots.project, created.runId as string,
+    )))
+    expect(status).toMatchObject({
+      state: 'preflight-readonly',
+      nextEdge: { command: 'run-preflight', from: 'preflight-readonly' },
+      minimumMissingInput: ['browser-preflight-retry:E2E_RUNTIME_PAGE_MISMATCH'],
+    })
+
+    const recovered = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-PREFLIGHT-RETRY'), command: 'run-preflight',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })))
+    expect(recovered).toMatchObject({
+      runId: created.runId, status: 'ready', workflow: { current: 'preflight-readonly' },
+      preflightFact: { reservationId: 'RESERVATION-RETRY' },
+    })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(persisted).not.toHaveProperty('preflightBlocker')
+    expect(persisted?.trustedExecutionFacts['browser-preflight']).toEqual(recovered.preflightFact)
+    expect(attempts).toBe(2)
+    await fixture.store.close()
+  })
+
   test('Authority complete 成功但 fact 落盘失败时从持久 preparation 恢复且不重复浏览器动作', async () => {
     let browserPreparations = 0
     let authorityCompletions = 0

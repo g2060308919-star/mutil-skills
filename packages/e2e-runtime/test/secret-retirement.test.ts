@@ -316,7 +316,7 @@ function runSnapshot(
     ? { ...createWorkflow(), current: 'accepted' as const, sequence: 1 }
     : createWorkflow()
   return {
-    schemaVersion: '1.7.0',
+    schemaVersion: '1.8.0',
     runId,
     assetId: `ASSET-${runId}`,
     projectIdentityDigest,

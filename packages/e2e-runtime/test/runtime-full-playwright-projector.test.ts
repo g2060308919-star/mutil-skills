@@ -127,7 +127,7 @@ export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
     signature: 'A'.repeat(86),
   }
   return {
-    schemaVersion: '1.7.0', runId: 'RUN-1', assetId: 'ASSET-1', projectIdentityDigest: d('project'),
+    schemaVersion: '1.8.0', runId: 'RUN-1', assetId: 'ASSET-1', projectIdentityDigest: d('project'),
     runtimeInstallationDigest: d('installation'), workflow: 'approved' as never, artifactDigests: {},
     frozenArtifacts: { 'test-cases': testCases, 'execution-contract': execution,
       'browser-action-map': actionMap, 'run-bundle': runBundle },

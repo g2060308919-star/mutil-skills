@@ -10,6 +10,7 @@ import {
   type ManualResult,
   type ArtifactDocument,
   type CompiledPrdRunPlan,
+  type RuntimePreflightBlocker,
   type WorkflowState,
 } from '@mutil-skills/e2e-contracts'
 import { transitionWorkflow, type PendingWorkflowDecision } from '@mutil-skills/e2e-engine'
@@ -82,8 +83,8 @@ export interface RuntimeTrustedFactCapability {
 }
 
 export interface RuntimeRunSnapshot {
-  /** 1.1–1.6 仅作为显式迁移输入兼容；Store 读取与写回始终规范化为 1.7。 */
-  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.7.0'
+  /** 1.1–1.7 仅作为显式迁移输入兼容；Store 读取与写回始终规范化为 1.8。 */
+  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.7.0' | '1.8.0'
   runId: string
   assetId: string
   projectIdentityDigest: string
@@ -92,6 +93,8 @@ export interface RuntimeRunSnapshot {
   runRevision?: number
   executionAttempt?: RuntimeExecutionAttempt
   preflightAttempt?: RuntimePreflightAttempt
+  /** 预检环境/输入阻断不是 Engine 终态；修复后可在原 Run 重试。 */
+  preflightBlocker?: RuntimePreflightBlocker
   finalizationAttempt?: RuntimeFinalizationAttempt
   publication?: RuntimePublicationRecord
   workflow: WorkflowState
@@ -870,9 +873,11 @@ export class RuntimeRunStore {
       )
       if ((current.runRevision ?? 0) !== input.expectedRevision
         || current.workflow.eventChainDigest !== input.expectedWorkflowDigest
-        || current.workflow.current !== 'discovery-approved') throw runtimeStoreError(
-        'E2E_RUNTIME_PREFLIGHT_FENCED', 'preflight preparation 已陈旧，拒绝持久化',
-      )
+        || (current.workflow.current !== 'discovery-approved'
+          && !(current.workflow.current === 'preflight-readonly'
+            && current.preflightBlocker !== undefined))) throw runtimeStoreError(
+          'E2E_RUNTIME_PREFLIGHT_FENCED', 'preflight preparation 已陈旧，拒绝持久化',
+        )
       const revision = (current.runRevision ?? 0) + 1
       const prepared = migrateRuntimeRunSnapshot({
         ...current,
@@ -1568,7 +1573,7 @@ export class RuntimeRunStore {
         const snapshot = parseStoreSnapshot(serialized)
         let changed = false
         for (const [key, raw] of Object.entries(snapshot.runs)) {
-          if (isPlainRecord(raw) && raw.schemaVersion === '1.7.0') continue
+          if (isPlainRecord(raw) && raw.schemaVersion === '1.8.0') continue
           const rows = snapshot.journals[key]
           if (!Array.isArray(rows) || rows.length === 0) {
             throw journalIntegrityError('legacy Run 缺少可验证 journal，拒绝迁移')

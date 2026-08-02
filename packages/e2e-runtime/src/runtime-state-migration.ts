@@ -356,7 +356,7 @@ const RuntimePublicationRecordSchema = z.object({
 }).strict()
 
 const RuntimeRunSnapshotSchema = z.object({
-  schemaVersion: z.literal('1.7.0'),
+  schemaVersion: z.literal('1.8.0'),
   runId: RunIdSchema,
   assetId: AssetIdSchema,
   projectIdentityDigest: DigestSchema,
@@ -364,6 +364,13 @@ const RuntimeRunSnapshotSchema = z.object({
   runRevision: z.number().int().nonnegative().default(0),
   executionAttempt: RuntimeExecutionAttemptSchema.optional(),
   preflightAttempt: RuntimePreflightAttemptSchema.optional(),
+  preflightBlocker: z.object({
+    status: z.enum(['input-blocked', 'environment-blocked']),
+    reasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/),
+    blockedAt: z.string().datetime(),
+    attemptCount: z.number().int().positive(),
+    resumeState: z.literal('preflight-readonly'),
+  }).strict().optional(),
   finalizationAttempt: RuntimeFinalizationAttemptSchema.optional(),
   publication: RuntimePublicationRecordSchema.optional(),
   workflow: WorkflowStateSchema,
@@ -390,11 +397,18 @@ const RuntimeRunSnapshotSchema = z.object({
   updatedAt: z.string().datetime(),
 }).strict().superRefine((snapshot, context) => {
   if (snapshot.preflightAttempt !== undefined
-    && (snapshot.workflow.current !== 'discovery-approved'
+    && (!['discovery-approved', 'preflight-readonly'].includes(snapshot.workflow.current)
       || snapshot.preflightAttempt.revision !== snapshot.runRevision)) {
     context.addIssue({
       code: 'custom', path: ['preflightAttempt'],
-      message: 'preflight attempt 必须绑定 discovery-approved 与当前 revision',
+      message: 'preflight attempt 必须绑定可执行预检的 workflow 与当前 revision',
+    })
+  }
+  if (snapshot.preflightBlocker !== undefined
+    && snapshot.workflow.current !== 'preflight-readonly') {
+    context.addIssue({
+      code: 'custom', path: ['preflightBlocker'],
+      message: '可恢复预检阻断只能绑定 preflight-readonly',
     })
   }
   if (snapshot.finalizationAttempt !== undefined
@@ -472,6 +486,10 @@ export const RuntimeStateMigrationRegistry: Readonly<Record<string, RuntimeState
     schemaVersion: '1.7.0',
     ...legacySingleCaseSchedule(snapshot),
   }),
+  '1.7.0': (snapshot) => ({
+    ...snapshot,
+    schemaVersion: '1.8.0',
+  }),
 })
 
 export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
@@ -483,7 +501,7 @@ export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
   }
   let candidateVersion = sourceVersion
   const visited = new Set<string>()
-  while (candidateVersion !== '1.7.0') {
+  while (candidateVersion !== '1.8.0') {
     if (visited.has(candidateVersion)) throw migrationRequired(sourceVersion)
     visited.add(candidateVersion)
     const migrator = RuntimeStateMigrationRegistry[candidateVersion]
