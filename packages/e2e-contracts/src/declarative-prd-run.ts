@@ -112,6 +112,10 @@ const CompiledCaseSchema = z.object({
   actions: z.array(CompiledActionSchema).min(1).max(10_000),
   oracles: z.array(CompiledOracleSchema).min(1).max(10_000),
   failurePolicy: z.enum(['stop-required', 'continue']),
+  executionLane: E2ECaseExecutionFieldsSchema.shape.executionLane.optional(),
+  fixture: E2ECaseExecutionFieldsSchema.shape.fixture.optional(),
+  locatorCandidates: E2ECaseExecutionFieldsSchema.shape.locatorCandidates.optional(),
+  pageIdentityPolicy: E2ECaseExecutionFieldsSchema.shape.pageIdentityPolicy.optional(),
 }).strict()
 
 const CompiledPrdRunPlanDraftSchema = z.object({

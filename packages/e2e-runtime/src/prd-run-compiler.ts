@@ -1,16 +1,16 @@
 import {
   CompiledPrdRunPlanSchema,
-  DeclarativePrdRunDesignSchema,
+  AnyDeclarativePrdRunDesignSchema,
   PrdUnderstandingProjectionSchema,
   digestCompiledPrdRunPlan,
   type CompiledPrdRunPlan,
-  type DeclarativePrdRunDesign,
+  type AnyDeclarativePrdRunDesign,
   type PrdUnderstandingProjection,
 } from '@mutil-skills/e2e-contracts'
 
 export interface CompilePrdRunInput {
   understanding: PrdUnderstandingProjection
-  design: DeclarativePrdRunDesign
+  design: AnyDeclarativePrdRunDesign
 }
 
 export function compilePrdRun(input: CompilePrdRunInput): CompiledPrdRunPlan {
@@ -18,7 +18,7 @@ export function compilePrdRun(input: CompilePrdRunInput): CompiledPrdRunPlan {
   if (input.design.cases.some((testCase) => testCase.oracles.length === 0)) {
     throw compilerError('E2E_RUNTIME_PRD_RUN_ACCEPTANCE_UNMAPPED')
   }
-  const design = DeclarativePrdRunDesignSchema.parse(input.design)
+  const design = AnyDeclarativePrdRunDesignSchema.parse(input.design)
   const authorized = new Set(understanding.authorization.authorizedNodeIds)
   const expected = new Map<string, { nodeId: string; criterion: string }>()
   for (const node of understanding.nodes) {
@@ -56,6 +56,12 @@ export function compilePrdRun(input: CompilePrdRunInput): CompiledPrdRunPlan {
       actor: testCase.actor,
       contractNodeIds: [...testCase.contractNodeIds],
       failurePolicy: testCase.failurePolicy,
+      ...(!('executionLane' in testCase) ? {} : {
+        executionLane: testCase.executionLane,
+        fixture: testCase.fixture,
+        locatorCandidates: testCase.locatorCandidates,
+        pageIdentityPolicy: testCase.pageIdentityPolicy,
+      }),
       actions: testCase.actions.map((action, actionIndex) => ({
         actionId: `ACTION-${ordinal(caseOrdinal)}-${ordinal(actionIndex + 1)}`,
         actionKey: action.actionKey,

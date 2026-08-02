@@ -8,9 +8,7 @@ import {
 import { WorkflowNodeSchema, WorkflowStateSchema } from './workflow.js'
 import { ApprovalGrantSubjectSchema, canonicalGrantApprovalType } from './approval-subject.js'
 import { ManualResultDraftSchema } from './manual-result.js'
-import {
-  DeclarativePrdRunDesignSchema,
-} from './declarative-prd-run.js'
+import { AnyDeclarativePrdRunDesignSchema } from './declarative-prd-run.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -94,7 +92,7 @@ const commandSchemas = [
     projectRoot: z.string().min(1),
     payload: z.object({
       runId: SafeIdSchema,
-      design: DeclarativePrdRunDesignSchema,
+      design: AnyDeclarativePrdRunDesignSchema,
     }).strict(),
   }).strict(),
   z.object({
