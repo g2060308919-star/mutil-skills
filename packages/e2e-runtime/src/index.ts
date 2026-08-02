@@ -1,4 +1,10 @@
 export { RUNTIME_PACKAGE_VERSION } from './protocol.js'
+export {
+  AcceptanceReviewReceiptSchema,
+  buildAcceptanceReview,
+  confirmAcceptanceReview,
+  type AcceptanceReviewReceipt,
+} from './acceptance-review.js'
 
 export {
   RuntimeDoctorProbeSchema,

@@ -4,6 +4,8 @@ import {
   RuntimeDoctorReportSchema,
   RuntimeCreateRunResultSchema,
   RuntimeCompilePrdRunResultSchema,
+  RuntimeAcceptanceReviewResultSchema,
+  AcceptanceReviewSchema,
   RuntimePreparePrdUnderstandingResultSchema,
   RuntimeResponseEnvelopeSchema,
   RuntimeStatusResultSchema,
@@ -117,6 +119,11 @@ import {
 import { compilePrdRun } from './prd-run-compiler.js'
 import { createCaseSchedule } from './multi-case-scheduler.js'
 import type { StandaloneEvidencePublisher } from './standalone-evidence-publisher.js'
+import {
+  AcceptanceReviewReceiptSchema,
+  buildAcceptanceReview,
+  confirmAcceptanceReview,
+} from './acceptance-review.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -188,6 +195,7 @@ export class E2ERuntimeHost {
         && request.command !== 'open-approval'
         && request.command !== 'confirm-approval'
         && request.command !== 'compile-prd-run'
+        && request.command !== 'confirm-acceptance-review'
         && request.command !== 'submit-candidate'
         && request.command !== 'run-preflight'
         && request.command !== 'execute-run'
@@ -216,6 +224,12 @@ export class E2ERuntimeHost {
       }
       if (request.command === 'compile-prd-run') {
         return await this.compilePrdRun(request, requestDigest)
+      }
+      if (request.command === 'get-acceptance-review') {
+        return await this.getAcceptanceReview(request, requestDigest)
+      }
+      if (request.command === 'confirm-acceptance-review') {
+        return await this.confirmAcceptanceReview(request, requestDigest)
       }
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
@@ -585,6 +599,78 @@ export class E2ERuntimeHost {
         lock,
       )
       return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
+  }
+
+  private async getAcceptanceReview(
+    request: Extract<RuntimeRequestEnvelope, { command: 'get-acceptance-review' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const outcome = await this.dependencies.runStore.readRunOutcome(
+        identity.digest, request.payload.runId, request.requestId, requestDigest,
+        (snapshot) => {
+          this.requireInstallation(snapshot)
+          const review = buildAcceptanceReview(snapshot)
+          const receipt = AcceptanceReviewReceiptSchema.safeParse(
+            snapshot.trustedExecutionFacts['acceptance-review-receipt'],
+          )
+          const confirmed = receipt.success && receipt.data.reviewDigest === review.reviewDigest
+          return this.successResponse(request.requestId, RuntimeAcceptanceReviewResultSchema.parse({
+            review,
+            confirmation: confirmed
+              ? { status: 'confirmed', receiptDigest: receipt.data.receiptDigest }
+              : { status: 'required' },
+          }))
+        },
+        lock,
+      )
+      return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
+  }
+
+  private async confirmAcceptanceReview(
+    request: Extract<RuntimeRequestEnvelope, { command: 'confirm-acceptance-review' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      const review = buildAcceptanceReview(snapshot)
+      const receipt = confirmAcceptanceReview({
+        review,
+        expectedReviewDigest: request.payload.reviewDigest,
+        confirmedAt: this.dependencies.now().toISOString(),
+      })
+      const response = this.successResponse(request.requestId, RuntimeAcceptanceReviewResultSchema.parse({
+        review,
+        confirmation: { status: 'confirmed', receiptDigest: receipt.receiptDigest },
+      }))
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+        identity.digest, snapshot.runId, request.requestId, requestDigest,
+        (current) => {
+          const currentReview = buildAcceptanceReview(current)
+          if (currentReview.reviewDigest !== review.reviewDigest) throw runtimeHostError(
+            'E2E_ACCEPTANCE_REVIEW_CHANGED', 'safety', '确认落盘前验收语义链已变化',
+          )
+          return {
+            snapshot: {
+              ...current,
+              trustedExecutionFacts: {
+                ...current.trustedExecutionFacts,
+                'acceptance-review': AcceptanceReviewSchema.parse(review),
+                'acceptance-review-receipt': receipt,
+              },
+              updatedAt: this.dependencies.now().toISOString(),
+            },
+            response,
+          }
+        },
+        'acceptance-review-confirmed', lock,
+      ))
     })
   }
 
@@ -981,6 +1067,9 @@ export class E2ERuntimeHost {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     const initial = await this.readLockedRun(identity.digest, request.payload.runId)
     this.requireInstallation(initial)
+    if (request.payload.approvalType === 'discovery') {
+      assertAcceptanceReviewConfirmed(initial)
+    }
     requireApprovalType(initial, request.payload.approvalType)
     assertRuntimeGrantSubject(initial, request.payload.approvalType, request.payload.grantSubject)
     const subjectDigest = computeRuntimeApprovalSubjectDigest(
@@ -1587,6 +1676,7 @@ export class E2ERuntimeHost {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     let initial = await this.readLockedRun(identity.digest, request.payload.runId)
     this.requireInstallation(initial)
+    assertAcceptanceReviewConfirmed(initial)
     const isRetry = initial.workflow.current === 'preflight-readonly'
       && initial.preflightBlocker !== undefined
       && initial.trustedExecutionFacts['browser-preflight'] === undefined
@@ -2914,6 +3004,23 @@ function requireApprovalType(snapshot: RuntimeRunSnapshot, approvalType: string)
   }
 }
 
+function assertAcceptanceReviewConfirmed(snapshot: RuntimeRunSnapshot): void {
+  const requiresReview = snapshot.compiledPrdRun?.cases.some((testCase) =>
+    testCase.executionLane !== undefined) === true
+  if (!requiresReview) return
+  const review = buildAcceptanceReview(snapshot)
+  const receipt = AcceptanceReviewReceiptSchema.safeParse(
+    snapshot.trustedExecutionFacts['acceptance-review-receipt'],
+  )
+  if (!receipt.success || receipt.data.reviewDigest !== review.reviewDigest) {
+    throw runtimeHostError(
+      'E2E_ACCEPTANCE_REVIEW_CONFIRMATION_REQUIRED',
+      'input',
+      '请先展示并确认 PRD 原文→Requirement→Rule→Oracle→Case 验收链路',
+    )
+  }
+}
+
 function assertRuntimeGrantSubject(
   snapshot: RuntimeRunSnapshot,
   approvalType: string,
@@ -2973,6 +3080,12 @@ function createRunResult(snapshot: RuntimeRunSnapshot): Record<string, unknown> 
 
 function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, unknown> {
   const projection = runtimeStatusProjection(snapshot, now)
+  const acceptanceReview = acceptanceReviewForStatus(snapshot)
+  const receipt = AcceptanceReviewReceiptSchema.safeParse(
+    snapshot.trustedExecutionFacts['acceptance-review-receipt'],
+  )
+  const reviewConfirmed = acceptanceReview !== undefined && receipt.success
+    && receipt.data.reviewDigest === acceptanceReview.reviewDigest
   return RuntimeStatusResultSchema.parse({
     runId: snapshot.runId,
     assetId: snapshot.assetId,
@@ -2983,6 +3096,12 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
     workflow: snapshot.workflow,
     artifactDigests: snapshot.artifactDigests,
     ...projection,
+    ...(acceptanceReview === undefined ? {} : {
+      acceptanceReview,
+      acceptanceReviewConfirmation: reviewConfirmed
+        ? { status: 'confirmed', receiptDigest: receipt.data.receiptDigest }
+        : { status: 'required' },
+    }),
     ...(snapshot.preflightBlocker === undefined
       ? {} : { preflightBlocker: snapshot.preflightBlocker }),
     ...(snapshot.pendingDecision === undefined ? {} : { pendingDecision: snapshot.pendingDecision }),
@@ -3033,7 +3152,16 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
   const contract = PrdUnderstandingContractFactSchema.safeParse(
     snapshot.trustedExecutionFacts['prd-understanding-contract'],
   )
-  const intent = current === 'preflight-readonly' && snapshot.preflightBlocker !== undefined
+  const acceptanceReview = acceptanceReviewForStatus(snapshot)
+  const acceptanceReceipt = AcceptanceReviewReceiptSchema.safeParse(
+    snapshot.trustedExecutionFacts['acceptance-review-receipt'],
+  )
+  const needsAcceptanceConfirmation = acceptanceReview !== undefined
+    && (!acceptanceReceipt.success
+      || acceptanceReceipt.data.reviewDigest !== acceptanceReview.reviewDigest)
+  const intent = needsAcceptanceConfirmation
+    ? { command: 'get-acceptance-review' as const, missing: ['acceptance-review-confirmation'] }
+    : current === 'preflight-readonly' && snapshot.preflightBlocker !== undefined
     ? {
       command: 'run-preflight' as const,
       missing: [`browser-preflight-retry:${snapshot.preflightBlocker.reasonCode}`],
@@ -3069,6 +3197,17 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
     },
     minimumMissingInput: missing,
   }
+}
+
+function acceptanceReviewForStatus(snapshot: RuntimeRunSnapshot) {
+  const requiresReview = snapshot.compiledPrdRun?.cases.some((testCase) =>
+    testCase.executionLane !== undefined) === true
+  if (!requiresReview) return undefined
+  const ready = snapshot.frozenArtifacts['prd-manifest'] !== undefined
+    && snapshot.frozenArtifacts['acceptance-scope'] !== undefined
+    && snapshot.frozenArtifacts['requirement-model'] !== undefined
+    && snapshot.frozenArtifacts['coverage-universe'] !== undefined
+  return ready ? buildAcceptanceReview(snapshot) : undefined
 }
 
 const FINALIZATION_EXTERNAL_TYPES = [

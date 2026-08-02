@@ -1,0 +1,122 @@
+import { describe, expect, test } from 'vitest'
+import type { RuntimeRunSnapshot } from '../src/run-store.js'
+import {
+  AcceptanceReviewReceiptSchema,
+  buildAcceptanceReview,
+  confirmAcceptanceReview,
+} from '../src/acceptance-review.js'
+
+const d = (value: string): string => `sha256:${value.repeat(64)}`
+
+describe('AcceptanceReview', () => {
+  test('从冻结资产生成 SourceSpan→Clause→Requirement→Rule→Oracle→Case 链路', () => {
+    const review = buildAcceptanceReview(reviewSnapshot())
+
+    expect(review).toMatchObject({
+      runId: 'RUN-1',
+      contractProjectionDigest: d('a'),
+      compilerDigest: d('b'),
+      includedClauseIds: ['CLAUSE-1'],
+      excludedClauseIds: ['CLAUSE-2'],
+      unresolvedItems: ['是否允许匿名下单？'],
+    })
+    expect(review.links).toEqual([
+      {
+        clauseId: 'CLAUSE-1', sourceSpan: {
+          sourceId: 'PRD-BODY', startLine: 2, startColumn: 1, endLine: 2, endColumn: 8,
+        },
+        sourceText: '用户可以下单', disposition: 'modeled',
+        requirementIds: ['REQ-1'], ruleIds: ['RULE-1'], oracleIds: ['ORACLE-1'],
+        caseIds: ['CASE-0001', 'CASE-BUY'],
+      },
+      {
+        clauseId: 'CLAUSE-2', sourceSpan: {
+          sourceId: 'PRD-BODY', startLine: 3, startColumn: 1, endLine: 3, endColumn: 7,
+        },
+        sourceText: '不支持批发', disposition: 'excluded',
+        requirementIds: [], ruleIds: [], oracleIds: [], caseIds: [],
+      },
+    ])
+    expect(review.reviewDigest).toMatch(/^sha256:/)
+    expect(buildAcceptanceReview(reviewSnapshot())).toEqual(review)
+  })
+
+  test('已建模 Clause 缺少 Requirement/Rule/Oracle/Case 任一链路时拒绝伪造 Review', () => {
+    const snapshot = reviewSnapshot()
+    const coverage = snapshot.frozenArtifacts['coverage-universe']!.content as any
+    coverage.obligations[0].disposition = { kind: 'manual', manualProcedureId: 'MANUAL-1', blocking: true }
+    snapshot.compiledPrdRun = { ...snapshot.compiledPrdRun!, cases: [] } as any
+
+    expect(() => buildAcceptanceReview(snapshot)).toThrowError(expect.objectContaining({
+      code: 'E2E_ACCEPTANCE_REVIEW_CHAIN_INCOMPLETE',
+    }))
+  })
+
+  test('本地确认回执绑定 reviewDigest 并如实报告无身份与职责分离保证', () => {
+    const review = buildAcceptanceReview(reviewSnapshot())
+    const receipt = confirmAcceptanceReview({
+      review,
+      expectedReviewDigest: review.reviewDigest,
+      confirmedAt: '2026-08-02T01:00:00.000Z',
+    })
+
+    expect(AcceptanceReviewReceiptSchema.parse(receipt)).toMatchObject({
+      reviewDigest: review.reviewDigest,
+      approver: 'local-caller', approvalMode: 'local-confirmation',
+      identityVerified: false, separationOfDutiesVerified: false,
+    })
+    expect(() => confirmAcceptanceReview({
+      review, expectedReviewDigest: d('f'), confirmedAt: '2026-08-02T01:00:00.000Z',
+    })).toThrowError(expect.objectContaining({ code: 'E2E_ACCEPTANCE_REVIEW_DIGEST_MISMATCH' }))
+  })
+})
+
+function reviewSnapshot(): RuntimeRunSnapshot {
+  return {
+    schemaVersion: '1.8.0', runId: 'RUN-1', assetId: 'ASSET-1',
+    projectIdentityDigest: d('1'), runtimeInstallationDigest: d('2'), runRevision: 3,
+    workflow: { current: 'coverage-audited', sequence: 4, eventChainDigest: d('3') },
+    artifactDigests: {},
+    frozenArtifacts: {
+      'prd-manifest': { content: { clauses: [
+        { clauseId: 'CLAUSE-1', sourceId: 'PRD-BODY', sourceSpan: {
+          startLine: 2, startColumn: 1, endLine: 2, endColumn: 8,
+        }, originalText: '用户可以下单' },
+        { clauseId: 'CLAUSE-2', sourceId: 'PRD-BODY', sourceSpan: {
+          startLine: 3, startColumn: 1, endLine: 3, endColumn: 7,
+        }, originalText: '不支持批发' },
+      ] } } as any,
+      'acceptance-scope': { content: {
+        clauseDispositions: [
+          { clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] },
+          { clauseId: 'CLAUSE-2', disposition: 'excluded', reason: '范围外', decisionId: 'DECISION-1' },
+        ],
+        ambiguities: [{ ambiguityId: 'AMB-1', question: '是否允许匿名下单？', status: 'pending' }],
+      } } as any,
+      'requirement-model': { content: { requirements: [{
+        reqId: 'REQ-1', contractNodeIds: ['NODE-1'],
+        rules: [{ ruleId: 'RULE-1', oracleIds: ['ORACLE-1'] }],
+        observableOutcomes: [{ oracleId: 'ORACLE-1', ruleId: 'RULE-1' }],
+      }] } } as any,
+      'coverage-universe': { content: { obligations: [{
+        obligationId: 'OBL-1', reqId: 'REQ-1', clauseIds: ['CLAUSE-1'],
+        ruleIds: ['RULE-1'], oracleIds: ['ORACLE-1'],
+        disposition: { kind: 'automated', caseIds: ['CASE-BUY'] },
+      }] } } as any,
+    },
+    trustedExecutionFacts: {},
+    compiledPrdRun: {
+      schemaVersion: '1.0.0', contractProjectionDigest: d('a'), compilerDigest: d('b'),
+      cases: [{
+        queueOrdinal: 0, caseId: 'CASE-0001', caseKey: 'buy', title: '下单', actor: 'USER',
+        contractNodeIds: ['NODE-1'], failurePolicy: 'stop-required',
+        actions: [{ actionId: 'ACTION-1', actionKey: 'buy', kind: 'full-playwright',
+          effect: 'reversible-write', statement: '下单' }],
+        oracles: [{ oracleId: 'COMPILED-ORACLE-1', oracleKey: 'created', actionId: 'ACTION-1',
+          contractNodeId: 'NODE-1', acceptanceCriterion: '订单可见' }],
+      }],
+    } as any,
+    writeAttempts: {}, executionResults: { readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} },
+    requestResponses: {}, createdAt: '2026-08-02T00:00:00.000Z', updatedAt: '2026-08-02T00:00:00.000Z',
+  }
+}

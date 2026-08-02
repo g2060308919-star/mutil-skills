@@ -9,6 +9,7 @@ import { WorkflowNodeSchema, WorkflowStateSchema } from './workflow.js'
 import { ApprovalGrantSubjectSchema, canonicalGrantApprovalType } from './approval-subject.js'
 import { ManualResultDraftSchema } from './manual-result.js'
 import { AnyDeclarativePrdRunDesignSchema } from './declarative-prd-run.js'
+import { AcceptanceReviewSchema } from './e2e-flow.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -94,6 +95,18 @@ const commandSchemas = [
       runId: SafeIdSchema,
       design: AnyDeclarativePrdRunDesignSchema,
     }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('get-acceptance-review'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema,
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('confirm-acceptance-review'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema.extend({ reviewDigest: DigestSchema }).strict(),
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
@@ -230,6 +243,7 @@ export const RuntimeDoctorReportSchema = z.object({
 export const RuntimeStatusNextEdgeSchema = z.object({
   command: z.enum([
     'prepare-prd-understanding', 'compile-prd-run', 'submit-candidate', 'open-approval', 'confirm-approval',
+    'get-acceptance-review', 'confirm-acceptance-review',
     'run-preflight', 'prepare-manual-result',
     'finalize-manual-result-role', 'execute-run', 'resume-run', 'finalize-run', 'render-report',
   ]),
@@ -259,6 +273,11 @@ export const RuntimeStatusResultSchema = z.object({
   verifiedDigests: z.record(DigestSchema),
   minimumMissingInput: z.array(z.string().min(1)).max(32),
   preflightBlocker: RuntimePreflightBlockerSchema.optional(),
+  acceptanceReview: AcceptanceReviewSchema.optional(),
+  acceptanceReviewConfirmation: z.object({
+    status: z.enum(['required', 'confirmed']),
+    receiptDigest: DigestSchema.optional(),
+  }).strict().optional(),
   pendingDecision: JsonValueSchema.optional(),
 }).strict()
 
@@ -302,6 +321,14 @@ export const RuntimeCompilePrdRunResultSchema = z.object({
   nextRequiredDecision: z.literal('scope'),
 }).strict()
 
+export const RuntimeAcceptanceReviewResultSchema = z.object({
+  review: AcceptanceReviewSchema,
+  confirmation: z.object({
+    status: z.enum(['required', 'confirmed']),
+    receiptDigest: DigestSchema.optional(),
+  }).strict(),
+}).strict()
+
 export const RuntimeResponseEnvelopeSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
   requestId: SafeIdSchema,
@@ -334,6 +361,7 @@ export type RuntimePreparePrdUnderstandingResult = z.infer<
   typeof RuntimePreparePrdUnderstandingResultSchema
 >
 export type RuntimeCompilePrdRunResult = z.infer<typeof RuntimeCompilePrdRunResultSchema>
+export type RuntimeAcceptanceReviewResult = z.infer<typeof RuntimeAcceptanceReviewResultSchema>
 
 function isPlainJsonObject(value: unknown): value is Record<string, JsonValue> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)
