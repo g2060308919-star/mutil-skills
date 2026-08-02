@@ -1,0 +1,217 @@
+import {
+  RuntimeAcceptanceReviewResultSchema,
+  RuntimeRequestEnvelopeSchema,
+  RuntimeResponseEnvelopeSchema,
+  RuntimeStatusResultSchema,
+  canonicalizeJson,
+  type RunHandle,
+  type RuntimeAcceptanceReviewResult,
+  type RuntimeRequestEnvelope,
+  type RuntimeResponseEnvelope,
+  type RuntimeStatusResult,
+  type TargetContract,
+} from '@mutil-skills/e2e-contracts'
+import { randomUUID } from 'node:crypto'
+
+type CreateRunRequest = Extract<RuntimeRequestEnvelope, { command: 'create-run' }>
+
+export interface E2EFacadeHost {
+  handle(request: RuntimeRequestEnvelope, requestBytes: Uint8Array): Promise<RuntimeResponseEnvelope>
+}
+
+export interface E2EFacadeOptions {
+  projectRoot: string
+  host: E2EFacadeHost
+  requestId?: () => string
+  clientVersion?: string
+}
+
+export class E2EFacadeError extends Error {
+  readonly code: string
+  readonly category: string
+  readonly retryable: boolean
+  readonly requestId: string
+  readonly runId?: string
+  readonly remediation?: string
+  readonly details?: unknown
+
+  constructor(input: {
+    code: string
+    category: string
+    message: string
+    retryable: boolean
+    requestId: string
+    runId?: string
+    remediation?: string
+    details?: unknown
+  }) {
+    super(input.message)
+    this.name = 'E2EFacadeError'
+    this.code = input.code
+    this.category = input.category
+    this.retryable = input.retryable
+    this.requestId = input.requestId
+    if (input.runId !== undefined) this.runId = input.runId
+    if (input.remediation !== undefined) this.remediation = input.remediation
+    if (input.details !== undefined) this.details = input.details
+  }
+}
+
+/** Skill 使用的高层门面：生成 envelope/requestId，跟随 Runtime 状态，不自己实现状态机。 */
+export class E2EFacade {
+  readonly #projectRoot: string
+  readonly #host: E2EFacadeHost
+  readonly #requestId: () => string
+  readonly #clientVersion: string
+
+  constructor(options: E2EFacadeOptions) {
+    this.#projectRoot = options.projectRoot
+    this.#host = options.host
+    this.#requestId = options.requestId ?? (() => `FACADE-${randomUUID()}`)
+    this.#clientVersion = options.clientVersion ?? '0.4.7'
+  }
+
+  async start(input: {
+    create: CreateRunRequest['payload']
+    targetContract?: TargetContract
+  }): Promise<RuntimeStatusResult> {
+    const created = await this.#invoke('create-run', input.create)
+    const runId = requireString(created, 'runId')
+    if (input.targetContract !== undefined) {
+      await this.#invoke('configure-target', { runId, targetContract: input.targetContract }, runId)
+      await this.#invoke('probe-target', { runId }, runId)
+    }
+    return await this.#statusByRunId(runId)
+  }
+
+  async status(handle: RunHandle): Promise<RuntimeStatusResult> {
+    return await this.#statusByRunId(handle.runId, handle)
+  }
+
+  async review(handle: RunHandle): Promise<RuntimeAcceptanceReviewResult> {
+    await this.status(handle)
+    return RuntimeAcceptanceReviewResultSchema.parse(
+      await this.#invoke('get-acceptance-review', { runId: handle.runId }, handle.runId),
+    )
+  }
+
+  async confirmReview(handle: RunHandle, reviewDigest: string): Promise<RuntimeStatusResult> {
+    await this.status(handle)
+    await this.#invoke('confirm-acceptance-review', {
+      runId: handle.runId, reviewDigest,
+    }, handle.runId)
+    return await this.#statusByRunId(handle.runId)
+  }
+
+  async configureTarget(handle: RunHandle, targetContract: TargetContract): Promise<RuntimeStatusResult> {
+    await this.status(handle)
+    await this.#invoke('configure-target', { runId: handle.runId, targetContract }, handle.runId)
+    return await this.#statusByRunId(handle.runId)
+  }
+
+  async probeTarget(handle: RunHandle): Promise<RuntimeStatusResult> {
+    await this.status(handle)
+    await this.#invoke('probe-target', { runId: handle.runId }, handle.runId)
+    return await this.#statusByRunId(handle.runId)
+  }
+
+  async execute(handle: RunHandle): Promise<RuntimeStatusResult> {
+    await this.status(handle)
+    await this.#invoke('execute-run', { runId: handle.runId }, handle.runId)
+    return await this.#statusByRunId(handle.runId)
+  }
+
+  async retry(handle: RunHandle): Promise<RuntimeStatusResult> {
+    const status = await this.status(handle)
+    if (status.condition?.kind !== 'blocked-retryable') {
+      throw new E2EFacadeError({
+        code: 'E2E_FACADE_RETRY_NOT_ALLOWED', category: 'input',
+        message: '当前 Run 没有可安全重试的 blocker', retryable: false,
+        requestId: 'FACADE-LOCAL', runId: handle.runId,
+      })
+    }
+    const command = status.nextEdge?.command
+    if (command !== 'run-preflight' && command !== 'probe-target') {
+      throw new E2EFacadeError({
+        code: 'E2E_FACADE_RETRY_EDGE_UNSUPPORTED', category: 'safety',
+        message: '当前 blocker 不能通过通用 retry 重放', retryable: false,
+        requestId: 'FACADE-LOCAL', runId: handle.runId,
+      })
+    }
+    await this.#invoke(command, { runId: handle.runId }, handle.runId)
+    return await this.#statusByRunId(handle.runId)
+  }
+
+  async report(handle: RunHandle, outputRoot?: string): Promise<Record<string, unknown>> {
+    await this.status(handle)
+    return asRecord(await this.#invoke('render-report', {
+      runId: handle.runId, ...(outputRoot === undefined ? {} : { outputRoot }),
+    }, handle.runId))
+  }
+
+  async #statusByRunId(runId: string, expected?: RunHandle): Promise<RuntimeStatusResult> {
+    const result = RuntimeStatusResultSchema.parse(
+      await this.#invoke('get-status', { runId }, runId),
+    )
+    if (result.handle === undefined) throw new E2EFacadeError({
+      code: 'E2E_FACADE_RUN_HANDLE_REQUIRED', category: 'migration',
+      message: '当前 Runtime 未返回 RunHandle，请升级 Runtime', retryable: false,
+      requestId: 'FACADE-LOCAL', runId,
+    })
+    if (expected !== undefined && canonicalizeJson(result.handle) !== canonicalizeJson(expected)) {
+      throw new E2EFacadeError({
+        code: result.handle.revision !== expected.revision
+          ? 'E2E_RUN_HANDLE_REVISION_STALE' : 'E2E_RUN_HANDLE_BINDING_MISMATCH',
+        category: 'safety', message: '调用者 RunHandle 与 Runtime 当前快照不一致', retryable: false,
+        requestId: 'FACADE-LOCAL', runId,
+      })
+    }
+    return result
+  }
+
+  async #invoke(
+    command: RuntimeRequestEnvelope['command'],
+    payload: Record<string, unknown>,
+    runId?: string,
+  ): Promise<unknown> {
+    const requestId = this.#requestId()
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      schemaVersion: '1.0.0', requestId,
+      client: { name: 'e2e-facade', version: this.#clientVersion },
+      command, projectRoot: this.#projectRoot, payload,
+    })
+    const bytes = Buffer.from(canonicalizeJson(request), 'utf8')
+    const response = RuntimeResponseEnvelopeSchema.parse(await this.#host.handle(request, bytes))
+    if (!response.ok) {
+      const error = response.error!
+      const details = asOptionalRecord(error.details)
+      throw new E2EFacadeError({
+        code: error.code, category: error.category, message: error.message,
+        retryable: error.retryable, requestId: response.requestId,
+        ...(runId === undefined ? {} : { runId }),
+        ...(typeof details?.remediation === 'string'
+          ? { remediation: details.remediation } : {}),
+        ...(error.details === undefined ? {} : { details: error.details }),
+      })
+    }
+    return response.result
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('Runtime result 必须是对象')
+  }
+  return value as Record<string, unknown>
+}
+
+function asOptionalRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined
+}
+
+function requireString(value: unknown, key: string): string {
+  const result = asRecord(value)[key]
+  if (typeof result !== 'string') throw new Error(`Runtime result 缺少 ${key}`)
+  return result
+}

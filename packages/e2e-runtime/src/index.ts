@@ -20,6 +20,12 @@ export {
   type TargetProbeCapability,
   type TargetProbeFact,
 } from './target-probe.js'
+export {
+  E2EFacade,
+  E2EFacadeError,
+  type E2EFacadeHost,
+  type E2EFacadeOptions,
+} from './e2e-facade.js'
 
 export {
   RuntimeDoctorProbeSchema,
