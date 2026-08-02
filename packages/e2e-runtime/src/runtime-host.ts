@@ -3467,12 +3467,12 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
     || snapshot.compiledPrdRun?.cases.some((testCase) => testCase.executionLane !== undefined) === true
   const targetProbeReady = snapshot.targetProbe?.status === 'ready'
     && snapshot.targetProbe.targetContractDigest === snapshot.targetContract?.contractDigest
-  const intent = requiresTarget && snapshot.targetContract === undefined
+  const intent = needsAcceptanceConfirmation
+    ? { command: 'get-acceptance-review' as const, missing: ['acceptance-review-confirmation'] }
+    : requiresTarget && snapshot.targetContract === undefined
     ? { command: 'configure-target' as const, missing: ['target-contract'] }
     : requiresTarget && !targetProbeReady
       ? { command: 'probe-target' as const, missing: ['target-probe-ready'] }
-    : needsAcceptanceConfirmation
-    ? { command: 'get-acceptance-review' as const, missing: ['acceptance-review-confirmation'] }
     : current === 'preflight-readonly' && snapshot.preflightBlocker !== undefined
     ? {
       command: 'run-preflight' as const,

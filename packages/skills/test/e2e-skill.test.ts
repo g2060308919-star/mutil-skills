@@ -386,6 +386,63 @@ describe('E2E skill package', () => {
     }
   })
 
+  test('入口用友好门面驱动状态、语义确认、恢复和报告，调用者不手写 envelope', async () => {
+    const entry = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+
+    for (const command of ['status --run', 'review --run', 'confirm-review --run', 'retry --run', 'report --run-id']) {
+      expect(entry).toContain(command)
+    }
+    expect(entry).toContain('调用者不需要构造 `RuntimeRequestEnvelope`')
+    expect(entry).toContain('Facade')
+    expect(entry).toContain('reasonCode')
+    expect(entry).toContain('remediation')
+  })
+
+  test('语义审查发生在浏览器预检之前并明确隔离目标、参考与依赖来源', async () => {
+    const entry = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+    const understanding = await readFile(new URL('../skills/testing/e2e/prd-understanding.md', import.meta.url), 'utf8')
+
+    expect(entry).toContain('AcceptanceReview')
+    expect(entry).toContain('浏览器预检前')
+    expect(entry).toContain('PRD 原文 → Clause 原文与处置 → Requirement → Rule → Oracle → Case')
+    expect(entry).toContain('确认前不得执行 Target Probe 或浏览器预检')
+    for (const role of ['target', 'reference', 'necessary-dependency']) {
+      expect(understanding).toContain(`\`${role}\``)
+    }
+    expect(understanding).toContain('参考页面不得进入验收范围')
+  })
+
+  test('页面身份支持业务选择器、浏览器侧 localhost 探测与同 Run 修订恢复', async () => {
+    const preflight = await readFile(new URL('../skills/testing/e2e/browser-preflight-binding.md', import.meta.url), 'utf8')
+
+    for (const signal of ['test-id', 'role', 'css-visible', 'visible-text', 'title', 'heading']) {
+      expect(preflight).toContain(`\`${signal}\``)
+    }
+    expect(preflight).toContain('TargetContract')
+    expect(preflight).toContain('Target Probe')
+    expect(preflight).toContain('命令行无法访问 localhost 不能判定目标不可用')
+    expect(preflight).toContain('同一 Run')
+    expect(preflight).toContain('preservedAssets')
+    expect(preflight).toContain('invalidatedAssets')
+    expect(preflight).toContain('E2E_RUNTIME_PAGE_MISMATCH')
+  })
+
+  test('中间状态与最终报告对用户可见并严格区分阻断、未执行和业务失败', async () => {
+    const entry = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+    const report = await readFile(new URL('../skills/testing/e2e/report-verdict.md', import.meta.url), 'utf8')
+
+    expect(entry).toContain('run-status.html')
+    expect(entry).toContain('semanticCases')
+    for (const state of ['环境阻断', '未执行', '业务失败']) {
+      expect(report).toContain(state)
+    }
+    expect(report).toContain('目标网站')
+    expect(report).toContain('PRD 来源')
+    expect(report).toContain('测试用例')
+    expect(report).toContain('截图')
+    expect(report).toContain('Playwright Trace')
+  })
+
   test('E2E workflow files stay local and preserve the TDD skill', () => {
     expect(listSkills().map((skill) => skill.id)).toEqual(['tdd', 'e2e'])
     expect(resolveSkill('tdd')?.files.map((file) => file.name)).toContain('tests.md')
