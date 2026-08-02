@@ -128,6 +128,7 @@ import { createRunHandle } from './run-handle.js'
 import { classifyRunCondition, projectRunStage } from './run-condition.js'
 import { createTargetContractFact } from './target-contract.js'
 import { runTargetProbe, type TargetProbeCapability } from './target-probe.js'
+import type { RunStatusPublisher } from './run-status-publisher.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -164,6 +165,7 @@ export interface RuntimeHostDependencies {
   fullPlaywrightExecutor?: RuntimeFullPlaywrightExecutorCapability
   preflightExecutor?: RuntimePreflightCapability
   targetProbe?: TargetProbeCapability
+  runStatusPublisher?: Pick<RunStatusPublisher, 'publish'>
   writeProduction?: RuntimeWriteProductionCapability
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
   standaloneEvidencePublisher?: Pick<StandaloneEvidencePublisher, 'publishRuntimeState'>
@@ -456,6 +458,13 @@ export class E2ERuntimeHost {
   ): Promise<RuntimeResponseEnvelope> {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const beforeRead = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (beforeRead === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(beforeRead)
+      const projectedStatus = RuntimeStatusResultSchema.parse(
+        statusResult(beforeRead, this.dependencies.now()),
+      )
+      await this.dependencies.runStatusPublisher?.publish(projectedStatus)
       const outcome = await this.dependencies.runStore.readRunOutcome(
         identity.digest,
         request.payload.runId,
@@ -463,7 +472,14 @@ export class E2ERuntimeHost {
         requestDigest,
         (snapshot) => {
           this.requireInstallation(snapshot)
-          return this.successResponse(request.requestId, statusResult(snapshot, this.dependencies.now()))
+          if (snapshot.workflow.eventChainDigest !== beforeRead.workflow.eventChainDigest
+            || (snapshot.runRevision ?? 0) !== (beforeRead.runRevision ?? 0)) {
+            throw runtimeHostError(
+              'E2E_RUNTIME_STATUS_SNAPSHOT_CHANGED', 'safety',
+              '状态工作区发布期间 Run 快照已变化',
+            )
+          }
+          return this.successResponse(request.requestId, projectedStatus)
         },
         lock,
       )

@@ -26,6 +26,7 @@ export {
   type E2EFacadeHost,
   type E2EFacadeOptions,
 } from './e2e-facade.js'
+export { RunStatusPublisher } from './run-status-publisher.js'
 
 export {
   RuntimeDoctorProbeSchema,

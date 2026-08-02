@@ -99,6 +99,7 @@ import {
   type RuntimeAuthoritySession,
 } from './authority-host.js'
 import { approvalModeFromTrustedFacts } from './local-approval-confirmations.js'
+import { RunStatusPublisher } from './run-status-publisher.js'
 import {
   RUNTIME_PACKAGE_VERSION,
   exitCodeForResponse,
@@ -618,6 +619,7 @@ export async function runCli(
           installation, homeDir: dependencies.homeDir,
         }),
         runStore,
+        runStatusPublisher: new RunStatusPublisher({ homeDir: dependencies.homeDir }),
         now: () => new Date(),
         approvalMode: configuredApprovalMode,
         ...(request.command !== 'submit-candidate' ? {} : {
