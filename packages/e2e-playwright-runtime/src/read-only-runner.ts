@@ -10,7 +10,9 @@ import {
   type ReadApprovalSubject,
   type SignedDiscoveryGrant,
   type SignedReadGrant,
+  type PageIdentityPolicy,
 } from '@mutil-skills/e2e-contracts'
+import type { PageIdentityEvaluation } from './page-identity-policy.js'
 
 export interface ObservedPageIdentity {
   url: string
@@ -26,6 +28,7 @@ export interface BrowserPageAdapter {
   containsText(text: string): Promise<boolean>
   screenshot(): Promise<Uint8Array>
   domSnapshot(): Promise<string>
+  evaluateIdentity?(policy: PageIdentityPolicy): Promise<PageIdentityEvaluation>
 }
 
 export interface DiscoveryAuthorityClient {
@@ -51,6 +54,7 @@ export interface BrowserPreflightResult {
   observedIdentity?: ObservedPageIdentity
   reservationId?: string
   preflightDigest?: string
+  pageIdentityEvaluation?: DiscoveryPreflightOutcome['pageIdentityEvaluation']
 }
 
 export async function runBrowserPreflight(input: {
@@ -105,10 +109,36 @@ export async function runBrowserPreflight(input: {
     const gatewayAudit = typeof input.gatewayAudit === 'function' ? input.gatewayAudit() : input.gatewayAudit
     if (gatewayAudit.received <= 0 || gatewayAudit.forwarded <= 0) {
       result = { status: 'safety-blocked', reasonCode: 'E2E_RUNTIME_GATEWAY_AUDIT_INCOMPLETE', observedIdentity }
-    } else if (canonicalPageUrl(observedIdentity.url) !== canonicalPageUrl(expected.url)) {
+    } else if (expected.policy !== undefined && input.page.evaluateIdentity === undefined) {
+      result = {
+        status: 'safety-blocked', reasonCode: 'E2E_RUNTIME_PAGE_IDENTITY_POLICY_UNSUPPORTED', observedIdentity,
+      }
+    } else if (expected.policy !== undefined) {
+      const evaluation = await input.page.evaluateIdentity!(expected.policy)
+      const pageIdentityEvaluation = {
+        policyDigest: digestText('page-identity-policy/v1', canonicalizeJson(expected.policy)),
+        matched: evaluation.matched,
+        urlMatched: evaluation.url.matched,
+        actualUrl: evaluation.url.actual,
+        matchedSignalCount: evaluation.matchedSignalCount,
+        requiredSignalCount: evaluation.requiredSignalCount,
+        signals: evaluation.signals.map((signal) => ({ kind: signal.kind, matched: signal.matched })),
+      }
+      result = !evaluation.matched
+        ? {
+            status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH',
+            observedIdentity, pageIdentityEvaluation,
+          }
+        : observedIdentity.role !== undefined && observedIdentity.role !== currentSubject.actor
+          ? { status: 'input-blocked', reasonCode: 'E2E_RUNTIME_ROLE_MISMATCH', observedIdentity,
+              pageIdentityEvaluation }
+          : { status: 'ready', observedIdentity, pageIdentityEvaluation }
+    } else if (expected.policy === undefined
+      && canonicalPageUrl(observedIdentity.url) !== canonicalPageUrl(expected.url)) {
       result = { status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_URL_MISMATCH', observedIdentity }
-    } else if (observedIdentity.title !== expected.title || !observedIdentity.headings.includes(expected.heading)
-      || expected.ariaSignals.some((signal) => !(observedIdentity.ariaSignals ?? []).includes(signal))) {
+    } else if (expected.policy === undefined
+      && (observedIdentity.title !== expected.title || !observedIdentity.headings.includes(expected.heading)
+      || expected.ariaSignals.some((signal) => !(observedIdentity.ariaSignals ?? []).includes(signal)))) {
       result = { status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH', observedIdentity }
     } else if (observedIdentity.role !== undefined && observedIdentity.role !== currentSubject.actor) {
       result = { status: 'input-blocked', reasonCode: 'E2E_RUNTIME_ROLE_MISMATCH', observedIdentity }

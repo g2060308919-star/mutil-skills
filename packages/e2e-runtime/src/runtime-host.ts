@@ -4,6 +4,8 @@ import {
   RuntimeDoctorReportSchema,
   RuntimeCreateRunResultSchema,
   RuntimeCompilePrdRunResultSchema,
+  RuntimeAcceptanceReviewResultSchema,
+  AcceptanceReviewSchema,
   RuntimePreparePrdUnderstandingResultSchema,
   RuntimeResponseEnvelopeSchema,
   RuntimeStatusResultSchema,
@@ -35,6 +37,7 @@ import { randomUUID } from 'node:crypto'
 import {
   computePrdRevision,
   createWorkflow,
+  invalidatePreflightForTargetChange,
   transitionWorkflow,
 } from '@mutil-skills/e2e-engine'
 import { runtimeErrorResponse } from './protocol.js'
@@ -117,6 +120,17 @@ import {
 import { compilePrdRun } from './prd-run-compiler.js'
 import { createCaseSchedule } from './multi-case-scheduler.js'
 import type { StandaloneEvidencePublisher } from './standalone-evidence-publisher.js'
+import {
+  AcceptanceReviewReceiptSchema,
+  buildAcceptanceReview,
+  confirmAcceptanceReview,
+} from './acceptance-review.js'
+import { createRunHandle } from './run-handle.js'
+import { classifyRunCondition, projectRunStage } from './run-condition.js'
+import { createTargetContractFact } from './target-contract.js'
+import { runTargetProbe, type TargetProbeCapability } from './target-probe.js'
+import type { RunStatusPublisher } from './run-status-publisher.js'
+import { assertCompiledCaseProjection } from './compiled-case-projection.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -152,6 +166,8 @@ export interface RuntimeHostDependencies {
   injectionExecutor?: RuntimeInjectionExecutorCapability
   fullPlaywrightExecutor?: RuntimeFullPlaywrightExecutorCapability
   preflightExecutor?: RuntimePreflightCapability
+  targetProbe?: TargetProbeCapability
+  runStatusPublisher?: Pick<RunStatusPublisher, 'publish'>
   writeProduction?: RuntimeWriteProductionCapability
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
   standaloneEvidencePublisher?: Pick<StandaloneEvidencePublisher, 'publishRuntimeState'>
@@ -188,6 +204,9 @@ export class E2ERuntimeHost {
         && request.command !== 'open-approval'
         && request.command !== 'confirm-approval'
         && request.command !== 'compile-prd-run'
+        && request.command !== 'confirm-acceptance-review'
+        && request.command !== 'configure-target'
+        && request.command !== 'probe-target'
         && request.command !== 'submit-candidate'
         && request.command !== 'run-preflight'
         && request.command !== 'execute-run'
@@ -216,6 +235,18 @@ export class E2ERuntimeHost {
       }
       if (request.command === 'compile-prd-run') {
         return await this.compilePrdRun(request, requestDigest)
+      }
+      if (request.command === 'get-acceptance-review') {
+        return await this.getAcceptanceReview(request, requestDigest)
+      }
+      if (request.command === 'confirm-acceptance-review') {
+        return await this.confirmAcceptanceReview(request, requestDigest)
+      }
+      if (request.command === 'configure-target') {
+        return await this.configureTarget(request, requestDigest)
+      }
+      if (request.command === 'probe-target') {
+        return await this.probeTarget(request, requestDigest)
       }
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
@@ -359,7 +390,7 @@ export class E2ERuntimeHost {
     }).prdRevision
     const timestamp = this.dependencies.now().toISOString()
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.7.0',
+      schemaVersion: '1.8.0',
       runId,
       assetId: request.payload.assetId,
       projectIdentityDigest: identity.digest,
@@ -429,6 +460,13 @@ export class E2ERuntimeHost {
   ): Promise<RuntimeResponseEnvelope> {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const beforeRead = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (beforeRead === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(beforeRead)
+      const projectedStatus = RuntimeStatusResultSchema.parse(
+        statusResult(beforeRead, this.dependencies.now()),
+      )
+      await this.dependencies.runStatusPublisher?.publish(projectedStatus)
       const outcome = await this.dependencies.runStore.readRunOutcome(
         identity.digest,
         request.payload.runId,
@@ -436,7 +474,14 @@ export class E2ERuntimeHost {
         requestDigest,
         (snapshot) => {
           this.requireInstallation(snapshot)
-          return this.successResponse(request.requestId, statusResult(snapshot, this.dependencies.now()))
+          if (snapshot.workflow.eventChainDigest !== beforeRead.workflow.eventChainDigest
+            || (snapshot.runRevision ?? 0) !== (beforeRead.runRevision ?? 0)) {
+            throw runtimeHostError(
+              'E2E_RUNTIME_STATUS_SNAPSHOT_CHANGED', 'safety',
+              '状态工作区发布期间 Run 快照已变化',
+            )
+          }
+          return this.successResponse(request.requestId, projectedStatus)
         },
         lock,
       )
@@ -585,6 +630,188 @@ export class E2ERuntimeHost {
         lock,
       )
       return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
+  }
+
+  private async getAcceptanceReview(
+    request: Extract<RuntimeRequestEnvelope, { command: 'get-acceptance-review' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const outcome = await this.dependencies.runStore.readRunOutcome(
+        identity.digest, request.payload.runId, request.requestId, requestDigest,
+        (snapshot) => {
+          this.requireInstallation(snapshot)
+          const review = buildAcceptanceReview(snapshot)
+          const receipt = AcceptanceReviewReceiptSchema.safeParse(
+            snapshot.trustedExecutionFacts['acceptance-review-receipt'],
+          )
+          const confirmed = receipt.success && receipt.data.reviewDigest === review.reviewDigest
+          return this.successResponse(request.requestId, RuntimeAcceptanceReviewResultSchema.parse({
+            review,
+            confirmation: confirmed
+              ? { status: 'confirmed', receiptDigest: receipt.data.receiptDigest }
+              : { status: 'required' },
+          }))
+        },
+        lock,
+      )
+      return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
+  }
+
+  private async confirmAcceptanceReview(
+    request: Extract<RuntimeRequestEnvelope, { command: 'confirm-acceptance-review' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      const review = buildAcceptanceReview(snapshot)
+      const receipt = confirmAcceptanceReview({
+        review,
+        expectedReviewDigest: request.payload.reviewDigest,
+        confirmedAt: this.dependencies.now().toISOString(),
+      })
+      const response = this.successResponse(request.requestId, RuntimeAcceptanceReviewResultSchema.parse({
+        review,
+        confirmation: { status: 'confirmed', receiptDigest: receipt.receiptDigest },
+      }))
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+        identity.digest, snapshot.runId, request.requestId, requestDigest,
+        (current) => {
+          const currentReview = buildAcceptanceReview(current)
+          if (currentReview.reviewDigest !== review.reviewDigest) throw runtimeHostError(
+            'E2E_ACCEPTANCE_REVIEW_CHANGED', 'safety', '确认落盘前验收语义链已变化',
+          )
+          return {
+            snapshot: {
+              ...current,
+              trustedExecutionFacts: {
+                ...current.trustedExecutionFacts,
+                'acceptance-review': AcceptanceReviewSchema.parse(review),
+                'acceptance-review-receipt': receipt,
+              },
+              updatedAt: this.dependencies.now().toISOString(),
+            },
+            response,
+          }
+        },
+        'acceptance-review-confirmed', lock,
+      ))
+    })
+  }
+
+  private async configureTarget(
+    request: Extract<RuntimeRequestEnvelope, { command: 'configure-target' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    const target = createTargetContractFact(request.payload.targetContract)
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      const normalConfiguration = ['created', 'source-frozen', 'awaiting-scope-approval', 'scope-approved',
+        'modeled', 'coverage-audited'].includes(snapshot.workflow.current)
+      const pageIdentityRecoveryState = snapshot.workflow.current === 'preflight-readonly'
+        && snapshot.preflightBlocker?.reasonCode === 'E2E_RUNTIME_PAGE_MISMATCH'
+        && snapshot.targetContract !== undefined
+        && snapshot.targetContract.contractDigest !== target.contractDigest
+      if (pageIdentityRecoveryState
+        && !isPageIdentityOnlyTargetRevision(snapshot.targetContract!, target)) {
+        throw runtimeHostError(
+          'E2E_TARGET_PAGE_IDENTITY_ONLY_REVISION_REQUIRED', 'input',
+          '页面身份恢复仅允许修改 pageIdentityPolicy；目标地址、环境标签和允许导航源必须保持不变',
+        )
+      }
+      const recoverablePageIdentityRevision = pageIdentityRecoveryState
+        && isPageIdentityOnlyTargetRevision(snapshot.targetContract!, target)
+      if (!normalConfiguration && !recoverablePageIdentityRevision) throw runtimeHostError(
+        'E2E_TARGET_CONFIGURATION_STATE_MISMATCH', 'input',
+        '目标配置必须在 Discovery 授权前完成；仅页面身份不匹配可显式修订并失效下游资产',
+      )
+      const invalidation = recoverablePageIdentityRevision
+        ? targetChangeInvalidationSummary(snapshot)
+        : undefined
+      const response = this.successResponse(request.requestId, {
+        runId: snapshot.runId, target,
+        ...(invalidation === undefined ? {} : { invalidation }),
+      })
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+        identity.digest, snapshot.runId, request.requestId, requestDigest,
+        (current) => {
+          if (recoverablePageIdentityRevision) return {
+            snapshot: invalidateTargetDependentSnapshot(
+              current, target, invalidation!, this.dependencies.now().toISOString(),
+              this.dependencies.installation.version,
+            ),
+            response,
+          }
+          if (current.targetContract?.contractDigest === target.contractDigest) return {
+            snapshot: { ...current, updatedAt: this.dependencies.now().toISOString() }, response,
+          }
+          const { targetProbe: _invalidatedProbe, ...withoutProbe } = current
+          return {
+            snapshot: {
+              ...withoutProbe,
+              runRevision: (current.runRevision ?? 0) + 1,
+              targetContract: target,
+              updatedAt: this.dependencies.now().toISOString(),
+            },
+            response,
+          }
+        },
+        'target-contract-configured', lock,
+      ))
+    })
+  }
+
+  private async probeTarget(
+    request: Extract<RuntimeRequestEnvelope, { command: 'probe-target' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const capability = this.dependencies.targetProbe
+    if (capability === undefined) throw blockedError('E2E_TARGET_PROBE_NOT_READY')
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    const initial = await this.readLockedRun(identity.digest, request.payload.runId)
+    this.requireInstallation(initial)
+    if (initial.targetContract === undefined) throw runtimeHostError(
+      'E2E_TARGET_CONTRACT_REQUIRED', 'input', '请先配置 TargetContract',
+    )
+    const targetProbe = await runTargetProbe(capability, {
+      runId: initial.runId,
+      target: initial.targetContract,
+      probedAt: this.dependencies.now().toISOString(),
+    })
+    return await this.withRunLock(identity.digest, initial.runId, async (lock) => {
+      const current = await this.dependencies.runStore.getRun(identity.digest, initial.runId)
+      if (current === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      if ((current.runRevision ?? 0) !== (initial.runRevision ?? 0)
+        || current.targetContract?.contractDigest !== initial.targetContract?.contractDigest) {
+        throw runtimeHostError(
+          'E2E_TARGET_PROBE_FENCED', 'safety', 'Target Probe 运行期间 Run 或目标配置已变化',
+        )
+      }
+      const response = this.successResponse(request.requestId, {
+        runId: current.runId, targetProbe,
+      })
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+        identity.digest, current.runId, request.requestId, requestDigest,
+        (snapshot) => ({
+          snapshot: {
+            ...snapshot,
+            runRevision: (snapshot.runRevision ?? 0) + 1,
+            targetProbe,
+            updatedAt: this.dependencies.now().toISOString(),
+          },
+          response,
+        }),
+        'target-probed', lock,
+      ))
     })
   }
 
@@ -860,6 +1087,12 @@ export class E2ERuntimeHost {
         assertPrdUnderstandingCandidate(candidate, snapshot)
       }
       assertPrdUnderstandingLinkedCandidate(request.payload.artifactType, candidate, snapshot)
+      if (request.payload.artifactType === 'test-cases' && snapshot.compiledPrdRun !== undefined) {
+        assertCompiledCaseProjection(
+          snapshot.compiledPrdRun,
+          ArtifactSchemaRegistry['test-cases'].parse(candidate).content,
+        )
+      }
 
       const existing = snapshot.frozenArtifacts[request.payload.artifactType]
       if (existing !== undefined && canonicalizeJson(existing) !== canonicalizeJson(candidate)) {
@@ -981,6 +1214,10 @@ export class E2ERuntimeHost {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     const initial = await this.readLockedRun(identity.digest, request.payload.runId)
     this.requireInstallation(initial)
+    if (request.payload.approvalType === 'discovery') {
+      assertTargetReady(initial)
+      assertAcceptanceReviewConfirmed(initial)
+    }
     requireApprovalType(initial, request.payload.approvalType)
     assertRuntimeGrantSubject(initial, request.payload.approvalType, request.payload.grantSubject)
     const subjectDigest = computeRuntimeApprovalSubjectDigest(
@@ -1587,8 +1824,14 @@ export class E2ERuntimeHost {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     let initial = await this.readLockedRun(identity.digest, request.payload.runId)
     this.requireInstallation(initial)
-    if (initial.workflow.current !== 'discovery-approved') throw runtimeHostError(
-      'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH', 'input', 'run-preflight 仅允许 discovery-approved Run',
+    assertTargetReady(initial)
+    assertAcceptanceReviewConfirmed(initial)
+    const isRetry = initial.workflow.current === 'preflight-readonly'
+      && initial.preflightBlocker !== undefined
+      && initial.trustedExecutionFacts['browser-preflight'] === undefined
+    if (initial.workflow.current !== 'discovery-approved' && !isRetry) throw runtimeHostError(
+      'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH', 'input',
+      'run-preflight 仅允许 discovery-approved 或带可恢复阻断的 preflight-readonly Run',
     )
     let durablePreparation = initial.preflightAttempt !== undefined
     let result: Awaited<ReturnType<typeof finalizeRuntimePreflight>>
@@ -1659,18 +1902,32 @@ export class E2ERuntimeHost {
           || current.workflow.eventChainDigest !== initial.workflow.eventChainDigest) throw runtimeHostError(
           'E2E_RUNTIME_PREFLIGHT_FENCED', 'safety', '预检期间 Run revision 已改变，拒绝落入陈旧结果',
         )
-        const entered = transitionWorkflow({
-          state: current.workflow, next: 'preflight-readonly', reason: `browser preflight ${result.output.status}`,
-          timestamp: this.dependencies.now().toISOString(),
-          engineVersion: this.dependencies.installation.version,
-        }).state
-        const finalWorkflow = result.output.status === 'ready' ? entered : transitionWorkflow({
+        const timestamp = this.dependencies.now().toISOString()
+        const entered = current.workflow.current === 'discovery-approved'
+          ? transitionWorkflow({
+            state: current.workflow, next: 'preflight-readonly',
+            reason: `browser preflight ${result.output.status}`,
+            timestamp,
+            engineVersion: this.dependencies.installation.version,
+          }).state
+          : current.workflow
+        const recoverableBlocker = result.output.status === 'input-blocked'
+          || result.output.status === 'environment-blocked'
+          ? {
+            status: result.output.status,
+            reasonCode: result.output.reasonCode!,
+            blockedAt: timestamp,
+            attemptCount: (current.preflightBlocker?.attemptCount ?? 0) + 1,
+            resumeState: 'preflight-readonly' as const,
+          }
+          : undefined
+        const finalWorkflow = result.output.status === 'safety-blocked' ? transitionWorkflow({
           state: entered,
-          next: result.output.status,
+          next: 'safety-blocked',
           reason: result.output.reasonCode ?? 'browser preflight blocked',
-          timestamp: this.dependencies.now().toISOString(),
+          timestamp,
           engineVersion: this.dependencies.installation.version,
-        }).state
+        }).state : entered
         const response = this.successResponse(request.requestId, {
           runId: current.runId, status: result.output.status,
           ...(result.output.reasonCode === undefined ? {} : { reasonCode: result.output.reasonCode }),
@@ -1686,10 +1943,14 @@ export class E2ERuntimeHost {
               capability, requestId: request.requestId, requestDigest,
               factType: 'browser-preflight', fact: result.fact, response,
               update: (snapshot) => {
-                const { preflightAttempt: _completedPreflight, ...withoutPreflight } = snapshot
+                const {
+                  preflightAttempt: _completedPreflight,
+                  preflightBlocker: _completedBlocker,
+                  ...withoutPreflight
+                } = snapshot
                 return {
                   ...withoutPreflight, workflow: finalWorkflow,
-                  updatedAt: this.dependencies.now().toISOString(),
+                  updatedAt: timestamp,
                 }
               },
             }),
@@ -1698,11 +1959,17 @@ export class E2ERuntimeHost {
         return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
           identity.digest, current.runId, request.requestId, requestDigest,
           (snapshot) => {
-            const { preflightAttempt: _completedPreflight, ...withoutPreflight } = snapshot
+            const {
+              preflightAttempt: _completedPreflight,
+              preflightBlocker: _previousBlocker,
+              ...withoutPreflight
+            } = snapshot
             return {
               snapshot: {
                 ...withoutPreflight, runRevision: (snapshot.runRevision ?? 0) + 1,
-                workflow: finalWorkflow, updatedAt: this.dependencies.now().toISOString(),
+                workflow: finalWorkflow,
+                ...(recoverableBlocker === undefined ? {} : { preflightBlocker: recoverableBlocker }),
+                updatedAt: timestamp,
               },
               response,
             }
@@ -2585,6 +2852,101 @@ export class E2ERuntimeHost {
 
 }
 
+const TARGET_INDEPENDENT_ARTIFACTS = new Set<ArtifactType>([
+  'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation',
+  'acceptance-scope', 'requirement-model', 'interaction-flow', 'coverage-universe',
+  'test-cases', 'design-audit', 'execution-contract',
+])
+
+const TARGET_DEPENDENT_TRUSTED_FACTS = new Set([
+  'pending-local-approval', 'signed-discovery-grant', 'browser-preflight',
+  'signed-execution-grant', 'prd-semantic-confirmation', 'manual-results-by-id',
+  'finalization-execution-facts', 'quarantined-evidence', 'finalization-material',
+])
+
+function isPageIdentityOnlyTargetRevision(
+  previous: NonNullable<RuntimeRunSnapshot['targetContract']>,
+  next: NonNullable<RuntimeRunSnapshot['targetContract']>,
+): boolean {
+  const withoutPageIdentity = (target: NonNullable<RuntimeRunSnapshot['targetContract']>) => ({
+    schemaVersion: target.contract.schemaVersion,
+    targetUrl: target.contract.targetUrl,
+    baseOrigin: target.contract.baseOrigin,
+    environmentLabel: target.contract.environmentLabel,
+    allowedNavigationOrigins: target.contract.allowedNavigationOrigins,
+  })
+  return canonicalizeJson(withoutPageIdentity(previous)) === canonicalizeJson(withoutPageIdentity(next))
+}
+
+function targetChangeInvalidationSummary(snapshot: RuntimeRunSnapshot): {
+  reason: 'target-contract-changed'
+  preservedAssets: string[]
+  invalidatedAssets: string[]
+} {
+  return {
+    reason: 'target-contract-changed',
+    preservedAssets: [
+      ...Object.keys(snapshot.frozenArtifacts).filter((key) =>
+        TARGET_INDEPENDENT_ARTIFACTS.has(key as ArtifactType)),
+      'prd-source-bundle', 'compiled-prd-run', 'acceptance-review-confirmation',
+    ].filter((value, index, values) => values.indexOf(value) === index).sort(),
+    invalidatedAssets: [
+      'target-probe', 'signed-discovery-grant', 'browser-preflight',
+      'browser-action-map', 'signed-execution-grant', 'execution-results', 'final-report',
+    ],
+  }
+}
+
+function invalidateTargetDependentSnapshot(
+  snapshot: RuntimeRunSnapshot,
+  target: RuntimeRunSnapshot['targetContract'],
+  invalidation: ReturnType<typeof targetChangeInvalidationSummary>,
+  timestamp: string,
+  engineVersion: string,
+): RuntimeRunSnapshot {
+  const frozenArtifacts = Object.fromEntries(Object.entries(snapshot.frozenArtifacts)
+    .filter(([type]) => TARGET_INDEPENDENT_ARTIFACTS.has(type as ArtifactType)))
+  const artifactDigests = Object.fromEntries(Object.entries(snapshot.artifactDigests)
+    .filter(([type]) => type === 'prd-source' || type === 'project-policy-source'
+      || TARGET_INDEPENDENT_ARTIFACTS.has(type as ArtifactType)))
+  const trustedExecutionFacts = Object.fromEntries(Object.entries(snapshot.trustedExecutionFacts)
+    .filter(([type]) => !TARGET_DEPENDENT_TRUSTED_FACTS.has(type)))
+  trustedExecutionFacts['target-contract-invalidation'] = {
+    schemaVersion: '1.0.0', ...invalidation,
+    previousTargetContractDigest: snapshot.targetContract?.contractDigest,
+    nextTargetContractDigest: target?.contractDigest,
+    invalidatedAt: timestamp,
+  }
+  const workflow = invalidatePreflightForTargetChange({
+    state: snapshot.workflow,
+    reason: 'target-contract-changed: invalidate browser-bound assets and grants',
+    timestamp,
+    engineVersion,
+  }).state
+  const {
+    targetProbe: _targetProbe,
+    preflightAttempt: _preflightAttempt,
+    preflightBlocker: _preflightBlocker,
+    executionAttempt: _executionAttempt,
+    finalizationAttempt: _finalizationAttempt,
+    publication: _publication,
+    pendingDecision: _pendingDecision,
+    ...preserved
+  } = snapshot
+  return {
+    ...preserved,
+    runRevision: (snapshot.runRevision ?? 0) + 1,
+    targetContract: target,
+    workflow,
+    artifactDigests,
+    frozenArtifacts,
+    trustedExecutionFacts,
+    writeAttempts: {},
+    executionResults: { readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} },
+    updatedAt: timestamp,
+  }
+}
+
 function parseCandidate(artifactType: ArtifactType, input: unknown): ArtifactDocument {
   const parsed = ArtifactSchemaRegistry[artifactType].safeParse(input)
   if (!parsed.success) {
@@ -2886,6 +3248,44 @@ function requireApprovalType(snapshot: RuntimeRunSnapshot, approvalType: string)
   }
 }
 
+function assertAcceptanceReviewConfirmed(snapshot: RuntimeRunSnapshot): void {
+  const requiresReview = snapshot.compiledPrdRun?.cases.some((testCase) =>
+    testCase.executionLane !== undefined) === true
+  if (!requiresReview) return
+  const review = buildAcceptanceReview(snapshot)
+  const receipt = AcceptanceReviewReceiptSchema.safeParse(
+    snapshot.trustedExecutionFacts['acceptance-review-receipt'],
+  )
+  if (!receipt.success || receipt.data.reviewDigest !== review.reviewDigest) {
+    throw runtimeHostError(
+      'E2E_ACCEPTANCE_REVIEW_CONFIRMATION_REQUIRED',
+      'input',
+      '请先展示并确认 PRD 原文→Requirement→Rule→Oracle→Case 验收链路',
+    )
+  }
+}
+
+function assertTargetReady(snapshot: RuntimeRunSnapshot): void {
+  const requiresTarget = snapshot.targetContract !== undefined
+    || snapshot.compiledPrdRun?.cases.some((testCase) => testCase.executionLane !== undefined) === true
+  if (!requiresTarget) return
+  if (snapshot.targetContract === undefined) throw runtimeHostError(
+    'E2E_TARGET_CONTRACT_REQUIRED', 'input', '请先配置 TargetContract',
+  )
+  if (snapshot.targetProbe === undefined
+    || snapshot.targetProbe.targetContractDigest !== snapshot.targetContract.contractDigest) {
+    throw runtimeHostError(
+      'E2E_TARGET_PROBE_REQUIRED', 'environment',
+      '请先使用受控浏览器执行无副作用 Target Probe',
+    )
+  }
+  if (snapshot.targetProbe.status !== 'ready') throw runtimeHostError(
+    snapshot.targetProbe.reasonCode ?? 'E2E_TARGET_PROBE_BLOCKED',
+    'environment',
+    'Target Probe 未证明页面可达且身份匹配',
+  )
+}
+
 function assertRuntimeGrantSubject(
   snapshot: RuntimeRunSnapshot,
   approvalType: string,
@@ -2908,6 +3308,18 @@ function assertRuntimeGrantSubject(
       'E2E_RUNTIME_APPROVAL_SUBJECT_INVALID',
       'safety',
       'grantSubject 必须严格绑定当前 Run、PRD revision 与 approvalType',
+    )
+  }
+  if (approvalType === 'discovery' && snapshot.targetContract !== undefined
+    && ('expectedPageIdentity' in subject)
+    && (subject.baseOrigin !== snapshot.targetContract.contract.baseOrigin
+      || subject.environment !== snapshot.targetContract.contract.environmentLabel
+      || subject.expectedPageIdentity.url !== snapshot.targetContract.contract.targetUrl
+      || canonicalizeJson(subject.expectedPageIdentity.policy)
+        !== canonicalizeJson(snapshot.targetContract.contract.pageIdentityPolicy))) {
+    throw runtimeHostError(
+      'E2E_TARGET_ENVIRONMENT_MISMATCH', 'safety',
+      'Discovery subject 必须引用唯一 TargetContract 的环境和页面身份',
     )
   }
   if (snapshot.workflow.current === 'diagnosing' && approvalType === 'execution'
@@ -2945,6 +3357,13 @@ function createRunResult(snapshot: RuntimeRunSnapshot): Record<string, unknown> 
 
 function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, unknown> {
   const projection = runtimeStatusProjection(snapshot, now)
+  const targetInvalidation = targetInvalidationProjection(snapshot)
+  const acceptanceReview = acceptanceReviewForStatus(snapshot)
+  const receipt = AcceptanceReviewReceiptSchema.safeParse(
+    snapshot.trustedExecutionFacts['acceptance-review-receipt'],
+  )
+  const reviewConfirmed = acceptanceReview !== undefined && receipt.success
+    && receipt.data.reviewDigest === acceptanceReview.reviewDigest
   return RuntimeStatusResultSchema.parse({
     runId: snapshot.runId,
     assetId: snapshot.assetId,
@@ -2954,9 +3373,78 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
     prdRevision: snapshot.artifactDigests['prd-source'],
     workflow: snapshot.workflow,
     artifactDigests: snapshot.artifactDigests,
+    handle: createRunHandle(snapshot),
+    stage: projectRunStage(snapshot.workflow.current),
+    condition: classifyRunCondition(snapshot),
+    ...(snapshot.targetContract === undefined ? {} : { target: snapshot.targetContract }),
+    ...(snapshot.targetProbe === undefined ? {} : { targetProbe: snapshot.targetProbe }),
+    preservedAssets: targetInvalidation?.preservedAssets ?? [
+      ...Object.keys(snapshot.artifactDigests).sort(),
+      ...(snapshot.compiledPrdRun === undefined ? [] : ['compiled-prd-run']),
+    ],
+    invalidatedAssets: targetInvalidation?.invalidatedAssets ?? [],
+    semanticCases: (snapshot.compiledPrdRun?.cases ?? []).map((testCase) => ({
+      caseId: testCase.caseId,
+      title: testCase.title,
+      actor: testCase.actor,
+      contractNodeIds: testCase.contractNodeIds,
+      oracleIds: testCase.oracles.map((oracle) => oracle.oracleId),
+      ...(testCase.executionLane === undefined ? {} : { executionLane: testCase.executionLane }),
+      ...(testCase.fixture === undefined ? {} : { fixture: testCase.fixture }),
+      ...(testCase.locatorCandidates === undefined
+        ? {} : { locatorCandidates: testCase.locatorCandidates }),
+      ...(testCase.pageIdentityPolicy === undefined
+        ? {} : { pageIdentityPolicy: testCase.pageIdentityPolicy }),
+      bindingStatus: snapshot.preflightBlocker !== undefined ? 'blocked'
+        : snapshot.trustedExecutionFacts['browser-preflight'] !== undefined
+          && snapshot.frozenArtifacts['browser-action-map'] !== undefined ? 'ready' : 'pending',
+      ...(snapshot.preflightBlocker === undefined
+        ? {} : { blockerReasonCode: snapshot.preflightBlocker.reasonCode }),
+    })),
+    remediation: runtimeRemediation(snapshot, acceptanceReview, reviewConfirmed),
     ...projection,
+    ...(acceptanceReview === undefined ? {} : {
+      acceptanceReview,
+      acceptanceReviewConfirmation: reviewConfirmed
+        ? { status: 'confirmed', receiptDigest: receipt.data.receiptDigest }
+        : { status: 'required' },
+    }),
+    ...(snapshot.preflightBlocker === undefined
+      ? {} : { preflightBlocker: snapshot.preflightBlocker }),
     ...(snapshot.pendingDecision === undefined ? {} : { pendingDecision: snapshot.pendingDecision }),
   })
+}
+
+function targetInvalidationProjection(snapshot: RuntimeRunSnapshot): {
+  preservedAssets: string[]
+  invalidatedAssets: string[]
+} | undefined {
+  const candidate = snapshot.trustedExecutionFacts['target-contract-invalidation']
+  if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return undefined
+  const record = candidate as Record<string, unknown>
+  if (record.reason !== 'target-contract-changed'
+    || !Array.isArray(record.preservedAssets)
+    || !record.preservedAssets.every((value) => typeof value === 'string')
+    || !Array.isArray(record.invalidatedAssets)
+    || !record.invalidatedAssets.every((value) => typeof value === 'string')) return undefined
+  return {
+    preservedAssets: [...record.preservedAssets] as string[],
+    invalidatedAssets: [...record.invalidatedAssets] as string[],
+  }
+}
+
+function runtimeRemediation(
+  snapshot: RuntimeRunSnapshot,
+  acceptanceReview: ReturnType<typeof acceptanceReviewForStatus>,
+  reviewConfirmed: boolean,
+): string[] {
+  if (snapshot.preflightBlocker !== undefined) return [
+    `修复 ${snapshot.preflightBlocker.reasonCode} 后对同一 Run 重新执行 run-preflight，无需重建需求资产。`,
+  ]
+  if (acceptanceReview !== undefined && !reviewConfirmed) return [
+    '请先展示 AcceptanceReview 的 PRD 原文到 Case 映射，再使用 reviewDigest 确认。',
+  ]
+  return []
 }
 
 const STATUS_COMMAND_BY_STATE: Partial<Record<WorkflowNode,
@@ -3003,14 +3491,38 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
   const contract = PrdUnderstandingContractFactSchema.safeParse(
     snapshot.trustedExecutionFacts['prd-understanding-contract'],
   )
-  const intent = current === 'created' && !prepared.success
+  const acceptanceReview = acceptanceReviewForStatus(snapshot)
+  const acceptanceReceipt = AcceptanceReviewReceiptSchema.safeParse(
+    snapshot.trustedExecutionFacts['acceptance-review-receipt'],
+  )
+  const needsAcceptanceConfirmation = acceptanceReview !== undefined
+    && (!acceptanceReceipt.success
+      || acceptanceReceipt.data.reviewDigest !== acceptanceReview.reviewDigest)
+  const requiresTarget = snapshot.targetContract !== undefined
+    || snapshot.compiledPrdRun?.cases.some((testCase) => testCase.executionLane !== undefined) === true
+  const targetProbeReady = snapshot.targetProbe?.status === 'ready'
+    && snapshot.targetProbe.targetContractDigest === snapshot.targetContract?.contractDigest
+  const intent = requiresTarget && snapshot.targetContract === undefined
+    ? { command: 'configure-target' as const, missing: ['target-contract'] }
+    : requiresTarget && !targetProbeReady
+      ? { command: 'probe-target' as const, missing: ['target-probe-ready'] }
+    : needsAcceptanceConfirmation
+      ? { command: 'get-acceptance-review' as const, missing: ['acceptance-review-confirmation'] }
+    : current === 'preflight-readonly' && snapshot.preflightBlocker !== undefined
+    ? {
+      command: 'run-preflight' as const,
+      missing: [`browser-preflight-retry:${snapshot.preflightBlocker.reasonCode}`],
+    }
+    : current === 'created' && !prepared.success
     ? { command: 'prepare-prd-understanding' as const, missing: ['prd-understanding-prepared'] }
     : current === 'created' && snapshot.compiledPrdRun === undefined
       ? { command: 'compile-prd-run' as const, missing: ['declarative-prd-run-design'] }
     : STATUS_COMMAND_BY_STATE[current]
   const missing = current === 'diagnosing'
     ? runtimeFinalizationMissingInputs(snapshot, now)
-    : intent?.missing.filter((item) => snapshot.artifactDigests[item] === undefined) ?? []
+    : snapshot.preflightBlocker !== undefined
+      ? intent?.missing ?? []
+      : intent?.missing.filter((item) => snapshot.artifactDigests[item] === undefined) ?? []
   return {
     state: current,
     nextEdge: intent === undefined ? null : {
@@ -3032,6 +3544,17 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
     },
     minimumMissingInput: missing,
   }
+}
+
+function acceptanceReviewForStatus(snapshot: RuntimeRunSnapshot) {
+  const requiresReview = snapshot.compiledPrdRun?.cases.some((testCase) =>
+    testCase.executionLane !== undefined) === true
+  if (!requiresReview) return undefined
+  const ready = snapshot.frozenArtifacts['prd-manifest'] !== undefined
+    && snapshot.frozenArtifacts['acceptance-scope'] !== undefined
+    && snapshot.frozenArtifacts['requirement-model'] !== undefined
+    && snapshot.frozenArtifacts['coverage-universe'] !== undefined
+  return ready ? buildAcceptanceReview(snapshot) : undefined
 }
 
 const FINALIZATION_EXTERNAL_TYPES = [

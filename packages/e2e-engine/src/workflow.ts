@@ -75,6 +75,35 @@ export interface TransitionWorkflowResult {
   event: WorkflowTransitionEvent
 }
 
+export interface InvalidatePreflightForTargetChangeInput {
+  state: WorkflowState
+  reason: string
+  timestamp?: string
+  engineVersion?: string
+}
+
+/**
+ * 页面身份契约变化会使 Discovery 授权及浏览器绑定失效，但不应销毁已审计的 PRD 语义资产。
+ * 这是唯一允许从 preflight 回退到 coverage-audited 的显式审计边。
+ */
+export function invalidatePreflightForTargetChange(
+  input: InvalidatePreflightForTargetChangeInput,
+): TransitionWorkflowResult {
+  if (input.state.current !== 'preflight-readonly') {
+    throw workflowError(
+      'E2E_WORKFLOW_TARGET_INVALIDATION_DENIED',
+      '仅允许在尚未进入执行绑定的 preflight-readonly 阶段修订页面身份契约',
+    )
+  }
+  return recordWorkflowEvent({
+    state: input.state,
+    next: 'coverage-audited',
+    reason: input.reason,
+    ...(input.timestamp === undefined ? {} : { timestamp: input.timestamp }),
+    ...(input.engineVersion === undefined ? {} : { engineVersion: input.engineVersion }),
+  })
+}
+
 export interface PendingWorkflowDecision {
   decisionId: string
   resumeState: WorkflowNode

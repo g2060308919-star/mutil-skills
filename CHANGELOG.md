@@ -2,9 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增 Runtime-owned `TargetContract`、可配置 `PageIdentityPolicy`、非权威 Target Probe、`AcceptanceReview`、`RunHandle`、可恢复 Run Condition 和静态 Run Status Workspace。
+- 新增 Semantic Case 的 `ExecutionLane`、`FixtureContract`、locator candidates 与 binding 状态，使预检阻断时仍可审查完整需求覆盖和不可执行原因。
+- 新增真实 localhost SPA Golden：系统 Chrome 经正式 Gateway 发现并精确授权同源只读静态资源，证明非标题业务身份；Runtime Host 回归测试独立证明同一 Run 的身份修订、语义资产保留和下游失效。
+
+### Changed
+
+- E2E Skill 在 Discovery 授权和可信浏览器预检前展示并确认一次完整的“PRD 原文/SourceSpan → Clause 处置 → Requirement → Rule → Oracle → Case”验收视图；Execution Approval 只确认执行差异。
+- Runtime 状态投影分离阶段、可恢复阻断和业务终态；`status/review/confirm-review/retry/report` 友好命令不再要求调用者手写 RPC envelope。
+- Target Probe 的可达性以受控浏览器为准。SPA 资源闭包使用显式来源内 GET/HEAD、精确 URL、有限轮次和有限总量发现，不使用 shell reachability 覆盖浏览器事实。
+
 ### Fixed
 
 - Trusted Publishing 在同版本 tgz 封装字节变化时，下载 Registry 包并比较稳定文件内容摘要；内容相同则安全幂等跳过，内容不同仍拒绝覆盖，发布工作流可安全重跑。
+- Runtime 重复安装使用稳定内容身份判断幂等；普通封装 metadata 或非执行权限变化不再制造版本冲突，活跃/不明 owner 仍 fail-closed。
+- 页面身份不匹配不再销毁 Run。修改 TargetContract 后仅失效 Probe、Discovery、Preflight 与下游执行事实，保留冻结 PRD、Requirement、Rule、Oracle 和 Semantic Case。
+- Target Probe 不再把 SPA 脚本/样式资源被旧单文档规则阻断误报为目标不可达；底层 E2E reasonCode 也不再统一吞并为导航失败。
+- `report --run` 与 Skill 文档保持一致，并保留 `--run-id` 作为兼容别名；Facade 客户端版本从 Runtime 唯一版本常量读取。
 
 ## [0.4.7] - 2026-07-31
 

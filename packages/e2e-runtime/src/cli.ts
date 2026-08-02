@@ -5,6 +5,9 @@ import {
   canonicalGrantApprovalType,
   digestText,
   type ApprovalGrantSubject,
+  RuntimeResponseEnvelopeSchema,
+  type RuntimeRequestEnvelope,
+  type RuntimeResponseEnvelope,
 } from '@mutil-skills/e2e-contracts'
 import {
   EncryptedQuarantine,
@@ -21,7 +24,7 @@ import { homedir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
-import { Readable, type Writable } from 'node:stream'
+import { Readable, Writable } from 'node:stream'
 import {
   installRuntime as installRuntimeDefault,
   type InstallRuntimeOptions,
@@ -56,6 +59,7 @@ import { installChromium as installChromiumDefault, type InstallChromiumOptions 
 import {
   bootstrapInstalledBrowserRuntime,
   createProductionBrowserCapabilities,
+  createProductionTargetProbeCapability,
   createProductionFullPlaywrightBrowserCapability,
   createProductionInjectionBrowserCapability,
   createProductionWriteBrowserCapability,
@@ -98,6 +102,7 @@ import {
   type RuntimeAuthoritySession,
 } from './authority-host.js'
 import { approvalModeFromTrustedFacts } from './local-approval-confirmations.js'
+import { RunStatusPublisher } from './run-status-publisher.js'
 import {
   RUNTIME_PACKAGE_VERSION,
   exitCodeForResponse,
@@ -179,11 +184,81 @@ export async function runCli(
     return 0
   }
 
+  if (arguments_[0] === 'status') {
+    const runId = parseFriendlyRunId(arguments_)
+    if (runId === undefined) return writeErrorResponse(responseWriter, 'STATUS', friendlyCommandError(
+      'status 只接受 --run <safe-id>',
+    ))
+    return await runFriendlyRpcToOutput({
+      command: 'get-status', payload: { runId }, dependencies, stdout, stderr,
+    })
+  }
+
+  if (arguments_[0] === 'review') {
+    const runId = parseFriendlyRunId(arguments_)
+    if (runId === undefined) return writeErrorResponse(responseWriter, 'REVIEW', friendlyCommandError(
+      'review 只接受 --run <safe-id>',
+    ))
+    return await runFriendlyRpcToOutput({
+      command: 'get-acceptance-review', payload: { runId }, dependencies, stdout, stderr,
+    })
+  }
+
+  if (arguments_[0] === 'confirm-review') {
+    const valid = arguments_.length === 5 && arguments_[1] === '--run'
+      && SAFE_ID.test(arguments_[2]!) && arguments_[3] === '--digest'
+      && /^sha256:[a-f0-9]{64}$/.test(arguments_[4]!)
+    if (!valid) return writeErrorResponse(responseWriter, 'CONFIRM-REVIEW', friendlyCommandError(
+      'confirm-review 只接受 --run <safe-id> --digest <sha256>',
+    ))
+    return await runFriendlyRpcToOutput({
+      command: 'confirm-acceptance-review',
+      payload: { runId: arguments_[2]!, reviewDigest: arguments_[4]! },
+      dependencies, stdout, stderr,
+    })
+  }
+
+  if (arguments_[0] === 'retry') {
+    const runId = parseFriendlyRunId(arguments_)
+    if (runId === undefined) return writeErrorResponse(responseWriter, 'RETRY', friendlyCommandError(
+      'retry 只接受 --run <safe-id>',
+    ))
+    const status = await runFriendlyRpcCaptured({
+      command: 'get-status', payload: { runId }, dependencies, stderr,
+    })
+    if (status.code !== 0) {
+      await responseWriter.write(`${canonicalizeJson(status.response)}\n`)
+      return status.code
+    }
+    const result = isRecord(status.response.result) ? status.response.result : undefined
+    const condition = isRecord(result?.condition) ? result.condition : undefined
+    const nextEdge = isRecord(result?.nextEdge) ? result.nextEdge : undefined
+    const command = nextEdge?.command
+    if (condition?.kind !== 'blocked-retryable'
+      || (command !== 'run-preflight' && command !== 'probe-target')) {
+      return writeErrorResponse(responseWriter, 'RETRY', new E2EError({
+        code: 'E2E_FACADE_RETRY_NOT_ALLOWED', category: 'input',
+        message: '当前 Run 没有可安全重试的环境/预检 blocker', retryable: false,
+      }))
+    }
+    const retried = await runFriendlyRpcCaptured({
+      command, payload: { runId }, dependencies, stderr,
+    })
+    if (retried.code !== 0) {
+      await responseWriter.write(`${canonicalizeJson(retried.response)}\n`)
+      return retried.code
+    }
+    return await runFriendlyRpcToOutput({
+      command: 'get-status', payload: { runId }, dependencies, stdout, stderr,
+    })
+  }
+
   if (arguments_[0] === 'report') {
-    if (arguments_.length !== 3 || arguments_[1] !== '--run-id' || !SAFE_ID.test(arguments_[2]!)) {
+    const validRunFlag = arguments_[1] === '--run' || arguments_[1] === '--run-id'
+    if (arguments_.length !== 3 || !validRunFlag || !SAFE_ID.test(arguments_[2]!)) {
       return writeErrorResponse(responseWriter, 'UNKNOWN', new E2EError({
         code: 'E2E_RUNTIME_REQUEST_INVALID', category: 'input',
-        message: 'report 只接受 --run-id <safe-id>', retryable: false,
+        message: 'report 只接受 --run <safe-id>', retryable: false,
       }))
     }
     const requestBytes = Buffer.from(canonicalizeJson({
@@ -438,6 +513,12 @@ export async function runCli(
         homeDir: dependencies.homeDir, projectRoot: request.projectRoot,
         installation, authorityHost: getAuthorityHost,
       })
+      const targetProbe = request.command !== 'probe-target' ? undefined
+        : createProductionTargetProbeCapability({
+          homeDir: dependencies.homeDir,
+          projectRoot: request.projectRoot,
+          installation,
+        })
       // 生产执行资源只能在 Host 的最外层 workflow 前置条件可能通过时装配。
       // 这里仅做只读短路；最终判定仍由持锁的 E2ERuntimeHost 完成，避免无效请求
       // 提前创建后端、密钥代理或隔离区并把输入错误污染成 cleanup/internal 错误。
@@ -611,6 +692,7 @@ export async function runCli(
           installation, homeDir: dependencies.homeDir,
         }),
         runStore,
+        runStatusPublisher: new RunStatusPublisher({ homeDir: dependencies.homeDir }),
         now: () => new Date(),
         approvalMode: configuredApprovalMode,
         ...(request.command !== 'submit-candidate' ? {} : {
@@ -622,6 +704,7 @@ export async function runCli(
           preflightExecutor: browserCapabilities.preflight,
           readExecutor: browserCapabilities.read,
         }),
+        ...(targetProbe === undefined ? {} : { targetProbe }),
         ...(writeExecutor === undefined ? {} : { writeExecutor }),
         ...(fullPlaywrightExecutor === undefined ? {} : { fullPlaywrightExecutor }),
         ...(injectionExecutor === undefined ? {} : { injectionExecutor }),
@@ -699,6 +782,65 @@ export async function runCli(
           cause: error,
         })
     return writeErrorResponse(responseWriter, requestIdFromUntrustedJson(json), runtimeError)
+  }
+}
+
+function parseFriendlyRunId(arguments_: string[]): string | undefined {
+  return arguments_.length === 3 && arguments_[1] === '--run' && SAFE_ID.test(arguments_[2]!)
+    ? arguments_[2] : undefined
+}
+
+function friendlyCommandError(message: string): E2EError {
+  return new E2EError({
+    code: 'E2E_RUNTIME_REQUEST_INVALID', category: 'input', message, retryable: false,
+  })
+}
+
+async function runFriendlyRpcToOutput(input: {
+  command: RuntimeRequestEnvelope['command']
+  payload: Record<string, unknown>
+  dependencies: RuntimeCliDependencies
+  stdout: Writable
+  stderr: Writable
+}): Promise<number> {
+  const request = friendlyRpcRequest(input.command, input.payload, input.dependencies)
+  return await runCli(
+    ['rpc'], Readable.from([Buffer.from(canonicalizeJson(request), 'utf8')]),
+    input.stdout, input.stderr, input.dependencies,
+  )
+}
+
+async function runFriendlyRpcCaptured(input: {
+  command: RuntimeRequestEnvelope['command']
+  payload: Record<string, unknown>
+  dependencies: RuntimeCliDependencies
+  stderr: Writable
+}): Promise<{ code: number; response: RuntimeResponseEnvelope }> {
+  const chunks: Buffer[] = []
+  const stdout = new Writable({
+    write(chunk, _encoding, callback) {
+      chunks.push(Buffer.isBuffer(chunk) ? Buffer.from(chunk) : Buffer.from(String(chunk)))
+      callback()
+    },
+  })
+  const code = await runFriendlyRpcToOutput({ ...input, stdout })
+  const response = RuntimeResponseEnvelopeSchema.parse(
+    JSON.parse(Buffer.concat(chunks).toString('utf8')),
+  )
+  return { code, response }
+}
+
+function friendlyRpcRequest(
+  command: RuntimeRequestEnvelope['command'],
+  payload: Record<string, unknown>,
+  dependencies: RuntimeCliDependencies,
+): Record<string, unknown> {
+  return {
+    schemaVersion: '1.0.0', requestId: `FACADE-${randomUUID()}`,
+    client: { name: 'repo-e2e-cli', version: RUNTIME_PACKAGE_VERSION },
+    command,
+    projectRoot: (dependencies.currentWorkingDirectory ?? process.cwd)(),
+    payload,
   }
 }
 
@@ -1463,10 +1605,12 @@ function formatDoctorReport(report: RuntimeDoctorReport): string {
     `浏览器来源：${report.browserSource}`,
     `审批模式：${report.approvalMode}`,
     `就绪：${report.ready ? '是' : '否'}`,
-    '探针\t状态\t原因代码\t修复建议',
+    '探针\t状态\t原因代码\t可恢复性\t期望/实际\t保留状态\t修复建议',
   ]
   for (const [name, probe] of Object.entries(report.probes)) {
-    lines.push(`${name}\t${statusLabels[probe.status]}\t${probe.reasonCode}\t${probe.remediation}`)
+    const comparison = probe.expected === undefined && probe.actual === undefined
+      ? '-' : `${probe.expected ?? '-'} / ${probe.actual ?? '-'}`
+    lines.push(`${name}\t${statusLabels[probe.status]}\t${probe.reasonCode}\t${probe.recoverability ?? '-'}\t${comparison}\t${probe.preservedState?.join(',') ?? '-'}\t${probe.remediation}`)
   }
   return `${lines.join('\n')}\n`
 }

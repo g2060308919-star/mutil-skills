@@ -1,4 +1,32 @@
 export { RUNTIME_PACKAGE_VERSION } from './protocol.js'
+export {
+  AcceptanceReviewReceiptSchema,
+  buildAcceptanceReview,
+  confirmAcceptanceReview,
+  type AcceptanceReviewReceipt,
+} from './acceptance-review.js'
+export { assertRunHandle, createRunHandle } from './run-handle.js'
+export { classifyRunCondition, projectRunStage } from './run-condition.js'
+export {
+  TargetContractFactSchema,
+  assertTargetEnvironmentConsistency,
+  createTargetContractFact,
+  type TargetContractFact,
+} from './target-contract.js'
+export {
+  TargetProbeFactSchema,
+  authorizeTargetProbe,
+  runTargetProbe,
+  type TargetProbeCapability,
+  type TargetProbeFact,
+} from './target-probe.js'
+export {
+  E2EFacade,
+  E2EFacadeError,
+  type E2EFacadeHost,
+  type E2EFacadeOptions,
+} from './e2e-facade.js'
+export { RunStatusPublisher } from './run-status-publisher.js'
 
 export {
   RuntimeDoctorProbeSchema,

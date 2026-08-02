@@ -200,11 +200,19 @@ async function runtimeEnvironmentProbe(context: RuntimeProbeContext): Promise<Ru
     status: 'blocked',
     reasonCode: 'E2E_RUNTIME_PLATFORM_UNSUPPORTED',
     remediation: '当前 Runtime 仅支持 macOS 与 Linux',
+    recoverability: 'user-action-required',
+    expected: 'platform=darwin|linux',
+    actual: `platform=${environment.platform}`,
+    preservedState: ['runtime-installation', 'run-assets'],
   }
   if (!supportedNodeVersion(environment.nodeVersion)) return {
     status: 'blocked',
     reasonCode: 'E2E_RUNTIME_NODE_VERSION_UNSUPPORTED',
     remediation: '安装 Node.js 22.13.0 或更高版本后重新安装 Runtime',
+    recoverability: 'repair-then-retry',
+    expected: 'Node.js >=22.13.0',
+    actual: `Node.js ${environment.nodeVersion}`,
+    preservedState: ['runtime-installation', 'run-assets'],
   }
   try {
     if (!isAbsolute(environment.tempDir)) throw new Error('E2E_RUNTIME_TEMP_DIRECTORY_UNAVAILABLE')
@@ -221,6 +229,10 @@ async function runtimeEnvironmentProbe(context: RuntimeProbeContext): Promise<Ru
       status: 'blocked',
       reasonCode: 'E2E_RUNTIME_TEMP_DIRECTORY_UNAVAILABLE',
       remediation: '配置当前用户可读、可写、可进入的绝对 TMPDIR 后重新运行 doctor',
+      recoverability: 'repair-then-retry',
+      expected: '绝对、可读、可写、可进入的 TMPDIR',
+      actual: `TMPDIR=${environment.tempDir}`,
+      preservedState: ['runtime-installation', 'run-assets'],
     }
   }
   return {
@@ -283,6 +295,8 @@ async function approvalPresenceProbe(context: RuntimeProbeContext): Promise<Runt
     } : {
       status: 'not-installed', reasonCode: 'E2E_APPROVAL_IDENTITY_NOT_ENROLLED',
       remediation: '使用 repo-e2e identity enroll 完成本机 WebAuthn identity 登记',
+      recoverability: 'user-action-required', expected: '至少一个 WebAuthn identity',
+      actual: 'credentialCount=0', preservedState: ['runtime-installation', 'run-assets'],
     }
   } catch (error) {
     return authorityFailure(error)
@@ -436,6 +450,10 @@ function verifiedInstallationProbe(reasonCode: string): RuntimeProbe {
           status: 'blocked',
           reasonCode: 'E2E_RUNTIME_DOCTOR_INSTALLATION_MISMATCH',
           remediation: 'Runtime 实际安装与 doctor 输入不一致；重新发现或重新安装 Runtime',
+          recoverability: 'reinstall',
+          expected: `installationDigest=${installation.installationDigest}`,
+          actual: `installationDigest=${inspected.installationDigest}`,
+          preservedState: ['run-assets'],
         }
       }
       return {
@@ -451,6 +469,8 @@ function verifiedInstallationProbe(reasonCode: string): RuntimeProbe {
         status: 'blocked',
         reasonCode: code,
         remediation: 'Runtime 安装缺失或完整性验证失败；重新安装 Runtime 后再次运行 doctor',
+        recoverability: 'reinstall', expected: `Runtime ${installation.version} 完整闭包`,
+        actual: code, preservedState: ['run-assets'],
       }
     }
   }

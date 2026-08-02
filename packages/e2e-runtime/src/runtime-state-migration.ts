@@ -1,6 +1,7 @@
 import {
   ArtifactSchemaRegistry,
   ArtifactTypeSchema,
+  AcceptanceReviewSchema,
   CompiledPrdRunPlanSchema,
   ManualResultSchema,
   SignedGrantSchema,
@@ -31,6 +32,9 @@ import {
   parseCaseSchedule,
   type RuntimeCaseSchedule,
 } from './multi-case-scheduler.js'
+import { TargetContractFactSchema } from './target-contract.js'
+import { TargetProbeFactSchema } from './target-probe.js'
+import { AcceptanceReviewReceiptSchema } from './acceptance-review.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const RunIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -59,6 +63,15 @@ const RuntimePreflightAttemptSchema = z.object({
   revision: z.number().int().positive(),
   startedAt: z.string().datetime(),
   preparation: RuntimePreflightPreparationSchema,
+}).strict()
+const TargetContractInvalidationFactSchema = z.object({
+  schemaVersion: z.literal('1.0.0'),
+  reason: z.literal('target-contract-changed'),
+  preservedAssets: z.array(z.string().min(1)).max(64),
+  invalidatedAssets: z.array(z.string().min(1)).max(64),
+  previousTargetContractDigest: DigestSchema,
+  nextTargetContractDigest: DigestSchema,
+  invalidatedAt: z.string().datetime(),
 }).strict()
 
 export const MAX_FROZEN_ARTIFACT_BYTES = 2 * 1024 * 1024
@@ -103,6 +116,7 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     'manual-results-by-id',
     'approval-mode', 'pending-local-approval', 'prd-source-snapshot', 'prd-source-bundle',
     'prd-understanding-contract', 'prd-understanding-prepared', 'prd-semantic-confirmation',
+    'acceptance-review', 'acceptance-review-receipt', 'target-contract-invalidation',
   ])
   if (Object.keys(facts).length > allowed.size) context.addIssue({ code: 'custom', message: '可信执行事实数量超限' })
   let trustedFactBytes = 0
@@ -159,6 +173,24 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     if (key === 'prd-semantic-confirmation') {
       if (!PrdSemanticConfirmationSchema.safeParse(value).success) context.addIssue({
         code: 'custom', path: [key], message: 'PRD 语义确认事实结构非法',
+      })
+      continue
+    }
+    if (key === 'acceptance-review') {
+      if (!AcceptanceReviewSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: '验收语义审查事实结构非法',
+      })
+      continue
+    }
+    if (key === 'acceptance-review-receipt') {
+      if (!AcceptanceReviewReceiptSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: '验收语义确认回执结构非法',
+      })
+      continue
+    }
+    if (key === 'target-contract-invalidation') {
+      if (!TargetContractInvalidationFactSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: 'TargetContract 失效事实结构非法',
       })
       continue
     }
@@ -356,7 +388,7 @@ const RuntimePublicationRecordSchema = z.object({
 }).strict()
 
 const RuntimeRunSnapshotSchema = z.object({
-  schemaVersion: z.literal('1.7.0'),
+  schemaVersion: z.literal('1.8.0'),
   runId: RunIdSchema,
   assetId: AssetIdSchema,
   projectIdentityDigest: DigestSchema,
@@ -364,6 +396,15 @@ const RuntimeRunSnapshotSchema = z.object({
   runRevision: z.number().int().nonnegative().default(0),
   executionAttempt: RuntimeExecutionAttemptSchema.optional(),
   preflightAttempt: RuntimePreflightAttemptSchema.optional(),
+  preflightBlocker: z.object({
+    status: z.enum(['input-blocked', 'environment-blocked']),
+    reasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/),
+    blockedAt: z.string().datetime(),
+    attemptCount: z.number().int().positive(),
+    resumeState: z.literal('preflight-readonly'),
+  }).strict().optional(),
+  targetContract: TargetContractFactSchema.optional(),
+  targetProbe: TargetProbeFactSchema.optional(),
   finalizationAttempt: RuntimeFinalizationAttemptSchema.optional(),
   publication: RuntimePublicationRecordSchema.optional(),
   workflow: WorkflowStateSchema,
@@ -390,11 +431,27 @@ const RuntimeRunSnapshotSchema = z.object({
   updatedAt: z.string().datetime(),
 }).strict().superRefine((snapshot, context) => {
   if (snapshot.preflightAttempt !== undefined
-    && (snapshot.workflow.current !== 'discovery-approved'
+    && (!['discovery-approved', 'preflight-readonly'].includes(snapshot.workflow.current)
       || snapshot.preflightAttempt.revision !== snapshot.runRevision)) {
     context.addIssue({
       code: 'custom', path: ['preflightAttempt'],
-      message: 'preflight attempt 必须绑定 discovery-approved 与当前 revision',
+      message: 'preflight attempt 必须绑定可执行预检的 workflow 与当前 revision',
+    })
+  }
+  if (snapshot.preflightBlocker !== undefined
+    && snapshot.workflow.current !== 'preflight-readonly') {
+    context.addIssue({
+      code: 'custom', path: ['preflightBlocker'],
+      message: '可恢复预检阻断只能绑定 preflight-readonly',
+    })
+  }
+  if (snapshot.targetProbe !== undefined
+    && (snapshot.targetContract === undefined
+      || snapshot.targetProbe.runId !== snapshot.runId
+      || snapshot.targetProbe.targetContractDigest !== snapshot.targetContract.contractDigest)) {
+    context.addIssue({
+      code: 'custom', path: ['targetProbe'],
+      message: 'Target Probe 必须绑定当前 Run 与 TargetContract',
     })
   }
   if (snapshot.finalizationAttempt !== undefined
@@ -472,6 +529,10 @@ export const RuntimeStateMigrationRegistry: Readonly<Record<string, RuntimeState
     schemaVersion: '1.7.0',
     ...legacySingleCaseSchedule(snapshot),
   }),
+  '1.7.0': (snapshot) => ({
+    ...snapshot,
+    schemaVersion: '1.8.0',
+  }),
 })
 
 export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
@@ -483,7 +544,7 @@ export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
   }
   let candidateVersion = sourceVersion
   const visited = new Set<string>()
-  while (candidateVersion !== '1.7.0') {
+  while (candidateVersion !== '1.8.0') {
     if (visited.has(candidateVersion)) throw migrationRequired(sourceVersion)
     visited.add(candidateVersion)
     const migrator = RuntimeStateMigrationRegistry[candidateVersion]

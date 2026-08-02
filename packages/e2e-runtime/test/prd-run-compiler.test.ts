@@ -4,6 +4,7 @@ import {
   digestPrdUnderstandingQuote,
   digestText,
   type DeclarativePrdRunDesign,
+  type DeclarativePrdRunDesignV2,
   type PrdUnderstandingProjection,
 } from '@mutil-skills/e2e-contracts'
 import { compilePrdRun } from '../src/prd-run-compiler.js'
@@ -46,6 +47,37 @@ describe('PRDRunCompiler', () => {
     unauthorized.design.cases[0]!.contractNodeIds = ['REQ-UNKNOWN']
     unauthorized.design.cases[0]!.oracles[0]!.contractNodeId = 'REQ-UNKNOWN'
     expect(() => compilePrdRun(unauthorized)).toThrow(/E2E_RUNTIME_PRD_RUN_NODE_UNAUTHORIZED/)
+  })
+
+  test('编译 v2 设计时保留 execution lane、fixture、locator 和页面身份', () => {
+    const input = inputFixture()
+    const design: DeclarativePrdRunDesignV2 = {
+      ...input.design,
+      schemaVersion: '2.0.0',
+      cases: input.design.cases.map((testCase) => ({
+        ...testCase,
+        executionLane: 'preview-readonly',
+        fixture: { actorRef: testCase.actor, preconditions: [], seedStrategy: 'pre-existing' },
+        locatorCandidates: [{ kind: 'test-id', value: 'result-panel' }],
+        pageIdentityPolicy: {
+          schemaVersion: '1.0.0',
+          url: { origin: 'http://localhost:3000', pathPattern: '/results/**' },
+          signals: [{ kind: 'test-id', value: 'results-page' }],
+          match: { mode: 'all' },
+        },
+      })),
+    }
+
+    const compiled = compilePrdRun({ understanding: input.understanding, design })
+
+    expect(compiled.cases[0]).toMatchObject({
+      executionLane: 'preview-readonly',
+      fixture: { actorRef: 'USER', seedStrategy: 'pre-existing' },
+      locatorCandidates: [{ kind: 'test-id', value: 'result-panel' }],
+      pageIdentityPolicy: {
+        url: { origin: 'http://localhost:3000', pathPattern: '/results/**' },
+      },
+    })
   })
 })
 

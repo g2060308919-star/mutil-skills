@@ -52,6 +52,7 @@ import { injectionOutput, realWriteOutput, runtimeWriteDigest } from './runtime-
 import { authorizeRuntimeGenerationFinalizer } from '../src/runtime-generation-finalizer.js'
 import { authorizeRuntimeEvidenceQuarantine } from '../src/runtime-evidence-quarantine.js'
 import { createCaseSchedule } from '../src/multi-case-scheduler.js'
+import { authorizeTargetProbe } from '../src/target-probe.js'
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`
 
@@ -287,6 +288,54 @@ describe('E2ERuntimeHost', () => {
       ok: false,
       error: { code: 'E2E_RUNTIME_RUN_NOT_FOUND' },
     })
+    await fixture.store.close()
+  })
+
+  test('Target Probe 由受控浏览器提前运行并只持久化非权威诊断', async () => {
+    const probe = vi.fn(async () => ({
+      status: 'ready' as const, observedUrl: 'http://localhost:3000/orders',
+      observedTitle: '订单', identityMatched: true,
+    }))
+    const fixture = await hostFixture({ targetProbe: probe })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-TARGET-CREATE', fixture.roots.project),
+    ))
+    const targetContract = {
+      schemaVersion: '1.0.0' as const, targetUrl: 'http://localhost:3000/orders',
+      baseOrigin: 'http://localhost:3000', environmentLabel: 'local',
+      pageIdentityPolicy: {
+        schemaVersion: '1.0.0' as const,
+        url: { origin: 'http://localhost:3000', pathPattern: '/orders/**' },
+        signals: [{ kind: 'test-id' as const, value: 'orders-page' }],
+        match: { mode: 'all' as const },
+      },
+      allowedNavigationOrigins: ['http://localhost:3000'],
+    }
+    const configured = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-TARGET-CONFIGURE'), command: 'configure-target',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId, targetContract },
+    })))
+    expect(configured).toMatchObject({ runId: created.runId, target: {
+      contract: targetContract, contractDigest: expect.stringMatching(/^sha256:/),
+    } })
+
+    const result = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-TARGET-PROBE'), command: 'probe-target',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })))
+    expect(result).toMatchObject({ runId: created.runId, targetProbe: {
+      trust: 'untrusted-diagnostic', status: 'ready', identityMatched: true,
+    } })
+    expect(probe).toHaveBeenCalledOnce()
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(persisted).toMatchObject({
+      workflow: { current: 'created' },
+      targetContract: { contract: targetContract },
+      targetProbe: { trust: 'untrusted-diagnostic', status: 'ready' },
+    })
+    expect(persisted?.trustedExecutionFacts).not.toHaveProperty('browser-preflight')
     await fixture.store.close()
   })
 
@@ -1795,6 +1844,202 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('环境预检阻断保留原 Run，修复后可以在同一 Run 重试', async () => {
+    let attempts = 0
+    const fixture = await hostFixture({ preflight: async () => {
+      attempts += 1
+      if (attempts === 1) return {
+        status: 'environment-blocked' as const,
+        reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH',
+        observedIdentity: {
+          url: 'http://localhost:3000/loading', title: '加载中', headings: [], role: 'auditor',
+        },
+      }
+      return {
+        status: 'ready' as const, reservationId: 'RESERVATION-RETRY', preflightDigest: digest('1'),
+        observedIdentity: {
+          url: 'http://localhost:3000/orders', title: '订单', headings: ['订单列表'], role: 'auditor',
+        },
+        browserMeasurement: {
+          browserMeasurementDigest: digest('2'), browserClosureDigest: digest('3'),
+          browserExecutableDigest: digest('4'), gatewaySessionMeasurementDigest: digest('5'),
+          canaryProofDigest: digest('6'),
+        },
+        gatewayPolicyDigest: digest('7'), authorityOutcomeDigest: digest('8'),
+        authorityReceiptDigest: digest('a'), gatewayAuditDigest: digest('d'),
+      }
+    } })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-PREFLIGHT-RETRY', fixture.roots.project),
+    ))
+    const projected = projectionFixture()
+    await fixture.store.beginRequest('SEED-DISCOVERY-RETRY', digest('b'))
+    const lock = await fixture.store.acquireRunLock(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string, created.runId as string,
+      'SEED-DISCOVERY-RETRY', digest('b'),
+      (snapshot) => ({ snapshot: {
+        ...snapshot,
+        trustedExecutionFacts: {
+          'signed-discovery-grant': executionFactsFor(projected, snapshot)['signed-discovery-grant'],
+        },
+        workflow: { current: 'discovery-approved', sequence: 5, eventChainDigest: digest('c') },
+      }, response: { seeded: true } }),
+      'test-seed-discovery-retry', lock,
+    )
+    await lock.close()
+
+    const first = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-PREFLIGHT-BLOCKED'), command: 'run-preflight',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })))
+    expect(first).toMatchObject({
+      runId: created.runId, status: 'environment-blocked',
+      reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH', workflow: { current: 'preflight-readonly' },
+    })
+    const blocked = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(blocked).toMatchObject({
+      workflow: { current: 'preflight-readonly' },
+      preflightBlocker: {
+        status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH', attemptCount: 1,
+        resumeState: 'preflight-readonly',
+      },
+    })
+    const status = successResult(await handleRequest(fixture.host, getStatusRequest(
+      'REQUEST-STATUS-PREFLIGHT-RETRY', fixture.roots.project, created.runId as string,
+    )))
+    expect(status).toMatchObject({
+      state: 'preflight-readonly',
+      nextEdge: { command: 'run-preflight', from: 'preflight-readonly' },
+      minimumMissingInput: ['browser-preflight-retry:E2E_RUNTIME_PAGE_MISMATCH'],
+    })
+
+    const recovered = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-PREFLIGHT-RETRY'), command: 'run-preflight',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })))
+    expect(recovered).toMatchObject({
+      runId: created.runId, status: 'ready', workflow: { current: 'preflight-readonly' },
+      preflightFact: { reservationId: 'RESERVATION-RETRY' },
+    })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(persisted).not.toHaveProperty('preflightBlocker')
+    expect(persisted?.trustedExecutionFacts['browser-preflight']).toEqual(recovered.preflightFact)
+    expect(attempts).toBe(2)
+    await fixture.store.close()
+  })
+
+  test('页面身份规则修订保留语义资产并显式失效旧探测与 Discovery 授权', async () => {
+    const fixture = await hostFixture({ targetProbe: async () => ({
+      status: 'ready', observedUrl: 'http://localhost:3000/orders',
+      observedTitle: '订单', identityMatched: true,
+    }) })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-TARGET-REVISION', fixture.roots.project),
+    ))
+    const targetContract = {
+      schemaVersion: '1.0.0' as const,
+      targetUrl: 'http://localhost:3000/orders',
+      baseOrigin: 'http://localhost:3000',
+      environmentLabel: 'local',
+      pageIdentityPolicy: {
+        schemaVersion: '1.0.0' as const,
+        url: { origin: 'http://localhost:3000', pathPattern: '/orders/**' },
+        signals: [{ kind: 'test-id' as const, value: 'old-orders-page' }],
+        match: { mode: 'all' as const },
+      },
+      allowedNavigationOrigins: ['http://localhost:3000'],
+    }
+    await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-CONFIGURE-TARGET-OLD'), command: 'configure-target',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId, targetContract },
+    }))
+    await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-PROBE-TARGET-OLD'), command: 'probe-target',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    }))
+
+    await fixture.store.beginRequest('SEED-TARGET-REVISION-BLOCKER', digest('b'))
+    const projected = projectionFixture()
+    const lock = await fixture.store.acquireRunLock(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string, created.runId as string,
+      'SEED-TARGET-REVISION-BLOCKER', digest('b'),
+      (snapshot) => ({ snapshot: {
+        ...snapshot,
+        trustedExecutionFacts: {
+          ...snapshot.trustedExecutionFacts,
+          'signed-discovery-grant': executionFactsFor(projected, snapshot)['signed-discovery-grant'],
+        },
+        preflightBlocker: {
+          status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH',
+          blockedAt: '2026-08-02T08:00:00.000Z', attemptCount: 1,
+          resumeState: 'preflight-readonly',
+        },
+        workflow: { current: 'preflight-readonly', sequence: 6, eventChainDigest: digest('c') },
+      }, response: { seeded: true } }),
+      'test-seed-target-revision', lock,
+    )
+    await lock.close()
+
+    const changedEnvironment = structuredClone(targetContract)
+    changedEnvironment.targetUrl = 'http://localhost:4000/orders'
+    changedEnvironment.baseOrigin = 'http://localhost:4000'
+    changedEnvironment.pageIdentityPolicy.url.origin = 'http://localhost:4000'
+    changedEnvironment.allowedNavigationOrigins = ['http://localhost:4000']
+    await expect(handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-CONFIGURE-TARGET-ENVIRONMENT-SWAP'), command: 'configure-target',
+      projectRoot: fixture.roots.project,
+      payload: { runId: created.runId, targetContract: changedEnvironment },
+    }))).resolves.toMatchObject({
+      ok: false, error: { code: 'E2E_TARGET_PAGE_IDENTITY_ONLY_REVISION_REQUIRED' },
+    })
+
+    const revised = structuredClone(targetContract)
+    revised.pageIdentityPolicy.signals = [{ kind: 'test-id', value: 'orders-page' }]
+    const response = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-CONFIGURE-TARGET-NEW'), command: 'configure-target',
+      projectRoot: fixture.roots.project,
+      payload: { runId: created.runId, targetContract: revised },
+    })))
+    expect(response).toMatchObject({
+      runId: created.runId,
+      invalidation: {
+        reason: 'target-contract-changed',
+        preservedAssets: expect.arrayContaining(['prd-source-bundle']),
+        invalidatedAssets: expect.arrayContaining(['target-probe', 'signed-discovery-grant', 'browser-preflight']),
+      },
+    })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(persisted).toMatchObject({
+      workflow: { current: 'coverage-audited', sequence: 7 },
+      targetContract: { contract: revised },
+    })
+    expect(persisted).not.toHaveProperty('targetProbe')
+    expect(persisted).not.toHaveProperty('preflightBlocker')
+    expect(persisted?.trustedExecutionFacts).not.toHaveProperty('signed-discovery-grant')
+    expect(persisted?.trustedExecutionFacts['prd-source-bundle']).toBeDefined()
+    const status = successResult(await handleRequest(fixture.host, getStatusRequest(
+      'REQUEST-STATUS-TARGET-REVISION', fixture.roots.project, created.runId as string,
+    )))
+    expect(status).toMatchObject({
+      nextEdge: { command: 'probe-target' },
+      preservedAssets: expect.arrayContaining(['prd-source-bundle']),
+      invalidatedAssets: expect.arrayContaining(['target-probe', 'signed-discovery-grant']),
+    })
+    await fixture.store.close()
+  })
+
   test('Authority complete 成功但 fact 落盘失败时从持久 preparation 恢复且不重复浏览器动作', async () => {
     let browserPreparations = 0
     let authorityCompletions = 0
@@ -2286,6 +2531,7 @@ async function hostFixture(options: {
   executeInjectionRun?: Parameters<typeof authorizeRuntimeInjectionExecutor>[0]
   executeFullPlaywrightRun?: Parameters<typeof authorizeRuntimeFullPlaywrightExecutor>[0]
   preflight?: Parameters<typeof authorizeRuntimePreflight>[0]
+  targetProbe?: Parameters<typeof authorizeTargetProbe>[0]
   authorityHostFactory?: () => Promise<Pick<RuntimeAuthorityHost, 'requestApproval'>>
   writeRecovery?: Parameters<typeof authorizeRuntimeWriteProduction>[0]['recovery']
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
@@ -2340,6 +2586,9 @@ async function hostFixture(options: {
     }),
     ...(options.preflight === undefined ? {} : {
       preflightExecutor: authorizeRuntimePreflight(options.preflight),
+    }),
+    ...(options.targetProbe === undefined ? {} : {
+      targetProbe: authorizeTargetProbe(options.targetProbe),
     }),
     ...(options.authorityHostFactory === undefined ? {} : {
       authorityHostFactory: options.authorityHostFactory,

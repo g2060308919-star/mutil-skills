@@ -57,6 +57,23 @@ const manualDraft = {
 }
 
 describe('Runtime Host contracts', () => {
+  test('验收语义查看与确认使用独立严格命令并绑定 reviewDigest', () => {
+    const base = {
+      schemaVersion: '1.0.0', client: { name: 'e2e-skill', version: '1.0.0' },
+      projectRoot: '/project',
+    }
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...base, requestId: 'REVIEW-1', command: 'get-acceptance-review', payload: { runId: 'RUN-1' },
+    }).success).toBe(true)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...base, requestId: 'REVIEW-2', command: 'confirm-acceptance-review',
+      payload: { runId: 'RUN-1', reviewDigest: `sha256:${'a'.repeat(64)}` },
+    }).success).toBe(true)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({
+      ...base, requestId: 'REVIEW-3', command: 'confirm-acceptance-review',
+      payload: { runId: 'RUN-1', confirmed: true },
+    }).success).toBe(false)
+  })
   test('accepts the exact doctor envelope', () => {
     expect(RuntimeRequestEnvelopeSchema.parse(doctorRequest)).toEqual(doctorRequest)
   })

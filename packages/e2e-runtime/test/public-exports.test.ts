@@ -2,14 +2,30 @@ import { readFile } from 'node:fs/promises'
 import { expect, test } from 'vitest'
 import * as runtimePublicApi from '../src/index.js'
 
-test('public Runtime package exposes only protocol schemas and version metadata', async () => {
+test('public Runtime package exposes the safe facade, status model, and protocol schemas', async () => {
   expect(Object.keys(runtimePublicApi).sort()).toEqual([
+    'AcceptanceReviewReceiptSchema',
+    'E2EFacade',
+    'E2EFacadeError',
     'RUNTIME_PACKAGE_VERSION',
+    'RunStatusPublisher',
     'RuntimeDoctorProbeSchema',
     'RuntimeDoctorReportSchema',
     'RuntimeErrorSchema',
     'RuntimeRequestEnvelopeSchema',
     'RuntimeResponseEnvelopeSchema',
+    'TargetContractFactSchema',
+    'TargetProbeFactSchema',
+    'assertRunHandle',
+    'assertTargetEnvironmentConsistency',
+    'authorizeTargetProbe',
+    'buildAcceptanceReview',
+    'classifyRunCondition',
+    'confirmAcceptanceReview',
+    'createRunHandle',
+    'createTargetContractFact',
+    'projectRunStage',
+    'runTargetProbe',
   ])
   for (const forbidden of [
     'E2ERuntimeHost', 'RuntimeAuthorityHost', 'RuntimeRunStore', 'startRuntimeAuthorityHost',

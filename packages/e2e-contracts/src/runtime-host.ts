@@ -8,9 +8,15 @@ import {
 import { WorkflowNodeSchema, WorkflowStateSchema } from './workflow.js'
 import { ApprovalGrantSubjectSchema, canonicalGrantApprovalType } from './approval-subject.js'
 import { ManualResultDraftSchema } from './manual-result.js'
+import { AnyDeclarativePrdRunDesignSchema } from './declarative-prd-run.js'
 import {
-  DeclarativePrdRunDesignSchema,
-} from './declarative-prd-run.js'
+  AcceptanceReviewSchema,
+  E2ECaseExecutionFieldsSchema,
+  RunConditionSchema,
+  RunHandleSchema,
+  RunStageSchema,
+  TargetContractSchema,
+} from './e2e-flow.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -94,8 +100,32 @@ const commandSchemas = [
     projectRoot: z.string().min(1),
     payload: z.object({
       runId: SafeIdSchema,
-      design: DeclarativePrdRunDesignSchema,
+      design: AnyDeclarativePrdRunDesignSchema,
     }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('get-acceptance-review'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema,
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('confirm-acceptance-review'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema.extend({ reviewDigest: DigestSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('configure-target'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema.extend({ targetContract: TargetContractSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('probe-target'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema,
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
@@ -218,6 +248,12 @@ export const RuntimeDoctorProbeSchema = z.object({
   reasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/),
   proofDigest: DigestSchema.optional(),
   remediation: z.string().min(1),
+  recoverability: z.enum([
+    'none', 'retry', 'repair-then-retry', 'reinstall', 'user-action-required',
+  ]).optional(),
+  expected: z.string().min(1).max(16 * 1024).optional(),
+  actual: z.string().min(1).max(16 * 1024).optional(),
+  preservedState: z.array(SafeIdSchema).max(100).optional(),
 }).strict()
 
 export const RuntimeDoctorReportSchema = z.object({
@@ -232,11 +268,21 @@ export const RuntimeDoctorReportSchema = z.object({
 export const RuntimeStatusNextEdgeSchema = z.object({
   command: z.enum([
     'prepare-prd-understanding', 'compile-prd-run', 'submit-candidate', 'open-approval', 'confirm-approval',
+    'get-acceptance-review', 'confirm-acceptance-review',
+    'configure-target', 'probe-target',
     'run-preflight', 'prepare-manual-result',
     'finalize-manual-result-role', 'execute-run', 'resume-run', 'finalize-run', 'render-report',
   ]),
   from: WorkflowNodeSchema,
   expectedState: WorkflowNodeSchema,
+}).strict()
+
+export const RuntimePreflightBlockerSchema = z.object({
+  status: z.enum(['input-blocked', 'environment-blocked']),
+  reasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/),
+  blockedAt: z.string().datetime(),
+  attemptCount: z.number().int().positive(),
+  resumeState: z.literal('preflight-readonly'),
 }).strict()
 
 export const RuntimeStatusResultSchema = z.object({
@@ -252,6 +298,52 @@ export const RuntimeStatusResultSchema = z.object({
   nextEdge: RuntimeStatusNextEdgeSchema.nullable(),
   verifiedDigests: z.record(DigestSchema),
   minimumMissingInput: z.array(z.string().min(1)).max(32),
+  preflightBlocker: RuntimePreflightBlockerSchema.optional(),
+  acceptanceReview: AcceptanceReviewSchema.optional(),
+  acceptanceReviewConfirmation: z.object({
+    status: z.enum(['required', 'confirmed']),
+    receiptDigest: DigestSchema.optional(),
+  }).strict().optional(),
+  handle: RunHandleSchema.optional(),
+  stage: RunStageSchema.optional(),
+  condition: RunConditionSchema.optional(),
+  preservedAssets: z.array(z.string().min(1)).max(100_000).optional(),
+  invalidatedAssets: z.array(z.string().min(1)).max(100_000).optional(),
+  semanticCases: z.array(z.object({
+    caseId: SafeIdSchema,
+    title: z.string().min(1).max(64 * 1024),
+    actor: SafeIdSchema,
+    contractNodeIds: z.array(SafeIdSchema).max(10_000),
+    oracleIds: z.array(SafeIdSchema).max(10_000),
+    executionLane: z.enum([
+      'preview-readonly', 'real-reversible-write', 'injection-simulated',
+    ]).optional(),
+    fixture: E2ECaseExecutionFieldsSchema.shape.fixture.optional(),
+    locatorCandidates: E2ECaseExecutionFieldsSchema.shape.locatorCandidates.optional(),
+    pageIdentityPolicy: E2ECaseExecutionFieldsSchema.shape.pageIdentityPolicy.optional(),
+    bindingStatus: z.enum(['pending', 'ready', 'blocked']),
+    blockerReasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/).optional(),
+  }).strict()).max(1_000).optional(),
+  remediation: z.array(z.string().min(1).max(64 * 1024)).max(32).optional(),
+  target: z.object({
+    schemaVersion: z.literal('1.0.0'),
+    contract: TargetContractSchema,
+    contractDigest: DigestSchema,
+    environmentIdentityDigest: DigestSchema,
+  }).strict().optional(),
+  targetProbe: z.object({
+    schemaVersion: z.literal('1.0.0'),
+    trust: z.literal('untrusted-diagnostic'),
+    runId: SafeIdSchema,
+    targetContractDigest: DigestSchema,
+    status: z.enum(['ready', 'environment-blocked', 'page-identity-mismatch']),
+    reasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/).optional(),
+    observedUrl: z.string().url(),
+    observedTitle: z.string(),
+    identityMatched: z.boolean(),
+    probedAt: z.string().datetime(),
+    diagnosticDigest: DigestSchema,
+  }).strict().optional(),
   pendingDecision: JsonValueSchema.optional(),
 }).strict()
 
@@ -295,6 +387,14 @@ export const RuntimeCompilePrdRunResultSchema = z.object({
   nextRequiredDecision: z.literal('scope'),
 }).strict()
 
+export const RuntimeAcceptanceReviewResultSchema = z.object({
+  review: AcceptanceReviewSchema,
+  confirmation: z.object({
+    status: z.enum(['required', 'confirmed']),
+    receiptDigest: DigestSchema.optional(),
+  }).strict(),
+}).strict()
+
 export const RuntimeResponseEnvelopeSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
   requestId: SafeIdSchema,
@@ -321,11 +421,13 @@ export type RuntimeDoctorProbe = z.infer<typeof RuntimeDoctorProbeSchema>
 export type RuntimeDoctorReport = z.infer<typeof RuntimeDoctorReportSchema>
 export type RuntimeStatusNextEdge = z.infer<typeof RuntimeStatusNextEdgeSchema>
 export type RuntimeStatusResult = z.infer<typeof RuntimeStatusResultSchema>
+export type RuntimePreflightBlocker = z.infer<typeof RuntimePreflightBlockerSchema>
 export type RuntimeCreateRunResult = z.infer<typeof RuntimeCreateRunResultSchema>
 export type RuntimePreparePrdUnderstandingResult = z.infer<
   typeof RuntimePreparePrdUnderstandingResultSchema
 >
 export type RuntimeCompilePrdRunResult = z.infer<typeof RuntimeCompilePrdRunResultSchema>
+export type RuntimeAcceptanceReviewResult = z.infer<typeof RuntimeAcceptanceReviewResultSchema>
 
 function isPlainJsonObject(value: unknown): value is Record<string, JsonValue> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)

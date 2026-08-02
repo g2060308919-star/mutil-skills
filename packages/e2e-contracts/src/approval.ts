@@ -58,6 +58,15 @@ export interface DiscoveryPreflightOutcome {
     role?: string
     ariaSignals?: string[]
   }
+  pageIdentityEvaluation?: {
+    policyDigest: string
+    matched: boolean
+    urlMatched: boolean
+    actualUrl: string
+    matchedSignalCount: number
+    requiredSignalCount: number
+    signals: Array<{ kind: string; matched: boolean }>
+  }
 }
 
 export type CanonicalReadApprovalSubject = ReadApprovalSubjectV21
