@@ -37,6 +37,8 @@ import {
 } from './local-approval-confirmations.js'
 import type { RuntimeCaseSchedule } from './multi-case-scheduler.js'
 import { parseCaseSchedule } from './multi-case-scheduler.js'
+import type { TargetContractFact } from './target-contract.js'
+import type { TargetProbeFact } from './target-probe.js'
 
 const EMPTY_DIGEST = `sha256:${'0'.repeat(64)}`
 const LEASE_MILLISECONDS = 30_000
@@ -95,6 +97,8 @@ export interface RuntimeRunSnapshot {
   preflightAttempt?: RuntimePreflightAttempt
   /** 预检环境/输入阻断不是 Engine 终态；修复后可在原 Run 重试。 */
   preflightBlocker?: RuntimePreflightBlocker
+  targetContract?: TargetContractFact
+  targetProbe?: TargetProbeFact
   finalizationAttempt?: RuntimeFinalizationAttempt
   publication?: RuntimePublicationRecord
   workflow: WorkflowState

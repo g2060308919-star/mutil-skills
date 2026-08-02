@@ -43,6 +43,13 @@ export function projectRunStage(workflow: WorkflowNode): RunStage {
 }
 
 export function classifyRunCondition(snapshot: RuntimeRunSnapshot): RunCondition {
+  if (snapshot.targetProbe !== undefined && snapshot.targetProbe.status !== 'ready') {
+    return RunConditionSchema.parse({
+      kind: 'blocked-retryable',
+      reasonCode: snapshot.targetProbe.reasonCode ?? 'E2E_TARGET_PROBE_BLOCKED',
+      resumeStage: 'target-probe',
+    })
+  }
   if (snapshot.preflightBlocker !== undefined) return RunConditionSchema.parse({
     kind: 'blocked-retryable',
     reasonCode: snapshot.preflightBlocker.reasonCode,

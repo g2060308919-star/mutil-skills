@@ -7,6 +7,19 @@ export {
 } from './acceptance-review.js'
 export { assertRunHandle, createRunHandle } from './run-handle.js'
 export { classifyRunCondition, projectRunStage } from './run-condition.js'
+export {
+  TargetContractFactSchema,
+  assertTargetEnvironmentConsistency,
+  createTargetContractFact,
+  type TargetContractFact,
+} from './target-contract.js'
+export {
+  TargetProbeFactSchema,
+  authorizeTargetProbe,
+  runTargetProbe,
+  type TargetProbeCapability,
+  type TargetProbeFact,
+} from './target-probe.js'
 
 export {
   RuntimeDoctorProbeSchema,

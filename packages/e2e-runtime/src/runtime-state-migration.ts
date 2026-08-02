@@ -31,6 +31,8 @@ import {
   parseCaseSchedule,
   type RuntimeCaseSchedule,
 } from './multi-case-scheduler.js'
+import { TargetContractFactSchema } from './target-contract.js'
+import { TargetProbeFactSchema } from './target-probe.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const RunIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -371,6 +373,8 @@ const RuntimeRunSnapshotSchema = z.object({
     attemptCount: z.number().int().positive(),
     resumeState: z.literal('preflight-readonly'),
   }).strict().optional(),
+  targetContract: TargetContractFactSchema.optional(),
+  targetProbe: TargetProbeFactSchema.optional(),
   finalizationAttempt: RuntimeFinalizationAttemptSchema.optional(),
   publication: RuntimePublicationRecordSchema.optional(),
   workflow: WorkflowStateSchema,
@@ -409,6 +413,15 @@ const RuntimeRunSnapshotSchema = z.object({
     context.addIssue({
       code: 'custom', path: ['preflightBlocker'],
       message: '可恢复预检阻断只能绑定 preflight-readonly',
+    })
+  }
+  if (snapshot.targetProbe !== undefined
+    && (snapshot.targetContract === undefined
+      || snapshot.targetProbe.runId !== snapshot.runId
+      || snapshot.targetProbe.targetContractDigest !== snapshot.targetContract.contractDigest)) {
+    context.addIssue({
+      code: 'custom', path: ['targetProbe'],
+      message: 'Target Probe 必须绑定当前 Run 与 TargetContract',
     })
   }
   if (snapshot.finalizationAttempt !== undefined

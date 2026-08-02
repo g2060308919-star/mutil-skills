@@ -126,6 +126,8 @@ import {
 } from './acceptance-review.js'
 import { createRunHandle } from './run-handle.js'
 import { classifyRunCondition, projectRunStage } from './run-condition.js'
+import { createTargetContractFact } from './target-contract.js'
+import { runTargetProbe, type TargetProbeCapability } from './target-probe.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -161,6 +163,7 @@ export interface RuntimeHostDependencies {
   injectionExecutor?: RuntimeInjectionExecutorCapability
   fullPlaywrightExecutor?: RuntimeFullPlaywrightExecutorCapability
   preflightExecutor?: RuntimePreflightCapability
+  targetProbe?: TargetProbeCapability
   writeProduction?: RuntimeWriteProductionCapability
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
   standaloneEvidencePublisher?: Pick<StandaloneEvidencePublisher, 'publishRuntimeState'>
@@ -198,6 +201,8 @@ export class E2ERuntimeHost {
         && request.command !== 'confirm-approval'
         && request.command !== 'compile-prd-run'
         && request.command !== 'confirm-acceptance-review'
+        && request.command !== 'configure-target'
+        && request.command !== 'probe-target'
         && request.command !== 'submit-candidate'
         && request.command !== 'run-preflight'
         && request.command !== 'execute-run'
@@ -232,6 +237,12 @@ export class E2ERuntimeHost {
       }
       if (request.command === 'confirm-acceptance-review') {
         return await this.confirmAcceptanceReview(request, requestDigest)
+      }
+      if (request.command === 'configure-target') {
+        return await this.configureTarget(request, requestDigest)
+      }
+      if (request.command === 'probe-target') {
+        return await this.probeTarget(request, requestDigest)
       }
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
@@ -676,6 +687,87 @@ export class E2ERuntimeHost {
     })
   }
 
+  private async configureTarget(
+    request: Extract<RuntimeRequestEnvelope, { command: 'configure-target' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    const target = createTargetContractFact(request.payload.targetContract)
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      if (!['created', 'source-frozen', 'awaiting-scope-approval', 'scope-approved', 'modeled',
+        'coverage-audited'].includes(snapshot.workflow.current)) throw runtimeHostError(
+        'E2E_TARGET_CONFIGURATION_STATE_MISMATCH', 'input',
+        '目标配置必须在 Discovery 授权前完成；已授权变更需显式失效下游资产',
+      )
+      const response = this.successResponse(request.requestId, {
+        runId: snapshot.runId, target,
+      })
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+        identity.digest, snapshot.runId, request.requestId, requestDigest,
+        (current) => {
+          const { targetProbe: _invalidatedProbe, ...withoutProbe } = current
+          return {
+            snapshot: {
+              ...withoutProbe,
+              targetContract: target,
+              updatedAt: this.dependencies.now().toISOString(),
+            },
+            response,
+          }
+        },
+        'target-contract-configured', lock,
+      ))
+    })
+  }
+
+  private async probeTarget(
+    request: Extract<RuntimeRequestEnvelope, { command: 'probe-target' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const capability = this.dependencies.targetProbe
+    if (capability === undefined) throw blockedError('E2E_TARGET_PROBE_NOT_READY')
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    const initial = await this.readLockedRun(identity.digest, request.payload.runId)
+    this.requireInstallation(initial)
+    if (initial.targetContract === undefined) throw runtimeHostError(
+      'E2E_TARGET_CONTRACT_REQUIRED', 'input', '请先配置 TargetContract',
+    )
+    const targetProbe = await runTargetProbe(capability, {
+      runId: initial.runId,
+      target: initial.targetContract,
+      probedAt: this.dependencies.now().toISOString(),
+    })
+    return await this.withRunLock(identity.digest, initial.runId, async (lock) => {
+      const current = await this.dependencies.runStore.getRun(identity.digest, initial.runId)
+      if (current === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      if ((current.runRevision ?? 0) !== (initial.runRevision ?? 0)
+        || current.targetContract?.contractDigest !== initial.targetContract?.contractDigest) {
+        throw runtimeHostError(
+          'E2E_TARGET_PROBE_FENCED', 'safety', 'Target Probe 运行期间 Run 或目标配置已变化',
+        )
+      }
+      const response = this.successResponse(request.requestId, {
+        runId: current.runId, targetProbe,
+      })
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+        identity.digest, current.runId, request.requestId, requestDigest,
+        (snapshot) => ({
+          snapshot: {
+            ...snapshot,
+            runRevision: (snapshot.runRevision ?? 0) + 1,
+            targetProbe,
+            updatedAt: this.dependencies.now().toISOString(),
+          },
+          response,
+        }),
+        'target-probed', lock,
+      ))
+    })
+  }
+
   private async renderReport(
     request: Extract<RuntimeRequestEnvelope, { command: 'render-report' }>,
     requestDigest: string,
@@ -1070,6 +1162,7 @@ export class E2ERuntimeHost {
     const initial = await this.readLockedRun(identity.digest, request.payload.runId)
     this.requireInstallation(initial)
     if (request.payload.approvalType === 'discovery') {
+      assertTargetReady(initial)
       assertAcceptanceReviewConfirmed(initial)
     }
     requireApprovalType(initial, request.payload.approvalType)
@@ -1678,6 +1771,7 @@ export class E2ERuntimeHost {
     const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
     let initial = await this.readLockedRun(identity.digest, request.payload.runId)
     this.requireInstallation(initial)
+    assertTargetReady(initial)
     assertAcceptanceReviewConfirmed(initial)
     const isRetry = initial.workflow.current === 'preflight-readonly'
       && initial.preflightBlocker !== undefined
@@ -3023,6 +3117,27 @@ function assertAcceptanceReviewConfirmed(snapshot: RuntimeRunSnapshot): void {
   }
 }
 
+function assertTargetReady(snapshot: RuntimeRunSnapshot): void {
+  const requiresTarget = snapshot.compiledPrdRun?.cases.some((testCase) =>
+    testCase.executionLane !== undefined) === true
+  if (!requiresTarget) return
+  if (snapshot.targetContract === undefined) throw runtimeHostError(
+    'E2E_TARGET_CONTRACT_REQUIRED', 'input', '请先配置 TargetContract',
+  )
+  if (snapshot.targetProbe === undefined
+    || snapshot.targetProbe.targetContractDigest !== snapshot.targetContract.contractDigest) {
+    throw runtimeHostError(
+      'E2E_TARGET_PROBE_REQUIRED', 'environment',
+      '请先使用受控浏览器执行无副作用 Target Probe',
+    )
+  }
+  if (snapshot.targetProbe.status !== 'ready') throw runtimeHostError(
+    snapshot.targetProbe.reasonCode ?? 'E2E_TARGET_PROBE_BLOCKED',
+    'environment',
+    'Target Probe 未证明页面可达且身份匹配',
+  )
+}
+
 function assertRuntimeGrantSubject(
   snapshot: RuntimeRunSnapshot,
   approvalType: string,
@@ -3045,6 +3160,18 @@ function assertRuntimeGrantSubject(
       'E2E_RUNTIME_APPROVAL_SUBJECT_INVALID',
       'safety',
       'grantSubject 必须严格绑定当前 Run、PRD revision 与 approvalType',
+    )
+  }
+  if (approvalType === 'discovery' && snapshot.targetContract !== undefined
+    && ('expectedPageIdentity' in subject)
+    && (subject.baseOrigin !== snapshot.targetContract.contract.baseOrigin
+      || subject.environment !== snapshot.targetContract.contract.environmentLabel
+      || subject.expectedPageIdentity.url !== snapshot.targetContract.contract.targetUrl
+      || canonicalizeJson(subject.expectedPageIdentity.policy)
+        !== canonicalizeJson(snapshot.targetContract.contract.pageIdentityPolicy))) {
+    throw runtimeHostError(
+      'E2E_TARGET_ENVIRONMENT_MISMATCH', 'safety',
+      'Discovery subject 必须引用唯一 TargetContract 的环境和页面身份',
     )
   }
   if (snapshot.workflow.current === 'diagnosing' && approvalType === 'execution'
@@ -3100,6 +3227,8 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
     handle: createRunHandle(snapshot),
     stage: projectRunStage(snapshot.workflow.current),
     condition: classifyRunCondition(snapshot),
+    ...(snapshot.targetContract === undefined ? {} : { target: snapshot.targetContract }),
+    ...(snapshot.targetProbe === undefined ? {} : { targetProbe: snapshot.targetProbe }),
     preservedAssets: [
       ...Object.keys(snapshot.artifactDigests).sort(),
       ...(snapshot.compiledPrdRun === undefined ? [] : ['compiled-prd-run']),
@@ -3197,7 +3326,15 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
   const needsAcceptanceConfirmation = acceptanceReview !== undefined
     && (!acceptanceReceipt.success
       || acceptanceReceipt.data.reviewDigest !== acceptanceReview.reviewDigest)
-  const intent = needsAcceptanceConfirmation
+  const requiresTarget = snapshot.compiledPrdRun?.cases.some((testCase) =>
+    testCase.executionLane !== undefined) === true
+  const targetProbeReady = snapshot.targetProbe?.status === 'ready'
+    && snapshot.targetProbe.targetContractDigest === snapshot.targetContract?.contractDigest
+  const intent = requiresTarget && snapshot.targetContract === undefined
+    ? { command: 'configure-target' as const, missing: ['target-contract'] }
+    : requiresTarget && !targetProbeReady
+      ? { command: 'probe-target' as const, missing: ['target-probe-ready'] }
+    : needsAcceptanceConfirmation
     ? { command: 'get-acceptance-review' as const, missing: ['acceptance-review-confirmation'] }
     : current === 'preflight-readonly' && snapshot.preflightBlocker !== undefined
     ? {

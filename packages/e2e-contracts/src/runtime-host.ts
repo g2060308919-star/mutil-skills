@@ -14,6 +14,7 @@ import {
   RunConditionSchema,
   RunHandleSchema,
   RunStageSchema,
+  TargetContractSchema,
 } from './e2e-flow.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -112,6 +113,18 @@ const commandSchemas = [
     command: z.literal('confirm-acceptance-review'),
     projectRoot: z.string().min(1),
     payload: RunIdPayloadSchema.extend({ reviewDigest: DigestSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('configure-target'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema.extend({ targetContract: TargetContractSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('probe-target'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema,
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
@@ -249,6 +262,7 @@ export const RuntimeStatusNextEdgeSchema = z.object({
   command: z.enum([
     'prepare-prd-understanding', 'compile-prd-run', 'submit-candidate', 'open-approval', 'confirm-approval',
     'get-acceptance-review', 'confirm-acceptance-review',
+    'configure-target', 'probe-target',
     'run-preflight', 'prepare-manual-result',
     'finalize-manual-result-role', 'execute-run', 'resume-run', 'finalize-run', 'render-report',
   ]),
@@ -301,6 +315,25 @@ export const RuntimeStatusResultSchema = z.object({
     blockerReasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/).optional(),
   }).strict()).max(1_000).optional(),
   remediation: z.array(z.string().min(1).max(64 * 1024)).max(32).optional(),
+  target: z.object({
+    schemaVersion: z.literal('1.0.0'),
+    contract: TargetContractSchema,
+    contractDigest: DigestSchema,
+    environmentIdentityDigest: DigestSchema,
+  }).strict().optional(),
+  targetProbe: z.object({
+    schemaVersion: z.literal('1.0.0'),
+    trust: z.literal('untrusted-diagnostic'),
+    runId: SafeIdSchema,
+    targetContractDigest: DigestSchema,
+    status: z.enum(['ready', 'environment-blocked', 'page-identity-mismatch']),
+    reasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/).optional(),
+    observedUrl: z.string().url(),
+    observedTitle: z.string(),
+    identityMatched: z.boolean(),
+    probedAt: z.string().datetime(),
+    diagnosticDigest: DigestSchema,
+  }).strict().optional(),
   pendingDecision: JsonValueSchema.optional(),
 }).strict()
 

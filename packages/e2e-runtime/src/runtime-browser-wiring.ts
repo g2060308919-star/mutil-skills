@@ -77,6 +77,7 @@ import {
   BrowserPreflightFactSchema,
   type RuntimePreflightCapability,
 } from './runtime-preflight.js'
+import { authorizeTargetProbe, type TargetProbeCapability } from './target-probe.js'
 import {
   TrustedActionRunner,
   authorizeRuntimeReadExecutor,
@@ -637,6 +638,71 @@ export function createProductionBrowserCapabilities(input: {
     }
   })
   return { preflight, read }
+}
+
+export function createProductionTargetProbeCapability(input: {
+  homeDir: string
+  browserHomeDir?: string
+  projectRoot: string
+  installation: RuntimeInstallation
+}): TargetProbeCapability {
+  const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
+  return authorizeTargetProbe(async ({ runId, contract }) => {
+    const approvedRequests: ApprovedGatewayRequest[] = [{
+      actionId: 'TARGET-PROBE', capabilityId: 'TARGET-PROBE-NAVIGATION',
+      method: 'GET', url: contract.targetUrl, maxUses: 1,
+      behavior: { kind: 'pass-through' },
+    }]
+    let gateway: Awaited<ReturnType<typeof startGatewayProxyHostForRuntime>> | undefined
+    let browser: Awaited<ReturnType<ControlledBrowserHost['open']>> | undefined
+    let output: {
+      status: 'ready' | 'environment-blocked' | 'page-identity-mismatch'
+      reasonCode?: string
+      observedUrl: string
+      observedTitle: string
+      identityMatched: boolean
+    }
+    try {
+      gateway = await startGatewayProxyHostForRuntime({
+        runId, mode: 'real-environment', authorityRoot: runtimeLayout(input.homeDir).authority,
+        approvedRequests,
+      })
+      browser = await new ControlledBrowserHost().open({
+        homeDir: input.homeDir, runId,
+        installation: await browserInstallation(), gateway,
+      })
+      const rule = projectGatewayRules({ runId, approvedRequests }).rules[0]!
+      await getControlledBrowserSessionBinding(browser).executeWithCorrelation({
+        ruleId: rule.ruleId, stepOrdinal: rule.stepOrdinal,
+        method: rule.method, url: rule.url, channel: 'http',
+        bodyDigest: rule.bodyDigest, actionId: rule.actionId,
+        capabilityId: rule.capabilityId, headers: {},
+      }, async () => await browser!.page.goto(contract.targetUrl, { waitUntil: 'domcontentloaded' }))
+      const page = new PlaywrightPageAdapter(browser.page)
+      const evaluation = await page.evaluateIdentity(contract.pageIdentityPolicy)
+      output = evaluation.matched ? {
+        status: 'ready',
+        observedUrl: browser.page.url(), observedTitle: await browser.page.title(),
+        identityMatched: true,
+      } : {
+        status: 'page-identity-mismatch', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH',
+        observedUrl: browser.page.url(), observedTitle: await browser.page.title(),
+        identityMatched: false,
+      }
+      await gateway.handle.finalize()
+    } catch {
+      output = {
+        status: 'environment-blocked', reasonCode: 'E2E_TARGET_BROWSER_NAVIGATION_FAILED',
+        observedUrl: contract.targetUrl, observedTitle: '', identityMatched: false,
+      }
+    } finally {
+      await settleRuntimeBrowserResources(undefined, [
+        ...(browser === undefined ? [] : [async () => await browser!.close()]),
+        ...(gateway === undefined ? [] : [async () => await gateway!.handle.close()]),
+      ])
+    }
+    return output
+  })
 }
 
 /**

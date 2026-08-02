@@ -56,6 +56,7 @@ import { installChromium as installChromiumDefault, type InstallChromiumOptions 
 import {
   bootstrapInstalledBrowserRuntime,
   createProductionBrowserCapabilities,
+  createProductionTargetProbeCapability,
   createProductionFullPlaywrightBrowserCapability,
   createProductionInjectionBrowserCapability,
   createProductionWriteBrowserCapability,
@@ -438,6 +439,12 @@ export async function runCli(
         homeDir: dependencies.homeDir, projectRoot: request.projectRoot,
         installation, authorityHost: getAuthorityHost,
       })
+      const targetProbe = request.command !== 'probe-target' ? undefined
+        : createProductionTargetProbeCapability({
+          homeDir: dependencies.homeDir,
+          projectRoot: request.projectRoot,
+          installation,
+        })
       // 生产执行资源只能在 Host 的最外层 workflow 前置条件可能通过时装配。
       // 这里仅做只读短路；最终判定仍由持锁的 E2ERuntimeHost 完成，避免无效请求
       // 提前创建后端、密钥代理或隔离区并把输入错误污染成 cleanup/internal 错误。
@@ -622,6 +629,7 @@ export async function runCli(
           preflightExecutor: browserCapabilities.preflight,
           readExecutor: browserCapabilities.read,
         }),
+        ...(targetProbe === undefined ? {} : { targetProbe }),
         ...(writeExecutor === undefined ? {} : { writeExecutor }),
         ...(fullPlaywrightExecutor === undefined ? {} : { fullPlaywrightExecutor }),
         ...(injectionExecutor === undefined ? {} : { injectionExecutor }),

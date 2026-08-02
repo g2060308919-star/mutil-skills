@@ -52,6 +52,7 @@ import { injectionOutput, realWriteOutput, runtimeWriteDigest } from './runtime-
 import { authorizeRuntimeGenerationFinalizer } from '../src/runtime-generation-finalizer.js'
 import { authorizeRuntimeEvidenceQuarantine } from '../src/runtime-evidence-quarantine.js'
 import { createCaseSchedule } from '../src/multi-case-scheduler.js'
+import { authorizeTargetProbe } from '../src/target-probe.js'
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`
 
@@ -287,6 +288,54 @@ describe('E2ERuntimeHost', () => {
       ok: false,
       error: { code: 'E2E_RUNTIME_RUN_NOT_FOUND' },
     })
+    await fixture.store.close()
+  })
+
+  test('Target Probe 由受控浏览器提前运行并只持久化非权威诊断', async () => {
+    const probe = vi.fn(async () => ({
+      status: 'ready' as const, observedUrl: 'http://localhost:3000/orders',
+      observedTitle: '订单', identityMatched: true,
+    }))
+    const fixture = await hostFixture({ targetProbe: probe })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-TARGET-CREATE', fixture.roots.project),
+    ))
+    const targetContract = {
+      schemaVersion: '1.0.0' as const, targetUrl: 'http://localhost:3000/orders',
+      baseOrigin: 'http://localhost:3000', environmentLabel: 'local',
+      pageIdentityPolicy: {
+        schemaVersion: '1.0.0' as const,
+        url: { origin: 'http://localhost:3000', pathPattern: '/orders/**' },
+        signals: [{ kind: 'test-id' as const, value: 'orders-page' }],
+        match: { mode: 'all' as const },
+      },
+      allowedNavigationOrigins: ['http://localhost:3000'],
+    }
+    const configured = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-TARGET-CONFIGURE'), command: 'configure-target',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId, targetContract },
+    })))
+    expect(configured).toMatchObject({ runId: created.runId, target: {
+      contract: targetContract, contractDigest: expect.stringMatching(/^sha256:/),
+    } })
+
+    const result = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-TARGET-PROBE'), command: 'probe-target',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })))
+    expect(result).toMatchObject({ runId: created.runId, targetProbe: {
+      trust: 'untrusted-diagnostic', status: 'ready', identityMatched: true,
+    } })
+    expect(probe).toHaveBeenCalledOnce()
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(persisted).toMatchObject({
+      workflow: { current: 'created' },
+      targetContract: { contract: targetContract },
+      targetProbe: { trust: 'untrusted-diagnostic', status: 'ready' },
+    })
+    expect(persisted?.trustedExecutionFacts).not.toHaveProperty('browser-preflight')
     await fixture.store.close()
   })
 
@@ -2377,6 +2426,7 @@ async function hostFixture(options: {
   executeInjectionRun?: Parameters<typeof authorizeRuntimeInjectionExecutor>[0]
   executeFullPlaywrightRun?: Parameters<typeof authorizeRuntimeFullPlaywrightExecutor>[0]
   preflight?: Parameters<typeof authorizeRuntimePreflight>[0]
+  targetProbe?: Parameters<typeof authorizeTargetProbe>[0]
   authorityHostFactory?: () => Promise<Pick<RuntimeAuthorityHost, 'requestApproval'>>
   writeRecovery?: Parameters<typeof authorizeRuntimeWriteProduction>[0]['recovery']
   projectPublisherFactory?: (projectRoot: string) => Pick<ProjectPublisher, 'renderActiveReport'>
@@ -2431,6 +2481,9 @@ async function hostFixture(options: {
     }),
     ...(options.preflight === undefined ? {} : {
       preflightExecutor: authorizeRuntimePreflight(options.preflight),
+    }),
+    ...(options.targetProbe === undefined ? {} : {
+      targetProbe: authorizeTargetProbe(options.targetProbe),
     }),
     ...(options.authorityHostFactory === undefined ? {} : {
       authorityHostFactory: options.authorityHostFactory,
