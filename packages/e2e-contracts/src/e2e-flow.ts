@@ -226,12 +226,64 @@ const AcceptanceReviewLinkSchema = z.object({
   caseIds: z.array(SafeIdSchema).max(1_000),
 }).strict()
 
+const AcceptanceSemanticCatalogSchema = z.object({
+  requirements: z.array(z.object({
+    reqId: SafeIdSchema,
+    title: LimitedTextSchema,
+    actors: z.array(SafeIdSchema).min(1).max(1_000),
+    preconditions: z.array(LimitedTextSchema).max(10_000),
+    contractNodeIds: z.array(SafeIdSchema).max(10_000),
+  }).strict()).max(10_000),
+  rules: z.array(z.object({
+    ruleId: SafeIdSchema,
+    reqId: SafeIdSchema,
+    category: z.enum(['business', 'permission', 'validation', 'state', 'error', 'visual']),
+    statement: LimitedTextSchema,
+    certainty: z.enum(['explicit', 'confirmed-inference']),
+    oracleIds: z.array(SafeIdSchema).min(1).max(10_000),
+  }).strict()).max(100_000),
+  oracles: z.array(z.object({
+    oracleId: SafeIdSchema,
+    reqId: SafeIdSchema,
+    ruleId: SafeIdSchema,
+    statement: LimitedTextSchema,
+  }).strict()).max(100_000),
+  obligations: z.array(z.object({
+    obligationId: SafeIdSchema,
+    reqId: SafeIdSchema,
+    scenario: LimitedTextSchema,
+    necessity: z.enum(['required', 'advisory']),
+    disposition: z.enum(['automated', 'manual', 'not-applicable']),
+    caseIds: z.array(SafeIdSchema).max(10_000),
+  }).strict()).max(100_000),
+  cases: z.array(z.object({
+    caseId: SafeIdSchema,
+    title: LimitedTextSchema,
+    actor: SafeIdSchema,
+    contractNodeIds: z.array(SafeIdSchema).max(10_000),
+    actions: z.array(z.object({
+      actionId: SafeIdSchema,
+      statement: LimitedTextSchema,
+      effect: z.enum(['read', 'reversible-write', 'irreversible', 'unknown']),
+    }).strict()).max(10_000),
+    oracles: z.array(z.object({
+      oracleId: SafeIdSchema,
+      acceptanceCriterion: LimitedTextSchema,
+    }).strict()).max(10_000),
+    executionLane: ExecutionLaneSchema.optional(),
+    fixture: FixtureContractSchema.optional(),
+    locatorCandidates: z.array(PageLocatorCandidateSchema).max(1_000).optional(),
+    pageIdentityPolicy: PageIdentityPolicySchema.optional(),
+  }).strict()).max(1_000),
+}).strict()
+
 export const AcceptanceReviewSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
   runId: SafeIdSchema,
   contractProjectionDigest: DigestSchema,
   compilerDigest: DigestSchema,
   links: z.array(AcceptanceReviewLinkSchema).min(1).max(100_000),
+  semanticCatalog: AcceptanceSemanticCatalogSchema,
   includedClauseIds: z.array(SafeIdSchema).max(100_000),
   excludedClauseIds: z.array(SafeIdSchema).max(100_000),
   unresolvedItems: z.array(LimitedTextSchema).max(10_000),

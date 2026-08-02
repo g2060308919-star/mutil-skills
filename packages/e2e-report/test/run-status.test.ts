@@ -13,6 +13,8 @@ describe('run status renderer', () => {
     expect(rendered.markdown).toContain('中间状态（非最终结论）')
     expect(rendered.markdown).toContain('环境阻断')
     expect(rendered.markdown).toContain('未执行')
+    expect(rendered.markdown).toContain('gateway-api')
+    expect(rendered.markdown).toContain('orders-page')
     expect(rendered.markdown).not.toContain('业务失败\n')
     expect(rendered.html).toContain('<!doctype html>')
     expect(rendered.html).toContain('环境阻断')
@@ -26,7 +28,41 @@ describe('run status renderer', () => {
     expect(rendered.html).toContain('&lt;img src=x onerror=alert(1)&gt;')
     expect(rendered.html).not.toContain('<img src=x')
   })
+
+  test('可视化展示 PRD 原文到 Requirement、Rule、Oracle、Case 的真实语义', () => {
+    const status = statusFixture() as any
+    status.acceptanceReview = acceptanceReviewFixture()
+    status.acceptanceReviewConfirmation = { status: 'required' }
+
+    const rendered = renderRunStatus(status)
+    for (const expected of ['用户可以下单', '用户下单', '提交有效订单后创建订单', '订单可见', '下单']) {
+      expect(rendered.markdown).toContain(expected)
+      expect(rendered.html).toContain(expected)
+    }
+  })
 })
+
+function acceptanceReviewFixture() {
+  return {
+    schemaVersion: '1.0.0', runId: 'RUN-1', contractProjectionDigest: d('a'), compilerDigest: d('b'),
+    links: [{ clauseId: 'CLAUSE-1', sourceSpan: { sourceId: 'PRD', startLine: 1,
+      startColumn: 1, endLine: 1, endColumn: 8 }, sourceText: '用户可以下单', disposition: 'modeled',
+    requirementIds: ['REQ-1'], ruleIds: ['RULE-1'], oracleIds: ['ORACLE-1'], caseIds: ['CASE-1'] }],
+    semanticCatalog: {
+      requirements: [{ reqId: 'REQ-1', title: '用户下单', actors: ['USER'],
+        preconditions: ['已登录'], contractNodeIds: ['NODE-1'] }],
+      rules: [{ ruleId: 'RULE-1', reqId: 'REQ-1', category: 'business',
+        statement: '提交有效订单后创建订单', certainty: 'explicit', oracleIds: ['ORACLE-1'] }],
+      oracles: [{ oracleId: 'ORACLE-1', reqId: 'REQ-1', ruleId: 'RULE-1', statement: '订单可见' }],
+      obligations: [{ obligationId: 'OBL-1', reqId: 'REQ-1', scenario: '提交有效订单',
+        necessity: 'required', disposition: 'automated', caseIds: ['CASE-1'] }],
+      cases: [{ caseId: 'CASE-1', title: '下单', actor: 'USER', contractNodeIds: ['NODE-1'],
+        actions: [{ actionId: 'ACTION-1', statement: '点击提交', effect: 'reversible-write' }],
+        oracles: [{ oracleId: 'CASE-ORACLE-1', acceptanceCriterion: '订单可见' }] }],
+    },
+    includedClauseIds: ['CLAUSE-1'], excludedClauseIds: [], unresolvedItems: [], reviewDigest: d('c'),
+  }
+}
 
 function statusFixture() {
   return {
@@ -43,6 +79,14 @@ function statusFixture() {
     preservedAssets: ['prd-source', 'compiled-prd-run'], invalidatedAssets: [],
     semanticCases: [{ caseId: 'CASE-1', title: '创建订单', actor: 'USER',
       contractNodeIds: ['REQ-1'], oracleIds: ['ORACLE-1'], executionLane: 'real-reversible-write',
+      fixture: { actorRef: 'USER', preconditions: [{ kind: 'business-state', statement: '存在测试订单' }],
+        seedStrategy: 'gateway-api', dataLease: { leaseKey: 'LEASE-1', scope: 'order', expiresAfterSeconds: 600 },
+        cleanup: { kind: 'gateway-api', statement: '删除测试订单' },
+        reloadVerification: [{ statement: '刷新后测试订单不存在' }] },
+      pageIdentityPolicy: { schemaVersion: '1.0.0',
+        url: { origin: 'http://localhost:3000', pathPattern: '/orders/**' },
+        signals: [{ kind: 'test-id', value: 'orders-page' }], match: { mode: 'all' } },
+      locatorCandidates: [{ kind: 'test-id', value: 'create-order' }],
       bindingStatus: 'blocked', blockerReasonCode: 'E2E_RUNTIME_PAGE_MISMATCH' }],
     remediation: ['修复页面身份后重试'],
     preflightBlocker: { status: 'environment-blocked', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH',

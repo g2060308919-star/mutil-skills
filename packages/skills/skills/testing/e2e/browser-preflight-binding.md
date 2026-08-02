@@ -20,10 +20,10 @@ Runtime 内部必须调用系统 Chrome 或显式托管 Chromium 的一次性 Pr
 
 ## 执行步骤
 
-1. 在任何 Discovery 授权或浏览器预检前，先展示并确认 AcceptanceReview；确认前不得打开目标或推导 locator。
-2. 配置 TargetContract。优先选择产品稳定 `data-testid`、ARIA role/name 或不含通配逃逸的业务 CSS；URL path pattern 与强业务信号共同构成身份，不使用动态文案作为唯一强信号。
-3. 运行 Target Probe。它只允许目标入口的无副作用导航和页面身份读取，不执行 Case。若页面不匹配，向用户展示每个 signal 的 expected/observed/matched，而不是笼统返回 mismatch。
-4. Discovery 授权后验证 URL/TLS/origin、登录和角色信号、页面身份、关键控件、数据、Gateway、证据目录和浏览器 sandbox；按 role/name、label、test-id、稳定属性绑定；冻结 Action Map。
+1. 配置 TargetContract。优先选择产品稳定 `data-testid`、ARIA role/name 或不含通配逃逸的业务 CSS；URL path pattern 与强业务信号共同构成身份，不使用动态文案作为唯一强信号。
+2. 在任何授权前运行 Target Probe。它只允许 `allowedNavigationOrigins` 内的无副作用导航和页面身份读取，不推导 locator、不执行 Case。SPA 脚本、样式等资源只按浏览器实际请求进行最多 5 轮、最多 256 项的 GET/HEAD 精确 URL 闭包发现；不得产生来源 wildcard，不得批准 POST、WebSocket 或 SSE。若页面不匹配，向用户展示每个 signal 的 expected/observed/matched，而不是笼统返回 mismatch。
+3. Target Probe 与覆盖资产齐备后，展示并确认 AcceptanceReview；确认前不得发起 Discovery 授权、可信浏览器预检或 locator 绑定。
+4. AcceptanceReview 确认并完成 Discovery 授权后，验证 URL/TLS/origin、登录和角色信号、页面身份、关键控件、数据、Gateway、证据目录和浏览器 sandbox；按 role/name、label、test-id、稳定属性绑定；冻结 Action Map。
 5. 服务未启动、临时 loading 或相同策略下的环境阻断使用 `retry --run` 原地重试。若 `E2E_RUNTIME_PAGE_MISMATCH` 证明身份策略本身错误，用新的 TargetContract 修订同一 Run；Runtime 必须增加 revision，回到 Discovery 前，返回 `preservedAssets` 与 `invalidatedAssets`，保留 PRD/Requirement/Rule/Oracle/Case，失效旧 Target Probe、Discovery Grant、preflight 和浏览器绑定，再重新 Probe 与授权。
 
 ## 退出条件

@@ -11,6 +11,7 @@ import { ManualResultDraftSchema } from './manual-result.js'
 import { AnyDeclarativePrdRunDesignSchema } from './declarative-prd-run.js'
 import {
   AcceptanceReviewSchema,
+  E2ECaseExecutionFieldsSchema,
   RunConditionSchema,
   RunHandleSchema,
   RunStageSchema,
@@ -247,6 +248,12 @@ export const RuntimeDoctorProbeSchema = z.object({
   reasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/),
   proofDigest: DigestSchema.optional(),
   remediation: z.string().min(1),
+  recoverability: z.enum([
+    'none', 'retry', 'repair-then-retry', 'reinstall', 'user-action-required',
+  ]).optional(),
+  expected: z.string().min(1).max(16 * 1024).optional(),
+  actual: z.string().min(1).max(16 * 1024).optional(),
+  preservedState: z.array(SafeIdSchema).max(100).optional(),
 }).strict()
 
 export const RuntimeDoctorReportSchema = z.object({
@@ -311,6 +318,9 @@ export const RuntimeStatusResultSchema = z.object({
     executionLane: z.enum([
       'preview-readonly', 'real-reversible-write', 'injection-simulated',
     ]).optional(),
+    fixture: E2ECaseExecutionFieldsSchema.shape.fixture.optional(),
+    locatorCandidates: E2ECaseExecutionFieldsSchema.shape.locatorCandidates.optional(),
+    pageIdentityPolicy: E2ECaseExecutionFieldsSchema.shape.pageIdentityPolicy.optional(),
     bindingStatus: z.enum(['pending', 'ready', 'blocked']),
     blockerReasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/).optional(),
   }).strict()).max(1_000).optional(),

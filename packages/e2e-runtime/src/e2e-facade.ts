@@ -5,6 +5,7 @@ import {
   RuntimeStatusResultSchema,
   canonicalizeJson,
   type RunHandle,
+  type ApprovalGrantSubject,
   type RuntimeAcceptanceReviewResult,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
@@ -12,6 +13,7 @@ import {
   type TargetContract,
 } from '@mutil-skills/e2e-contracts'
 import { randomUUID } from 'node:crypto'
+import { RUNTIME_PACKAGE_VERSION } from './protocol.js'
 
 type CreateRunRequest = Extract<RuntimeRequestEnvelope, { command: 'create-run' }>
 
@@ -68,7 +70,7 @@ export class E2EFacade {
     this.#projectRoot = options.projectRoot
     this.#host = options.host
     this.#requestId = options.requestId ?? (() => `FACADE-${randomUUID()}`)
-    this.#clientVersion = options.clientVersion ?? '0.4.7'
+    this.#clientVersion = options.clientVersion ?? RUNTIME_PACKAGE_VERSION
   }
 
   async start(input: {
@@ -99,6 +101,28 @@ export class E2EFacade {
     await this.status(handle)
     await this.#invoke('confirm-acceptance-review', {
       runId: handle.runId, reviewDigest,
+    }, handle.runId)
+    return await this.#statusByRunId(handle.runId)
+  }
+
+  async approveExecution(
+    handle: RunHandle,
+    grantSubject: ApprovalGrantSubject,
+  ): Promise<Record<string, unknown>> {
+    await this.status(handle)
+    return asRecord(await this.#invoke('open-approval', {
+      runId: handle.runId, approvalType: 'execution', grantSubject,
+    }, handle.runId))
+  }
+
+  async confirmApproval(
+    handle: RunHandle,
+    confirmationId: string,
+    subjectDigest: string,
+  ): Promise<RuntimeStatusResult> {
+    await this.status(handle)
+    await this.#invoke('confirm-approval', {
+      runId: handle.runId, confirmationId, subjectDigest,
     }, handle.runId)
     return await this.#statusByRunId(handle.runId)
   }

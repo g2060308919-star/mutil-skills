@@ -118,6 +118,10 @@ describe('Runtime doctor', () => {
       status: 'blocked',
       reasonCode: 'E2E_RUNTIME_NODE_VERSION_UNSUPPORTED',
       remediation: '安装 Node.js 22.13.0 或更高版本后重新安装 Runtime',
+      recoverability: 'repair-then-retry',
+      expected: 'Node.js >=22.13.0',
+      actual: 'Node.js 20.19.5',
+      preservedState: ['runtime-installation', 'run-assets'],
     })
     expect(report.ready).toBe(false)
   })
@@ -360,7 +364,7 @@ describe('Runtime doctor', () => {
 
     expect(exitCode).toBe(3)
     expect(stdout.text()).toBe('')
-    expect(stderr.text()).toContain('探针\t状态\t原因代码\t修复建议')
+    expect(stderr.text()).toContain('探针\t状态\t原因代码\t可恢复性\t期望/实际\t保留状态\t修复建议')
     const installationProbe = report.probes.installation!
     expect(stderr.text()).toContain(`installation\t阻塞\t${installationProbe.reasonCode}`)
     const authority = report.probes.authority!

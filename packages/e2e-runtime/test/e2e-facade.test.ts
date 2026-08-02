@@ -6,10 +6,47 @@ import {
   type RuntimeResponseEnvelope,
 } from '@mutil-skills/e2e-contracts'
 import { E2EFacade, E2EFacadeError } from '../src/e2e-facade.js'
+import { RUNTIME_PACKAGE_VERSION } from '../src/protocol.js'
 
 const d = (value: string): string => `sha256:${value.repeat(64)}`
 
 describe('E2EFacade', () => {
+  test('start 冻结来源、配置 Target 并在任何授权前完成无副作用 Probe', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 1, generationDigest: d('1') }
+    const commands: string[] = []
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'create-run') return success(request.requestId, { runId: 'RUN-1' })
+      if (request.command === 'configure-target') return success(request.requestId, { runId: 'RUN-1' })
+      return success(request.requestId, statusResult(handle))
+    }) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+    const targetContract = {
+      schemaVersion: '1.0.0' as const, targetUrl: 'http://localhost:3000/orders',
+      baseOrigin: 'http://localhost:3000', environmentLabel: 'local',
+      allowedNavigationOrigins: ['http://localhost:3000'],
+      pageIdentityPolicy: {
+        schemaVersion: '1.0.0' as const,
+        url: { origin: 'http://localhost:3000', pathPattern: '/orders/**' },
+        signals: [{ kind: 'test-id' as const, value: 'orders-page' }],
+        match: { mode: 'all' as const },
+      },
+    }
+
+    await facade.start({ create: {
+      assetId: 'ASSET-1',
+      prdSource: { kind: 'file', path: 'prd.md', origin: { kind: 'file', ref: 'prd.md' } },
+      understandingContract: { header: { schemaVersion: '1.0.0', contractId: 'CONTRACT-1',
+        contractVersion: 1, contractStatus: 'confirmed-by-caller', authorization: {
+          status: 'confirmed-by-caller', contractVersion: 1, confirmedAt: '2026-08-02T00:00:00.000Z',
+        } }, source: { kind: 'file', path: 'contract.md' } },
+      projectPolicyPath: 'policy.json',
+    }, targetContract })
+
+    expect(commands).toEqual(['create-run', 'configure-target', 'probe-target', 'get-status'])
+  })
+
   test('status 内部生成严格 envelope，对外只使用 RunHandle', async () => {
     const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
     const host = vi.fn(async (request: RuntimeRequestEnvelope, bytes: Uint8Array) => {
@@ -22,6 +59,7 @@ describe('E2EFacade', () => {
     await expect(facade.status(handle)).resolves.toMatchObject({ handle, state: 'preflight-readonly' })
     expect(host).toHaveBeenCalledWith(expect.objectContaining({
       command: 'get-status', projectRoot: '/project', payload: { runId: 'RUN-1' },
+      client: { name: 'e2e-facade', version: RUNTIME_PACKAGE_VERSION },
     }), expect.any(Uint8Array))
   })
 
@@ -62,6 +100,39 @@ describe('E2EFacade', () => {
       name: 'E2EFacadeError', code: 'E2E_RUNTIME_PAGE_MISMATCH',
       requestId: 'FACADE-ERROR-1', runId: 'RUN-1', remediation: '更新页面身份策略',
     } satisfies Partial<E2EFacadeError>)
+  })
+
+  test('Execution Approval 由门面打开并确认，调用者不构造 envelope', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const commands: string[] = []
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'get-status') return success(request.requestId, statusResult(handle))
+      if (request.command === 'open-approval') return success(request.requestId, {
+        status: 'confirmation-required', confirmationId: 'CONFIRM-1', subjectDigest: d('8'),
+      })
+      if (request.command === 'confirm-approval') return success(request.requestId, { signedGrant: {} })
+      throw new Error(request.command)
+    }) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+    const subject = {
+      schemaVersion: '2.1.0' as const, assetId: 'ASSET-1', prdRevision: d('1'),
+      scopeDigest: d('2'), requirementModelDigest: d('3'), coveragePolicyDigest: d('4'),
+      universeDigest: d('5'), caseDigest: d('6'), actionMapDigest: d('7'), policyDigest: d('8'),
+      executionContractDigest: d('9'), runBundleProjectionDigest: d('a'), environment: 'local' as const,
+      baseOrigin: 'http://localhost:3000', actor: 'USER', discoveryGrantId: 'GRANT-1',
+      preflightDigest: d('b'), requests: [],
+      actions: [{ actionId: 'ACTION-1', operation: 'dom-read' as const, maxUses: 1, requestIds: [] }],
+    }
+
+    await expect(facade.approveExecution(handle, subject)).resolves.toMatchObject({
+      status: 'confirmation-required', confirmationId: 'CONFIRM-1', subjectDigest: d('8'),
+    })
+    await expect(facade.confirmApproval(handle, 'CONFIRM-1', d('8'))).resolves.toMatchObject({ handle })
+    expect(commands).toEqual([
+      'get-status', 'open-approval', 'get-status', 'confirm-approval', 'get-status',
+    ])
   })
 })
 

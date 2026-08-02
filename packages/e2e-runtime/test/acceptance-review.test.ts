@@ -27,7 +27,7 @@ describe('AcceptanceReview', () => {
         },
         sourceText: '用户可以下单', disposition: 'modeled',
         requirementIds: ['REQ-1'], ruleIds: ['RULE-1'], oracleIds: ['ORACLE-1'],
-        caseIds: ['CASE-0001', 'CASE-BUY'],
+        caseIds: ['CASE-0001'],
       },
       {
         clauseId: 'CLAUSE-2', sourceSpan: {
@@ -37,6 +37,28 @@ describe('AcceptanceReview', () => {
         requirementIds: [], ruleIds: [], oracleIds: [], caseIds: [],
       },
     ])
+    expect(review.semanticCatalog).toEqual({
+      requirements: [{
+        reqId: 'REQ-1', title: '用户下单', actors: ['USER'], preconditions: ['已登录'],
+        contractNodeIds: ['NODE-1'],
+      }],
+      rules: [{
+        ruleId: 'RULE-1', reqId: 'REQ-1', category: 'business',
+        statement: '提交有效订单后创建订单', certainty: 'explicit', oracleIds: ['ORACLE-1'],
+      }],
+      oracles: [{
+        oracleId: 'ORACLE-1', reqId: 'REQ-1', ruleId: 'RULE-1', statement: '订单可见',
+      }],
+      obligations: [{
+        obligationId: 'OBL-1', reqId: 'REQ-1', scenario: '用户提交有效订单',
+        necessity: 'required', disposition: 'automated', caseIds: ['CASE-0001'],
+      }],
+      cases: [{
+        caseId: 'CASE-0001', title: '下单', actor: 'USER', contractNodeIds: ['NODE-1'],
+        actions: [{ actionId: 'ACTION-1', statement: '下单', effect: 'reversible-write' }],
+        oracles: [{ oracleId: 'COMPILED-ORACLE-1', acceptanceCriterion: '订单可见' }],
+      }],
+    })
     expect(review.reviewDigest).toMatch(/^sha256:/)
     expect(buildAcceptanceReview(reviewSnapshot())).toEqual(review)
   })
@@ -46,6 +68,16 @@ describe('AcceptanceReview', () => {
     const coverage = snapshot.frozenArtifacts['coverage-universe']!.content as any
     coverage.obligations[0].disposition = { kind: 'manual', manualProcedureId: 'MANUAL-1', blocking: true }
     snapshot.compiledPrdRun = { ...snapshot.compiledPrdRun!, cases: [] } as any
+
+    expect(() => buildAcceptanceReview(snapshot)).toThrowError(expect.objectContaining({
+      code: 'E2E_ACCEPTANCE_REVIEW_CHAIN_INCOMPLETE',
+    }))
+  })
+
+  test('Coverage obligation 引用不存在的编译 Case 时拒绝生成伪完整链路', () => {
+    const snapshot = reviewSnapshot()
+    const coverage = snapshot.frozenArtifacts['coverage-universe']!.content as any
+    coverage.obligations[0].disposition.caseIds = ['CASE-NOT-COMPILED']
 
     expect(() => buildAcceptanceReview(snapshot)).toThrowError(expect.objectContaining({
       code: 'E2E_ACCEPTANCE_REVIEW_CHAIN_INCOMPLETE',
@@ -95,13 +127,19 @@ function reviewSnapshot(): RuntimeRunSnapshot {
       } } as any,
       'requirement-model': { content: { requirements: [{
         reqId: 'REQ-1', contractNodeIds: ['NODE-1'],
-        rules: [{ ruleId: 'RULE-1', oracleIds: ['ORACLE-1'] }],
-        observableOutcomes: [{ oracleId: 'ORACLE-1', ruleId: 'RULE-1' }],
+        revision: 1, title: '用户下单', actors: ['USER'], entities: ['订单'],
+        preconditions: ['已登录'], states: [], transitions: [], applicability: [], sourceRefs: ['CLAUSE-1'],
+        status: 'active',
+        rules: [{ ruleId: 'RULE-1', category: 'business', statement: '提交有效订单后创建订单',
+          sourceRefs: ['CLAUSE-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'] }],
+        observableOutcomes: [{ oracleId: 'ORACLE-1', ruleId: 'RULE-1', statement: '订单可见',
+          sourceRefs: ['CLAUSE-1'] }],
       }] } } as any,
       'coverage-universe': { content: { obligations: [{
         obligationId: 'OBL-1', reqId: 'REQ-1', clauseIds: ['CLAUSE-1'],
         ruleIds: ['RULE-1'], oracleIds: ['ORACLE-1'],
-        disposition: { kind: 'automated', caseIds: ['CASE-BUY'] },
+        scenario: '用户提交有效订单', necessity: 'required',
+        disposition: { kind: 'automated', caseIds: ['CASE-0001'] },
       }] } } as any,
     },
     trustedExecutionFacts: {},

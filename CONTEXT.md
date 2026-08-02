@@ -131,6 +131,38 @@ _避免使用_：retry counter only、replayed write
 E2E 唯一 RPC、工作流和恢复权威。它协调 Contracts、Engine、Authority、Gateway、Browser Runtime、Artifact Store 和 Report；Skill 不复制其状态机。
 _避免使用_：backend service、Skill runtime
 
+**Target Contract**：
+一次 Run 唯一的目标环境契约，闭合目标 URL、base origin、环境标签、允许导航来源和页面身份策略。Policy、Probe、Discovery、Preflight 与 Execution 必须引用同一摘要，不能分别提交彼此矛盾的 environment ID。
+_避免使用_：scattered baseUrl、caller environment flag
+
+**Target Probe**：
+在可信预检之前运行的非权威浏览器诊断。它使用系统 Chrome、一次性 Profile 和 Gateway，只在显式来源内发现有限的 GET/HEAD 精确资源闭包，用于判断浏览器可达性和页面身份；结果不能进入 Verdict。
+_避免使用_：curl health check、trusted preflight、business evidence
+
+**Page Identity Policy**：
+由 URL origin/path 与 test-id、ARIA role/name、受限 CSS、可见文本、标题或 heading 等业务信号组成的声明式页面身份。普通文本不能独自构成身份，策略不允许脚本、XPath、伪元素或任意 evaluate。
+_避免使用_：heading-only heuristic、arbitrary selector script
+
+**Acceptance Review**：
+Runtime 从冻结来源和编译资产生成的不可改写验收视图，逐项展示 PRD 原文/SourceSpan、Clause 处置、Requirement、Rule、Oracle 和 Case。用户只确认其摘要一次；这不是第二次需求理解，也不能替代 Execution Approval。
+_避免使用_：LLM summary confirmation、generic approval boolean
+
+**Run Handle**：
+由 assetId、runId、revision 和 generationDigest 组成的活动 Run 引用。页面身份、Fixture 或目标变化会推进 revision；旧 handle、旧 requestId、旧批准和旧脚本不能写入新 revision。
+_避免使用_：bare runId、latest run guess
+
+**Run Stage / Run Condition**：
+Stage 表示流程位置，Condition 独立表示 ready、awaiting-user、running、blocked-retryable、blocked-requires-change 或 terminal。环境阻断不再伪装成业务失败，也不必为了重试复制完整 Run。
+_避免使用_：single overloaded status enum、failed means everything
+
+**Semantic Case / Executable Case**：
+Semantic Case 在可信预检前即可展示完整需求、Rule、Oracle、lane、Fixture 和 binding 状态；Executable Case 只有在身份、定位、审批和来源闭合后才由可信 Compiler 生成。阻断 Case 不能用 skip 或伪 Playwright 文件冒充执行。
+_避免使用_：CASE id only、generated test before preflight
+
+**Fixture Contract**：
+Case 的声明式前置数据与恢复契约，包含 actor、precondition、seed strategy、DataLease、Cleanup 和 Reload oracle。真实写 lane 必须闭合 lease、cleanup 与 reload verification；注入 lane 不能声称验证真实依赖。
+_避免使用_：ad hoc UID injection、implicit cleanup
+
 **Authority**：
 审批、能力、租约、reservation、结果回执和签名事实的权威边界。调用方布尔值不能替代 Authority 事实。
 _避免使用_：approved flag、caller role claim

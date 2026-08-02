@@ -254,10 +254,11 @@ export async function runCli(
   }
 
   if (arguments_[0] === 'report') {
-    if (arguments_.length !== 3 || arguments_[1] !== '--run-id' || !SAFE_ID.test(arguments_[2]!)) {
+    const validRunFlag = arguments_[1] === '--run' || arguments_[1] === '--run-id'
+    if (arguments_.length !== 3 || !validRunFlag || !SAFE_ID.test(arguments_[2]!)) {
       return writeErrorResponse(responseWriter, 'UNKNOWN', new E2EError({
         code: 'E2E_RUNTIME_REQUEST_INVALID', category: 'input',
-        message: 'report 只接受 --run-id <safe-id>', retryable: false,
+        message: 'report 只接受 --run <safe-id>', retryable: false,
       }))
     }
     const requestBytes = Buffer.from(canonicalizeJson({
@@ -1604,10 +1605,12 @@ function formatDoctorReport(report: RuntimeDoctorReport): string {
     `浏览器来源：${report.browserSource}`,
     `审批模式：${report.approvalMode}`,
     `就绪：${report.ready ? '是' : '否'}`,
-    '探针\t状态\t原因代码\t修复建议',
+    '探针\t状态\t原因代码\t可恢复性\t期望/实际\t保留状态\t修复建议',
   ]
   for (const [name, probe] of Object.entries(report.probes)) {
-    lines.push(`${name}\t${statusLabels[probe.status]}\t${probe.reasonCode}\t${probe.remediation}`)
+    const comparison = probe.expected === undefined && probe.actual === undefined
+      ? '-' : `${probe.expected ?? '-'} / ${probe.actual ?? '-'}`
+    lines.push(`${name}\t${statusLabels[probe.status]}\t${probe.reasonCode}\t${probe.recoverability ?? '-'}\t${comparison}\t${probe.preservedState?.join(',') ?? '-'}\t${probe.remediation}`)
   }
   return `${lines.join('\n')}\n`
 }

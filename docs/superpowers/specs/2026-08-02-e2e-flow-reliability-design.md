@@ -53,15 +53,16 @@ Version Closure / Doctor
 → Requirement / Rule / Oracle / Flow
 → PRDRunCompiler semantic Case plan
 → Acceptance Review + local confirmation receipt
-→ Execution Subject Review + local approval
+→ Discovery Subject Review + local approval
 → Trusted Preflight / Binding
+→ Execution Subject Review + local approval
 → Trusted Playwright Compile
 → MultiCaseScheduler
 → Browser / Gateway / Cleanup / Reload
 → Evidence / Verdict / Report
 ```
 
-Target Probe 是非权威、无副作用的早期诊断；Trusted Preflight 仍在执行批准后运行，并为正式执行提供可信环境事实。两者不能共用证据身份，也不能把 Probe 结果投影成执行通过。
+Target Probe 是非权威、无副作用的早期诊断；Trusted Preflight 在 Discovery 授权后运行，并产生 locator binding 与正式环境事实；Execution Approval 必须绑定这些最终事实，因此位于 Trusted Preflight 之后。两类探测不能共用证据身份，也不能把 Probe 结果投影成执行通过。
 
 ## 深模块与公开接口
 
@@ -74,7 +75,8 @@ interface E2EFacade {
   start(input: StartE2ERunInput): Promise<RunProjection>
   review(handle: RunHandle): Promise<AcceptanceReview>
   confirmReview(input: ConfirmAcceptanceReviewInput): Promise<RunProjection>
-  approveExecution(input: ConfirmExecutionSubjectInput): Promise<RunProjection>
+  approveExecution(handle: RunHandle, subject: ApprovalGrantSubject): Promise<ApprovalConfirmation>
+  confirmApproval(handle: RunHandle, confirmationId: string, subjectDigest: string): Promise<RunProjection>
   execute(handle: RunHandle): Promise<RunProjection>
   retry(handle: RunHandle): Promise<RunProjection>
   status(handle: RunHandle): Promise<RunProjection>
@@ -82,13 +84,14 @@ interface E2EFacade {
 }
 ```
 
-CLI 提供同语义命令：
+“只提供 PRD 与目标地址”的 `run` 是 E2E Skill 的入口，因为 requirements contract、需求理解和 Case 设计需要 LLM 语义工作，Runtime CLI 不得假装可以自行理解 PRD。CLI 只提供无需语义生成、可安全独立调用的友好命令：
 
 ```text
-repo-e2e run --prd <path-or-url> --target <url>
-repo-e2e status --run <run-handle> [--open]
-repo-e2e retry --run <run-handle>
-repo-e2e report --run <run-handle> [--open]
+repo-e2e status --run <run-id>
+repo-e2e review --run <run-id>
+repo-e2e confirm-review --run <run-id> --digest <sha256>
+repo-e2e retry --run <run-id>
+repo-e2e report --run <run-id>
 ```
 
 低层 `repo-e2e rpc` 继续存在，作为稳定机器协议和兼容接口。Facade 错误必须同时包含中文可操作信息与原始 `reasonCode`、`requestId`、`runId`、失败字段路径和 remediation，不得吞掉诊断事实。

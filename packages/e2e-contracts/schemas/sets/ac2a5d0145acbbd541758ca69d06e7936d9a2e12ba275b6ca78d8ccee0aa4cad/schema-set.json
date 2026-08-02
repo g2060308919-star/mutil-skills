@@ -1,0 +1,142 @@
+{
+  "schemaVersion": "1.0.0",
+  "artifactTypes": [
+    "project-policy",
+    "prd-request",
+    "prd-manifest",
+    "prd-diff",
+    "semantic-generation",
+    "acceptance-scope",
+    "requirement-model",
+    "interaction-flow",
+    "coverage-universe",
+    "test-cases",
+    "design-audit",
+    "execution-contract",
+    "approval-grants",
+    "manual-results",
+    "data-leases",
+    "browser-preflight",
+    "browser-action-map",
+    "regression-manifest",
+    "run-bundle",
+    "workflow-events",
+    "browser-results",
+    "gateway-audit",
+    "browser-evidence",
+    "diagnosis",
+    "cleanup-results",
+    "final-report",
+    "generation-manifest"
+  ],
+  "schemas": [
+    {
+      "file": "project-policy.schema.json",
+      "digest": "sha256:15a2a3d7553478e4908cfe09384ccea09b79aecd706ccdc72c4fe8899ac74555"
+    },
+    {
+      "file": "prd-request.schema.json",
+      "digest": "sha256:c65fd22820205f801f9f4e860ff977dacbbecaf6a6bbc9ed92b0d7021874f0b2"
+    },
+    {
+      "file": "prd-manifest.schema.json",
+      "digest": "sha256:483472b50cc5441ae7deacb1be7bdce37ce405c706f396c535fc46160d827ef9"
+    },
+    {
+      "file": "prd-diff.schema.json",
+      "digest": "sha256:07bdb0fa731429b572059166f83de510a08231045fa903790cf3e28d416719ad"
+    },
+    {
+      "file": "semantic-generation.schema.json",
+      "digest": "sha256:6845922f9973fdcdb252629ea86f51fb28bdd676a74f5603e827cf9e59d28421"
+    },
+    {
+      "file": "acceptance-scope.schema.json",
+      "digest": "sha256:03855cdd09463167eb1505017e9b9bfd40b8fe45f2004afb8f8ed6b3a2615443"
+    },
+    {
+      "file": "requirement-model.schema.json",
+      "digest": "sha256:b21d20abcaea9e38e9475c010df2cd0e24c1cdb6908a58817e99807eacff2f71"
+    },
+    {
+      "file": "interaction-flow.schema.json",
+      "digest": "sha256:31f8a2492dcccfa509985016fd8d8c24948c4883dd56dadcce3cdb3141f9921d"
+    },
+    {
+      "file": "coverage-universe.schema.json",
+      "digest": "sha256:8574f94ce8f1e173e381ba6f426864e6adfa1fb87c0e09ade1611b7c3376829e"
+    },
+    {
+      "file": "test-cases.schema.json",
+      "digest": "sha256:5902bf77827ab38460dc7a4ed6be0d19022f41a733a8b01af9a18d194a838918"
+    },
+    {
+      "file": "design-audit.schema.json",
+      "digest": "sha256:2315eaa4c3c430eac9c7961f6fcb614bc7c81c24b5273496ac393174bf1739ea"
+    },
+    {
+      "file": "execution-contract.schema.json",
+      "digest": "sha256:86a6018db068ea529ad8f90c6f6529f559256efe34ef8bab38791a41aa962db7"
+    },
+    {
+      "file": "approval-grants.schema.json",
+      "digest": "sha256:09bd971201f6f8ba1a442e3e61d030eedc3ade31ca952f9d7ca1317fa2a2e56c"
+    },
+    {
+      "file": "manual-results.schema.json",
+      "digest": "sha256:3d8d3a8de124dc614e2e41914bda5c16fe6da91efde5e4753bfbdcdbd414af34"
+    },
+    {
+      "file": "data-leases.schema.json",
+      "digest": "sha256:9b090f523f14b8af843cc65194f4b0f0ecf6f8c3bc145658bf7e9d9d99c7cbba"
+    },
+    {
+      "file": "browser-preflight.schema.json",
+      "digest": "sha256:313536d37a461fb444d8c3ca8542311674ccf16b8724aa6fcade43ae4e1c398b"
+    },
+    {
+      "file": "browser-action-map.schema.json",
+      "digest": "sha256:c1934a80a703acbdceb61e05a917ca5c5dd37a4e98d1ca7219a2c4e7532f0877"
+    },
+    {
+      "file": "regression-manifest.schema.json",
+      "digest": "sha256:1ff0c2e026bb54f5a85301235d23189ef4ce47d35a59d35b002a3be2d5b5370d"
+    },
+    {
+      "file": "run-bundle.schema.json",
+      "digest": "sha256:914220c45f438c5f3a515f3681c6e7430dd9bdb96b60aeea0abe8a338e0cafab"
+    },
+    {
+      "file": "workflow-events.schema.json",
+      "digest": "sha256:a0f8e6c8d89796fdabd1110cd26f9b4ea70064a4f7226b19c2e43ea5ab981ac8"
+    },
+    {
+      "file": "browser-results.schema.json",
+      "digest": "sha256:7a84210c1ec05433cb95209282b08880b8a98bce2cae1bfcd1dd86ab4353305d"
+    },
+    {
+      "file": "gateway-audit.schema.json",
+      "digest": "sha256:30f1e2c10d33543cf42778dd31a98c48fc25d8157223c093d1af7ce943748a21"
+    },
+    {
+      "file": "browser-evidence.schema.json",
+      "digest": "sha256:ab063c681c8ce8a1db75083f0de8abc1c50aec47dd04504fc87ec4214e69105b"
+    },
+    {
+      "file": "diagnosis.schema.json",
+      "digest": "sha256:b9da2a5dcc6e0e72a1d9ccb9a8922da4350367826aa2c8d84112df1f68582852"
+    },
+    {
+      "file": "cleanup-results.schema.json",
+      "digest": "sha256:88b0b684c2bb4a101d82d4f7a6eb98f622303f97be2a6ab2220ca7b0522785dd"
+    },
+    {
+      "file": "final-report.schema.json",
+      "digest": "sha256:407a6b6f6da5769302beb9db92312af919d0e20efc592911e49a7b8552c1a317"
+    },
+    {
+      "file": "generation-manifest.schema.json",
+      "digest": "sha256:2ce34ab1aad1c302786ac1f18a966095af5973595287a1b9fd5117de384fb2bc"
+    }
+  ]
+}

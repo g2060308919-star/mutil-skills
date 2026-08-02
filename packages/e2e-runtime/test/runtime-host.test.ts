@@ -1990,6 +1990,19 @@ describe('E2ERuntimeHost', () => {
     )
     await lock.close()
 
+    const changedEnvironment = structuredClone(targetContract)
+    changedEnvironment.targetUrl = 'http://localhost:4000/orders'
+    changedEnvironment.baseOrigin = 'http://localhost:4000'
+    changedEnvironment.pageIdentityPolicy.url.origin = 'http://localhost:4000'
+    changedEnvironment.allowedNavigationOrigins = ['http://localhost:4000']
+    await expect(handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-CONFIGURE-TARGET-ENVIRONMENT-SWAP'), command: 'configure-target',
+      projectRoot: fixture.roots.project,
+      payload: { runId: created.runId, targetContract: changedEnvironment },
+    }))).resolves.toMatchObject({
+      ok: false, error: { code: 'E2E_TARGET_PAGE_IDENTITY_ONLY_REVISION_REQUIRED' },
+    })
+
     const revised = structuredClone(targetContract)
     revised.pageIdentityPolicy.signals = [{ kind: 'test-id', value: 'orders-page' }]
     const response = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({

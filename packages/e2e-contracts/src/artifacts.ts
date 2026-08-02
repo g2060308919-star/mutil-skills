@@ -55,6 +55,7 @@ import {
   digestOracleCheckpointValue,
   OracleCheckpointPlanSchema,
 } from './compiler-input.js'
+import { E2ECaseExecutionFieldsSchema } from './e2e-flow.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -621,6 +622,10 @@ const testCasesContent = z.object({
     timeoutMs: z.number().int().positive().max(3_600_000),
     retryPolicy: z.enum(['none', 'read-automation-max-2', 'verified-not-applied-max-1']),
     status: z.enum(['active', 'deprecated']),
+    executionLane: E2ECaseExecutionFieldsSchema.shape.executionLane.optional(),
+    fixture: E2ECaseExecutionFieldsSchema.shape.fixture.optional(),
+    locatorCandidates: E2ECaseExecutionFieldsSchema.shape.locatorCandidates.optional(),
+    pageIdentityPolicy: E2ECaseExecutionFieldsSchema.shape.pageIdentityPolicy.optional(),
   }).strict()).max(100_000),
   caseSetDigest: DigestSchema,
 }).strict()

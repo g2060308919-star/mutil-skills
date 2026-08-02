@@ -9,6 +9,8 @@ export interface RenderedRunStatus {
   html: string
 }
 
+type SemanticCase = NonNullable<RuntimeStatusResult['semanticCases']>[number]
+
 export function renderRunStatus(input: unknown): RenderedRunStatus {
   const status = RuntimeStatusResultSchema.parse(input)
   return {
@@ -39,6 +41,8 @@ function markdown(status: RuntimeStatusResult): string {
     ...cases.map((item) => `| ${cell(item.caseId)} | ${cell(item.title)} | ${cell(item.executionLane ?? '未声明')} | ${cell(bindingLabel(item.bindingStatus))} | ${item.oracleIds.length} |`),
     ...(cases.length === 0 ? ['| - | 尚未生成 | - | 未执行 | 0 |'] : []),
     '',
+    ...cases.flatMap(markdownCaseDetails),
+    ...markdownAcceptanceReview(status),
     '## 修复建议',
     '',
     ...(status.remediation?.map((item) => `- ${text(item)}`) ?? ['- 无']),
@@ -69,10 +73,13 @@ function htmlDocument(status: RuntimeStatusResult): string {
       '<article>', `<h3>${escapeHtml(item.caseId)} · ${escapeHtml(item.title)}</h3>`,
       `<p>Lane：${escapeHtml(item.executionLane ?? '未声明')}</p>`,
       `<p>Binding：${escapeHtml(bindingLabel(item.bindingStatus))}</p>`,
-      `<p>Oracle：${item.oracleIds.length}</p>`, '</article>',
+      `<p>Oracle：${item.oracleIds.length}</p>`,
+      ...htmlCaseDetails(item), '</article>',
     ].join('')),
     ...(cases.length === 0 ? ['<p>尚未生成 Semantic Case。</p>'] : []),
-    '</div><h2>修复建议</h2><ul>',
+    '</div>',
+    ...htmlAcceptanceReview(status),
+    '<h2>修复建议</h2><ul>',
     ...(status.remediation?.map((item) => `<li>${escapeHtml(item)}</li>`) ?? ['<li>无</li>']),
     '</ul></main></body></html>\n',
   ].join('')
@@ -109,6 +116,107 @@ function blockerLabel(reasonCode: string): string {
 
 function bindingLabel(value: 'pending' | 'ready' | 'blocked'): string {
   return value === 'ready' ? '已就绪' : value === 'blocked' ? '已阻断' : '未执行'
+}
+
+function markdownCaseDetails(item: SemanticCase): string[] {
+  const fixture = item.fixture
+  const signals = item.pageIdentityPolicy?.signals.map(identitySignalLabel) ?? []
+  const locators = item.locatorCandidates?.map(locatorLabel) ?? []
+  if (fixture === undefined && signals.length === 0 && locators.length === 0) return []
+  return [
+    `### ${text(item.caseId)} 执行契约`,
+    '',
+    ...(fixture === undefined ? [] : [
+      `- Fixture：${text(fixture.seedStrategy)}`,
+      `- Actor：${text(fixture.actorRef)}`,
+      `- 前置条件：${fixture.preconditions.map((entry) => text(entry.statement)).join('；') || '无'}`,
+      `- DataLease：${fixture.dataLease === undefined ? '无' : text(`${fixture.dataLease.leaseKey} / ${fixture.dataLease.scope}`)}`,
+      `- Cleanup：${fixture.cleanup === undefined ? '无' : text(`${fixture.cleanup.kind} / ${fixture.cleanup.statement}`)}`,
+      `- Reload Oracle：${fixture.reloadVerification?.map((entry) => text(entry.statement)).join('；') ?? '无'}`,
+    ]),
+    `- 页面身份：${signals.map(text).join('；') || '未声明'}`,
+    `- Locator 候选：${locators.map(text).join('；') || '未声明'}`,
+    '',
+  ]
+}
+
+function htmlCaseDetails(item: SemanticCase): string[] {
+  const fixture = item.fixture
+  const signals = item.pageIdentityPolicy?.signals.map(identitySignalLabel).join('；') ?? '未声明'
+  const locators = item.locatorCandidates?.map(locatorLabel).join('；') ?? '未声明'
+  return [
+    ...(fixture === undefined ? [] : [
+      `<p>Fixture：${escapeHtml(fixture.seedStrategy)}</p>`,
+      `<p>Actor：${escapeHtml(fixture.actorRef)}</p>`,
+      `<p>Cleanup：${escapeHtml(fixture.cleanup === undefined ? '无' : `${fixture.cleanup.kind} / ${fixture.cleanup.statement}`)}</p>`,
+      `<p>Reload Oracle：${escapeHtml(fixture.reloadVerification?.map((entry) => entry.statement).join('；') ?? '无')}</p>`,
+    ]),
+    `<p>页面身份：${escapeHtml(signals)}</p>`,
+    `<p>Locator 候选：${escapeHtml(locators)}</p>`,
+  ]
+}
+
+function markdownAcceptanceReview(status: RuntimeStatusResult): string[] {
+  const review = status.acceptanceReview
+  if (review === undefined) return []
+  const catalog = review.semanticCatalog
+  const requirementById = new Map(catalog.requirements.map((item) => [item.reqId, item]))
+  const ruleById = new Map(catalog.rules.map((item) => [item.ruleId, item]))
+  const oracleById = new Map(catalog.oracles.map((item) => [item.oracleId, item]))
+  const caseById = new Map(catalog.cases.map((item) => [item.caseId, item]))
+  return [
+    '## PRD 语义确认',
+    '',
+    `- 状态：${status.acceptanceReviewConfirmation?.status === 'confirmed' ? '已确认' : '待确认'}`,
+    `- Review Digest：\`${review.reviewDigest}\``,
+    '',
+    ...review.links.flatMap((link) => [
+      `### ${text(link.clauseId)} · ${text(link.sourceText)}`,
+      '',
+      `- PRD 原文位置：${text(link.sourceSpan.sourceId)}:${link.sourceSpan.startLine}:${link.sourceSpan.startColumn}`,
+      `- 处置：${text(link.disposition)}`,
+      `- Requirement：${link.requirementIds.map((id) => text(`${id} / ${requirementById.get(id)?.title ?? '缺失'}`)).join('；') || '无'}`,
+      `- Rule：${link.ruleIds.map((id) => text(`${id} / ${ruleById.get(id)?.statement ?? '缺失'}`)).join('；') || '无'}`,
+      `- Oracle：${link.oracleIds.map((id) => text(`${id} / ${oracleById.get(id)?.statement ?? '缺失'}`)).join('；') || '无'}`,
+      `- Case：${link.caseIds.map((id) => text(`${id} / ${caseById.get(id)?.title ?? '缺失'}`)).join('；') || '无'}`,
+      '',
+    ]),
+  ]
+}
+
+function htmlAcceptanceReview(status: RuntimeStatusResult): string[] {
+  const review = status.acceptanceReview
+  if (review === undefined) return []
+  const catalog = review.semanticCatalog
+  const requirementById = new Map(catalog.requirements.map((item) => [item.reqId, item]))
+  const ruleById = new Map(catalog.rules.map((item) => [item.ruleId, item]))
+  const oracleById = new Map(catalog.oracles.map((item) => [item.oracleId, item]))
+  const caseById = new Map(catalog.cases.map((item) => [item.caseId, item]))
+  return [
+    '<h2>PRD 语义确认</h2>',
+    `<p>状态：${status.acceptanceReviewConfirmation?.status === 'confirmed' ? '已确认' : '待确认'}</p>`,
+    ...review.links.map((link) => [
+      '<article>',
+      `<h3>${escapeHtml(link.clauseId)} · ${escapeHtml(link.sourceText)}</h3>`,
+      `<p>Requirement：${escapeHtml(link.requirementIds.map((id) => `${id} / ${requirementById.get(id)?.title ?? '缺失'}`).join('；') || '无')}</p>`,
+      `<p>Rule：${escapeHtml(link.ruleIds.map((id) => `${id} / ${ruleById.get(id)?.statement ?? '缺失'}`).join('；') || '无')}</p>`,
+      `<p>Oracle：${escapeHtml(link.oracleIds.map((id) => `${id} / ${oracleById.get(id)?.statement ?? '缺失'}`).join('；') || '无')}</p>`,
+      `<p>Case：${escapeHtml(link.caseIds.map((id) => `${id} / ${caseById.get(id)?.title ?? '缺失'}`).join('；') || '无')}</p>`,
+      '</article>',
+    ].join('')),
+  ]
+}
+
+function identitySignalLabel(signal: NonNullable<SemanticCase['pageIdentityPolicy']>['signals'][number]): string {
+  if (signal.kind === 'role') return `role:${signal.role}/${signal.name}`
+  if (signal.kind === 'css-visible') return `css:${signal.selector}`
+  return `${signal.kind}:${signal.value}`
+}
+
+function locatorLabel(locator: NonNullable<SemanticCase['locatorCandidates']>[number]): string {
+  if (locator.kind === 'role') return `role:${locator.role}/${locator.name}`
+  if (locator.kind === 'css') return `css:${locator.selector}`
+  return `${locator.kind}:${locator.value}`
 }
 
 function pair(label: string, value: string): string {

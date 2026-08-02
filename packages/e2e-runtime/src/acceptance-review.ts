@@ -63,16 +63,28 @@ interface ScopeDisposition {
 interface Requirement {
   reqId: string
   contractNodeIds?: string[]
-  rules: Array<{ ruleId: string; oracleIds: string[] }>
-  observableOutcomes: Array<{ oracleId: string; ruleId: string }>
+  title: string
+  actors: string[]
+  preconditions: string[]
+  rules: Array<{
+    ruleId: string
+    category: 'business' | 'permission' | 'validation' | 'state' | 'error' | 'visual'
+    statement: string
+    certainty: 'explicit' | 'confirmed-inference'
+    oracleIds: string[]
+  }>
+  observableOutcomes: Array<{ oracleId: string; ruleId: string; statement: string }>
 }
 
 interface Obligation {
+  obligationId: string
   reqId: string
   clauseIds: string[]
   ruleIds: string[]
   oracleIds: string[]
-  disposition: { kind: string; caseIds?: string[] }
+  scenario: string
+  necessity: 'required' | 'advisory'
+  disposition: { kind: 'automated' | 'manual' | 'not-applicable'; caseIds?: string[] }
 }
 
 /**
@@ -92,6 +104,7 @@ export function buildAcceptanceReview(snapshot: RuntimeRunSnapshot): AcceptanceR
   )
   const dispositionByClause = uniqueMap(dispositions, (item) => item.clauseId)
   const requirementById = uniqueMap(requirements, (item) => item.reqId)
+  const compiledCaseIds = new Set(plan.cases.map((testCase) => testCase.caseId))
 
   const links = clauses.map((clause) => {
     const disposition = dispositionByClause.get(clause.clauseId)
@@ -119,7 +132,12 @@ export function buildAcceptanceReview(snapshot: RuntimeRunSnapshot): AcceptanceR
       if (!obligation.clauseIds.includes(clause.clauseId)
         && !requirementIds.includes(obligation.reqId)) continue
       if (obligation.disposition.kind === 'automated') {
-        for (const caseId of obligation.disposition.caseIds ?? []) caseIds.add(caseId)
+        for (const caseId of obligation.disposition.caseIds ?? []) {
+          if (!compiledCaseIds.has(caseId)) {
+            throw reviewError('E2E_ACCEPTANCE_REVIEW_CHAIN_INCOMPLETE')
+          }
+          caseIds.add(caseId)
+        }
       }
     }
     if (disposition.disposition === 'modeled'
@@ -141,12 +159,66 @@ export function buildAcceptanceReview(snapshot: RuntimeRunSnapshot): AcceptanceR
   if (links.length !== dispositions.length) {
     throw reviewError('E2E_ACCEPTANCE_REVIEW_DISPOSITION_REQUIRED')
   }
+  const semanticCatalog = {
+    requirements: requirements.map((requirement) => ({
+      reqId: requirement.reqId,
+      title: requirement.title,
+      actors: requirement.actors,
+      preconditions: requirement.preconditions,
+      contractNodeIds: requirement.contractNodeIds ?? [],
+    })),
+    rules: requirements.flatMap((requirement) => requirement.rules.map((rule) => ({
+      ruleId: rule.ruleId,
+      reqId: requirement.reqId,
+      category: rule.category,
+      statement: rule.statement,
+      certainty: rule.certainty,
+      oracleIds: rule.oracleIds,
+    }))),
+    oracles: requirements.flatMap((requirement) => requirement.observableOutcomes.map((oracle) => ({
+      oracleId: oracle.oracleId,
+      reqId: requirement.reqId,
+      ruleId: oracle.ruleId,
+      statement: oracle.statement,
+    }))),
+    obligations: obligations.map((obligation) => ({
+      obligationId: obligation.obligationId,
+      reqId: obligation.reqId,
+      scenario: obligation.scenario,
+      necessity: obligation.necessity,
+      disposition: obligation.disposition.kind,
+      caseIds: obligation.disposition.kind === 'automated'
+        ? obligation.disposition.caseIds ?? [] : [],
+    })),
+    cases: plan.cases.map((testCase) => ({
+      caseId: testCase.caseId,
+      title: testCase.title,
+      actor: testCase.actor,
+      contractNodeIds: testCase.contractNodeIds,
+      actions: testCase.actions.map((action) => ({
+        actionId: action.actionId,
+        statement: action.statement,
+        effect: action.effect,
+      })),
+      oracles: testCase.oracles.map((oracle) => ({
+        oracleId: oracle.oracleId,
+        acceptanceCriterion: oracle.acceptanceCriterion,
+      })),
+      ...(testCase.executionLane === undefined ? {} : { executionLane: testCase.executionLane }),
+      ...(testCase.fixture === undefined ? {} : { fixture: testCase.fixture }),
+      ...(testCase.locatorCandidates === undefined
+        ? {} : { locatorCandidates: testCase.locatorCandidates }),
+      ...(testCase.pageIdentityPolicy === undefined
+        ? {} : { pageIdentityPolicy: testCase.pageIdentityPolicy }),
+    })),
+  }
   const draft = {
     schemaVersion: '1.0.0' as const,
     runId: snapshot.runId,
     contractProjectionDigest: plan.contractProjectionDigest,
     compilerDigest: plan.compilerDigest,
     links,
+    semanticCatalog,
     includedClauseIds: links.filter((link) => link.disposition === 'modeled')
       .map((link) => link.clauseId),
     excludedClauseIds: links.filter((link) => link.disposition === 'excluded'

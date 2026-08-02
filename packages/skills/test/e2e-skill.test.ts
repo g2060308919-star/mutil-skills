@@ -389,7 +389,7 @@ describe('E2E skill package', () => {
   test('入口用友好门面驱动状态、语义确认、恢复和报告，调用者不手写 envelope', async () => {
     const entry = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
 
-    for (const command of ['status --run', 'review --run', 'confirm-review --run', 'retry --run', 'report --run-id']) {
+    for (const command of ['status --run', 'review --run', 'confirm-review --run', 'retry --run', 'report --run']) {
       expect(entry).toContain(command)
     }
     expect(entry).toContain('调用者不需要构造 `RuntimeRequestEnvelope`')
@@ -405,7 +405,7 @@ describe('E2E skill package', () => {
     expect(entry).toContain('AcceptanceReview')
     expect(entry).toContain('浏览器预检前')
     expect(entry).toContain('PRD 原文 → Clause 原文与处置 → Requirement → Rule → Oracle → Case')
-    expect(entry).toContain('确认前不得执行 Target Probe 或浏览器预检')
+    expect(entry).toContain('确认前不得执行 Discovery、可信浏览器预检或 locator 绑定')
     for (const role of ['target', 'reference', 'necessary-dependency']) {
       expect(understanding).toContain(`\`${role}\``)
     }

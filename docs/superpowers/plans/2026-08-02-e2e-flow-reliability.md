@@ -8,6 +8,12 @@
 
 **Tech Stack:** TypeScript 5、Zod、Vitest、Playwright、Node.js 文件系统原子操作、现有 Runtime Host/Engine/Authority/Gateway/Report packages。
 
+## 实施结果（2026-08-02）
+
+计划能力已实现并通过完整验证。实现中有两项经安全审查后的等价调整：可恢复入口复用同一 Run 的 `run-preflight`/`configure-target` 边与 Facade `retry`，没有另造第二套 `retry-blocked` 状态机；“只输入 PRD 与 target”的高层 `run` 由 E2E Skill 执行，Runtime CLI 只提供不需要 LLM 语义生成的友好状态、确认、恢复和报告命令。
+
+最终门：`npm run build`、1789 个单元/安全用例、30 个真实浏览器 Golden、零跳过 Release pack Golden、500/2000/5000/1000 规模 p95 证明、31 个宿主能力矩阵用例和架构检查均通过。
+
 ## Global Constraints
 
 - Runtime Host 是唯一 RPC、工作流和恢复权威；Skill 不维护状态机。
@@ -258,12 +264,12 @@
 - Test: `packages/e2e-runtime/test/protocol.test.ts`
 
 **Interfaces:**
-- Produces: `E2EFacade` methods specified by the design and CLI `run/status/retry/report`。
+- Produces: `E2EFacade` methods specified by the design 与 CLI `status/review/confirm-review/retry/report`；“PRD + target”高层 `run` 由需要 LLM 语义工作的 E2E Skill 提供，Runtime CLI 不伪造需求理解。
 - Consumes: fixed absolute Runtime launcher and strict in-process Host protocol；CLI string input never enters shell interpolation。
 
 - [ ] **Step 1: Write failing user-interface tests**
 
-  覆盖 `repo-e2e run --prd ./prd.md --target localhost:3000`、字段级中文错误、reasonCode 保留、`status --run`、`retry --run`、`report --run` 和底层 `rpc` 无回归。
+  覆盖 Facade `start`、字段级中文错误、reasonCode 保留、`status --run`、`review --run`、`confirm-review --run`、`retry --run`、`report --run` 和底层 `rpc` 无回归。
 
 - [ ] **Step 2: Run RED**
 

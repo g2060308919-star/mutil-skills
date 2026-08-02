@@ -130,6 +130,7 @@ import { classifyRunCondition, projectRunStage } from './run-condition.js'
 import { createTargetContractFact } from './target-contract.js'
 import { runTargetProbe, type TargetProbeCapability } from './target-probe.js'
 import type { RunStatusPublisher } from './run-status-publisher.js'
+import { assertCompiledCaseProjection } from './compiled-case-projection.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -716,10 +717,19 @@ export class E2ERuntimeHost {
       this.requireInstallation(snapshot)
       const normalConfiguration = ['created', 'source-frozen', 'awaiting-scope-approval', 'scope-approved',
         'modeled', 'coverage-audited'].includes(snapshot.workflow.current)
-      const recoverablePageIdentityRevision = snapshot.workflow.current === 'preflight-readonly'
+      const pageIdentityRecoveryState = snapshot.workflow.current === 'preflight-readonly'
         && snapshot.preflightBlocker?.reasonCode === 'E2E_RUNTIME_PAGE_MISMATCH'
         && snapshot.targetContract !== undefined
         && snapshot.targetContract.contractDigest !== target.contractDigest
+      if (pageIdentityRecoveryState
+        && !isPageIdentityOnlyTargetRevision(snapshot.targetContract!, target)) {
+        throw runtimeHostError(
+          'E2E_TARGET_PAGE_IDENTITY_ONLY_REVISION_REQUIRED', 'input',
+          '页面身份恢复仅允许修改 pageIdentityPolicy；目标地址、环境标签和允许导航源必须保持不变',
+        )
+      }
+      const recoverablePageIdentityRevision = pageIdentityRecoveryState
+        && isPageIdentityOnlyTargetRevision(snapshot.targetContract!, target)
       if (!normalConfiguration && !recoverablePageIdentityRevision) throw runtimeHostError(
         'E2E_TARGET_CONFIGURATION_STATE_MISMATCH', 'input',
         '目标配置必须在 Discovery 授权前完成；仅页面身份不匹配可显式修订并失效下游资产',
@@ -1077,6 +1087,12 @@ export class E2ERuntimeHost {
         assertPrdUnderstandingCandidate(candidate, snapshot)
       }
       assertPrdUnderstandingLinkedCandidate(request.payload.artifactType, candidate, snapshot)
+      if (request.payload.artifactType === 'test-cases' && snapshot.compiledPrdRun !== undefined) {
+        assertCompiledCaseProjection(
+          snapshot.compiledPrdRun,
+          ArtifactSchemaRegistry['test-cases'].parse(candidate).content,
+        )
+      }
 
       const existing = snapshot.frozenArtifacts[request.payload.artifactType]
       if (existing !== undefined && canonicalizeJson(existing) !== canonicalizeJson(candidate)) {
@@ -2848,6 +2864,20 @@ const TARGET_DEPENDENT_TRUSTED_FACTS = new Set([
   'finalization-execution-facts', 'quarantined-evidence', 'finalization-material',
 ])
 
+function isPageIdentityOnlyTargetRevision(
+  previous: NonNullable<RuntimeRunSnapshot['targetContract']>,
+  next: NonNullable<RuntimeRunSnapshot['targetContract']>,
+): boolean {
+  const withoutPageIdentity = (target: NonNullable<RuntimeRunSnapshot['targetContract']>) => ({
+    schemaVersion: target.contract.schemaVersion,
+    targetUrl: target.contract.targetUrl,
+    baseOrigin: target.contract.baseOrigin,
+    environmentLabel: target.contract.environmentLabel,
+    allowedNavigationOrigins: target.contract.allowedNavigationOrigins,
+  })
+  return canonicalizeJson(withoutPageIdentity(previous)) === canonicalizeJson(withoutPageIdentity(next))
+}
+
 function targetChangeInvalidationSummary(snapshot: RuntimeRunSnapshot): {
   reason: 'target-contract-changed'
   preservedAssets: string[]
@@ -3360,6 +3390,11 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
       contractNodeIds: testCase.contractNodeIds,
       oracleIds: testCase.oracles.map((oracle) => oracle.oracleId),
       ...(testCase.executionLane === undefined ? {} : { executionLane: testCase.executionLane }),
+      ...(testCase.fixture === undefined ? {} : { fixture: testCase.fixture }),
+      ...(testCase.locatorCandidates === undefined
+        ? {} : { locatorCandidates: testCase.locatorCandidates }),
+      ...(testCase.pageIdentityPolicy === undefined
+        ? {} : { pageIdentityPolicy: testCase.pageIdentityPolicy }),
       bindingStatus: snapshot.preflightBlocker !== undefined ? 'blocked'
         : snapshot.trustedExecutionFacts['browser-preflight'] !== undefined
           && snapshot.frozenArtifacts['browser-action-map'] !== undefined ? 'ready' : 'pending',
@@ -3467,12 +3502,12 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
     || snapshot.compiledPrdRun?.cases.some((testCase) => testCase.executionLane !== undefined) === true
   const targetProbeReady = snapshot.targetProbe?.status === 'ready'
     && snapshot.targetProbe.targetContractDigest === snapshot.targetContract?.contractDigest
-  const intent = needsAcceptanceConfirmation
-    ? { command: 'get-acceptance-review' as const, missing: ['acceptance-review-confirmation'] }
-    : requiresTarget && snapshot.targetContract === undefined
+  const intent = requiresTarget && snapshot.targetContract === undefined
     ? { command: 'configure-target' as const, missing: ['target-contract'] }
     : requiresTarget && !targetProbeReady
       ? { command: 'probe-target' as const, missing: ['target-probe-ready'] }
+    : needsAcceptanceConfirmation
+      ? { command: 'get-acceptance-review' as const, missing: ['acceptance-review-confirmation'] }
     : current === 'preflight-readonly' && snapshot.preflightBlocker !== undefined
     ? {
       command: 'run-preflight' as const,

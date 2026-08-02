@@ -242,7 +242,7 @@ describe('repo-e2e CLI protocol slice', () => {
     expect(JSON.parse(replayStdout.text())).toEqual(JSON.parse(stdout.text()))
   })
 
-  test('human report command maps to the same render-report Runtime Host protocol', async () => {
+  test('report --run maps to the same render-report Runtime Host protocol', async () => {
     const stdout = captureWritable()
     const stderr = captureWritable()
     const handle = vi.fn(async (
@@ -252,7 +252,7 @@ describe('repo-e2e CLI protocol slice', () => {
     }))
 
     const exitCode = await runCli(
-      ['report', '--run-id', 'RUN-1'], Readable.from([]), stdout.stream, stderr.stream,
+      ['report', '--run', 'RUN-1'], Readable.from([]), stdout.stream, stderr.stream,
       {
         homeDir: '/safe/home',
         installRuntime: async () => ({

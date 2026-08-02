@@ -15,8 +15,8 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 4. 运行 `~/.mutil-skills/bin/repo-e2e configure-approval --mode local-confirmation`。默认流程不执行 `identity enroll`；WebAuthn 是用户显式选择的增强模式。
 5. 运行 `~/.mutil-skills/bin/repo-e2e doctor --json`；仅在 `ready:true` 后创建 Run。
 6. `create-run` 同时提交带严格 front matter 的唯一 requirements contract 原文、主 PRD 与执行所需依赖来源；把 Runtime 返回的 `understandingContractDigest`、`sourceRevision` 与 Source Bundle 绑定进同一契约的 E2E execution projection。调用一次 `prepare-prd-understanding`，让 Runtime 复算并持久化唯一 prepared projection。随后把声明式 Case、Action 和 Oracle 设计一次性交给 `compile-prd-run`；只使用 Runtime 返回的稳定 Case ID、Action ID、Oracle ID、`compilerDigest` 和 `caseSchedule`，不得由 Skill 生成或覆盖这些可信事实。
-7. 覆盖资产齐备后先取得 Runtime 的 `AcceptanceReview`，在浏览器预检前按“PRD 原文 → Clause 原文与处置 → Requirement → Rule → Oracle → Case”向调用者展示，并用 `review --run` 读取、`confirm-review --run` 确认当前 `reviewDigest`。Runtime 返回 `confirmation-required` 时必须暂停并等待调用者明确确认；确认前不得执行 Target Probe 或浏览器预检。该确认只核对 LLM 的需求、交互、范围和用例理解；它不是 Execution Approval，也不是第二次 `$understand-prd`。
-8. 根据用户给出的唯一验证地址配置 `TargetContract`，明确环境、目标 URL、允许导航 origin 与可配置页面身份策略；再由系统 Chrome 执行无副作用 Target Probe。命令行无法访问 localhost 不是目标不可用的证明，浏览器侧探测结果才是诊断依据。随后按 Runtime `nextEdge` 完成 Discovery、只读预检、执行审批和 Case 执行。
+7. 根据用户给出的唯一验证地址配置 `TargetContract`，明确环境、目标 URL、允许导航 origin 与可配置页面身份策略；立即由系统 Chrome 在任何授权前执行无副作用 Target Probe。命令行无法访问 localhost 不是目标不可用的证明，浏览器侧探测结果才是诊断依据。Probe 只确认地址可达和页面身份，不推导 locator、不执行 Case、不产生写请求。
+8. 覆盖资产与 Target Probe 齐备后取得 Runtime 的 `AcceptanceReview`，在 Discovery 授权和可信浏览器预检前按“PRD 原文 → Clause 原文与处置 → Requirement → Rule → Oracle → Case”向调用者展示，并用 `review --run` 读取、`confirm-review --run` 确认当前 `reviewDigest`。Runtime 返回 `confirmation-required` 时必须暂停并等待调用者明确确认；确认前不得执行 Discovery、可信浏览器预检或 locator 绑定。该确认只核对 LLM 的需求、交互、范围和用例理解；它不是 Execution Approval，也不是第二次 `$understand-prd`。确认后按 Runtime `nextEdge` 完成 Discovery、只读预检与绑定、执行审批和 Case 执行。
 9. Runtime 完成最终化后调用 `render-report`。需要指定位置时传 `outputRoot`；否则报告写入 `~/.mutil-skills/e2e/reports/<asset-id>/<run-id>/`。交付独立 Run Workspace 中的 JSON、Markdown、HTML、原始 PNG 和 Playwright Trace；`.biztest`、Git、CI Artifact 和对象存储只作为可选发布适配器。
 
 ## Runtime 能力门
@@ -37,7 +37,7 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 - `~/.mutil-skills/bin/repo-e2e review --run <RUN>`：展示不可改写的 AcceptanceReview。
 - `~/.mutil-skills/bin/repo-e2e confirm-review --run <RUN> --digest <sha256:...>`：只确认当前语义审查摘要。
 - `~/.mutil-skills/bin/repo-e2e retry --run <RUN>`：仅重试 Runtime 明确标为可恢复的 Target Probe 或 preflight，不重放写操作。
-- `~/.mutil-skills/bin/repo-e2e report --run-id <RUN>`：读取正式最终报告。
+- `~/.mutil-skills/bin/repo-e2e report --run <RUN>`：读取正式最终报告；`--run-id` 仅保留为旧调用兼容别名。
 
 内部仍通过下节 JSON 协议提交复杂声明式资产，这是 Skill/Facade 的实现细节，不得要求用户手写 JSON envelope。
 
