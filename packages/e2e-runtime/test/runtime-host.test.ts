@@ -487,6 +487,7 @@ describe('E2ERuntimeHost', () => {
         contractProjectionDigest: expect.stringMatching(/^sha256:/),
         caseIds: ['CASE-0001'],
         mappedAcceptanceCount: 1,
+        oracleCount: 1,
       },
     })
     const persisted = await fixture.store.getRun(

@@ -128,7 +128,11 @@ import {
 import { createRunHandle } from './run-handle.js'
 import { classifyRunCondition, projectRunStage } from './run-condition.js'
 import { createTargetContractFact } from './target-contract.js'
-import { runTargetProbe, type TargetProbeCapability } from './target-probe.js'
+import {
+  runTargetProbe,
+  selectTargetProbePolicy,
+  type TargetProbeCapability,
+} from './target-probe.js'
 import type { RunStatusPublisher } from './run-status-publisher.js'
 import { assertCompiledCaseProjection } from './compiled-case-projection.js'
 
@@ -604,9 +608,13 @@ export class E2ERuntimeHost {
         review: {
           contractProjectionDigest: persistedPlan.contractProjectionDigest,
           caseIds: persistedPlan.cases.map((testCase) => testCase.caseId),
-          mappedAcceptanceCount: persistedPlan.cases.reduce(
-            (total, testCase) => total + testCase.oracles.length,
-            0,
+          mappedAcceptanceCount: new Set(persistedPlan.cases.flatMap((testCase) =>
+            testCase.oracles.map((oracle) =>
+              `${oracle.contractNodeId}\u0000${oracle.acceptanceCriterion}`,
+            ),
+          )).size,
+          oracleCount: persistedPlan.cases.reduce(
+            (total, testCase) => total + testCase.oracles.length, 0,
           ),
         },
         unresolvedItems: [],
@@ -782,10 +790,22 @@ export class E2ERuntimeHost {
     if (initial.targetContract === undefined) throw runtimeHostError(
       'E2E_TARGET_CONTRACT_REQUIRED', 'input', '请先配置 TargetContract',
     )
+    const previousProbe = initial.targetProbe?.targetContractDigest
+      === initial.targetContract.contractDigest ? initial.targetProbe : undefined
+    const lanes = initial.compiledPrdRun?.cases
+      .map((testCase) => testCase.executionLane)
+      .filter((lane): lane is NonNullable<typeof lane> => lane !== undefined) ?? []
+    const probePolicy = selectTargetProbePolicy({
+      previewReadonlyOnly: lanes.length > 0
+        && lanes.every((lane) => lane === 'preview-readonly'),
+      ...(previousProbe === undefined ? {} : { previous: previousProbe }),
+    })
     const targetProbe = await runTargetProbe(capability, {
       runId: initial.runId,
       target: initial.targetContract,
       probedAt: this.dependencies.now().toISOString(),
+      strategy: probePolicy.strategy,
+      attempt: probePolicy.attempt,
     })
     return await this.withRunLock(identity.digest, initial.runId, async (lock) => {
       const current = await this.dependencies.runStore.getRun(identity.digest, initial.runId)
@@ -3364,6 +3384,9 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
   )
   const reviewConfirmed = acceptanceReview !== undefined && receipt.success
     && receipt.data.reviewDigest === acceptanceReview.reviewDigest
+  const targetProbeBlocker = snapshot.targetProbe !== undefined
+    && snapshot.targetProbe.status !== 'ready'
+    ? snapshot.targetProbe.reasonCode ?? 'E2E_TARGET_PROBE_BLOCKED' : undefined
   return RuntimeStatusResultSchema.parse({
     runId: snapshot.runId,
     assetId: snapshot.assetId,
@@ -3395,11 +3418,13 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
         ? {} : { locatorCandidates: testCase.locatorCandidates }),
       ...(testCase.pageIdentityPolicy === undefined
         ? {} : { pageIdentityPolicy: testCase.pageIdentityPolicy }),
-      bindingStatus: snapshot.preflightBlocker !== undefined ? 'blocked'
+      bindingStatus: targetProbeBlocker !== undefined || snapshot.preflightBlocker !== undefined ? 'blocked'
         : snapshot.trustedExecutionFacts['browser-preflight'] !== undefined
           && snapshot.frozenArtifacts['browser-action-map'] !== undefined ? 'ready' : 'pending',
-      ...(snapshot.preflightBlocker === undefined
-        ? {} : { blockerReasonCode: snapshot.preflightBlocker.reasonCode }),
+      ...(targetProbeBlocker !== undefined
+        ? { blockerReasonCode: targetProbeBlocker }
+        : snapshot.preflightBlocker === undefined
+          ? {} : { blockerReasonCode: snapshot.preflightBlocker.reasonCode }),
     })),
     remediation: runtimeRemediation(snapshot, acceptanceReview, reviewConfirmed),
     ...projection,
@@ -3438,6 +3463,11 @@ function runtimeRemediation(
   acceptanceReview: ReturnType<typeof acceptanceReviewForStatus>,
   reviewConfirmed: boolean,
 ): string[] {
+  if (snapshot.targetProbe !== undefined && snapshot.targetProbe.status !== 'ready') return [
+    `目标探测在 ${snapshot.targetProbe.diagnostics.strategy} 策略下被 ${snapshot.targetProbe.reasonCode ?? 'E2E_TARGET_PROBE_BLOCKED'} 阻断；页面 URL、标题、DOM、Console、失败请求和待处理资源已保留。`,
+    '对同一 Run 执行 retry；Runtime 会按已持久化 attempt 自动切换下一层探测策略，无需重建 PRD、Case 或审批资产。',
+    'Target Probe 未执行任何业务动作；只有可信 Preflight 通过后才允许进入业务执行。',
+  ]
   if (snapshot.preflightBlocker !== undefined) return [
     `修复 ${snapshot.preflightBlocker.reasonCode} 后对同一 Run 重新执行 run-preflight，无需重建需求资产。`,
   ]

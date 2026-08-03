@@ -18,7 +18,7 @@ import {
 } from '../src/protocol.js'
 
 const digest = `sha256:${'0'.repeat(64)}`
-const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.5.0 -- repo-e2e install-runtime --version 0.5.0'
+const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.5.1 -- repo-e2e install-runtime --version 0.5.1'
 const doctorRequest = {
   schemaVersion: '1.0.0',
   requestId: 'REQ-1',
@@ -32,6 +32,28 @@ describe('Runtime protocol', () => {
     expect(parseRuntimeRequest(JSON.stringify(doctorRequest))).toEqual(doctorRequest)
     expectInvalidRequest(() => parseRuntimeRequest('{'))
     expectInvalidRequest(() => parseRuntimeRequest(JSON.stringify({ ...doctorRequest, callerExecutable: '/bin/sh' })))
+  })
+
+  test('严格 envelope 无效时返回字段路径、约束和可执行修正提示', () => {
+    let error: E2EError | undefined
+    try {
+      parseRuntimeRequest(JSON.stringify({ ...doctorRequest, payload: { unexpected: true } }))
+    } catch (cause) {
+      error = cause as E2EError
+    }
+
+    expect(error).toBeInstanceOf(E2EError)
+    expect(runtimeErrorResponse('REQ-INVALID', error!)).toMatchObject({
+      error: {
+        code: 'E2E_RUNTIME_REQUEST_INVALID',
+        details: {
+          validationIssues: [expect.objectContaining({
+            path: 'payload', code: 'unrecognized_keys',
+          })],
+          remediation: expect.stringContaining('字段路径'),
+        },
+      },
+    })
   })
 
   test('classifies an unsupported protocol major without converting it', () => {
@@ -53,7 +75,7 @@ describe('Runtime protocol', () => {
     expect(response).toMatchObject({
       schemaVersion: '1.0.0',
       requestId: 'REQ-1',
-      runtime: { version: '0.5.0', installationDigest: digest },
+      runtime: { version: '0.5.1', installationDigest: digest },
       ok: false,
       error: {
         code: 'E2E_RUNTIME_NOT_INSTALLED',
@@ -283,7 +305,7 @@ describe('repo-e2e CLI protocol slice', () => {
     const exitCode = await runCli(['--version'], Readable.from([]), stdout.stream, stderr.stream)
 
     expect(exitCode).toBe(0)
-    expect(stdout.text()).toBe('0.5.0\n')
+    expect(stdout.text()).toBe('0.5.1\n')
     expect(stderr.text()).toBe('')
   })
 

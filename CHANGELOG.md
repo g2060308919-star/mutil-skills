@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-03
+
+### Added
+
+- Target Probe 新增 `resource-closure`、`application-ready`、`dom-identity` 分级策略，以及 URL/title、DOM、可见文本、Console/pageerror、失败请求、未闭合资源和长期连接诊断快照；Run Status 的 JSON/Markdown/HTML 可直接展示阻断原因和恢复动作。
+
+### Changed
+
+- 全部 `preview-readonly` Case 首次使用 application-ready 探测；严格资源闭包失败后的同 Run 重试自动升级策略。非权威 Probe 可以容纳 HMR/轮询等开发态资源，写操作的可信 preflight、Gateway、Authority、Lease 与 Cleanup 门保持不变。
+- E2E Skill 明确 Runtime 0.5 高层主线，并把项目身份、requirements contract、machine view、Source Bundle 与 project policy 定义为 Skill 自动准备的内部材料，不再要求调用者手写严格 envelope 或中间文件。
+- 编译结果分别报告唯一 `mappedAcceptanceCount` 与 `oracleCount`，避免重复 Oracle 放大覆盖数量。
+
+### Fixed
+
+- Target Probe 在资源闭包耗尽前先评估页面身份并保留页面诊断，不再把已渲染的 localhost SPA 简化为无标题的通用资源失败。
+- Runtime 严格请求错误返回字段路径和约束；同一 Case 的重复 `contractNodeId + acceptanceCriterion` Oracle 由编译器拒绝。
+
 ## [0.5.0] - 2026-08-02
 
 > 升级说明：Skill、Runtime 与全部 `@mutil-skills/*` 包必须统一使用 `0.5.0`；`AcceptanceReview` 和 Semantic Case 执行投影新增严格字段，禁止与 0.4.x 闭包混装。

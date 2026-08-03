@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, expect, test } from 'vitest'
 import { createTargetContractFact } from '../packages/e2e-runtime/src/target-contract.js'
 import { runTargetProbe } from '../packages/e2e-runtime/src/target-probe.js'
+import { RUNTIME_PACKAGE_VERSION } from '../packages/e2e-runtime/src/protocol.js'
 import {
   bootstrapInstalledBrowserRuntime,
   createProductionTargetProbeCapability,
@@ -39,6 +40,7 @@ test('真实 localhost SPA 经 Gateway 加载静态资源，并在同一 Run 修
   ])
 
   let scriptRequests = 0
+  let chainedScriptRequests = 0
   let writeRequests = 0
   const fixture = createServer((request, response) => {
     if (request.method === 'POST') {
@@ -56,6 +58,25 @@ test('真实 localhost SPA 经 Gateway 加载静态资源，并在同一 Run 修
       ].join(';'))
       return
     }
+    if (request.url === '/persistent-app.js') {
+      chainedScriptRequests += 1
+      response.setHeader('content-type', 'text/javascript; charset=utf-8')
+      response.end([
+        "document.querySelector('#root').innerHTML = '<section data-testid=\"persistent-card\">开发预览已就绪</section>'",
+        `fetch('/hmr-poll-${chainedScriptRequests}.json').catch(() => undefined)`,
+      ].join(';'))
+      return
+    }
+    if (/^\/hmr-poll-\d+\.json$/u.test(request.url ?? '')) {
+      response.setHeader('content-type', 'application/json; charset=utf-8')
+      response.end('{"ok":true}')
+      return
+    }
+    if (request.url === '/persistent') {
+      response.setHeader('content-type', 'text/html; charset=utf-8')
+      response.end('<!doctype html><title>开发预览</title><main id="root">加载中</main><script src="/persistent-app.js"></script>')
+      return
+    }
     response.setHeader('content-type', 'text/html; charset=utf-8')
     response.end('<!doctype html><title>本地应用</title><main id="root">加载中</main><script src="/app.js"></script>')
   })
@@ -67,7 +88,7 @@ test('真实 localhost SPA 经 Gateway 加载静态资源，并在同一 Run 修
   if (!address || typeof address === 'string') throw new Error('localhost fixture address missing')
   const origin = `http://127.0.0.1:${address.port}`
   const installation = {
-    version: '0.4.7', protocolMajor: 1 as const, versionRoot: sourceRoot,
+    version: RUNTIME_PACKAGE_VERSION, protocolMajor: 1 as const, versionRoot: sourceRoot,
     entrypoint: join(sourceRoot, 'packages', 'e2e-runtime', 'src', 'runtime-bin.ts'),
     installationDigest: `sha256:${'7'.repeat(64)}`, sourceRepositoryIndependent: true as const,
   }
@@ -129,6 +150,26 @@ test('真实 localhost SPA 经 Gateway 加载静态资源，并在同一 Run 修
     expect(revisedTarget.contractDigest).not.toBe(firstTarget.contractDigest)
     expect(scriptRequests).toBeGreaterThanOrEqual(2)
     expect(writeRequests).toBe(0)
+
+    const persistentTarget = createTargetContractFact({
+      schemaVersion: '1.0.0', targetUrl: `${origin}/persistent`, baseOrigin: origin,
+      environmentLabel: 'local-persistent-golden', allowedNavigationOrigins: [origin],
+      pageIdentityPolicy: {
+        schemaVersion: '1.0.0', url: { origin, pathPattern: '/persistent' },
+        signals: [{ kind: 'test-id', value: 'persistent-card' }], match: { mode: 'all' },
+      },
+    })
+    const persistent = await runTargetProbe(capability, {
+      runId: 'RUN-PERSISTENT-LOCALHOST', target: persistentTarget,
+      probedAt: '2026-08-02T00:00:03.000Z', strategy: 'application-ready',
+    })
+    expect(persistent).toMatchObject({
+      status: 'ready', identityMatched: true, observedTitle: '开发预览',
+      diagnostics: {
+        resourceSummary: { closureComplete: false },
+      },
+    })
+    expect(chainedScriptRequests).toBeGreaterThan(0)
   } finally {
     await new Promise<void>((resolvePromise) => fixture.close(() => resolvePromise()))
   }

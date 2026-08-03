@@ -7,14 +7,22 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 
 把 PRD、审批、受控浏览器事实和同代测试资产编排成可审计闭环。默认使用本机系统 Google Chrome，由 Runtime 为每次运行创建一次性 Profile 并强制经过 Gateway；Skill 只组织中文语义步骤和用户交互，确定性计算与安全决定必须来自独立的 Runtime Host。
 
+调用者的最小输入是 PRD 来源、唯一验证地址，以及目标需要登录时的可用角色/secret ref。不得要求调用者手工创建 `.biztest/project.json`、requirements contract、machine view、source bundle 或 project policy；这些是 Skill 自动准备并交给 Runtime 冻结的内部材料。若目标不属于代码仓库，Skill 应创建独立、可持续到 Run 结束的接入工作区；若项目已有身份或 policy，必须复用且不得覆盖。
+
+## Runtime 0.5.x 工作流契约
+
+Skill 版本与 Runtime 版本必须同为 `0.5.x`，并由 `skill.manifest.json` 的精确版本和 `doctor --json` 返回值进一步闭合。新 Run 的高层主线固定为：`create-run` 冻结来源，`prepare-prd-understanding` 固化唯一语义投影，`compile-prd-run` 编译 Case/Action/Oracle，`configure-target` 配置目标，`probe-target` 做无副作用浏览器诊断，随后 `get-acceptance-review` 与 `confirm-acceptance-review` 完成执行前语义确认。每条业务边之后立即执行 `get-status`，只按 Runtime 返回的 `nextEdge` 继续。
+
+`submit-candidate` 不属于新 Run 的默认主线，只为 Runtime 明确返回该边的旧 Run/旧 Artifact 流程保留。不得因为旧文档示例存在该命令，就跳过 `compile-prd-run`、目标配置、目标探测或语义确认。严格 JSON 只由 Skill/Facade 构造；当 Runtime 拒绝输入时，向调用者展示 `validationIssues` 的字段路径、约束与修复建议，而不是只返回“envelope 无效”。
+
 ## 默认首次使用流程
 
 1. 先加载 [prd-understanding.md](prd-understanding.md)。已有当前、已确认且 route 指向 `e2e` 的唯一 requirements contract 时直接复用；否则优先恰好调用一次已安装的 `$understand-prd`。若该外部 Skill 不可用，就由本 Skill 按 `prd-understanding.md` 内置流程完成同一次来源收集、问题闭合、节点化和契约确认；两条路径互斥，绝不执行两次，也不得另写一份 PRD 总结。
-2. 缺少 Runtime 时，只提示用户显式安装精确 `0.5.0`。
+2. 缺少 Runtime 时，只提示用户显式安装精确 `0.5.1`。
 3. 运行 `~/.mutil-skills/bin/repo-e2e configure-browser --system`，验证并选择系统 Google Chrome；只有系统 Chrome 不可用且用户明确选择兜底时，才运行 `install-browser` 安装托管 Chromium。
 4. 运行 `~/.mutil-skills/bin/repo-e2e configure-approval --mode local-confirmation`。默认流程不执行 `identity enroll`；WebAuthn 是用户显式选择的增强模式。
 5. 运行 `~/.mutil-skills/bin/repo-e2e doctor --json`；仅在 `ready:true` 后创建 Run。
-6. `create-run` 同时提交带严格 front matter 的唯一 requirements contract 原文、主 PRD 与执行所需依赖来源；把 Runtime 返回的 `understandingContractDigest`、`sourceRevision` 与 Source Bundle 绑定进同一契约的 E2E execution projection。调用一次 `prepare-prd-understanding`，让 Runtime 复算并持久化唯一 prepared projection。随后把声明式 Case、Action 和 Oracle 设计一次性交给 `compile-prd-run`；只使用 Runtime 返回的稳定 Case ID、Action ID、Oracle ID、`compilerDigest` 和 `caseSchedule`，不得由 Skill 生成或覆盖这些可信事实。
+6. Skill 自动准备接入工作区中的 `.biztest/project.json`、requirements contract、machine view、来源快照和 project policy；不得要求调用者手工创建这些内部文件。`create-run` 同时提交带严格 front matter 的唯一 requirements contract 原文、主 PRD 与执行所需依赖来源；把 Runtime 返回的 `understandingContractDigest`、`sourceRevision` 与 Source Bundle 绑定进同一契约的 E2E execution projection。调用一次 `prepare-prd-understanding`，让 Runtime 复算并持久化唯一 prepared projection。随后把声明式 Case、Action 和 Oracle 设计一次性交给 `compile-prd-run`；只使用 Runtime 返回的稳定 Case ID、Action ID、Oracle ID、`compilerDigest` 和 `caseSchedule`，不得由 Skill 生成或覆盖这些可信事实。
 7. 根据用户给出的唯一验证地址配置 `TargetContract`，明确环境、目标 URL、允许导航 origin 与可配置页面身份策略；立即由系统 Chrome 在任何授权前执行无副作用 Target Probe。命令行无法访问 localhost 不是目标不可用的证明，浏览器侧探测结果才是诊断依据。Probe 只确认地址可达和页面身份，不推导 locator、不执行 Case、不产生写请求。
 8. 覆盖资产与 Target Probe 齐备后取得 Runtime 的 `AcceptanceReview`，在 Discovery 授权和可信浏览器预检前按“PRD 原文 → Clause 原文与处置 → Requirement → Rule → Oracle → Case”向调用者展示，并用 `review --run` 读取、`confirm-review --run` 确认当前 `reviewDigest`。Runtime 返回 `confirmation-required` 时必须暂停并等待调用者明确确认；确认前不得执行 Discovery、可信浏览器预检或 locator 绑定。该确认只核对 LLM 的需求、交互、范围和用例理解；它不是 Execution Approval，也不是第二次 `$understand-prd`。确认后按 Runtime `nextEdge` 完成 Discovery、只读预检与绑定、执行审批和 Case 执行。
 9. Runtime 完成最终化后调用 `render-report`。需要指定位置时传 `outputRoot`；否则报告写入 `~/.mutil-skills/e2e/reports/<asset-id>/<run-id>/`。交付独立 Run Workspace 中的 JSON、Markdown、HTML、原始 PNG 和 Playwright Trace；`.biztest`、Git、CI Artifact 和对象存储只作为可选发布适配器。
@@ -27,7 +35,7 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 | --- | --- | --- |
 | Runtime Host | `doctor --json` 返回经过验证的 installation manifest、protocol major 和 safety probes | `environment-blocked / E2E_RUNTIME_HOST_UNAVAILABLE`，仅建议精确版本安装 |
 
-缺失时只展示以下精确建议，不得自行执行：`npm exec --yes --package=@mutil-skills/e2e-runtime@0.5.0 -- repo-e2e install-runtime --version 0.5.0`。不得探测、导入或建议安装 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Report、Store 等低层包。
+缺失时只展示以下精确建议，不得自行执行：`npm exec --yes --package=@mutil-skills/e2e-runtime@0.5.1 -- repo-e2e install-runtime --version 0.5.1`。不得探测、导入或建议安装 Contracts、Engine、Authority、Gateway、Browser、Sanitizer、Report、Store 等低层包。
 
 ## 面向调用者的友好门面
 

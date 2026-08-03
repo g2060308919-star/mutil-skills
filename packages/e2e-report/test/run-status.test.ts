@@ -40,6 +40,47 @@ describe('run status renderer', () => {
       expect(rendered.html).toContain(expected)
     }
   })
+
+  test('目标阻断时展示页面快照、资源分类、恢复动作并明确业务 Case 未执行', () => {
+    const status = statusFixture() as any
+    status.condition = { kind: 'blocked-retryable',
+      reasonCode: 'E2E_TARGET_PROBE_RESOURCE_TIMEOUT', resumeStage: 'target-probe' }
+    status.stage = 'target-probe'
+    status.targetProbe = {
+      schemaVersion: '1.0.0', trust: 'untrusted-diagnostic', runId: 'RUN-1',
+      targetContractDigest: d('6'), status: 'environment-blocked',
+      reasonCode: 'E2E_TARGET_PROBE_RESOURCE_TIMEOUT',
+      observedUrl: 'http://localhost:3000/orders', observedTitle: '订单预览',
+      identityMatched: false, probedAt: '2026-08-03T00:00:00.000Z', diagnosticDigest: d('7'),
+      diagnostics: {
+        strategy: 'resource-closure', attempt: 1, domPresent: true,
+        visibleTextSummary: '订单工作台正在加载',
+        consoleErrors: ['[pageerror] bootstrap failed'],
+        failedRequests: [{ method: 'GET', url: 'http://localhost:3000/app.js',
+          resourceType: 'script', errorText: 'net::ERR_FAILED' }],
+        pendingResources: [{ url: 'http://localhost:3000/hmr', resourceType: 'fetch' }],
+        persistentConnections: [{ url: 'ws://localhost:3000/hmr', resourceType: 'websocket' }],
+        advisories: ['E2E_TARGET_PROBE_EXPECTED_PERSISTENT_CONNECTION'],
+        resourceSummary: { observedCount: 4, approvedCount: 2, pendingCount: 1,
+          persistentConnectionCount: 1, closureComplete: false },
+      },
+    }
+    status.remediation = ['对同一 Run 执行 retry，自动切换 application-ready 策略。']
+
+    const rendered = renderRunStatus(status)
+    for (const expected of [
+      '目标探测诊断', '订单预览', '订单工作台正在加载', 'bootstrap failed',
+      'closureComplete', 'application-ready', 'ws://localhost:3000/hmr',
+      'E2E_TARGET_PROBE_EXPECTED_PERSISTENT_CONNECTION',
+    ]) {
+      expect(rendered.markdown).toContain(expected)
+      expect(rendered.html).toContain(expected)
+    }
+    expect(rendered.markdown).toContain('业务动作：未执行')
+    expect(rendered.markdown).toContain('Attempt：1')
+    expect(rendered.html).toContain('<dt>业务动作</dt><dd>未执行</dd>')
+    expect(rendered.html).toContain('<dt>Attempt</dt><dd>1</dd>')
+  })
 })
 
 function acceptanceReviewFixture() {

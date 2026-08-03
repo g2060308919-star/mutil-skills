@@ -34,6 +34,17 @@ describe('PRDRunCompiler', () => {
       item.oracles.some((oracle) => oracle.acceptanceCriterion === '结果 1 可见'))).toHaveLength(2)
   })
 
+  test('拒绝同一 Case 用多个主 Oracle 重复映射同一验收标准', () => {
+    const repeated = inputFixture()
+    repeated.design.cases[0]!.oracles.push({
+      ...structuredClone(repeated.design.cases[0]!.oracles[0]!),
+      oracleKey: 'visible-duplicate',
+    })
+
+    expect(() => compilePrdRun(repeated))
+      .toThrow(/E2E_RUNTIME_PRD_RUN_ACCEPTANCE_DUPLICATE/)
+  })
+
   test('blocks missing, altered, or unauthorized acceptance mappings', () => {
     const missing = inputFixture()
     missing.design.cases[0]!.oracles = []

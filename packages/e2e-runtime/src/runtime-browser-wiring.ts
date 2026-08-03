@@ -77,7 +77,11 @@ import {
   BrowserPreflightFactSchema,
   type RuntimePreflightCapability,
 } from './runtime-preflight.js'
-import { authorizeTargetProbe, type TargetProbeCapability } from './target-probe.js'
+import {
+  authorizeTargetProbe,
+  type TargetProbeCapability,
+  type TargetProbeDiagnostics,
+} from './target-probe.js'
 import {
   TrustedActionRunner,
   authorizeRuntimeReadExecutor,
@@ -647,9 +651,16 @@ export function createProductionTargetProbeCapability(input: {
   installation: RuntimeInstallation
 }): TargetProbeCapability {
   const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
-  return authorizeTargetProbe(async ({ runId, contract }) => {
-    const discoveredRequests = new Map<string, { method: 'GET' | 'HEAD'; url: string }>()
-    discoveredRequests.set(`GET\0${contract.targetUrl}`, { method: 'GET', url: contract.targetUrl })
+  return authorizeTargetProbe(async ({ runId, contract, strategy, attempt }) => {
+    const discoveredRequests = new Map<string, {
+      method: 'GET' | 'HEAD'; url: string; resourceType: string
+    }>()
+    discoveredRequests.set(`GET\0${contract.targetUrl}`, {
+      method: 'GET', url: contract.targetUrl, resourceType: 'document',
+    })
+    let observedUrl = contract.targetUrl
+    let observedTitle = ''
+    let lastDiagnostics = emptyProductionTargetProbeDiagnostics(strategy, attempt)
     try {
       for (let round = 0; round < 5; round += 1) {
         const approvedRequests = targetProbeApprovedRequests([...discoveredRequests.values()])
@@ -664,7 +675,12 @@ export function createProductionTargetProbeCapability(input: {
             homeDir: input.homeDir, runId,
             installation: await browserInstallation(), gateway,
           })
-          const observed = new Map<string, { method: 'GET' | 'HEAD'; url: string }>()
+          const observed = new Map<string, {
+            method: 'GET' | 'HEAD'; url: string; resourceType: string
+          }>()
+          const consoleErrors: string[] = []
+          const failedRequests: TargetProbeDiagnostics['failedRequests'] = []
+          const persistentConnections = new Map<string, { url: string; resourceType: string }>()
           browser.page.on('request', (request) => {
             const method = request.method().toUpperCase()
             if (method !== 'GET' && method !== 'HEAD') return
@@ -673,7 +689,33 @@ export function createProductionTargetProbeCapability(input: {
             if (!contract.allowedNavigationOrigins.includes(url.origin)
               || !['http:', 'https:'].includes(url.protocol)) return
             url.hash = ''
-            observed.set(`${method}\0${url.href}`, { method, url: url.href })
+            observed.set(`${method}\0${url.href}`, {
+              method, url: url.href, resourceType: request.resourceType(),
+            })
+          })
+          browser.page.on('console', (message) => {
+            if (message.type() === 'error' && consoleErrors.length < 20) {
+              consoleErrors.push(message.text().slice(0, 4_096))
+            }
+          })
+          browser.page.on('pageerror', (error) => {
+            if (consoleErrors.length < 20) {
+              consoleErrors.push(`[pageerror] ${String(error)}`.slice(0, 4_096))
+            }
+          })
+          browser.page.on('requestfailed', (request) => {
+            if (failedRequests.length >= 50) return
+            failedRequests.push({
+              method: request.method().slice(0, 16), url: request.url(),
+              resourceType: request.resourceType().slice(0, 64),
+              errorText: (request.failure()?.errorText ?? 'request failed').slice(0, 4_096),
+            })
+          })
+          browser.page.on('websocket', (socket) => {
+            if (persistentConnections.size >= 50) return
+            const item = { url: socket.url(), resourceType: 'websocket' }
+            persistentConnections.set(socket.url(), item)
+            socket.on('close', () => persistentConnections.delete(socket.url()))
           })
           const rules = projectGatewayRules({ runId, approvedRequests }).rules
           await getControlledBrowserSessionBinding(browser).executeWithCorrelations(
@@ -688,10 +730,53 @@ export function createProductionTargetProbeCapability(input: {
             })),
             async () => {
               await browser!.page.goto(contract.targetUrl, { waitUntil: 'domcontentloaded' })
-              await browser!.page.waitForLoadState('networkidle', { timeout: 2_000 }).catch(() => undefined)
+              if (strategy !== 'dom-identity') {
+                await browser!.page.waitForLoadState('networkidle', { timeout: 2_000 })
+                  .catch(() => undefined)
+              }
             },
           )
           const additions = [...observed.entries()].filter(([key]) => !discoveredRequests.has(key))
+          const page = new PlaywrightPageAdapter(browser.page)
+          const evaluation = await page.evaluateIdentity(contract.pageIdentityPolicy)
+          observedUrl = browser.page.url()
+          observedTitle = await browser.page.title().catch(() => '')
+          const visibleTextSummary = await browser.page.locator('body').innerText({ timeout: 500 })
+            .then((text) => text.replace(/\s+/gu, ' ').trim().slice(0, 4_096))
+            .catch(() => '')
+          lastDiagnostics = {
+            strategy, attempt,
+            domPresent: await browser.page.locator('html').count().then((count) => count > 0)
+              .catch(() => false),
+            visibleTextSummary,
+            consoleErrors,
+            failedRequests,
+            pendingResources: additions.slice(0, 256).map(([, request]) => ({
+              url: request.url, resourceType: request.resourceType,
+            })),
+            persistentConnections: [...persistentConnections.values()],
+            advisories: [
+              ...(additions.length > 0 ? ['E2E_TARGET_PROBE_RESOURCE_TIMEOUT'] : []),
+              ...(persistentConnections.size > 0
+                ? ['E2E_TARGET_PROBE_EXPECTED_PERSISTENT_CONNECTION'] : []),
+              ...(hasPageRuntimeError(consoleErrors)
+                ? ['E2E_TARGET_PROBE_PAGE_RUNTIME_ERROR'] : []),
+            ],
+            resourceSummary: {
+              observedCount: observed.size,
+              approvedCount: discoveredRequests.size,
+              pendingCount: additions.length,
+              persistentConnectionCount: persistentConnections.size,
+              closureComplete: additions.length === 0,
+            },
+          }
+          if (evaluation.matched && strategy !== 'resource-closure') {
+            await gateway.handle.finalize()
+            return {
+              status: 'ready', observedUrl, observedTitle, identityMatched: true,
+              diagnostics: lastDiagnostics,
+            }
+          }
           if (additions.length > 0) {
             if (round === 4 || discoveredRequests.size + additions.length > 256) {
               throw new E2EError({
@@ -702,17 +787,14 @@ export function createProductionTargetProbeCapability(input: {
             for (const [key, request] of additions) discoveredRequests.set(key, request)
             continue
           }
-          const page = new PlaywrightPageAdapter(browser.page)
-          const evaluation = await page.evaluateIdentity(contract.pageIdentityPolicy)
           await gateway.handle.finalize()
           return evaluation.matched ? {
             status: 'ready',
-            observedUrl: browser.page.url(), observedTitle: await browser.page.title(),
-            identityMatched: true,
+            observedUrl, observedTitle, identityMatched: true, diagnostics: lastDiagnostics,
           } : {
-            status: 'page-identity-mismatch', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH',
-            observedUrl: browser.page.url(), observedTitle: await browser.page.title(),
-            identityMatched: false,
+            status: targetProbeBlockedStatus(lastDiagnostics),
+            reasonCode: targetProbeBlockedReason(lastDiagnostics),
+            observedUrl, observedTitle, identityMatched: false, diagnostics: lastDiagnostics,
           }
         } finally {
           await settleRuntimeBrowserResources(undefined, [
@@ -723,16 +805,59 @@ export function createProductionTargetProbeCapability(input: {
       }
     } catch (error) {
       return {
-        status: 'environment-blocked', reasonCode: error instanceof E2EError
-          ? error.code : 'E2E_TARGET_BROWSER_NAVIGATION_FAILED',
-        observedUrl: contract.targetUrl, observedTitle: '', identityMatched: false,
+        status: 'environment-blocked',
+        reasonCode: targetProbeFailureReason(error, lastDiagnostics),
+        observedUrl, observedTitle, identityMatched: false, diagnostics: lastDiagnostics,
       }
     }
     return {
       status: 'environment-blocked', reasonCode: 'E2E_TARGET_BROWSER_NAVIGATION_FAILED',
-      observedUrl: contract.targetUrl, observedTitle: '', identityMatched: false,
+      observedUrl, observedTitle, identityMatched: false, diagnostics: lastDiagnostics,
     }
   })
+}
+
+function emptyProductionTargetProbeDiagnostics(
+  strategy: TargetProbeDiagnostics['strategy'], attempt: number,
+): TargetProbeDiagnostics {
+  return {
+    strategy, attempt, domPresent: false, visibleTextSummary: '', consoleErrors: [],
+    failedRequests: [], pendingResources: [], persistentConnections: [], advisories: [],
+    resourceSummary: {
+      observedCount: 0, approvedCount: 0, pendingCount: 0,
+      persistentConnectionCount: 0, closureComplete: true,
+    },
+  }
+}
+
+function targetProbeBlockedStatus(diagnostics: TargetProbeDiagnostics):
+  'environment-blocked' | 'page-identity-mismatch' {
+  return diagnostics.domPresent && !hasPageRuntimeError(diagnostics.consoleErrors)
+    ? 'page-identity-mismatch' : 'environment-blocked'
+}
+
+function targetProbeBlockedReason(diagnostics: TargetProbeDiagnostics): string {
+  if (!diagnostics.domPresent) return 'E2E_TARGET_PROBE_PAGE_NOT_READY'
+  if (hasPageRuntimeError(diagnostics.consoleErrors)) return 'E2E_TARGET_PROBE_PAGE_RUNTIME_ERROR'
+  if (diagnostics.failedRequests.some((request) => request.resourceType === 'script')) {
+    return 'E2E_TARGET_PROBE_PENDING_SCRIPT'
+  }
+  return 'E2E_RUNTIME_PAGE_MISMATCH'
+}
+
+function targetProbeFailureReason(error: unknown, diagnostics: TargetProbeDiagnostics): string {
+  if (hasPageRuntimeError(diagnostics.consoleErrors)) return 'E2E_TARGET_PROBE_PAGE_RUNTIME_ERROR'
+  if (diagnostics.failedRequests.some((request) => request.resourceType === 'script')) {
+    return 'E2E_TARGET_PROBE_PENDING_SCRIPT'
+  }
+  if (diagnostics.persistentConnections.length > 0) {
+    return 'E2E_TARGET_PROBE_EXPECTED_PERSISTENT_CONNECTION'
+  }
+  return error instanceof E2EError ? error.code : 'E2E_TARGET_BROWSER_NAVIGATION_FAILED'
+}
+
+function hasPageRuntimeError(consoleErrors: readonly string[]): boolean {
+  return consoleErrors.some((message) => message.startsWith('[pageerror] '))
 }
 
 function targetProbeApprovedRequests(

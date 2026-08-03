@@ -22,6 +22,8 @@ Runtime 内部必须调用 Engine `classify()`、持久化 attempt 审计、atte
 
 在运行状态内按页面身份、角色、数据、Gateway、环境、oracle、自动化顺序诊断单次失败；先从落盘 artifact 重算初始链、事件链和 workflowDigest，校验 generation/asset/PRD/run/case 绑定、slot 连续性、started→terminal 顺序、事件时间单调、proof purpose/keyId/signature 与前后摘要。再把每个 terminal 的 status、mode、effect、effectObservation、reservationSafeToVoid 与 `browser-results v2` 精确对齐；`passed|failed` 还必须把 terminal 的 reservationId/outcomeDigest 与 Gateway 签名 reservation 精确对齐；只有 effect-aware retry 规则允许时才生成下一 slot。所有 slot 结束再进入 `diagnosing`，冻结 final attempt、分类、change digest 和 assertionChanged=false，然后请求 `finalizing`。
 
+Target Probe 发生在业务执行前，恢复不属于 Browser action retry：读取上一 attempt 的 reasonCode 与 diagnostics，禁止重复同一策略。资源闭包/长期连接问题从 `resource-closure` 升级到 `application-ready`，再到只读 `dom-identity`；页面脚本异常、origin 漂移、安全边界或页面身份仍不可信时不得降级。每次阻断后必须立即 `get-status`，把当前可行动诊断发布到 `~/.mutil-skills/e2e/runs/<asset>/<run>/run-status.html`，明确标记业务 Case 未执行，不得等待最终报告才告知用户。
+
 ## 退出条件
 
 每个 Case 有可复算的唯一 selection、selectedAttemptId、完整 event-chain digest 和分类；运行状态内的允许重试已成功或安全耗尽；`diagnosing` 只退出到 Engine 接受的 `finalizing`。

@@ -30,12 +30,17 @@ export function compilePrdRun(input: CompilePrdRunInput): CompiledPrdRunPlan {
 
   const observed = new Set<string>()
   for (const testCase of design.cases) {
+    const caseObserved = new Set<string>()
     for (const nodeId of testCase.contractNodeIds) {
       if (!authorized.has(nodeId)) throw compilerError('E2E_RUNTIME_PRD_RUN_NODE_UNAUTHORIZED')
     }
     for (const oracle of testCase.oracles) {
       const key = criterionKey(oracle.contractNodeId, oracle.acceptanceCriterion)
       if (!expected.has(key)) throw compilerError('E2E_RUNTIME_PRD_RUN_ACCEPTANCE_UNKNOWN')
+      if (caseObserved.has(key)) {
+        throw compilerError('E2E_RUNTIME_PRD_RUN_ACCEPTANCE_DUPLICATE')
+      }
+      caseObserved.add(key)
       observed.add(key)
     }
   }

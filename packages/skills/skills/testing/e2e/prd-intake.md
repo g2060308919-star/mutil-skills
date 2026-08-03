@@ -8,6 +8,8 @@
 
 `project-policy`、含 `understanding` execution projection 的 `prd-request`，以及可读取的 PRD 正文/附件引用；秘密只允许 secret ref。投影必须来自同一份已确认 requirements contract，携带 `confirmed-by-caller`、当前 `sourceRevision`、`projectionDigest`、完整 Source Bundle、REQ/RULE/FLOW 节点与 `pendingQuestions: []`。
 
+这些属于 Skill 与 Runtime 的内部接入材料。不得要求调用者手工创建 `.biztest/project.json`、requirements contract、machine view、source bundle 或 project policy；Skill 自动准备相对 POSIX 路径的冻结文件并保留原始 origin，Runtime 只读取已冻结 bytes。已有项目身份和 policy 不得静默覆盖；无代码仓库时使用独立接入工作区，使 Run 不依赖 Git。
+
 ## 允许的语义输出
 
 来源候选、PRD-ID 建议和无法判定的身份问题只能回到 `$understand-prd` 更新同一契约，不得在本阶段建立第二份摘要。标准输出为带完整 Clause Inventory 的 `prd-manifest`、`prd-diff`
@@ -19,6 +21,8 @@ authority-confirmed，禁止标题相似度或模型猜测。
 ## 调用的确定性 API
 
 Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON stdin/stdout 发送严格 `RuntimeRequestEnvelope` 并解析严格 `RuntimeResponseEnvelope`。每个业务命令成功后必须立即调用 `get-status`；只有严格拒绝未知字段的 `get-status` `result` 才提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`，其他命令结果不得用于猜测状态；来源读取结果与语义候选通过 `create-run`/`prepare-prd-understanding`/`submit-candidate` 交给 Runtime，Skill 不自行计算 `sourceRevision` 或 `projectionDigest`。
+
+请求被拒绝时先读取 `error.details.validationIssues`，逐条向调用者展示字段 `path`、约束 `constraint` 和修复动作；路径、sourceSpan、安全 ID、空 locator name 与未知字段均按可修复输入问题处理。只有缺少业务事实或需要语义决定时才询问调用者，不得把严格 JSON envelope 或内部文件格式转嫁给调用者。
 
 Runtime 内部必须调用 Contracts parse/migrate、`E2EEngine.ingest()`、Authority 来源签名和 Engine `transition()`；摘要、Revision
 只采用 API 返回值。Lineage 决定必须由登记的 `lineage-approver` 通过专用 Decision key 签发

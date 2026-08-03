@@ -136,8 +136,12 @@ _避免使用_：backend service、Skill runtime
 _避免使用_：scattered baseUrl、caller environment flag
 
 **Target Probe**：
-在可信预检之前运行的非权威浏览器诊断。它使用系统 Chrome、一次性 Profile 和 Gateway，只在显式来源内发现有限的 GET/HEAD 精确资源闭包，用于判断浏览器可达性和页面身份；结果不能进入 Verdict。
+在可信预检之前运行的非权威浏览器诊断。它使用系统 Chrome、一次性 Profile 和 Gateway，只在显式来源内发现有限的 GET/HEAD 精确资源闭包，并按执行 lane 与历史诊断选择 resource-closure、application-ready 或 dom-identity。长期连接、Console/pageerror、失败请求、DOM 和可见文本进入诊断快照；preview-readonly 可在业务页面身份可信时结束非权威 Probe，但写操作的可信 preflight 不降级。结果不能进入 Verdict。
 _避免使用_：curl health check、trusted preflight、business evidence
+
+**Target Probe Diagnostics**：
+一次 Probe attempt 的有界、可持久化诊断事实，包含策略、URL/title、DOM、可见文本摘要、Console/pageerror、失败请求、未闭合资源、长期连接、资源计数和 advisory。阻断状态通过 Run Status Workspace 自动呈现，且必须标记业务 Case 是否实际执行。
+_避免使用_：generic timeout string、terminal business report
 
 **Page Identity Policy**：
 由 URL origin/path 与 test-id、ARIA role/name、受限 CSS、可见文本、标题或 heading 等业务信号组成的声明式页面身份。普通文本不能独自构成身份，策略不允许脚本、XPath、伪元素或任意 evaluate。
