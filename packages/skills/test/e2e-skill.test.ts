@@ -50,14 +50,14 @@ describe('E2E skill package', () => {
           'verified installation manifest + protocol major + safety probes',
         ],
         whenMissing: {
-          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.5.0',
+          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.5.1',
           terminalState: 'environment-blocked', reasonCode: 'E2E_RUNTIME_HOST_UNAVAILABLE',
         },
       }],
       source: {
-        url: 'https://github.com/g2060308919-star/mutil-skills/blob/v0.5.0/packages/skills/skills/testing/e2e/SKILL.md',
-        rawUrl: 'https://raw.githubusercontent.com/g2060308919-star/mutil-skills/v0.5.0/packages/skills/skills/testing/e2e/SKILL.md',
-        ref: 'v0.5.0',
+        url: 'https://github.com/g2060308919-star/mutil-skills/blob/v0.5.1/packages/skills/skills/testing/e2e/SKILL.md',
+        rawUrl: 'https://raw.githubusercontent.com/g2060308919-star/mutil-skills/v0.5.1/packages/skills/skills/testing/e2e/SKILL.md',
+        ref: 'v0.5.1',
       },
     })
   })
@@ -159,7 +159,7 @@ describe('E2E skill package', () => {
     expect(entry).toContain('默认流程不执行 `identity enroll`')
     expect(entry).toContain('`confirmation-required`')
     expect(entry).toContain('必须暂停并等待调用者明确确认')
-    expect(entry).toContain('@mutil-skills/e2e-runtime@0.5.0')
+    expect(entry).toContain('@mutil-skills/e2e-runtime@0.5.1')
     expect(approval).toContain('`confirm-approval`')
     expect(approval).toContain('本地确认不验证自然人身份，也不证明职责分离')
     expect(browser).toContain('系统 Google Chrome')
@@ -396,6 +396,53 @@ describe('E2E skill package', () => {
     expect(entry).toContain('Facade')
     expect(entry).toContain('reasonCode')
     expect(entry).toContain('remediation')
+  })
+
+  test('0.5 工作流以高层编译和目标探测为主线，submit-candidate 只服务旧 Run', async () => {
+    const entry = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+
+    expect(entry).toContain('## Runtime 0.5.x 工作流契约')
+    for (const command of [
+      'create-run', 'prepare-prd-understanding', 'compile-prd-run',
+      'configure-target', 'probe-target', 'get-acceptance-review',
+      'confirm-acceptance-review',
+    ]) {
+      expect(entry).toContain(`\`${command}\``)
+    }
+    expect(entry).toContain('`submit-candidate` 不属于新 Run 的默认主线')
+    expect(entry).toContain('Skill 版本与 Runtime 版本必须同为 `0.5.x`')
+  })
+
+  test('调用者只提供 PRD 与目标地址，Skill 自动准备并冻结 Runtime 输入材料', async () => {
+    const entry = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+    const understanding = await readFile(new URL('../skills/testing/e2e/prd-understanding.md', import.meta.url), 'utf8')
+    const intake = await readFile(new URL('../skills/testing/e2e/prd-intake.md', import.meta.url), 'utf8')
+
+    for (const text of [entry, understanding, intake]) {
+      expect(text).toContain('不得要求调用者手工创建')
+      expect(text).toContain('.biztest/project.json')
+      expect(text).toContain('requirements contract')
+      expect(text).toContain('project policy')
+    }
+    expect(entry).toContain('调用者的最小输入')
+    expect(entry).toContain('repo-e2e prepare-input')
+    expect(entry).toContain('不联网、不重新理解 PRD')
+    expect(understanding).toContain('URL 来源只抓取一次')
+    expect(intake).toContain('validationIssues')
+  })
+
+  test('Target Probe 按 lane 和历史诊断升级策略并生成可行动中间报告', async () => {
+    const preflight = await readFile(new URL('../skills/testing/e2e/browser-preflight-binding.md', import.meta.url), 'utf8')
+    const diagnosis = await readFile(new URL('../skills/testing/e2e/diagnosis-healing.md', import.meta.url), 'utf8')
+
+    for (const strategy of ['resource-closure', 'application-ready', 'dom-identity']) {
+      expect(preflight).toContain(`\`${strategy}\``)
+    }
+    expect(preflight).toContain('preview-readonly')
+    expect(preflight).toContain('WebSocket')
+    expect(preflight).toContain('业务动作：未执行')
+    expect(diagnosis).toContain('重复同一策略')
+    expect(diagnosis).toContain('run-status.html')
   })
 
   test('语义审查发生在浏览器预检之前并明确隔离目标、参考与依赖来源', async () => {

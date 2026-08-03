@@ -1,5 +1,5 @@
 import { Readable, Writable } from 'node:stream'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   E2EError,
@@ -18,7 +18,7 @@ import {
 } from '../src/protocol.js'
 
 const digest = `sha256:${'0'.repeat(64)}`
-const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.5.0 -- repo-e2e install-runtime --version 0.5.0'
+const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.5.1 -- repo-e2e install-runtime --version 0.5.1'
 const doctorRequest = {
   schemaVersion: '1.0.0',
   requestId: 'REQ-1',
@@ -32,6 +32,28 @@ describe('Runtime protocol', () => {
     expect(parseRuntimeRequest(JSON.stringify(doctorRequest))).toEqual(doctorRequest)
     expectInvalidRequest(() => parseRuntimeRequest('{'))
     expectInvalidRequest(() => parseRuntimeRequest(JSON.stringify({ ...doctorRequest, callerExecutable: '/bin/sh' })))
+  })
+
+  test('严格 envelope 无效时返回字段路径、约束和可执行修正提示', () => {
+    let error: E2EError | undefined
+    try {
+      parseRuntimeRequest(JSON.stringify({ ...doctorRequest, payload: { unexpected: true } }))
+    } catch (cause) {
+      error = cause as E2EError
+    }
+
+    expect(error).toBeInstanceOf(E2EError)
+    expect(runtimeErrorResponse('REQ-INVALID', error!)).toMatchObject({
+      error: {
+        code: 'E2E_RUNTIME_REQUEST_INVALID',
+        details: {
+          validationIssues: [expect.objectContaining({
+            path: 'payload', code: 'unrecognized_keys',
+          })],
+          remediation: expect.stringContaining('字段路径'),
+        },
+      },
+    })
   })
 
   test('classifies an unsupported protocol major without converting it', () => {
@@ -53,7 +75,7 @@ describe('Runtime protocol', () => {
     expect(response).toMatchObject({
       schemaVersion: '1.0.0',
       requestId: 'REQ-1',
-      runtime: { version: '0.5.0', installationDigest: digest },
+      runtime: { version: '0.5.1', installationDigest: digest },
       ok: false,
       error: {
         code: 'E2E_RUNTIME_NOT_INSTALLED',
@@ -97,6 +119,100 @@ describe('Runtime protocol', () => {
 })
 
 describe('repo-e2e CLI protocol slice', () => {
+  test('prepare-input 自动创建项目身份并封装 PRD 快照，不要求用户手写内部文件', async () => {
+    const roots = await createRuntimeTestRoots()
+    const stdout = captureWritable()
+    const input = {
+      schemaVersion: '1.0.0', assetId: 'COOPER',
+      prd: { text: '# Cooper PRD\n', origin: {
+        kind: 'url', ref: 'https://example.test/cooper-prd',
+      } },
+      understandingContract: {
+        text: '# Cooper requirements contract\n',
+        header: {
+          schemaVersion: '1.0.0', contractId: 'COOPER-CONTRACT', contractVersion: 1,
+          contractStatus: 'confirmed-by-caller',
+          authorization: { status: 'confirmed-by-caller', contractVersion: 1,
+            confirmedAt: '2026-08-03T00:00:00.000Z' },
+        },
+      },
+      supportingSources: [],
+    }
+
+    expect(await runCli(
+      ['prepare-input'], Readable.from([JSON.stringify(input)]), stdout.stream,
+      captureWritable().stream,
+      { ...minimalCliDependencies(), currentWorkingDirectory: () => roots.project },
+    )).toBe(0)
+
+    const response = JSON.parse(stdout.text())
+    expect(response).toMatchObject({ ok: true, result: {
+      schemaVersion: '1.0.0', intakeId: expect.stringMatching(/^INTAKE-/),
+      projectRoot: await realpath(roots.project),
+      create: { assetId: 'COOPER', prdSource: { kind: 'file', origin: input.prd.origin } },
+    } })
+    const prdPath = join(roots.project, response.result.create.prdSource.path)
+    expect(await readFile(prdPath, 'utf8')).toBe('# Cooper PRD\n')
+    expect((await lstat(prdPath)).mode & 0o777).toBe(0o600)
+    expect(JSON.parse(await readFile(join(roots.project, '.biztest', 'project.json'), 'utf8')))
+      .toMatchObject({ schemaVersion: '1.0.0', projectId: expect.stringMatching(/^E2E-/) })
+  })
+
+  test('prepare-input 的非法草稿返回可定位的 validationIssues', async () => {
+    const roots = await createRuntimeTestRoots()
+    const stdout = captureWritable()
+    expect(await runCli(
+      ['prepare-input'], Readable.from(['{"schemaVersion":"1.0.0"}']), stdout.stream,
+      captureWritable().stream,
+      { ...minimalCliDependencies(), currentWorkingDirectory: () => roots.project },
+    )).toBe(2)
+    expect(JSON.parse(stdout.text())).toMatchObject({ ok: false, error: {
+      code: 'E2E_RUNTIME_REQUEST_INVALID', details: {
+        validationIssues: expect.arrayContaining([expect.objectContaining({ path: 'assetId' })]),
+      },
+    } })
+  })
+
+  test('prepare-input 把不可写工作区分类为环境阻断，而不是 JSON 字段错误', async () => {
+    const roots = await createRuntimeTestRoots()
+    await chmod(roots.project, 0o500)
+    const stdout = captureWritable()
+    try {
+      expect(await runCli(
+        ['prepare-input'], Readable.from([JSON.stringify(validInputDraft())]), stdout.stream,
+        captureWritable().stream,
+        { ...minimalCliDependencies(), currentWorkingDirectory: () => roots.project },
+      )).toBe(3)
+      expect(JSON.parse(stdout.text())).toMatchObject({ ok: false, error: {
+        code: 'E2E_INPUT_PREPARATION_FAILED', category: 'environment',
+        terminalState: 'environment-blocked', retryable: true,
+      } })
+    } finally {
+      await chmod(roots.project, 0o700)
+    }
+  })
+
+  test('prepare-input 接受超过 RPC 4 MiB、但未超过来源总量门的合法输入', async () => {
+    const roots = await createRuntimeTestRoots()
+    const stdout = captureWritable()
+    const input = validInputDraft()
+    input.supportingSources = Array.from({ length: 5 }, (_, index) => ({
+      sourceId: `SOURCE-${index + 1}`, text: 'x'.repeat(900_000), mediaType: 'text/plain',
+      origin: { kind: 'text' as const, ref: `source-${index + 1}` },
+    }))
+    expect(Buffer.byteLength(JSON.stringify(input))).toBeGreaterThan(4 * 1024 * 1024)
+    expect(await runCli(
+      ['prepare-input'], Readable.from([JSON.stringify(input)]), stdout.stream,
+      captureWritable().stream,
+      { ...minimalCliDependencies(), currentWorkingDirectory: () => roots.project },
+    )).toBe(0)
+    expect(JSON.parse(stdout.text())).toMatchObject({ ok: true, result: {
+      create: { supportingSources: expect.arrayContaining([
+        expect.objectContaining({ sourceId: 'SOURCE-5' }),
+      ]) },
+    } })
+  })
+
   test('status --run 生成 get-status envelope，用户不需手写 JSON', async () => {
     const stdout = captureWritable()
     const handle = vi.fn(async (request: any) => RuntimeResponseEnvelopeSchema.parse({
@@ -283,7 +399,7 @@ describe('repo-e2e CLI protocol slice', () => {
     const exitCode = await runCli(['--version'], Readable.from([]), stdout.stream, stderr.stream)
 
     expect(exitCode).toBe(0)
-    expect(stdout.text()).toBe('0.5.0\n')
+    expect(stdout.text()).toBe('0.5.1\n')
     expect(stderr.text()).toBe('')
   })
 
@@ -640,6 +756,28 @@ function minimalCliDependencies() {
     homeDir: '/safe/home',
     installRuntime: async () => ({ version: '0.1.0', installationDigest: digest, launcher: '/safe/repo-e2e' }),
     uninstallRuntime: async () => ({ version: '0.1.0' }),
+  }
+}
+
+function validInputDraft() {
+  return {
+    schemaVersion: '1.0.0' as const, assetId: 'COOPER',
+    prd: { text: '# Cooper PRD\n', origin: {
+      kind: 'url' as const, ref: 'https://example.test/cooper-prd',
+    } },
+    understandingContract: {
+      text: '# Cooper requirements contract\n',
+      header: {
+        schemaVersion: '1.0.0' as const, contractId: 'COOPER-CONTRACT', contractVersion: 1,
+        contractStatus: 'confirmed-by-caller' as const,
+        authorization: { status: 'confirmed-by-caller' as const, contractVersion: 1,
+          confirmedAt: '2026-08-03T00:00:00.000Z' },
+      },
+    },
+    supportingSources: [] as Array<{
+      sourceId: string; text: string; mediaType: string
+      origin: { kind: 'text'; ref: string }
+    }>,
   }
 }
 

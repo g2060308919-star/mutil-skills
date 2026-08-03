@@ -16,6 +16,7 @@ import {
   RunHandleSchema,
   RunStageSchema,
   TargetContractSchema,
+  TargetProbeDiagnosticsSchema,
 } from './e2e-flow.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -341,6 +342,7 @@ export const RuntimeStatusResultSchema = z.object({
     observedUrl: z.string().url(),
     observedTitle: z.string(),
     identityMatched: z.boolean(),
+    diagnostics: TargetProbeDiagnosticsSchema.optional(),
     probedAt: z.string().datetime(),
     diagnosticDigest: DigestSchema,
   }).strict().optional(),
@@ -382,6 +384,7 @@ export const RuntimeCompilePrdRunResultSchema = z.object({
     contractProjectionDigest: DigestSchema,
     caseIds: z.array(SafeIdSchema).min(1).max(1_000),
     mappedAcceptanceCount: z.number().int().positive(),
+    oracleCount: z.number().int().positive(),
   }).strict(),
   unresolvedItems: z.array(z.string().min(1)).max(10_000),
   nextRequiredDecision: z.literal('scope'),

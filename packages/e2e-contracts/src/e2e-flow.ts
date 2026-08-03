@@ -94,6 +94,41 @@ export const TargetContractSchema = z.object({
   })
 })
 
+const TargetProbeDiagnosticTextSchema = z.string().max(4_096)
+export const TargetProbeResourceSchema = z.object({
+  url: z.string().url(),
+  resourceType: z.string().min(1).max(64),
+}).strict()
+export const TargetProbeFailedRequestSchema = TargetProbeResourceSchema.extend({
+  method: z.string().min(1).max(16),
+  errorText: TargetProbeDiagnosticTextSchema,
+}).strict()
+export const TargetProbeStrategySchema = z.enum([
+  'resource-closure', 'application-ready', 'dom-identity',
+])
+export const TargetProbeDiagnosticsSchema = z.object({
+  strategy: TargetProbeStrategySchema.default('resource-closure'),
+  attempt: z.number().int().positive().max(100).default(1),
+  domPresent: z.boolean(),
+  visibleTextSummary: TargetProbeDiagnosticTextSchema,
+  consoleErrors: z.array(TargetProbeDiagnosticTextSchema).max(20),
+  failedRequests: z.array(TargetProbeFailedRequestSchema).max(50),
+  pendingResources: z.array(TargetProbeResourceSchema).max(256),
+  unapprovedResources: z.array(TargetProbeResourceSchema).max(256).default([]),
+  persistentConnections: z.array(TargetProbeResourceSchema).max(50).default([]),
+  advisories: z.array(ReasonCodeSchema).max(20).default([]),
+  resourceSummary: z.object({
+    observedCount: z.number().int().nonnegative(),
+    approvedCount: z.number().int().nonnegative(),
+    pendingCount: z.number().int().nonnegative(),
+    unapprovedCount: z.number().int().nonnegative().default(0),
+    persistentConnectionCount: z.number().int().nonnegative().default(0),
+    closureComplete: z.boolean(),
+  }).strict(),
+}).strict()
+export type TargetProbeStrategy = z.infer<typeof TargetProbeStrategySchema>
+export type TargetProbeDiagnostics = z.infer<typeof TargetProbeDiagnosticsSchema>
+
 export const ExecutionLaneSchema = z.enum([
   'preview-readonly',
   'real-reversible-write',

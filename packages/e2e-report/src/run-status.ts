@@ -43,6 +43,7 @@ function markdown(status: RuntimeStatusResult): string {
     '',
     ...cases.flatMap(markdownCaseDetails),
     ...markdownAcceptanceReview(status),
+    ...markdownTargetProbe(status),
     '## 修复建议',
     '',
     ...(status.remediation?.map((item) => `- ${text(item)}`) ?? ['- 无']),
@@ -79,10 +80,67 @@ function htmlDocument(status: RuntimeStatusResult): string {
     ...(cases.length === 0 ? ['<p>尚未生成 Semantic Case。</p>'] : []),
     '</div>',
     ...htmlAcceptanceReview(status),
+    ...htmlTargetProbe(status),
     '<h2>修复建议</h2><ul>',
     ...(status.remediation?.map((item) => `<li>${escapeHtml(item)}</li>`) ?? ['<li>无</li>']),
     '</ul></main></body></html>\n',
   ].join('')
+}
+
+function markdownTargetProbe(status: RuntimeStatusResult): string[] {
+  const probe = status.targetProbe
+  if (probe === undefined || probe.status === 'ready') return []
+  const diagnostics = probe.diagnostics
+  return [
+    '## 目标探测诊断',
+    '',
+    `- 失败命令：probe-target`,
+    `- Runtime 错误码：${text(probe.reasonCode ?? 'E2E_TARGET_PROBE_BLOCKED')}`,
+    `- 页面 URL：${text(probe.observedUrl)}`,
+    `- 页面标题：${text(probe.observedTitle || '未取得')}`,
+    `- DOM：${diagnostics?.domPresent === true ? '已生成' : '未确认'}`,
+    `- 可见文本摘要：${text(diagnostics?.visibleTextSummary || '无')}`,
+    `- 探测策略：${text(diagnostics?.strategy ?? '未知')}`,
+    `- Attempt：${diagnostics?.attempt ?? 0}`,
+    `- 业务动作：未执行`,
+    `- closureComplete：${diagnostics?.resourceSummary.closureComplete ?? false}`,
+    `- 资源计数：observed=${diagnostics?.resourceSummary.observedCount ?? 0} / approved=${diagnostics?.resourceSummary.approvedCount ?? 0} / pending=${diagnostics?.resourceSummary.pendingCount ?? 0} / unapproved=${diagnostics?.resourceSummary.unapprovedCount ?? 0} / persistent=${diagnostics?.resourceSummary.persistentConnectionCount ?? 0}`,
+    `- Console Error：${diagnostics?.consoleErrors.map(text).join('；') || '无'}`,
+    `- Failed Request：${diagnostics?.failedRequests.map((item) => text(`${item.method} ${item.url} (${item.resourceType}: ${item.errorText})`)).join('；') || '无'}`,
+    `- Pending Resource：${diagnostics?.pendingResources.map((item) => text(`${item.resourceType}:${item.url}`)).join('；') || '无'}`,
+    `- Unapproved Discovered Resource：${diagnostics?.unapprovedResources.map((item) => text(`${item.resourceType}:${item.url}`)).join('；') || '无'}`,
+    `- Persistent Connection：${diagnostics?.persistentConnections.map((item) => text(`${item.resourceType}:${item.url}`)).join('；') || '无'}`,
+    `- Advisory：${diagnostics?.advisories.map(text).join('；') || '无'}`,
+    `- 已验证摘要：${Object.entries(status.verifiedDigests).map(([key, value]) => text(`${key}=${value}`)).join('；') || '无'}`,
+    '',
+  ]
+}
+
+function htmlTargetProbe(status: RuntimeStatusResult): string[] {
+  const probe = status.targetProbe
+  if (probe === undefined || probe.status === 'ready') return []
+  const diagnostics = probe.diagnostics
+  return [
+    '<h2>目标探测诊断</h2><article><dl>',
+    pair('失败命令', 'probe-target'),
+    pair('Runtime 错误码', probe.reasonCode ?? 'E2E_TARGET_PROBE_BLOCKED'),
+    pair('页面 URL', probe.observedUrl),
+    pair('页面标题', probe.observedTitle || '未取得'),
+    pair('DOM', diagnostics?.domPresent === true ? '已生成' : '未确认'),
+    pair('可见文本摘要', diagnostics?.visibleTextSummary || '无'),
+    pair('探测策略', diagnostics?.strategy ?? '未知'),
+    pair('Attempt', String(diagnostics?.attempt ?? 0)),
+    pair('业务动作', '未执行'),
+    pair('closureComplete', String(diagnostics?.resourceSummary.closureComplete ?? false)),
+    pair('资源计数', `observed=${diagnostics?.resourceSummary.observedCount ?? 0} / approved=${diagnostics?.resourceSummary.approvedCount ?? 0} / pending=${diagnostics?.resourceSummary.pendingCount ?? 0} / unapproved=${diagnostics?.resourceSummary.unapprovedCount ?? 0} / persistent=${diagnostics?.resourceSummary.persistentConnectionCount ?? 0}`),
+    pair('Console Error', diagnostics?.consoleErrors.join('；') || '无'),
+    pair('Failed Request', diagnostics?.failedRequests.map((item) => `${item.method} ${item.url} (${item.resourceType}: ${item.errorText})`).join('；') || '无'),
+    pair('Pending Resource', diagnostics?.pendingResources.map((item) => `${item.resourceType}:${item.url}`).join('；') || '无'),
+    pair('Unapproved Discovered Resource', diagnostics?.unapprovedResources.map((item) => `${item.resourceType}:${item.url}`).join('；') || '无'),
+    pair('Persistent Connection', diagnostics?.persistentConnections.map((item) => `${item.resourceType}:${item.url}`).join('；') || '无'),
+    pair('Advisory', diagnostics?.advisories.join('；') || '无'),
+    '</dl></article>',
+  ]
 }
 
 function classify(status: RuntimeStatusResult): {

@@ -14,6 +14,11 @@ import {
 } from '@mutil-skills/e2e-contracts'
 import { randomUUID } from 'node:crypto'
 import { RUNTIME_PACKAGE_VERSION } from './protocol.js'
+import {
+  E2EInputPreparer,
+  type E2EInputDraft,
+  type PreparedE2EInput,
+} from './e2e-input-preparer.js'
 
 type CreateRunRequest = Extract<RuntimeRequestEnvelope, { command: 'create-run' }>
 
@@ -26,6 +31,7 @@ export interface E2EFacadeOptions {
   host: E2EFacadeHost
   requestId?: () => string
   clientVersion?: string
+  inputPreparer?: Pick<E2EInputPreparer, 'prepare'>
 }
 
 export class E2EFacadeError extends Error {
@@ -61,16 +67,34 @@ export class E2EFacadeError extends Error {
 
 /** Skill 使用的高层门面：生成 envelope/requestId，跟随 Runtime 状态，不自己实现状态机。 */
 export class E2EFacade {
-  readonly #projectRoot: string
+  #projectRoot: string
   readonly #host: E2EFacadeHost
   readonly #requestId: () => string
   readonly #clientVersion: string
+  readonly #inputPreparer: Pick<E2EInputPreparer, 'prepare'>
 
   constructor(options: E2EFacadeOptions) {
     this.#projectRoot = options.projectRoot
     this.#host = options.host
     this.#requestId = options.requestId ?? (() => `FACADE-${randomUUID()}`)
     this.#clientVersion = options.clientVersion ?? RUNTIME_PACKAGE_VERSION
+    this.#inputPreparer = options.inputPreparer ?? new E2EInputPreparer(options.projectRoot)
+  }
+
+  async prepareInput(input: E2EInputDraft): Promise<PreparedE2EInput> {
+    return await this.#inputPreparer.prepare(input)
+  }
+
+  async startFromInput(input: {
+    intake: E2EInputDraft
+    targetContract?: TargetContract
+  }): Promise<RuntimeStatusResult> {
+    const prepared = await this.prepareInput(input.intake)
+    this.#projectRoot = prepared.projectRoot
+    return await this.start({
+      create: prepared.create,
+      ...(input.targetContract === undefined ? {} : { targetContract: input.targetContract }),
+    })
   }
 
   async start(input: {
@@ -81,7 +105,6 @@ export class E2EFacade {
     const runId = requireString(created, 'runId')
     if (input.targetContract !== undefined) {
       await this.#invoke('configure-target', { runId, targetContract: input.targetContract }, runId)
-      await this.#invoke('probe-target', { runId }, runId)
     }
     return await this.#statusByRunId(runId)
   }

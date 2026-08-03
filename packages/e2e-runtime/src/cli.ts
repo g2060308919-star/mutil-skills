@@ -25,6 +25,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
+import { z } from 'zod'
 import {
   installRuntime as installRuntimeDefault,
   type InstallRuntimeOptions,
@@ -103,6 +104,7 @@ import {
 } from './authority-host.js'
 import { approvalModeFromTrustedFacts } from './local-approval-confirmations.js'
 import { RunStatusPublisher } from './run-status-publisher.js'
+import { E2EInputDraftSchema, E2EInputPreparer } from './e2e-input-preparer.js'
 import {
   RUNTIME_PACKAGE_VERSION,
   exitCodeForResponse,
@@ -182,6 +184,31 @@ export async function runCli(
   if (arguments_.length === 1 && arguments_[0] === '--version') {
     await writeText(stdout, `${RUNTIME_PACKAGE_VERSION}\n`)
     return 0
+  }
+
+  if (arguments_.length === 1 && arguments_[0] === 'prepare-input') {
+    try {
+      const bytes = await readBytes(stdin, 12 * 1024 * 1024)
+      const draft = E2EInputDraftSchema.parse(JSON.parse(decodeRequestBytes(bytes)) as unknown)
+      const projectRoot = (dependencies.currentWorkingDirectory ?? process.cwd)()
+      const prepared = await new E2EInputPreparer(projectRoot).prepare(draft)
+      await responseWriter.write(`${canonicalizeJson({ ok: true, result: prepared })}\n`)
+      return 0
+    } catch (cause) {
+      const error = cause instanceof E2EError ? cause : cause instanceof SyntaxError
+        || cause instanceof z.ZodError
+        ? new E2EError({
+          code: 'E2E_RUNTIME_REQUEST_INVALID', category: 'input',
+          message: 'prepare-input 需要严格的 E2EInputDraft JSON；请按 validationIssues 修正',
+          retryable: false, cause,
+        })
+        : new E2EError({
+          code: 'E2E_INPUT_PREPARATION_FAILED', category: 'environment',
+          message: '接入工作区不可安全写入；请检查目录权限、可用空间和文件类型后重试',
+          retryable: true, cause,
+        })
+      return writeErrorResponse(responseWriter, 'PREPARE-INPUT', error)
+    }
   }
 
   if (arguments_[0] === 'status') {
@@ -447,7 +474,7 @@ export async function runCli(
     return writeErrorResponse(responseWriter, 'UNKNOWN', new E2EError({
       code: 'E2E_RUNTIME_REQUEST_INVALID',
       category: 'input',
-      message: '只支持 --version、rpc 或显式 Runtime 安装管理命令',
+      message: '只支持 --version、prepare-input、rpc 或显式 Runtime 安装管理命令',
       retryable: false,
     }))
   }
@@ -1105,16 +1132,16 @@ class SingleJsonResponseWriter {
   }
 }
 
-async function readBytes(stream: Readable): Promise<Buffer> {
+async function readBytes(stream: Readable, maxBytes = 4 * 1024 * 1024): Promise<Buffer> {
   const chunks: Buffer[] = []
   let byteLength = 0
   for await (const chunk of stream) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     byteLength += bytes.byteLength
-    if (byteLength > 4 * 1024 * 1024) throw new E2EError({
+    if (byteLength > maxBytes) throw new E2EError({
       code: 'E2E_RUNTIME_REQUEST_TOO_LARGE',
       category: 'input',
-      message: 'Runtime RPC request 超过 4 MiB',
+      message: `Runtime 输入超过 ${Math.floor(maxBytes / (1024 * 1024))} MiB`,
       retryable: false,
     })
     chunks.push(bytes)

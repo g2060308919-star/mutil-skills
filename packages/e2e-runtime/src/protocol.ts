@@ -7,8 +7,9 @@ import {
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
 } from '@mutil-skills/e2e-contracts'
+import { z } from 'zod'
 
-export const RUNTIME_PACKAGE_VERSION = '0.5.0'
+export const RUNTIME_PACKAGE_VERSION = '0.5.1'
 
 const runtimeInstallRemediation = `npm exec --yes --package=@mutil-skills/e2e-runtime@${RUNTIME_PACKAGE_VERSION} -- repo-e2e install-runtime --version ${RUNTIME_PACKAGE_VERSION}`
 
@@ -54,6 +55,9 @@ export function runtimeErrorResponse(
   const category = MIGRATION_REASON_CODES.has(error.code)
     ? 'migration'
     : runtimeCategory(error.category)
+  const details = error.code === 'E2E_RUNTIME_NOT_INSTALLED'
+    ? { remediation: runtimeInstallRemediation }
+    : validationErrorDetails(error)
   return {
     schemaVersion: '1.0.0',
     requestId,
@@ -65,10 +69,22 @@ export function runtimeErrorResponse(
       terminalState: terminalStateForCategory(category),
       message: error.message,
       retryable: error.retryable,
-      ...(error.code === 'E2E_RUNTIME_NOT_INSTALLED'
-        ? { details: { remediation: runtimeInstallRemediation } }
-        : {}),
+      ...(details === undefined ? {} : { details }),
     },
+  }
+}
+
+function validationErrorDetails(error: E2EError): Record<string, unknown> | undefined {
+  if (error.code !== 'E2E_RUNTIME_REQUEST_INVALID' || !(error.cause instanceof z.ZodError)) {
+    return undefined
+  }
+  return {
+    validationIssues: error.cause.issues.slice(0, 20).map((issue) => ({
+      path: issue.path.length === 0 ? '$' : issue.path.join('.'),
+      code: issue.code,
+      constraint: issue.message.slice(0, 1_024),
+    })),
+    remediation: '按 validationIssues 的字段路径修正输入；删除未声明字段，并使用对应命令的严格 schema 示例后重试。',
   }
 }
 

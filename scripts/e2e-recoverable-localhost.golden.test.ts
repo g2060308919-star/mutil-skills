@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, expect, test } from 'vitest'
 import { createTargetContractFact } from '../packages/e2e-runtime/src/target-contract.js'
 import { runTargetProbe } from '../packages/e2e-runtime/src/target-probe.js'
+import { RUNTIME_PACKAGE_VERSION } from '../packages/e2e-runtime/src/protocol.js'
 import {
   bootstrapInstalledBrowserRuntime,
   createProductionTargetProbeCapability,
@@ -39,7 +40,9 @@ test('真实 localhost SPA 经 Gateway 加载静态资源，并在同一 Run 修
   ])
 
   let scriptRequests = 0
+  let chainedScriptRequests = 0
   let writeRequests = 0
+  const openResponses = new Set<import('node:http').ServerResponse>()
   const fixture = createServer((request, response) => {
     if (request.method === 'POST') {
       writeRequests += 1
@@ -56,6 +59,69 @@ test('真实 localhost SPA 经 Gateway 加载静态资源，并在同一 Run 修
       ].join(';'))
       return
     }
+    if (request.url === '/persistent-app.js') {
+      chainedScriptRequests += 1
+      response.setHeader('content-type', 'text/javascript; charset=utf-8')
+      response.end([
+        "document.querySelector('#root').innerHTML = '<section data-testid=\"persistent-card\">开发预览已就绪</section>'",
+        `fetch('/hmr-poll-${chainedScriptRequests}.json').catch(() => undefined)`,
+      ].join(';'))
+      return
+    }
+    if (request.url === '/sse-app.js') {
+      response.setHeader('content-type', 'text/javascript; charset=utf-8')
+      response.end([
+        "document.querySelector('#root').innerHTML = '<section data-testid=\"sse-card\">SSE 预览已就绪</section>'",
+        "new EventSource('/events')",
+      ].join(';'))
+      return
+    }
+    if (request.url === '/pending-app.js') {
+      response.setHeader('content-type', 'text/javascript; charset=utf-8')
+      response.end([
+        "document.querySelector('#root').innerHTML = '<section data-testid=\"pending-card\">慢资源页面已就绪</section>'",
+        "fetch('/slow-resource.json').catch(() => undefined)",
+      ].join(';'))
+      return
+    }
+    if (request.url === '/runtime-error') {
+      response.setHeader('content-type', 'text/html; charset=utf-8')
+      response.end('<!doctype html><title>脚本异常</title><main data-testid="error-card">页面身份已生成</main><script>for(let i=0;i<25;i++)console.error(`noise-${i}`);queueMicrotask(() => { throw new Error("bootstrap exploded") })</script>')
+      return
+    }
+    if (request.url === '/events') {
+      response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+      response.write('data: ready\n\n')
+      openResponses.add(response)
+      response.once('close', () => openResponses.delete(response))
+      return
+    }
+    if (request.url === '/slow-resource.json') {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      openResponses.add(response)
+      response.once('close', () => openResponses.delete(response))
+      return
+    }
+    if (/^\/hmr-poll-\d+\.json$/u.test(request.url ?? '')) {
+      response.setHeader('content-type', 'application/json; charset=utf-8')
+      response.end('{"ok":true}')
+      return
+    }
+    if (request.url === '/persistent') {
+      response.setHeader('content-type', 'text/html; charset=utf-8')
+      response.end('<!doctype html><title>开发预览</title><main id="root">加载中</main><script src="/persistent-app.js"></script>')
+      return
+    }
+    if (request.url === '/sse') {
+      response.setHeader('content-type', 'text/html; charset=utf-8')
+      response.end('<!doctype html><title>SSE 开发预览</title><main id="root">加载中</main><script src="/sse-app.js"></script>')
+      return
+    }
+    if (request.url === '/pending') {
+      response.setHeader('content-type', 'text/html; charset=utf-8')
+      response.end('<!doctype html><title>慢资源预览</title><main id="root">加载中</main><script src="/pending-app.js"></script>')
+      return
+    }
     response.setHeader('content-type', 'text/html; charset=utf-8')
     response.end('<!doctype html><title>本地应用</title><main id="root">加载中</main><script src="/app.js"></script>')
   })
@@ -67,7 +133,7 @@ test('真实 localhost SPA 经 Gateway 加载静态资源，并在同一 Run 修
   if (!address || typeof address === 'string') throw new Error('localhost fixture address missing')
   const origin = `http://127.0.0.1:${address.port}`
   const installation = {
-    version: '0.4.7', protocolMajor: 1 as const, versionRoot: sourceRoot,
+    version: RUNTIME_PACKAGE_VERSION, protocolMajor: 1 as const, versionRoot: sourceRoot,
     entrypoint: join(sourceRoot, 'packages', 'e2e-runtime', 'src', 'runtime-bin.ts'),
     installationDigest: `sha256:${'7'.repeat(64)}`, sourceRepositoryIndependent: true as const,
   }
@@ -129,7 +195,72 @@ test('真实 localhost SPA 经 Gateway 加载静态资源，并在同一 Run 修
     expect(revisedTarget.contractDigest).not.toBe(firstTarget.contractDigest)
     expect(scriptRequests).toBeGreaterThanOrEqual(2)
     expect(writeRequests).toBe(0)
+
+    const persistentTarget = createTargetContractFact({
+      schemaVersion: '1.0.0', targetUrl: `${origin}/persistent`, baseOrigin: origin,
+      environmentLabel: 'local-persistent-golden', allowedNavigationOrigins: [origin],
+      pageIdentityPolicy: {
+        schemaVersion: '1.0.0', url: { origin, pathPattern: '/persistent' },
+        signals: [{ kind: 'test-id', value: 'persistent-card' }], match: { mode: 'all' },
+      },
+    })
+    const persistent = await runTargetProbe(capability, {
+      runId: 'RUN-PERSISTENT-LOCALHOST', target: persistentTarget,
+      probedAt: '2026-08-02T00:00:03.000Z', strategy: 'application-ready',
+    })
+    expect(persistent).toMatchObject({
+      status: 'ready', identityMatched: true, observedTitle: '开发预览',
+      diagnostics: {
+        resourceSummary: { closureComplete: false },
+      },
+    })
+    expect(chainedScriptRequests).toBeGreaterThan(0)
+
+    const diagnosticContract = (path: string, testId: string) => createTargetContractFact({
+      schemaVersion: '1.0.0', targetUrl: `${origin}${path}`, baseOrigin: origin,
+      environmentLabel: 'local-diagnostic-golden', allowedNavigationOrigins: [origin],
+      pageIdentityPolicy: {
+        schemaVersion: '1.0.0', url: { origin, pathPattern: path },
+        signals: [{ kind: 'test-id', value: testId }], match: { mode: 'all' },
+      },
+    })
+    const runtimeError = await runTargetProbe(capability, {
+      runId: 'RUN-PAGEERROR-LOCALHOST', target: diagnosticContract('/runtime-error', 'error-card'),
+      probedAt: '2026-08-02T00:00:04.000Z', strategy: 'application-ready',
+    })
+    expect(runtimeError).toMatchObject({
+      status: 'environment-blocked', reasonCode: 'E2E_TARGET_PROBE_PAGE_RUNTIME_ERROR',
+      identityMatched: true, diagnostics: { consoleErrors: expect.arrayContaining([
+        expect.stringContaining('bootstrap exploded'),
+      ]) },
+    })
+
+    const sse = await runTargetProbe(capability, {
+      runId: 'RUN-SSE-LOCALHOST', target: diagnosticContract('/sse', 'sse-card'),
+      probedAt: '2026-08-02T00:00:05.000Z', strategy: 'application-ready',
+    })
+    expect(sse).toMatchObject({
+      status: 'ready', identityMatched: true,
+      diagnostics: { resourceSummary: { closureComplete: false } },
+    })
+    expect([
+      ...sse.diagnostics.persistentConnections,
+      ...sse.diagnostics.failedRequests,
+    ].map((resource) => resource.resourceType)).toContain('eventsource')
+
+    const pending = await runTargetProbe(capability, {
+      runId: 'RUN-PENDING-LOCALHOST', target: diagnosticContract('/pending', 'pending-card'),
+      probedAt: '2026-08-02T00:00:06.000Z', strategy: 'resource-closure',
+    })
+    expect(pending).toMatchObject({
+      status: 'environment-blocked', reasonCode: 'E2E_TARGET_PROBE_RESOURCE_TIMEOUT',
+      identityMatched: true,
+      diagnostics: { pendingResources: [expect.objectContaining({
+        url: `${origin}/slow-resource.json`, resourceType: 'fetch',
+      })], resourceSummary: { unapprovedCount: 0, closureComplete: false } },
+    })
   } finally {
+    for (const response of openResponses) response.destroy()
     await new Promise<void>((resolvePromise) => fixture.close(() => resolvePromise()))
   }
 }, 120_000)

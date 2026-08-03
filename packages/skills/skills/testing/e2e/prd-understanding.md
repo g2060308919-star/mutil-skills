@@ -4,6 +4,8 @@
 
 在创建 E2E Run 之前执行。若调用者已提供当前、已确认、`pendingQuestions` 为空且 execution projection route 精确指向 `e2e` 的 requirements contract，直接消费该版本；否则优先恰好调用一次已安装的 `$understand-prd`。若外部 Skill 不可用，本文件就是内置等价流程：在当前 E2E Skill 内完成一次来源收集、节点化、问题闭合和调用者确认。外部与内置路径互斥，同一目标只能执行一次，也不得创建平行的需求总结、交接文档或决定清单。
 
+调用者只需给出 PRD 来源和验证目标；不得要求调用者手工创建 `.biztest/project.json`、requirements contract、machine view、source bundle 或 project policy。Skill 负责在已有项目根或独立接入工作区内准备这些 Runtime 输入：已有身份与 policy 只读复用，缺失时生成新的安全项目 ID 与最小 policy，不覆盖业务文件。requirements contract 的语义内容仍必须经过本文件规定的调用者确认，自动准备不等于自动批准。
+
 ## 必需 Artifact 与摘要
 
 唯一 requirements contract、执行相关 Source Bundle、当前 `contractVersion`、REQ/RULE/FLOW 原子节点、source/decision anchors、授权节点集合、E2E route 和调用者确认状态。每个来源必须标注唯一角色：`target` 是本次被验收的 PRD/页面，`reference` 只帮助理解且不得产生覆盖 obligation，`necessary-dependency` 是执行目标需求不可缺少的规则或附件。进入 Runtime 的不是第二份契约，而是同一契约的 execution projection；Runtime 冻结契约原文并生成、验证当前 `sourceRevision`、`understandingContractDigest` 与 `projectionDigest`。契约中的全局背景和 out-of-scope 仍保留在唯一契约中，但不得伪装为本次执行来源，参考页面不得进入验收范围。
@@ -20,7 +22,7 @@ Skill 只通过固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，以 JSON std
 
 1. 判断当前对话是否已有唯一契约。仅当契约状态已确认、版本明确、目标节点全部授权、`pendingQuestions` 为空且 route 指向 `e2e` 时复用；否则仅选择一条路径：调用一次已安装的 `$understand-prd`，或在其不可用时执行本文件的同等调查与确认步骤。
 2. 为唯一契约写入严格 front matter：`schemaVersion`、`contractId`、`contractVersion`、`contractStatus`、`confirmationStatus`、`confirmationContractVersion`、`confirmedAt`；并嵌入唯一 `e2e-contract-machine-view:v1` JSON 区块，逐字保存 nodes、provenance/confirmed-decision、pendingQuestions、route 与 authorizedNodeIds。Runtime 会冻结整份原文并要求 execution projection 与该区块完全一致；该投影是机器视图，不是新的需求资产。
-3. 将契约原文、唯一 `target` 主 PRD 与 `necessary-dependency` 来源作为 `create-run` 文件来源提交。`reference` 只保留在 Skill 的 intake 说明中，不提交为 Runtime requirements source，也不得进入验收范围、Case coverage 或 verdict；如果其中某条规则确实不可缺少，必须先明确重分类为 `necessary-dependency` 并说明理由。一个 Run 只能有一组目标边界。URL 或文本来源必须先获得有界、可复读的本地快照，并在投影 `origin` 中保留原始 kind/ref；不得让 Runtime 在执行期读取漂移网页。主来源与依赖来源合计不得超过 Runtime 公布的 8 MiB 上限。
+3. 将契约原文、唯一 `target` 主 PRD 与 `necessary-dependency` 来源作为 `create-run` 文件来源提交。`reference` 只保留在 Skill 的 intake 说明中，不提交为 Runtime requirements source，也不得进入验收范围、Case coverage 或 verdict；如果其中某条规则确实不可缺少，必须先明确重分类为 `necessary-dependency` 并说明理由。一个 Run 只能有一组目标边界。URL 来源只抓取一次，立即保存为有界、可复读的本地快照，并在投影 `origin` 中保留原始 URL；文本来源同样先冻结为本地快照。不得让 Runtime 在执行期读取漂移网页。主来源与依赖来源合计不得超过 Runtime 公布的 8 MiB 上限。
 4. 读取 Runtime 返回的 `sourceRevision`、`understandingContractDigest` 和 Source Bundle 元数据，只把这些机器值绑定进投影草稿；调用一次 `prepare-prd-understanding`，由 Contracts/Runtime 复算、持久化并返回 `projectionDigest`。重复相同请求可幂等重放，不同投影会被拒绝；Skill 不得自行计算摘要或替换 prepared projection。
 5. Runtime 严格验证契约版本与 authorization version 相等、投影 machine view 与冻结契约正文完全一致、授权节点集合与投影节点集合相等、route 覆盖全部节点、Source Bundle 的 snapshot path/digest/length、原始 `origin` 与 `relevance` 全部一致、每个 `source-fact` 的逐字 quote 与 `sourceSpan` 回切结果一致。缺失引用、伪造来源或引文、过期版本、未解决问题或 inference 伪装都进入 `input-blocked`。
 6. 后续 `prd-manifest` 必须把每个来源锚点映射成同 sourceId、同 sourceSpan、同原文的 Clause；每个 Requirement、Rule 与 Flow 都必须通过 `contractNodeIds` 引用当前契约节点，每条契约验收条件都必须通过 `contractAcceptanceCriteria` 完整且唯一地映射到 Oracle。Oracle 再由既有 Coverage → Case → Step → Evidence 链闭合，不能反向改写契约。

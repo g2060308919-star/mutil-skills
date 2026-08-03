@@ -11,7 +11,42 @@ import { RUNTIME_PACKAGE_VERSION } from '../src/protocol.js'
 const d = (value: string): string => `sha256:${value.repeat(64)}`
 
 describe('E2EFacade', () => {
-  test('start 冻结来源、配置 Target 并在任何授权前完成无副作用 Probe', async () => {
+  test('startFromInput 自动准备内部文件并只把 create payload 交给 Runtime', async () => {
+    const commands: string[] = []
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'create-run') return success(request.requestId, { runId: 'RUN-1' })
+      return success(request.requestId, statusResult({
+        assetId: 'ASSET-1', runId: 'RUN-1', revision: 1, generationDigest: d('1'),
+      }))
+    }) }
+    const create = {
+      assetId: 'ASSET-1',
+      prdSource: { kind: 'file' as const, path: '.biztest/e2e-intake/ASSET-1/prd.md',
+        origin: { kind: 'url' as const, ref: 'https://example.test/prd' } },
+      understandingContract: { header: { schemaVersion: '1.0.0' as const,
+        contractId: 'CONTRACT-1', contractVersion: 1, contractStatus: 'confirmed-by-caller' as const,
+        authorization: { status: 'confirmed-by-caller' as const, contractVersion: 1,
+          confirmedAt: '2026-08-03T00:00:00.000Z' } },
+      source: { kind: 'file' as const, path: '.biztest/e2e-intake/ASSET-1/contract.md' } },
+      projectPolicyPath: '.biztest/e2e-intake/ASSET-1/policy.json',
+    }
+    const inputPreparer = { prepare: vi.fn(async () => ({
+      schemaVersion: '1.0.0' as const, intakeId: 'INTAKE-1', projectRoot: '/project', create,
+    })) }
+    const facade = new E2EFacade({ projectRoot: '/project', host, inputPreparer,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+
+    await facade.startFromInput({ intake: { schemaVersion: '1.0.0', assetId: 'ASSET-1',
+      prd: { text: '# PRD', origin: { kind: 'url', ref: 'https://example.test/prd' } },
+      understandingContract: { text: '# Contract', header: create.understandingContract.header } } })
+
+    expect(inputPreparer.prepare).toHaveBeenCalledOnce()
+    expect(commands).toEqual(['create-run', 'get-status'])
+    expect(host.handle).toHaveBeenCalledWith(expect.objectContaining({ payload: create }), expect.any(Uint8Array))
+  })
+
+  test('start 冻结来源并配置 Target，等待需求编译后再由状态边触发 Probe', async () => {
     const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 1, generationDigest: d('1') }
     const commands: string[] = []
     const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
@@ -44,7 +79,7 @@ describe('E2EFacade', () => {
       projectPolicyPath: 'policy.json',
     }, targetContract })
 
-    expect(commands).toEqual(['create-run', 'configure-target', 'probe-target', 'get-status'])
+    expect(commands).toEqual(['create-run', 'configure-target', 'get-status'])
   })
 
   test('status 内部生成严格 envelope，对外只使用 RunHandle', async () => {

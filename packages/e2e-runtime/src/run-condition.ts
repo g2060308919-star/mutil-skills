@@ -6,6 +6,7 @@ import {
   type WorkflowNode,
 } from '@mutil-skills/e2e-contracts'
 import type { RuntimeRunSnapshot } from './run-store.js'
+import { isTargetProbeRetryableReason } from './target-probe.js'
 
 const STAGE_BY_WORKFLOW: Record<WorkflowNode, RunStage> = {
   created: 'requirements',
@@ -45,7 +46,9 @@ export function projectRunStage(workflow: WorkflowNode): RunStage {
 export function classifyRunCondition(snapshot: RuntimeRunSnapshot): RunCondition {
   if (snapshot.targetProbe !== undefined && snapshot.targetProbe.status !== 'ready') {
     return RunConditionSchema.parse({
-      kind: 'blocked-retryable',
+      kind: hasPreviewReadonlyOnlyCases(snapshot)
+        && isTargetProbeRetryableReason(snapshot.targetProbe.reasonCode)
+        ? 'blocked-retryable' : 'blocked-requires-change',
       reasonCode: snapshot.targetProbe.reasonCode ?? 'E2E_TARGET_PROBE_BLOCKED',
       resumeStage: 'target-probe',
     })
@@ -76,6 +79,13 @@ export function classifyRunCondition(snapshot: RuntimeRunSnapshot): RunCondition
     resumeStage: projectRunStage(snapshot.workflow.current),
   })
   return RunConditionSchema.parse({ kind: 'ready' })
+}
+
+export function hasPreviewReadonlyOnlyCases(snapshot: RuntimeRunSnapshot): boolean {
+  const lanes = snapshot.compiledPrdRun?.cases
+    .map((testCase) => testCase.executionLane)
+    .filter((lane): lane is NonNullable<typeof lane> => lane !== undefined) ?? []
+  return lanes.length > 0 && lanes.every((lane) => lane === 'preview-readonly')
 }
 
 function terminalReasonCode(workflow: WorkflowNode): string {
