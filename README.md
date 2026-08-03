@@ -82,7 +82,7 @@ E2E Skill 负责从 PRD 编排需求、审批、受控浏览器执行、证据�
    ~/.mutil-skills/bin/repo-e2e doctor --json
    ```
 
-7. 进入用户项目，让 Agent 调用 E2E Skill 并提供 PRD 路径。所有状态转换都通过固定 launcher 的 JSON stdin/stdout RPC 完成，不从用户项目解析 Runtime package。
+7. 进入用户项目，让 Agent 调用 E2E Skill 并提供 PRD 来源与验证地址。Skill 只读取来源一次，并用固定 launcher 的 `prepare-input` 自动创建私有接入快照和 Runtime 输入；用户无需手工编写 `.biztest/project.json`、契约或 policy。所有状态转换仍通过 JSON stdin/stdout RPC 完成，不从用户项目解析 Runtime package。
 8. 验收完成后，在该项目的 `.biztest` 目录查看可追踪测试资产、脱敏证据与最终报告；Git 外原始证据不会作为报告资产发布。
 
 ### 运行边界

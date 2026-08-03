@@ -136,11 +136,11 @@ _避免使用_：backend service、Skill runtime
 _避免使用_：scattered baseUrl、caller environment flag
 
 **Target Probe**：
-在可信预检之前运行的非权威浏览器诊断。它使用系统 Chrome、一次性 Profile 和 Gateway，只在显式来源内发现有限的 GET/HEAD 精确资源闭包，并按执行 lane 与历史诊断选择 resource-closure、application-ready 或 dom-identity。长期连接、Console/pageerror、失败请求、DOM 和可见文本进入诊断快照；preview-readonly 可在业务页面身份可信时结束非权威 Probe，但写操作的可信 preflight 不降级。结果不能进入 Verdict。
+在需求理解和 Case lane 编译之后、可信预检之前运行的非权威浏览器诊断。它使用系统 Chrome、一次性 Profile 和 Gateway，只在显式来源内发现有限的 GET/HEAD 精确资源闭包，并按执行 lane 与历史诊断选择 resource-closure、application-ready 或 dom-identity。长期连接、Console/pageerror、失败请求、DOM 是否存在和可见文本进入诊断快照；只有 preview-readonly 的资源类阻断可以升级策略，页面身份、pageerror 和含写 lane 均不得降级。结果不能进入 Verdict。
 _避免使用_：curl health check、trusted preflight、business evidence
 
 **Target Probe Diagnostics**：
-一次 Probe attempt 的有界、可持久化诊断事实，包含策略、URL/title、DOM、可见文本摘要、Console/pageerror、失败请求、未闭合资源、长期连接、资源计数和 advisory。阻断状态通过 Run Status Workspace 自动呈现，且必须标记业务 Case 是否实际执行。
+一次 Probe attempt 的有界、可持久化诊断事实，包含策略、URL/title、DOM 是否存在、可见文本摘要、Console/pageerror、失败请求、真正未结束的请求、尚未获批的新 URL、长期连接、资源计数和 advisory。阻断状态通过 Run Status Workspace 自动呈现，且必须标记业务 Case 是否实际执行。
 _避免使用_：generic timeout string、terminal business report
 
 **Page Identity Policy**：

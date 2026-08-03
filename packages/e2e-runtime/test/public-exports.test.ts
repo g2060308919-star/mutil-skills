@@ -7,6 +7,8 @@ test('public Runtime package exposes the safe facade, status model, and protocol
     'AcceptanceReviewReceiptSchema',
     'E2EFacade',
     'E2EFacadeError',
+    'E2EInputDraftSchema',
+    'E2EInputPreparer',
     'RUNTIME_PACKAGE_VERSION',
     'RunStatusPublisher',
     'RuntimeDoctorProbeSchema',

@@ -59,10 +59,11 @@ describe('Target Probe', () => {
           resourceType: 'script', errorText: 'net::ERR_FAILED',
         }],
         pendingResources: [{ url: 'http://localhost:3000/bootstrap.js', resourceType: 'script' }],
+        unapprovedResources: [],
         persistentConnections: [],
         advisories: [],
         resourceSummary: {
-          observedCount: 3, approvedCount: 2, pendingCount: 1,
+          observedCount: 3, approvedCount: 2, pendingCount: 1, unapprovedCount: 0,
           persistentConnectionCount: 0, closureComplete: false,
         },
       },
@@ -77,7 +78,7 @@ describe('Target Probe', () => {
     })
   })
 
-  test('只读预览首次使用应用就绪，闭包失败重试按策略升级且不重复原探测', () => {
+  test('只读预览按策略升级，含写 lane 始终保持严格资源闭包', () => {
     expect(selectTargetProbePolicy({ previewReadonlyOnly: true })).toEqual({
       strategy: 'application-ready', attempt: 1,
     })
@@ -88,6 +89,14 @@ describe('Target Probe', () => {
     expect(selectTargetProbePolicy({
       previewReadonlyOnly: false,
       previous: blockedProbe('E2E_TARGET_PROBE_RESOURCE_CLOSURE_LIMIT', 1),
+    })).toEqual({ strategy: 'resource-closure', attempt: 2 })
+    expect(selectTargetProbePolicy({
+      previewReadonlyOnly: true,
+      previous: blockedProbe('E2E_RUNTIME_PAGE_MISMATCH', 1),
+    })).toEqual({ strategy: 'application-ready', attempt: 2 })
+    expect(selectTargetProbePolicy({
+      previewReadonlyOnly: true,
+      previous: blockedProbe('E2E_TARGET_PROBE_PAGE_NOT_READY', 1),
     })).toEqual({ strategy: 'application-ready', attempt: 2 })
   })
 })
@@ -98,9 +107,9 @@ function blockedProbe(reasonCode: string, attempt: number) {
     diagnostics: {
       strategy: 'resource-closure' as const, attempt, domPresent: true,
       visibleTextSummary: '加载中', consoleErrors: [], failedRequests: [],
-      pendingResources: [], persistentConnections: [], advisories: [],
+      pendingResources: [], unapprovedResources: [], persistentConnections: [], advisories: [],
       resourceSummary: {
-        observedCount: 2, approvedCount: 1, pendingCount: 1,
+        observedCount: 2, approvedCount: 1, pendingCount: 0, unapprovedCount: 1,
         persistentConnectionCount: 0, closureComplete: false,
       },
     },

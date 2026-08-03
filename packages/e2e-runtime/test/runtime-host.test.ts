@@ -291,7 +291,7 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
-  test('Target Probe 由受控浏览器提前运行并只持久化非权威诊断', async () => {
+  test('Target Probe 在需求理解与 Case lane 编译前 fail-closed', async () => {
     const probe = vi.fn(async () => ({
       status: 'ready' as const, observedUrl: 'http://localhost:3000/orders',
       observedTitle: '订单', identityMatched: true,
@@ -319,22 +319,22 @@ describe('E2ERuntimeHost', () => {
       contract: targetContract, contractDigest: expect.stringMatching(/^sha256:/),
     } })
 
-    const result = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+    const result = await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
       ...requestHeader('REQUEST-TARGET-PROBE'), command: 'probe-target',
       projectRoot: fixture.roots.project, payload: { runId: created.runId },
-    })))
-    expect(result).toMatchObject({ runId: created.runId, targetProbe: {
-      trust: 'untrusted-diagnostic', status: 'ready', identityMatched: true,
+    }))
+    expect(result).toMatchObject({ ok: false, error: {
+      code: 'E2E_TARGET_PROBE_CASES_REQUIRED', terminalState: 'input-blocked',
     } })
-    expect(probe).toHaveBeenCalledOnce()
+    expect(probe).not.toHaveBeenCalled()
     const persisted = await fixture.store.getRun(
       created.projectIdentityDigest as string, created.runId as string,
     )
     expect(persisted).toMatchObject({
       workflow: { current: 'created' },
       targetContract: { contract: targetContract },
-      targetProbe: { trust: 'untrusted-diagnostic', status: 'ready' },
     })
+    expect(persisted).not.toHaveProperty('targetProbe')
     expect(persisted?.trustedExecutionFacts).not.toHaveProperty('browser-preflight')
     await fixture.store.close()
   })

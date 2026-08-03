@@ -24,7 +24,53 @@ describe('Run stage and condition', () => {
     })
     expect(classifyRunCondition(fixture('rejected'))).toEqual({ kind: 'terminal', verdict: 'rejected' })
   })
+
+  test('只读 Target Probe 可重试，含写 lane 的严格探测要求先修复环境', () => {
+    const readonly = targetProbeBlocked('preview-readonly')
+    expect(classifyRunCondition(readonly)).toMatchObject({ kind: 'blocked-retryable' })
+
+    const write = targetProbeBlocked('real-reversible-write')
+    expect(classifyRunCondition(write)).toMatchObject({ kind: 'blocked-requires-change' })
+
+    const pageMismatch = targetProbeBlocked('preview-readonly')
+    pageMismatch.targetProbe!.reasonCode = 'E2E_RUNTIME_PAGE_MISMATCH'
+    expect(classifyRunCondition(pageMismatch)).toMatchObject({ kind: 'blocked-requires-change' })
+
+    const pageNotReady = targetProbeBlocked('preview-readonly')
+    pageNotReady.targetProbe!.reasonCode = 'E2E_TARGET_PROBE_PAGE_NOT_READY'
+    expect(classifyRunCondition(pageNotReady)).toMatchObject({ kind: 'blocked-retryable' })
+  })
 })
+
+function targetProbeBlocked(executionLane: 'preview-readonly' | 'real-reversible-write') {
+  const snapshot = fixture('created')
+  snapshot.compiledPrdRun = {
+    schemaVersion: '1.0.0', contractProjectionDigest: d('5'), compilerDigest: d('6'),
+    cases: [{ queueOrdinal: 0, caseId: 'CASE-0001', caseKey: 'case', title: 'case', actor: 'user',
+      contractNodeIds: ['REQ-1'], failurePolicy: 'stop-required', executionLane,
+      fixture: { actorRef: 'user', preconditions: [], seedStrategy: 'pre-existing' },
+      locatorCandidates: [], pageIdentityPolicy: { schemaVersion: '1.0.0',
+        url: { origin: 'http://localhost:3000', pathPattern: '/' },
+        signals: [{ kind: 'test-id', value: 'app' }], match: { mode: 'all' } },
+      actions: [{ actionId: 'ACTION-0001-0001', actionKey: 'read', kind: 'full-playwright',
+        effect: executionLane === 'preview-readonly' ? 'read' : 'reversible-write', statement: '验证' }],
+      oracles: [{ oracleId: 'ORACLE-0001-0001', oracleKey: 'oracle',
+        actionId: 'ACTION-0001-0001', contractNodeId: 'REQ-1', acceptanceCriterion: '可用' }] }],
+  }
+  snapshot.targetProbe = {
+    schemaVersion: '1.0.0', trust: 'untrusted-diagnostic', runId: snapshot.runId,
+    targetContractDigest: d('7'), status: 'environment-blocked',
+    reasonCode: 'E2E_TARGET_PROBE_RESOURCE_CLOSURE_LIMIT',
+    observedUrl: 'http://localhost:3000', observedTitle: '', identityMatched: true,
+    diagnostics: { strategy: 'resource-closure', attempt: 1, domPresent: true,
+      visibleTextSummary: 'App', consoleErrors: [], failedRequests: [], pendingResources: [],
+      unapprovedResources: [], persistentConnections: [], advisories: [], resourceSummary: { observedCount: 1,
+        approvedCount: 1, pendingCount: 0, unapprovedCount: 1,
+        persistentConnectionCount: 0, closureComplete: false } },
+    probedAt: '2026-08-03T00:00:00.000Z', diagnosticDigest: d('8'),
+  }
+  return snapshot
+}
 
 function fixture(current: RuntimeRunSnapshot['workflow']['current']): RuntimeRunSnapshot {
   return {

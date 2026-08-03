@@ -1,59 +1,33 @@
-import { canonicalizeJson, digestText, E2EError } from '@mutil-skills/e2e-contracts'
+import {
+  canonicalizeJson,
+  digestText,
+  E2EError,
+  TargetProbeDiagnosticsSchema,
+  TargetProbeStrategySchema,
+  type TargetProbeDiagnostics,
+  type TargetProbeStrategy,
+} from '@mutil-skills/e2e-contracts'
 import { z } from 'zod'
 import { TargetContractFactSchema, type TargetContractFact } from './target-contract.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
-const BoundedDiagnosticTextSchema = z.string().max(4_096)
-const TargetProbeResourceSchema = z.object({
-  url: z.string().url(),
-  resourceType: z.string().min(1).max(64),
-}).strict()
-const TargetProbeFailedRequestSchema = TargetProbeResourceSchema.extend({
-  method: z.string().min(1).max(16),
-  errorText: BoundedDiagnosticTextSchema,
-}).strict()
-
-export const TargetProbeStrategySchema = z.enum([
-  'resource-closure', 'application-ready', 'dom-identity',
-])
-export type TargetProbeStrategy = z.infer<typeof TargetProbeStrategySchema>
-
 const emptyDiagnostics = {
   strategy: 'resource-closure' as const,
   attempt: 1,
   domPresent: false,
   visibleTextSummary: '',
   consoleErrors: [] as string[],
-  failedRequests: [] as Array<z.infer<typeof TargetProbeFailedRequestSchema>>,
-  pendingResources: [] as Array<z.infer<typeof TargetProbeResourceSchema>>,
-  persistentConnections: [] as Array<z.infer<typeof TargetProbeResourceSchema>>,
+  failedRequests: [] as TargetProbeDiagnostics['failedRequests'],
+  pendingResources: [] as TargetProbeDiagnostics['pendingResources'],
+  unapprovedResources: [] as TargetProbeDiagnostics['unapprovedResources'],
+  persistentConnections: [] as TargetProbeDiagnostics['persistentConnections'],
   advisories: [] as string[],
   resourceSummary: {
     observedCount: 0, approvedCount: 0, pendingCount: 0,
-    persistentConnectionCount: 0, closureComplete: true,
+    unapprovedCount: 0, persistentConnectionCount: 0, closureComplete: true,
   },
 }
-
-export const TargetProbeDiagnosticsSchema = z.object({
-  strategy: TargetProbeStrategySchema.default('resource-closure'),
-  attempt: z.number().int().positive().max(100).default(1),
-  domPresent: z.boolean(),
-  visibleTextSummary: BoundedDiagnosticTextSchema,
-  consoleErrors: z.array(BoundedDiagnosticTextSchema).max(20),
-  failedRequests: z.array(TargetProbeFailedRequestSchema).max(50),
-  pendingResources: z.array(TargetProbeResourceSchema).max(256),
-  persistentConnections: z.array(TargetProbeResourceSchema).max(50).default([]),
-  advisories: z.array(z.string().regex(/^E2E_[A-Z0-9_]+$/)).max(20).default([]),
-  resourceSummary: z.object({
-    observedCount: z.number().int().nonnegative(),
-    approvedCount: z.number().int().nonnegative(),
-    pendingCount: z.number().int().nonnegative(),
-    persistentConnectionCount: z.number().int().nonnegative().default(0),
-    closureComplete: z.boolean(),
-  }).strict(),
-}).strict()
-export type TargetProbeDiagnostics = z.infer<typeof TargetProbeDiagnosticsSchema>
 
 export function selectTargetProbePolicy(input: {
   previewReadonlyOnly: boolean
@@ -61,16 +35,24 @@ export function selectTargetProbePolicy(input: {
 }): { strategy: TargetProbeStrategy; attempt: number } {
   const attempt = Math.min((input.previous?.diagnostics.attempt ?? 0) + 1, 100)
   if (input.previewReadonlyOnly) {
-    return { strategy: attempt === 1 ? 'application-ready' : 'dom-identity', attempt }
+    const canEscalate = input.previous !== undefined
+      && isTargetProbeStrategyEscalationReason(input.previous.reasonCode)
+    return { strategy: canEscalate ? 'dom-identity' : 'application-ready', attempt }
   }
-  if (input.previous !== undefined && [
+  return { strategy: 'resource-closure', attempt }
+}
+
+export function isTargetProbeRetryableReason(reasonCode: string | undefined): boolean {
+  return reasonCode === 'E2E_TARGET_PROBE_PAGE_NOT_READY'
+    || isTargetProbeStrategyEscalationReason(reasonCode)
+}
+
+function isTargetProbeStrategyEscalationReason(reasonCode: string | undefined): boolean {
+  return reasonCode !== undefined && [
     'E2E_TARGET_PROBE_RESOURCE_CLOSURE_LIMIT',
     'E2E_TARGET_PROBE_RESOURCE_TIMEOUT',
     'E2E_TARGET_PROBE_EXPECTED_PERSISTENT_CONNECTION',
-  ].includes(input.previous.reasonCode ?? '')) {
-    return { strategy: attempt === 2 ? 'application-ready' : 'dom-identity', attempt }
-  }
-  return { strategy: 'resource-closure', attempt }
+  ].includes(reasonCode)
 }
 
 const TargetProbeBackendOutputSchema = z.object({
@@ -81,8 +63,8 @@ const TargetProbeBackendOutputSchema = z.object({
   identityMatched: z.boolean(),
   diagnostics: TargetProbeDiagnosticsSchema.optional(),
 }).strict().superRefine((value, context) => {
-  if ((value.status === 'ready') !== value.identityMatched) context.addIssue({
-    code: 'custom', path: ['identityMatched'], message: 'ready 必须与页面身份命中闭合',
+  if (value.status === 'ready' && !value.identityMatched) context.addIssue({
+    code: 'custom', path: ['identityMatched'], message: 'ready 必须命中页面身份',
   })
   if (value.status !== 'ready' && value.reasonCode === undefined) context.addIssue({
     code: 'custom', path: ['reasonCode'], message: '阻断诊断必须有 reasonCode',

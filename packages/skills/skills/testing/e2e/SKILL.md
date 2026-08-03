@@ -22,7 +22,7 @@ Skill 版本与 Runtime 版本必须同为 `0.5.x`，并由 `skill.manifest.json
 3. 运行 `~/.mutil-skills/bin/repo-e2e configure-browser --system`，验证并选择系统 Google Chrome；只有系统 Chrome 不可用且用户明确选择兜底时，才运行 `install-browser` 安装托管 Chromium。
 4. 运行 `~/.mutil-skills/bin/repo-e2e configure-approval --mode local-confirmation`。默认流程不执行 `identity enroll`；WebAuthn 是用户显式选择的增强模式。
 5. 运行 `~/.mutil-skills/bin/repo-e2e doctor --json`；仅在 `ready:true` 后创建 Run。
-6. Skill 自动准备接入工作区中的 `.biztest/project.json`、requirements contract、machine view、来源快照和 project policy；不得要求调用者手工创建这些内部文件。`create-run` 同时提交带严格 front matter 的唯一 requirements contract 原文、主 PRD 与执行所需依赖来源；把 Runtime 返回的 `understandingContractDigest`、`sourceRevision` 与 Source Bundle 绑定进同一契约的 E2E execution projection。调用一次 `prepare-prd-understanding`，让 Runtime 复算并持久化唯一 prepared projection。随后把声明式 Case、Action 和 Oracle 设计一次性交给 `compile-prd-run`；只使用 Runtime 返回的稳定 Case ID、Action ID、Oracle ID、`compilerDigest` 和 `caseSchedule`，不得由 Skill 生成或覆盖这些可信事实。
+6. Skill 逐字读取 PRD 与必要来源一次，完成同一次需求理解并取得调用者确认后，把这些已读取 bytes 通过 `~/.mutil-skills/bin/repo-e2e prepare-input` 自动封装；该命令不联网、不重新理解 PRD，只幂等创建接入工作区中的 `.biztest/project.json`、requirements contract、来源快照和 project policy，并返回严格 `create-run` payload。不得要求调用者手工创建这些内部文件或手写 JSON。`create-run` 同时冻结带严格 front matter 的唯一 requirements contract 原文、主 PRD 与执行所需依赖来源；把 Runtime 返回的 `understandingContractDigest`、`sourceRevision` 与 Source Bundle 绑定进同一契约的 E2E execution projection。调用一次 `prepare-prd-understanding`，让 Runtime 复算并持久化唯一 prepared projection。随后把声明式 Case、Action 和 Oracle 设计一次性交给 `compile-prd-run`；只使用 Runtime 返回的稳定 Case ID、Action ID、Oracle ID、`compilerDigest` 和 `caseSchedule`，不得由 Skill 生成或覆盖这些可信事实。
 7. 根据用户给出的唯一验证地址配置 `TargetContract`，明确环境、目标 URL、允许导航 origin 与可配置页面身份策略；立即由系统 Chrome 在任何授权前执行无副作用 Target Probe。命令行无法访问 localhost 不是目标不可用的证明，浏览器侧探测结果才是诊断依据。Probe 只确认地址可达和页面身份，不推导 locator、不执行 Case、不产生写请求。
 8. 覆盖资产与 Target Probe 齐备后取得 Runtime 的 `AcceptanceReview`，在 Discovery 授权和可信浏览器预检前按“PRD 原文 → Clause 原文与处置 → Requirement → Rule → Oracle → Case”向调用者展示，并用 `review --run` 读取、`confirm-review --run` 确认当前 `reviewDigest`。Runtime 返回 `confirmation-required` 时必须暂停并等待调用者明确确认；确认前不得执行 Discovery、可信浏览器预检或 locator 绑定。该确认只核对 LLM 的需求、交互、范围和用例理解；它不是 Execution Approval，也不是第二次 `$understand-prd`。确认后按 Runtime `nextEdge` 完成 Discovery、只读预检与绑定、执行审批和 Case 执行。
 9. Runtime 完成最终化后调用 `render-report`。需要指定位置时传 `outputRoot`；否则报告写入 `~/.mutil-skills/e2e/reports/<asset-id>/<run-id>/`。交付独立 Run Workspace 中的 JSON、Markdown、HTML、原始 PNG 和 Playwright Trace；`.biztest`、Git、CI Artifact 和对象存储只作为可选发布适配器。
@@ -42,6 +42,7 @@ Skill 版本与 Runtime 版本必须同为 `0.5.x`，并由 `skill.manifest.json
 调用者不需要构造 `RuntimeRequestEnvelope`，也不需要理解 requestId、project identity 或状态跳转。Skill 使用 Runtime 的 `Facade` 生成 envelope、跟随 `nextEdge`，并把 `reasonCode`、`remediation`、RunHandle 与最小缺失输入原样呈现。面向调用者和排障优先使用固定 launcher 的友好命令：
 
 - `~/.mutil-skills/bin/repo-e2e status --run <RUN>`：读取当前阶段、condition、`semanticCases`、保留/失效资产和下一步，并刷新 `~/.mutil-skills/e2e/runs/<asset>/<run>/run-status.html`。
+- `~/.mutil-skills/bin/repo-e2e prepare-input`：从标准输入接收 Skill 已读取并确认的 PRD/契约/必要来源 bytes，创建私有、不可变接入快照并输出 `create-run` payload；它不发起网络请求，也不替代需求理解。
 - `~/.mutil-skills/bin/repo-e2e review --run <RUN>`：展示不可改写的 AcceptanceReview。
 - `~/.mutil-skills/bin/repo-e2e confirm-review --run <RUN> --digest <sha256:...>`：只确认当前语义审查摘要。
 - `~/.mutil-skills/bin/repo-e2e retry --run <RUN>`：仅重试 Runtime 明确标为可恢复的 Target Probe 或 preflight，不重放写操作。
@@ -51,7 +52,7 @@ Skill 版本与 Runtime 版本必须同为 `0.5.x`，并由 `skill.manifest.json
 
 ## 固定 Runtime JSON 调用协议
 
-除 Doctor 外，唯一可执行入口是 `~/.mutil-skills/bin/repo-e2e rpc`。Skill 必须以参数数组直接启动固定绝对路径，不使用 shell，不拼接 PRD、路径、selector 或 secret。每次只构造一个协议 `1.0.0` 的严格 `RuntimeRequestEnvelope`，请求 JSON 只经标准输入写入；标准输出只接受一个严格 `RuntimeResponseEnvelope`。这就是本 Skill 唯一允许的 **JSON stdin/stdout** 协议。
+除 Doctor 和无状态转换的 `prepare-input` 接入助手外，唯一可执行入口是 `~/.mutil-skills/bin/repo-e2e rpc`。Skill 必须以参数数组直接启动固定绝对路径，不使用 shell，不拼接 PRD、路径、selector 或 secret。每次只构造一个协议 `1.0.0` 的严格 `RuntimeRequestEnvelope`，请求 JSON 只经标准输入写入；标准输出只接受一个严格 `RuntimeResponseEnvelope`。这就是本 Skill 唯一允许的 **JSON stdin/stdout** 协议。
 
 `ok:true` 时先按该命令的结果契约读取业务结果；每个业务命令成功后必须立即调用 `get-status`，发送新的严格请求。只有 `get-status` 的 `result` 是公共状态投影，并且必须严格拒绝未知字段、完整提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`。Skill 只原样转述该投影，不补值、不猜测下一边、不自行计算摘要。`ok:false` 时只转述 `error.code/category/terminalState/resumeState/details`；响应版本、requestId、Runtime 身份或字段闭包不合法时进入 `environment-blocked`，不得把传输成功当业务成功。
 

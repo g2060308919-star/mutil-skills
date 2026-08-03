@@ -7,16 +7,18 @@
 ### Added
 
 - Target Probe 新增 `resource-closure`、`application-ready`、`dom-identity` 分级策略，以及 URL/title、DOM、可见文本、Console/pageerror、失败请求、未闭合资源和长期连接诊断快照；Run Status 的 JSON/Markdown/HTML 可直接展示阻断原因和恢复动作。
+- Runtime 新增 `E2EInputPreparer`、Facade `prepareInput/startFromInput` 与 `repo-e2e prepare-input`：把 Skill 已读取并确认的 PRD、需求契约及必要来源幂等封装成私有不可变快照和严格 `create-run` payload，不再要求调用者手写内部文件或 RPC envelope。
 
 ### Changed
 
-- 全部 `preview-readonly` Case 首次使用 application-ready 探测；严格资源闭包失败后的同 Run 重试自动升级策略。非权威 Probe 可以容纳 HMR/轮询等开发态资源，写操作的可信 preflight、Gateway、Authority、Lease 与 Cleanup 门保持不变。
+- Target Probe 延后到需求理解和 Case lane 编译完成后；全部 `preview-readonly` Case 首次使用 application-ready，页面暂未就绪可维持策略重试，只有资源类阻断升级为 dom-identity。页面身份、pageerror 和含写 lane 均不降级；可信 preflight、Gateway、Authority、Lease 与 Cleanup 门不降低。
 - E2E Skill 明确 Runtime 0.5 高层主线，并把项目身份、requirements contract、machine view、Source Bundle 与 project policy 定义为 Skill 自动准备的内部材料，不再要求调用者手写严格 envelope 或中间文件。
 - 编译结果分别报告唯一 `mappedAcceptanceCount` 与 `oracleCount`，避免重复 Oracle 放大覆盖数量。
 
 ### Fixed
 
-- Target Probe 在资源闭包耗尽前先评估页面身份并保留页面诊断，不再把已渲染的 localhost SPA 简化为无标题的通用资源失败。
+- Target Probe 在资源闭包耗尽前先评估页面身份并保留页面诊断，不再把已渲染的 localhost SPA 简化为无标题的通用资源失败；真正 pending request、未获批的新 URL、WebSocket/SSE 与 pageerror 分别分类。
+- 输入封装复用并冻结已有 project policy，拒绝 symlink root、hard link、非当前 UID 和不安全目录；接入 I/O 错误与 JSON 校验错误分开分类。
 - Runtime 严格请求错误返回字段路径和约束；同一 Case 的重复 `contractNodeId + acceptanceCriterion` Oracle 由编译器拒绝。
 
 ## [0.5.0] - 2026-08-02

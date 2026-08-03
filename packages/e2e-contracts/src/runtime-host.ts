@@ -16,6 +16,7 @@ import {
   RunHandleSchema,
   RunStageSchema,
   TargetContractSchema,
+  TargetProbeDiagnosticsSchema,
 } from './e2e-flow.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -341,31 +342,7 @@ export const RuntimeStatusResultSchema = z.object({
     observedUrl: z.string().url(),
     observedTitle: z.string(),
     identityMatched: z.boolean(),
-    diagnostics: z.object({
-      strategy: z.enum(['resource-closure', 'application-ready', 'dom-identity']),
-      attempt: z.number().int().positive().max(100),
-      domPresent: z.boolean(),
-      visibleTextSummary: z.string().max(4_096),
-      consoleErrors: z.array(z.string().max(4_096)).max(20),
-      failedRequests: z.array(z.object({
-        method: z.string().min(1).max(16), url: z.string().url(),
-        resourceType: z.string().min(1).max(64), errorText: z.string().max(4_096),
-      }).strict()).max(50),
-      pendingResources: z.array(z.object({
-        url: z.string().url(), resourceType: z.string().min(1).max(64),
-      }).strict()).max(256),
-      persistentConnections: z.array(z.object({
-        url: z.string().url(), resourceType: z.string().min(1).max(64),
-      }).strict()).max(50),
-      advisories: z.array(z.string().regex(/^E2E_[A-Z0-9_]+$/)).max(20),
-      resourceSummary: z.object({
-        observedCount: z.number().int().nonnegative(),
-        approvedCount: z.number().int().nonnegative(),
-        pendingCount: z.number().int().nonnegative(),
-        persistentConnectionCount: z.number().int().nonnegative(),
-        closureComplete: z.boolean(),
-      }).strict(),
-    }).strict().optional(),
+    diagnostics: TargetProbeDiagnosticsSchema.optional(),
     probedAt: z.string().datetime(),
     diagnosticDigest: DigestSchema,
   }).strict().optional(),

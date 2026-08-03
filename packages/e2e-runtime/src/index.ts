@@ -26,6 +26,12 @@ export {
   type E2EFacadeHost,
   type E2EFacadeOptions,
 } from './e2e-facade.js'
+export {
+  E2EInputDraftSchema,
+  E2EInputPreparer,
+  type E2EInputDraft,
+  type PreparedE2EInput,
+} from './e2e-input-preparer.js'
 export { RunStatusPublisher } from './run-status-publisher.js'
 
 export {

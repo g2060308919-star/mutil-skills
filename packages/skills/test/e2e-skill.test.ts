@@ -425,6 +425,8 @@ describe('E2E skill package', () => {
       expect(text).toContain('project policy')
     }
     expect(entry).toContain('调用者的最小输入')
+    expect(entry).toContain('repo-e2e prepare-input')
+    expect(entry).toContain('不联网、不重新理解 PRD')
     expect(understanding).toContain('URL 来源只抓取一次')
     expect(intake).toContain('validationIssues')
   })
