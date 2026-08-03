@@ -9,7 +9,7 @@ import {
 } from '@mutil-skills/e2e-contracts'
 import { z } from 'zod'
 
-export const RUNTIME_PACKAGE_VERSION = '0.5.1'
+export const RUNTIME_PACKAGE_VERSION = '0.5.2'
 
 const runtimeInstallRemediation = `npm exec --yes --package=@mutil-skills/e2e-runtime@${RUNTIME_PACKAGE_VERSION} -- repo-e2e install-runtime --version ${RUNTIME_PACKAGE_VERSION}`
 

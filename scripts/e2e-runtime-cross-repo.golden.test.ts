@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises'
+import { access, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -107,6 +107,17 @@ describe('portable E2E runtime', () => {
       )
       expect(standaloneHtml).toContain('<img src="evidence/CASE-0001/')
       expect(standaloneHtml).toContain('下载 Playwright Trace')
+      expect(standaloneHtml).toContain('原始 DOM 未在独立报告中发布')
+      const standaloneEvidenceLinks = [...standaloneHtml.matchAll(
+        /(?:href|src)="(evidence\/[^"]+)"/g,
+      )].map((match) => match[1]!)
+      expect(standaloneEvidenceLinks.length).toBeGreaterThan(0)
+      for (const relativePath of standaloneEvidenceLinks) {
+        await expect(access(join(
+          result.fullPlaywright.standaloneReportRoot,
+          relativePath,
+        ))).resolves.toBeUndefined()
+      }
       expect(result.fullPlaywright.semanticReview.reviewDigest).toMatch(/^sha256:/)
       expect(result.fullPlaywright.semanticReview.prd.normalizedText).toContain('JSON Body')
       if (process.env.E2E_RUNTIME_RUN_TODOMVC_PUBLIC === '1') {

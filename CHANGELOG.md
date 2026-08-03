@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-08-04
+
+### Fixed
+
+- 独立 HTML/Markdown 验收报告不再保留未随包发布的 generation 内 `.dom.json` 死链；链接会降级为“原始 DOM 未在独立报告中发布”的审计说明，同时保留 JSON 事实、生产截图与 Playwright Trace，避免为修复可用性而削弱 DOM 安全边界。
+
 ## [0.5.1] - 2026-08-03
 
 ### Added

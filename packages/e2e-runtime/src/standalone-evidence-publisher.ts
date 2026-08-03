@@ -196,17 +196,18 @@ interface OutputFile {
 
 function buildFiles(input: StandaloneEvidencePublishInput): OutputFile[] {
   const evidenceSection = renderEvidenceSection(input.evidence)
+  const standaloneRendered = removeUnpublishedDomLinks(input.rendered)
   const reportFiles: OutputFile[] = [
     { kind: 'report-json', relativePath: 'final-report.json', bytes: Buffer.from(input.rendered.json) },
     {
       kind: 'report-markdown',
       relativePath: 'final-report.md',
-      bytes: Buffer.from(`${input.rendered.markdown}${evidenceSection.markdown}`),
+      bytes: Buffer.from(`${standaloneRendered.markdown}${evidenceSection.markdown}`),
     },
     {
       kind: 'report-html',
       relativePath: 'final-report.html',
-      bytes: Buffer.from(insertHtmlEvidence(input.rendered.html, evidenceSection.html)),
+      bytes: Buffer.from(insertHtmlEvidence(standaloneRendered.html, evidenceSection.html)),
     },
   ]
   return [
@@ -216,6 +217,23 @@ function buildFiles(input: StandaloneEvidencePublishInput): OutputFile[] {
     })),
     ...reportFiles,
   ]
+}
+
+function removeUnpublishedDomLinks(rendered: StandaloneEvidencePublishInput['rendered']): {
+  markdown: string
+  html: string
+} {
+  const notice = '（原始 DOM 未在独立报告中发布）'
+  return {
+    markdown: rendered.markdown.replace(
+      /\[([^\]\n]+)\]\(<evidence\/[A-Za-z0-9._/-]+\.dom\.json>\)/g,
+      `$1${notice}`,
+    ),
+    html: rendered.html.replace(
+      /<a href="evidence\/[A-Za-z0-9._/-]+\.dom\.json">([^<]+)<\/a>/g,
+      `<span data-evidence-kind="dom">$1${notice}</span>`,
+    ),
+  }
 }
 
 function validateInput(input: StandaloneEvidencePublishInput): void {
