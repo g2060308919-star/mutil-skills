@@ -89,6 +89,32 @@ describe('StandaloneEvidencePublisher', () => {
     ))).toEqual(trace)
   })
 
+  test('独立报告将未发布的 DOM 证据链接降级为说明文本', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'e2e-standalone-dom-link-')); roots.push(root)
+    const outputRoot = join(root, 'report')
+    const publisher = new StandaloneEvidencePublisher({ homeDir: join(root, 'home') })
+    const domPath = 'evidence/ACTION-1.dom.json'
+
+    const published = await publisher.publish({
+      assetId: 'ASSET-1', runId: 'RUN-1', generationDigest: `sha256:${'a'.repeat(64)}`,
+      outputRoot,
+      rendered: {
+        json: `${JSON.stringify({ evidencePath: domPath })}\n`,
+        markdown: `| EVIDENCE |\n| --- |\n| [EVIDENCE-1](<${domPath}>) |\n`,
+        html: `<html><body><a href="${domPath}">EVIDENCE-1</a></body></html>`,
+      },
+      evidence: [],
+    })
+
+    const html = await readFile(join(published, 'final-report.html'), 'utf8')
+    expect(html).not.toContain(`href="${domPath}"`)
+    expect(html).toContain('EVIDENCE-1（原始 DOM 未在独立报告中发布）')
+    const markdown = await readFile(join(published, 'final-report.md'), 'utf8')
+    expect(markdown).not.toContain(`](<${domPath}>)`)
+    expect(markdown).toContain('EVIDENCE-1（原始 DOM 未在独立报告中发布）')
+    expect(await readFile(join(published, 'final-report.json'), 'utf8')).toContain(domPath)
+  })
+
   test('uses the standalone HOME default and never requires a repository', async () => {
     const root = await mkdtemp(join(tmpdir(), 'e2e-standalone-default-')); roots.push(root)
     const homeDir = join(root, 'home')
