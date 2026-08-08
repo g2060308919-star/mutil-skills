@@ -298,6 +298,13 @@ Assertion 不允许独立写入；Verdict 继续由 Engine 基于 checkpoint/cov
 
 current/new-run-default 指针原子回退到 LKG；失败版本保留诊断但不再被自动选择。活跃 Run 继续使用各自绑定版本。
 
+### 8.4 前置 ADR 记录（2026-08-08）
+
+- 已形成 `docs/adr/0017-signed-runtime-update-trust-and-lkg.md`，状态为 `Proposed / Requires explicit human approval`。
+- ADR 采用 TUF root/timestamp/snapshot/targets 与官方 `tuf-js`，明确 npm provenance 只证明发布来源，不能替代 channel、撤销、回滚或 LKG 决策。
+- 已闭合 root/targets 阈值、连续轮换、metadata/target schema、回滚/冻结防护、缓存过期、紧急撤销、canary/LKG、Node 兼容和最小审计语义。
+- 在离线密钥保管、metadata 托管责任与安全阈值获得人工批准前，不实现或启用在线 `stable`/`latest`。
+
 ## 9. Phase 7：生产模块大规模 p95 Benchmark
 
 该阶段必须有独立 Benchmark Spec，不能直接沿用现有合成脚本的结论。
