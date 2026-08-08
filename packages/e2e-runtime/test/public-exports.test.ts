@@ -19,6 +19,7 @@ test('public Runtime package exposes the safe facade, status model, and protocol
     'RuntimeResponseEnvelopeSchema',
     'TargetContractFactSchema',
     'TargetProbeFactSchema',
+    'TaskStateViewV1Schema',
     'assertRunHandle',
     'assertTargetEnvironmentConsistency',
     'authorizeTargetProbe',

@@ -18,6 +18,7 @@ import {
   TargetContractSchema,
   TargetProbeDiagnosticsSchema,
 } from './e2e-flow.js'
+import { TaskStateViewV1Schema } from './task-state-view.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -207,7 +208,7 @@ const commandSchemas = [
     ...RuntimeRequestHeaderShape,
     command: z.literal('get-status'),
     projectRoot: z.string().min(1),
-    payload: RunIdPayloadSchema,
+    payload: RunIdPayloadSchema.extend({ includeTaskState: z.boolean().optional() }).strict(),
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
@@ -347,6 +348,7 @@ export const RuntimeStatusResultSchema = z.object({
     diagnosticDigest: DigestSchema,
   }).strict().optional(),
   pendingDecision: JsonValueSchema.optional(),
+  taskState: TaskStateViewV1Schema.optional(),
 }).strict()
 
 export const RuntimeCreateRunResultSchema = z.object({

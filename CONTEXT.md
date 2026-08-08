@@ -159,6 +159,10 @@ _避免使用_：bare runId、latest run guess
 Stage 表示流程位置，Condition 独立表示 ready、awaiting-user、running、blocked-retryable、blocked-requires-change 或 terminal。环境阻断不再伪装成业务失败，也不必为了重试复制完整 Run。
 _避免使用_：single overloaded status enum、failed means everything
 
+**Task State View**：
+`RuntimeRunSnapshot` 与现有 Status 权威投影的确定性只读视图，统一展示 Workflow、Stage/Condition、Case Attempt、制品有效性、最小缺失输入和恢复分类。它不持久化、不接受独立写入，也不计算业务 Verdict；普通 `get-status` 保持兼容，只有显式 opt-in 或 Facade `taskState` 才返回 `TaskStateViewV1`。
+_避免使用_：task-state.json、second workflow、UI-owned recovery state
+
 **Semantic Case / Executable Case**：
 Semantic Case 在可信预检前即可展示完整需求、Rule、Oracle、lane、Fixture 和 binding 状态；Executable Case 只有在身份、定位、审批和来源闭合后才由可信 Compiler 生成。阻断 Case 不能用 skip 或伪 Playwright 文件冒充执行。
 _避免使用_：CASE id only、generated test before preflight
