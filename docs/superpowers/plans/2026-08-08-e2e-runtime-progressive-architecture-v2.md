@@ -234,6 +234,15 @@ Assertion 不允许独立写入；Verdict 继续由 Engine 基于 checkpoint/cov
 - 让写请求绕过 Gateway；
 - 自动修复未知外部副作用。
 
+### 6.4 实施记录（2026-08-08）
+
+- 新增严格 `PolicyDecisionViewV1`，把 Authority freshness receipt 逐 Capability 投影为计划级批准，把 Gateway signed request event 投影为动作级执行。
+- 统一展示 subject、run bundle、target、Action、Capability、payload、lease、cleanup、Policy 与证据绑定；不复制 Policy 状态或风险分类器。
+- Final Report JSON/Markdown/HTML 使用同一策略决策表，并明确区分“计划级批准”和“动作级执行”。
+- Engine 独立事实审计会重算完整集合，拒绝调用方即使重算 `decisionId` 后的伪造绑定。
+- 整体批准仍不能绕过 Gateway；Gateway 事件不臆造其权威契约中不存在的阻断原因。
+- 架构决策见 `docs/adr/0015-policy-decision-view-preserves-enforcement-stages.md`。
+
 ## 7. Phase 5：Runtime Resolver（本地与 pinned）
 
 ### 7.1 目标

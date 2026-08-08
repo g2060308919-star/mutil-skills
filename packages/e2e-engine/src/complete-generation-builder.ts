@@ -31,6 +31,9 @@ import {
   RuntimeProvenanceSchema,
   type RuntimeProvenance,
   projectAssertionResultV1,
+  projectApprovalPolicyDecisionViews,
+  projectGatewayPolicyDecisionViews,
+  type PolicyDecisionViewV1,
 } from '@mutil-skills/e2e-contracts'
 import {
   computeFinalizationSnapshotDigest,
@@ -472,6 +475,7 @@ function renderFinalReport(
   const diffContent = content('prd-diff')
   const gateway = content('gateway-audit')
   const reportGateway = projectReportGatewayAudit(gateway)
+  const policyDecisions = projectReportPolicyDecisions(grantContent.grants, gateway)
   const semanticAudit = auditSemanticCompleteness({
     manifest: content('prd-manifest'), scope: content('acceptance-scope'),
     model: content('requirement-model'), flows: content('interaction-flow'),
@@ -603,6 +607,7 @@ function renderFinalReport(
         ...approvalAssurance,
         grantDigests: grantContent.grants.map((grant) => grant.authorityProof.signedDigest) },
     ],
+    policyDecisions,
     environment: {
       environmentId: content('execution-contract').environment,
       origins: [content('execution-contract').baseOrigin],
@@ -684,6 +689,21 @@ function renderFinalReport(
   return ArtifactSchemaRegistry['final-report'].parse(
     createArtifact(input, 'final-report', artifactIdFor('final-report'), draft),
   ) as ArtifactDocument
+}
+
+function projectReportPolicyDecisions(
+  grants: unknown[],
+  gateway: Record<string, any>,
+): PolicyDecisionViewV1[] {
+  const approvals = grants.flatMap(projectApprovalPolicyDecisionViews)
+  const sessions = Array.isArray(gateway.sessions) ? gateway.sessions as Array<Record<string, any>> : []
+  const gatewayViews = sessions.length === 0
+    ? projectGatewayPolicyDecisionViews(gateway)
+    : sessions.flatMap((session) => projectGatewayPolicyDecisionViews(session.audit, {
+      executionResultId: session.resultId,
+      executionDomain: session.domain,
+    }))
+  return [...approvals, ...gatewayViews].sort((left, right) => left.decisionId.localeCompare(right.decisionId))
 }
 
 function projectReportGatewayAudit(gateway: Record<string, any>): {

@@ -206,3 +206,7 @@ _避免使用_：LLM conclusion、report-calculated status
 **Assertion Result**：
 `OracleCheckpointResult` 的 `AssertionResultV1` 确定性只读投影，逐字段展示 checkpoint、oracle、expected/actual 规范 JSON 与摘要、status 和 evidence refs。它不接受独立写入，不拥有存储，也不能改变 Verdict；Final Report 可以携带并展示该投影，但必须与同 Step 的 checkpoint 完全一致。
 _避免使用_：assertion store、report-owned assertion、second verdict fact
+
+**Policy Decision View**：
+计划级 Authority freshness receipt 与动作级 Gateway enforcement event 的 `PolicyDecisionViewV1` 确定性只读投影。它统一 subject/run-bundle/target/action/capability/payload/lease/cleanup/policy/evidence 语言，但保留 `plan-approval` 与 `action-enforcement` 两个执行时点；前者不能替代真实请求的 Gateway 二次校验，后者也不能臆造整体批准或缺失的阻断原因。
+_避免使用_：global approved boolean、approval bypasses gateway、gateway event as plan approval

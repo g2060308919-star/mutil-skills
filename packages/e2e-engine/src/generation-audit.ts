@@ -40,6 +40,9 @@ import {
   type CleanupPlanDefinition,
   RuntimeProvenanceSchema,
   type RuntimeProvenance,
+  projectApprovalPolicyDecisionViews,
+  projectGatewayPolicyDecisionViews,
+  type PolicyDecisionViewV1,
 } from '@mutil-skills/e2e-contracts'
 import { computeVerdict, type VerdictDependencies } from './verdict.js'
 import { auditSemanticCompleteness } from './semantic-completeness.js'
@@ -269,6 +272,10 @@ export function auditFinalReportFactBinding(
   if (!safeCanonicalEquals(report.approvalAssurance, approvalAssurance)) {
     findings.push({ code: 'E2E_GENERATION_REPORT_APPROVAL_ASSURANCE_MISMATCH', ref: 'approvalAssurance' })
   }
+  const expectedPolicyDecisions = independentlyProjectPolicyDecisionViews(grantItems, content('gateway-audit'))
+  if (!safeCanonicalEquals(report.policyDecisions, expectedPolicyDecisions)) {
+    findings.push({ code: 'E2E_GENERATION_REPORT_POLICY_DECISIONS_MISMATCH', ref: 'policyDecisions' })
+  }
   const expectedManualResults = arrayAt(content('manual-results'), 'results').map((result) => ({
     id: stringAt(result, 'manualResultId'),
     digest: stringAt(objectAt(result, 'authorityProof'), 'signedDigest'),
@@ -443,6 +450,21 @@ export function auditFinalReportFactBinding(
     })
   }
   return { valid: findings.length === 0, findings }
+}
+
+function independentlyProjectPolicyDecisionViews(
+  grants: Array<Record<string, unknown>>,
+  gateway: Record<string, unknown>,
+): PolicyDecisionViewV1[] {
+  const approvals = grants.flatMap(projectApprovalPolicyDecisionViews)
+  const sessions = arrayAt(gateway, 'sessions')
+  const enforcement = sessions.length === 0
+    ? projectGatewayPolicyDecisionViews(gateway)
+    : sessions.flatMap((session) => projectGatewayPolicyDecisionViews(objectAt(session, 'audit'), {
+      executionResultId: stringAt(session, 'resultId'),
+      executionDomain: stringAt(session, 'domain') as 'real-environment' | 'gateway-injection',
+    }))
+  return [...approvals, ...enforcement].sort((left, right) => left.decisionId.localeCompare(right.decisionId))
 }
 
 function independentlyProjectReportGatewayAudit(gateway: Record<string, unknown>): {
