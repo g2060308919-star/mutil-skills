@@ -202,3 +202,7 @@ _避免使用_：environment boolean、silent skip
 **Verdict**：
 Engine 根据冻结 Artifact 和实际执行事实复算的唯一终态。Report 只渲染，Skill 只转述。
 _避免使用_：LLM conclusion、report-calculated status
+
+**Assertion Result**：
+`OracleCheckpointResult` 的 `AssertionResultV1` 确定性只读投影，逐字段展示 checkpoint、oracle、expected/actual 规范 JSON 与摘要、status 和 evidence refs。它不接受独立写入，不拥有存储，也不能改变 Verdict；Final Report 可以携带并展示该投影，但必须与同 Step 的 checkpoint 完全一致。
+_避免使用_：assertion store、report-owned assertion、second verdict fact

@@ -1,0 +1,748 @@
+{
+  "type": "object",
+  "properties": {
+    "artifactId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "artifactType": {
+      "type": "string",
+      "const": "prd-request"
+    },
+    "schemaVersion": {
+      "type": "string",
+      "const": "2.0.0"
+    },
+    "engineVersion": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "assetId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9._:-]+(?:\\/[A-Za-z0-9._:-]+)*$"
+    },
+    "prdRevision": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "generationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "contentDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "signatures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "issuer": {
+            "type": "string",
+            "minLength": 1
+          },
+          "keyId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "algorithm": {
+            "type": "string",
+            "const": "Ed25519"
+          },
+          "signedDigest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "issuer",
+          "keyId",
+          "algorithm",
+          "signedDigest",
+          "signature"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "artifactId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "artifactType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "schemaVersion": {
+            "type": "string",
+            "pattern": "^\\d+\\.\\d+\\.\\d+$"
+          },
+          "relativePath": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "pattern": "^(?!\\/)(?!.*\\\\)(?!.*:)(?!.*\\/\\/)(?!.*\\/$)(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?!(?:.*\\/)?(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:\\.[^/]*)?(?:\\/|$))[^\\0/]+(?:\\/[^\\0/]+)*$"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "artifactId",
+          "artifactType",
+          "schemaVersion",
+          "relativePath",
+          "digest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "graph": {
+      "type": "object",
+      "properties": {
+        "defines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100000
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 100000
+        }
+      },
+      "required": [
+        "defines",
+        "references"
+      ],
+      "additionalProperties": false
+    },
+    "content": {
+      "type": "object",
+      "properties": {
+        "productSpace": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "sourceDescriptors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sourceId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256,
+                "pattern": "^[A-Za-z0-9._:-]+$"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "file",
+                  "url",
+                  "text"
+                ]
+              },
+              "ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16384
+              }
+            },
+            "required": [
+              "sourceId",
+              "kind",
+              "ref"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "userRequest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16384
+        },
+        "testWorkspaceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "secretRefs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._:-]+$"
+          },
+          "maxItems": 1000
+        },
+        "understanding": {
+          "type": "object",
+          "properties": {
+            "schemaVersion": {
+              "type": "string",
+              "const": "1.0.0"
+            },
+            "contractId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:-]+$"
+            },
+            "contractVersion": {
+              "type": "integer",
+              "exclusiveMinimum": 0
+            },
+            "contractStatus": {
+              "type": "string",
+              "const": "confirmed-by-caller"
+            },
+            "contractSourceDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "sourceRevision": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "sources": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "sourceId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "file"
+                  },
+                  "ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536
+                  },
+                  "origin": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "url",
+                          "text"
+                        ]
+                      },
+                      "ref": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 65536
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "ref"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "relevance": {
+                    "type": "string",
+                    "enum": [
+                      "target",
+                      "necessary-dependency"
+                    ]
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^sha256:[a-f0-9]{64}$"
+                  },
+                  "byteLength": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 16777216
+                  }
+                },
+                "required": [
+                  "sourceId",
+                  "kind",
+                  "ref",
+                  "origin",
+                  "relevance",
+                  "digest",
+                  "byteLength"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 1000
+            },
+            "nodes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "nodeId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "REQ",
+                      "RULE",
+                      "FLOW"
+                    ]
+                  },
+                  "statement": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536
+                  },
+                  "provenance": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "source-fact"
+                          },
+                          "anchors": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "sourceId": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 256,
+                                  "pattern": "^[A-Za-z0-9._:-]+$"
+                                },
+                                "sourceSpan": {
+                                  "type": "object",
+                                  "properties": {
+                                    "startLine": {
+                                      "type": "integer",
+                                      "exclusiveMinimum": 0
+                                    },
+                                    "startColumn": {
+                                      "type": "integer",
+                                      "exclusiveMinimum": 0
+                                    },
+                                    "endLine": {
+                                      "type": "integer",
+                                      "exclusiveMinimum": 0
+                                    },
+                                    "endColumn": {
+                                      "type": "integer",
+                                      "exclusiveMinimum": 0
+                                    }
+                                  },
+                                  "required": [
+                                    "startLine",
+                                    "startColumn",
+                                    "endLine",
+                                    "endColumn"
+                                  ],
+                                  "additionalProperties": false
+                                },
+                                "quote": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 65536
+                                },
+                                "quoteDigest": {
+                                  "type": "string",
+                                  "pattern": "^sha256:[a-f0-9]{64}$"
+                                }
+                              },
+                              "required": [
+                                "sourceId",
+                                "sourceSpan",
+                                "quote",
+                                "quoteDigest"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "minItems": 1,
+                            "maxItems": 1000
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "anchors"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "type": "string",
+                            "const": "confirmed-decision"
+                          },
+                          "decisionId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "pattern": "^[A-Za-z0-9._:-]+$"
+                          },
+                          "decisionRef": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 65536
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "decisionId",
+                          "decisionRef"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "responsibility": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536
+                  },
+                  "upstreamNodeIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256,
+                      "pattern": "^[A-Za-z0-9._:-]+$"
+                    },
+                    "maxItems": 10000
+                  },
+                  "downstreamNodeIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256,
+                      "pattern": "^[A-Za-z0-9._:-]+$"
+                    },
+                    "maxItems": 10000
+                  },
+                  "acceptanceCriteria": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 65536
+                    },
+                    "minItems": 1,
+                    "maxItems": 1000
+                  }
+                },
+                "required": [
+                  "nodeId",
+                  "kind",
+                  "statement",
+                  "provenance",
+                  "responsibility",
+                  "upstreamNodeIds",
+                  "downstreamNodeIds",
+                  "acceptanceCriteria"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 1,
+              "maxItems": 10000
+            },
+            "pendingQuestions": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "questionId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "question": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 65536
+                  },
+                  "affectedNodeIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256,
+                      "pattern": "^[A-Za-z0-9._:-]+$"
+                    },
+                    "minItems": 1,
+                    "maxItems": 10000
+                  }
+                },
+                "required": [
+                  "questionId",
+                  "question",
+                  "affectedNodeIds"
+                ],
+                "additionalProperties": false
+              },
+              "maxItems": 10000
+            },
+            "route": {
+              "type": "object",
+              "properties": {
+                "skillName": {
+                  "type": "string",
+                  "const": "e2e"
+                },
+                "steps": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "stepId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256,
+                        "pattern": "^[A-Za-z0-9._:-]+$"
+                      },
+                      "inputNodeIds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9._:-]+$"
+                        },
+                        "minItems": 1,
+                        "maxItems": 10000
+                      },
+                      "output": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 65536
+                      },
+                      "constraints": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 65536
+                        },
+                        "maxItems": 1000
+                      },
+                      "dependencyStepIds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[A-Za-z0-9._:-]+$"
+                        },
+                        "maxItems": 1000
+                      },
+                      "completionCondition": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 65536
+                      }
+                    },
+                    "required": [
+                      "stepId",
+                      "inputNodeIds",
+                      "output",
+                      "constraints",
+                      "dependencyStepIds",
+                      "completionCondition"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "minItems": 1,
+                  "maxItems": 1000
+                }
+              },
+              "required": [
+                "skillName",
+                "steps"
+              ],
+              "additionalProperties": false
+            },
+            "authorization": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "const": "confirmed-by-caller"
+                },
+                "contractVersion": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0
+                },
+                "confirmedAt": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "authorizedNodeIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "pattern": "^[A-Za-z0-9._:-]+$"
+                  },
+                  "minItems": 1,
+                  "maxItems": 10000
+                }
+              },
+              "required": [
+                "status",
+                "contractVersion",
+                "confirmedAt",
+                "authorizedNodeIds"
+              ],
+              "additionalProperties": false
+            },
+            "projectionDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "schemaVersion",
+            "contractId",
+            "contractVersion",
+            "contractStatus",
+            "contractSourceDigest",
+            "sourceRevision",
+            "sources",
+            "nodes",
+            "pendingQuestions",
+            "route",
+            "authorization",
+            "projectionDigest"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "productSpace",
+        "title",
+        "sourceDescriptors",
+        "userRequest",
+        "testWorkspaceId",
+        "secretRefs",
+        "understanding"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "artifactId",
+    "artifactType",
+    "schemaVersion",
+    "engineVersion",
+    "assetId",
+    "prdRevision",
+    "generationId",
+    "createdAt",
+    "contentDigest",
+    "signatures",
+    "dependencies",
+    "graph",
+    "content"
+  ],
+  "additionalProperties": false,
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mutil-skills.local/e2e/schemas/prd-request.schema.json",
+  "title": "prd-request artifact",
+  "x-e2e-runtime-validation": {
+    "required": true,
+    "constraints": [
+      "contentDigest、Authority 签名、dependency 与 graph 必须由 validateGeneration 校验"
+    ]
+  }
+}

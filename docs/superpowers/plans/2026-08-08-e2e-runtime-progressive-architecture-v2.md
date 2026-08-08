@@ -204,6 +204,14 @@ Assertion 不允许独立写入；Verdict 继续由 Engine 基于 checkpoint/cov
 
 移除投影消费者即可；历史制品无迁移。
 
+### 5.4 实施记录（2026-08-08）
+
+- 新增严格 `AssertionResultV1Schema` 和 `projectAssertionResultV1`，逐字段投影 `OracleCheckpointResult`。
+- Final Report Step 保留 checkpoint，并附加确定性 `assertionResults`；Schema 会拒绝两者任何漂移。
+- Markdown 与 HTML Case 详情展示统一 Assertion 语义，JSON 报告保留机器可读投影。
+- 没有新增 Assertion Artifact、状态文件、写入入口或 Verdict 计算路径。
+- 架构决策见 `docs/adr/0014-assertion-result-read-only-projection.md`。
+
 ## 6. Phase 4：Policy 投影统一
 
 ### 6.1 目标

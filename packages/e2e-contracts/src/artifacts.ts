@@ -56,6 +56,7 @@ import {
   OracleCheckpointPlanSchema,
 } from './compiler-input.js'
 import { E2ECaseExecutionFieldsSchema } from './e2e-flow.js'
+import { AssertionResultV1Schema, projectAssertionResultV1 } from './assertion-result.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -1241,6 +1242,7 @@ export const FinalReportContentSchema = z.object({
       status: ReportStatusSchema,
       evidenceLinks: z.array(RelativePathSchema).max(10_000),
       oracleCheckpoints: z.array(OracleCheckpointResultSchema).max(10_000).optional(),
+      assertionResults: z.array(AssertionResultV1Schema).max(10_000).optional(),
     }).strict()).max(100_000),
   }).strict()).max(100_000),
   injectionBoundary: NonEmptyTextSchema,
@@ -1407,6 +1409,15 @@ export const FinalReportContentSchema = z.object({
       context.addIssue({
         code: 'custom', message: '同一 Case 的 stepId 必须唯一', path: ['caseDetails', caseIndex, 'steps'],
       })
+    }
+    for (const [stepIndex, step] of testCase.steps.entries()) {
+      const expected = step.oracleCheckpoints?.map(projectAssertionResultV1)
+      if (canonicalizeJson(step.assertionResults ?? null) !== canonicalizeJson(expected ?? null)) {
+        context.addIssue({
+          code: 'custom', message: 'AssertionResultV1 必须由同 Step OracleCheckpointResult 确定性投影',
+          path: ['caseDetails', caseIndex, 'steps', stepIndex, 'assertionResults'],
+        })
+      }
     }
   }
   for (const [rowIndex, row] of content.traceabilityMatrix.entries()) {

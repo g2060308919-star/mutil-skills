@@ -1,6 +1,6 @@
 import { describe, expect, expectTypeOf, test } from 'vitest'
 import {
-  ARTIFACT_TYPES, canonicalizeJson, digestBytes, digestRuntimeIsolationPolicy, digestText,
+  ARTIFACT_TYPES, canonicalizeJson, digestBytes, digestOracleCheckpointValue, digestRuntimeIsolationPolicy, digestText,
   parseArtifactDocument,
 } from '@mutil-skills/e2e-contracts'
 import {
@@ -14,6 +14,27 @@ import { addFixtureInjectionResult, bindFixtureExecutionOutcomeReceipt, complete
   setFixtureRegressionProfile } from './complete-generation.fixture.js'
 
 describe('完整 generation builder', () => {
+  test('FinalReport 从 OracleCheckpointResult 确定性投影 AssertionResultV1', () => {
+    const input = completeGenerationFixture()
+    const expectedJson = '{"visible":true}'
+    const actualJson = '{"visible":true}'
+    ;(input.drafts['browser-results'].content as any).caseResults[0].stepResults[0].oracleCheckpoints = [{
+      checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1', expectedJson, actualJson,
+      expectedDigest: digestOracleCheckpointValue(expectedJson),
+      actualDigest: digestOracleCheckpointValue(actualJson),
+      status: 'passed', evidenceIds: ['EVIDENCE-1'],
+    }]
+
+    const report: any = buildCompleteGeneration(input).artifacts
+      .find((artifact) => artifact.artifactType === 'final-report')!.content
+    expect(report.caseDetails[0].steps[0].assertionResults).toEqual([{
+      schemaVersion: '1.0.0', checkpointId: 'CHECKPOINT-1', oracleId: 'ORACLE-1',
+      expected: { canonicalJson: expectedJson, digest: digestOracleCheckpointValue(expectedJson) },
+      actual: { canonicalJson: actualJson, digest: digestOracleCheckpointValue(actualJson) },
+      status: 'passed', evidenceRefs: ['EVIDENCE-1'],
+    }])
+  })
+
   test('同一 Case 的 real 与 injection 结果独立进入报告，且输入顺序不影响裁决与分区', () => {
     const forwardInput = completeGenerationFixture()
     addFixtureInjectionResult(forwardInput)
