@@ -141,6 +141,7 @@ import {
 import { projectTaskStateViewV1 } from './task-state-view.js'
 import type { RunStatusPublisher } from './run-status-publisher.js'
 import { assertCompiledCaseProjection } from './compiled-case-projection.js'
+import { executeRuntimeReadWithBrowserExecutorProtocolV1 } from './browser-executor-protocol.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -172,6 +173,7 @@ export interface RuntimeHostDependencies {
     | 'prepareManualResult' | 'requestManualResultRole' | 'recoverManualResultRole'>>>
   presentUserPresenceUrl?(url: string): void | Promise<void>
   readExecutor?: RuntimeReadExecutorCapability
+  browserExecutorProtocolV1?: { readRoute: 'legacy' | 'shadow' }
   writeExecutor?: RuntimeWriteExecutorCapability
   injectionExecutor?: RuntimeInjectionExecutorCapability
   fullPlaywrightExecutor?: RuntimeFullPlaywrightExecutorCapability
@@ -2154,8 +2156,11 @@ export class E2ERuntimeHost {
       | Awaited<ReturnType<typeof executeRuntimeInjection>>
     try {
       execution = await executeWithOwnerHeartbeat(started.owner, async () => executionMode === 'read'
-        ? await executeRuntimeRead(this.dependencies.readExecutor!, {
+        ? await executeRuntimeReadWithBrowserExecutorProtocolV1(this.dependencies.readExecutor!, {
           snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
+          route: this.dependencies.browserExecutorProtocolV1?.readRoute ?? 'legacy',
+          executionId: `READ-${started!.attempt.attemptId}`,
+          now: () => this.dependencies.now().toISOString(),
         })
         : executionMode === 'write'
           ? await executeRuntimeWrite(this.dependencies.writeExecutor!, {
