@@ -131,6 +131,10 @@ _避免使用_：retry counter only、replayed write
 E2E 唯一 RPC、工作流和恢复权威。它协调 Contracts、Engine、Authority、Gateway、Browser Runtime、Artifact Store 和 Report；Skill 不复制其状态机。
 _避免使用_：backend service、Skill runtime
 
+**Runtime Resolver**：
+只从受控 Runtime closure 中选择执行版本，并把精确 installation digest 固化到 Run。Phase 5 仅支持本地 `offline` 与精确 `pinned`；新 Run 必须在安装锁内完成选择和持久绑定，已有 Run 必须按原摘要恢复，活跃引用阻止卸载或 GC。
+_避免使用_：SemVer range at execution、current means run identity、resolve then bind later
+
 **Target Contract**：
 一次 Run 唯一的目标环境契约，闭合目标 URL、base origin、环境标签、允许导航来源和页面身份策略。Policy、Probe、Discovery、Preflight 与 Execution 必须引用同一摘要，不能分别提交彼此矛盾的 environment ID。
 _避免使用_：scattered baseUrl、caller environment flag

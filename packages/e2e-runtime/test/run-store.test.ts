@@ -584,6 +584,21 @@ describe('runtime run store', () => {
     expect('tamperJournalForTest' in store).toBe(false)
     await store.close()
   })
+
+  test('列出活跃 Run 的精确 Runtime installation 引用，供卸载和 GC fail-closed', async () => {
+    const roots = await createRuntimeTestRoots()
+    const store = await openStore(roots)
+    await store.beginRequest('REQUEST-CREATE', digest('a'))
+    const lock = await store.acquireRunLock(digest('1'), 'RUN-1')
+    await store.createRunOutcome(runSnapshot(), 'REQUEST-CREATE', digest('a'), { ok: true }, lock)
+    await lock.close()
+
+    await expect(store.listActiveRuntimeInstallationReferences()).resolves.toEqual([{
+      projectIdentityDigest: digest('1'), runId: 'RUN-1',
+      installationDigest: digest('2'), workflowState: 'created',
+    }])
+    await store.close()
+  })
 })
 
 async function openStore(roots: { home: string; project: string }): Promise<RuntimeRunStore> {

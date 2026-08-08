@@ -9,6 +9,7 @@ import {
   verifyInstalledRuntimeVersion,
   verifyRuntimeRoot,
 } from './runtime-manifest.js'
+import { RuntimeRunStore } from './run-store.js'
 
 export interface UninstallRuntimeOptions {
   homeDir: string
@@ -35,6 +36,18 @@ export async function uninstallRuntime(options: UninstallRuntimeOptions): Promis
     const target = active.installation.version === options.version
       ? active.installation
       : await verifyInstalledRuntimeVersion(layout, options.version)
+    const runStore = await RuntimeRunStore.open({ homeDir: options.homeDir })
+    try {
+      const references = await runStore.listActiveRuntimeInstallationReferences()
+      const referencedBy = references.filter((reference) =>
+        reference.installationDigest === target.manifest.installationDigest)
+      if (referencedBy.length > 0) runtimeError(
+        'E2E_RUNTIME_VERSION_REFERENCED_BY_ACTIVE_RUN',
+        `Runtime ${options.version} 仍被 ${referencedBy.length} 个活跃 Run 精确绑定`,
+      )
+    } finally {
+      await runStore.close()
+    }
     let activeVersion: string | undefined
     if (active.installation.version === options.version) {
       if (options.activateVersion === undefined) {
