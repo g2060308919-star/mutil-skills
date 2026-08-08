@@ -183,6 +183,10 @@ _避免使用_：page.route mock、optional proxy
 使用系统 Chrome 或显式托管 Chromium、一次性 Profile 和受控 Playwright session 执行已批准 Action 的模块。它不能读取日常浏览器 Profile。
 _避免使用_：daily Chrome automation、arbitrary Playwright host
 
+**Browser Executor Protocol**：
+Runtime 内部位于现有品牌化执行器之外的统一适配协议。V1 为 Target Probe、Preflight、Read、Reversible Write、Injection 和 Full Playwright 提供同一能力描述、进度、dispatch 前 deadline/cancellation、结果、证据材料、cleanup、reconcile 与重试安全语义；适配器只闭合持有原 WeakMap capability，不公开原 backend，也不允许任意浏览器代码跨越可信边界。迁移期旧路径仍为默认，read shadow 只执行一次浏览器动作，再对旧结果与协议投影做 fail-closed 语义比较；写 effect 为 unknown 时只能 reconcile。
+_避免使用_：second browser runtime、generic callback executor、retry unknown write
+
 **Standalone Run Workspace**：
 与 Git、业务仓库和当前工作目录解耦的单 Run 输出目录。默认位于 `~/.mutil-skills/e2e/reports/<asset-id>/<run-id>/`，也可以显式指定 `outputRoot`。
 _避免使用_：mandatory .biztest、Git evidence directory

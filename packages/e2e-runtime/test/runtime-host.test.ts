@@ -964,6 +964,7 @@ describe('E2ERuntimeHost', () => {
       },
     }
     const fixture = await hostFixture({
+      browserExecutorProtocolReadRoute: 'shadow',
       authorityHostFactory: async () => authorityAdapter,
       quarantineEvidence: async (input) => ({
         schemaVersion: '1.0.0', runId: input.runId, attemptId: input.attemptId,
@@ -2575,6 +2576,7 @@ async function hostFixture(options: {
   finalizeGeneration?: Parameters<typeof authorizeRuntimeGenerationFinalizer>[0]
   quarantineEvidence?: Parameters<typeof authorizeRuntimeEvidenceQuarantine>[0]
   reserveExecutionLeases?: NonNullable<ConstructorParameters<typeof E2ERuntimeHost>[0]['reserveExecutionLeases']>
+  browserExecutorProtocolReadRoute?: 'legacy' | 'shadow'
 } = {}) {
   const roots = options.roots ?? await createRuntimeTestRoots()
   await mkdir(join(roots.project, '.biztest'), { recursive: true })
@@ -2609,6 +2611,9 @@ async function hostFixture(options: {
     ...(options.reader === undefined ? {} : { projectFileReader: options.reader }),
     ...(options.executeReadOnlyRun === undefined ? {} : {
       readExecutor: authorizeRuntimeReadExecutor(options.executeReadOnlyRun),
+    }),
+    ...(options.browserExecutorProtocolReadRoute === undefined ? {} : {
+      browserExecutorProtocolV1: { readRoute: options.browserExecutorProtocolReadRoute },
     }),
     ...(options.executeWriteRun === undefined ? {} : {
       writeExecutor: authorizeRuntimeWriteExecutor(options.executeWriteRun),
