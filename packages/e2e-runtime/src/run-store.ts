@@ -165,6 +165,13 @@ export interface RuntimeExecutionOwner {
   release(): Promise<void>
 }
 
+export interface ActiveRuntimeInstallationReference {
+  projectIdentityDigest: string
+  runId: string
+  installationDigest: string
+  workflowState: WorkflowState['current']
+}
+
 export interface RuntimeRunLock {
   close(): Promise<void>
 }
@@ -476,6 +483,24 @@ export class RuntimeRunStore {
       verifyStoreSnapshot(snapshot)
       const run = snapshot.runs[runKey(projectIdentityDigest, runId)]
       return run === undefined ? undefined : migrateRuntimeRunSnapshot(run)
+    })
+  }
+
+  /** 卸载/GC 的只读保护边界：终态前的每个 Run 都永久引用其创建时 installation digest。 */
+  async listActiveRuntimeInstallationReferences(): Promise<ActiveRuntimeInstallationReference[]> {
+    return await this.#read((snapshot) => {
+      verifyStoreSnapshot(snapshot)
+      return Object.values(snapshot.runs)
+        .map(migrateRuntimeRunSnapshot)
+        .filter((run) => !TERMINAL_SECRET_RETIREMENT_STATES.has(run.workflow.current))
+        .map((run) => ({
+          projectIdentityDigest: run.projectIdentityDigest,
+          runId: run.runId,
+          installationDigest: run.runtimeInstallationDigest,
+          workflowState: run.workflow.current,
+        }))
+        .sort((left, right) => left.projectIdentityDigest.localeCompare(right.projectIdentityDigest)
+          || left.runId.localeCompare(right.runId))
     })
   }
 

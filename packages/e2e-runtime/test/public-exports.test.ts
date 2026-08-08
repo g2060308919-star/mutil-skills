@@ -16,6 +16,7 @@ test('public Runtime package exposes the safe facade, status model, and protocol
     'RuntimeDoctorReportSchema',
     'RuntimeErrorSchema',
     'RuntimeRequestEnvelopeSchema',
+    'RuntimeResolverPolicySchema',
     'RuntimeResponseEnvelopeSchema',
     'TargetContractFactSchema',
     'TargetProbeFactSchema',
@@ -30,7 +31,9 @@ test('public Runtime package exposes the safe facade, status model, and protocol
     'createTargetContractFact',
     'describeRuntimeCompatibility',
     'projectRunStage',
+    'resolveRuntimeInstallation',
     'runTargetProbe',
+    'withResolvedRuntimeInstallation',
   ])
   for (const forbidden of [
     'E2ERuntimeHost', 'RuntimeAuthorityHost', 'RuntimeRunStore', 'startRuntimeAuthorityHost',

@@ -262,6 +262,16 @@ Assertion 不允许独立写入；Verdict 继续由 Engine 基于 checkpoint/cov
 
 关闭 Resolver 选择，恢复 current pointer 的现有精确版本；现有 Run 不受影响。
 
+### 7.4 实施记录（2026-08-08）
+
+- 新增纯本地 `RuntimeResolverPolicy`，Phase 5 只接受 `offline` 与精确 `pinned`；`stable`、`latest`、SemVer range 和隐式安装全部 fail-closed。
+- `offline` 完整验证 current closure；`pinned` 完整验证指定版本及可选 installation digest；两者都不移动 current pointer。
+- 已有 Run 忽略新 Run 策略，只按其原始 installation digest 定位已安装 closure；缺失、篡改或摘要歧义均阻断恢复。
+- 新增 `withResolvedRuntimeInstallation`，要求调用方在同一安装锁回调内持久化 Run 绑定，关闭“选择完成、绑定尚未固化”之间的卸载竞态。
+- Run Store 提供活跃 installation 引用投影；卸载器在同一安装锁内检查引用，拒绝删除任何非终态 Run 仍绑定的 closure。
+- 固定 launcher 和 installer 没有重写，现有 current 默认行为保持兼容；在线 stable/LKG 仍受 Phase 6 人工 ADR 门禁约束。
+- 架构决策见 `docs/adr/0016-local-runtime-resolution-and-run-binding.md`。
+
 ## 8. Phase 6：Runtime Resolver（签名 stable 与 LKG）
 
 ### 8.1 前置 ADR

@@ -34,6 +34,15 @@ export {
 } from './e2e-input-preparer.js'
 export { RunStatusPublisher } from './run-status-publisher.js'
 export { describeRuntimeCompatibility } from './runtime-compatibility.js'
+export {
+  RuntimeResolverPolicySchema,
+  resolveRuntimeInstallation,
+  withResolvedRuntimeInstallation,
+  type ExistingRunRuntimeBinding,
+  type ResolveRuntimeInstallationOptions,
+  type RuntimeResolution,
+  type RuntimeResolverPolicy,
+} from './runtime-resolver.js'
 
 export {
   RuntimeCompatibilityDescriptorV1Schema,
