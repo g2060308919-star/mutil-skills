@@ -1,11 +1,34 @@
 import { describe, expect, test } from 'vitest'
-import { deriveExecutionResultId } from '@mutil-skills/e2e-contracts'
+import { deriveExecutionResultId, digestOracleCheckpointValue } from '@mutil-skills/e2e-contracts'
 import * as reportModule from '../src/index.js'
 import { finalReportFixture as finalReport } from './final-report.fixture.js'
 
 const digest = (character: string) => `sha256:${character.repeat(64)}`
 
 describe('renderCompleteReport', () => {
+  test('Case 详情从 AssertionResultV1 展示统一断言语义', () => {
+    const withAssertion = structuredClone(finalReport)
+    const step: any = withAssertion.content.caseDetails[0]!.steps[0]!
+    const value = '{"visible":true}'
+    const digest = digestOracleCheckpointValue(value)
+    step.oracleCheckpoints = [{
+      checkpointId: 'CHECKPOINT-VISIBLE', oracleId: 'ORACLE-VISIBLE',
+      expectedJson: value, actualJson: value, expectedDigest: digest, actualDigest: digest,
+      status: 'passed', evidenceIds: ['EVIDENCE-1'],
+    }]
+    step.assertionResults = [{
+      schemaVersion: '1.0.0', checkpointId: 'CHECKPOINT-VISIBLE', oracleId: 'ORACLE-VISIBLE',
+      expected: { canonicalJson: value, digest }, actual: { canonicalJson: value, digest },
+      status: 'passed', evidenceRefs: ['EVIDENCE-1'],
+    }]
+
+    const report = reportModule.renderCompleteReport(withAssertion)
+    expect(report.markdown).toContain('CHECKPOINT-VISIBLE')
+    expect(report.markdown).toContain('ORACLE-VISIBLE')
+    expect(report.html).toContain('CHECKPOINT-VISIBLE')
+    expect(report.html).toContain('ORACLE-VISIBLE')
+  })
+
   test('从 final-report artifact 生成固定顺序的 JSON、Markdown 和离线 HTML', () => {
     const render = (reportModule as unknown as {
       renderCompleteReport(input: unknown): { json: string; markdown: string; html: string }

@@ -30,6 +30,7 @@ import {
   type ExecutionOutcomeReceipt,
   RuntimeProvenanceSchema,
   type RuntimeProvenance,
+  projectAssertionResultV1,
 } from '@mutil-skills/e2e-contracts'
 import {
   computeFinalizationSnapshotDigest,
@@ -452,6 +453,7 @@ function renderFinalReport(
           evidenceLinks,
           ...(stepResult?.oracleCheckpoints === undefined ? {} : {
             oracleCheckpoints: stepResult.oracleCheckpoints,
+            assertionResults: stepResult.oracleCheckpoints.map(projectAssertionResultV1),
           }),
         }
       }),

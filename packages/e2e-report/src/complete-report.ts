@@ -125,6 +125,7 @@ function renderMarkdown(report: FinalReportArtifact): string {
         step.stepId, step.action, step.expected, step.actual, step.oracle, step.status,
         markdownEvidenceLinks(step.evidenceLinks),
       ])),
+      ...markdownAssertionSection(item.steps),
       '',
     ])),
     markdownSection(SECTION_TITLES[9], [
@@ -252,7 +253,7 @@ function htmlSection(index: number, report: FinalReportArtifact): string {
   }
   if (index === 8) return content.caseDetails.length === 0
     ? '<p class="empty-state">无 Case</p>'
-    : content.caseDetails.map((item) => `<details class="case-detail" data-case data-case-status="${html(item.status)}" data-case-mode="${html(item.executionMode)}" data-case-search="${html(`${item.caseId} ${item.title} ${item.status} ${item.executionMode}`.toLocaleLowerCase('zh-CN'))}"><summary>${html(item.caseId)} · ${html(item.title)} · ${html(item.status)}</summary><div class="case-body"><p>模式：${html(item.executionMode)}；必要性：${html(item.necessity)}；状态：${html(item.status)}</p><p><strong>前置：</strong>${item.preconditions.length === 0 ? '无' : item.preconditions.map(html).join('；')}</p><div class="table-scroll">${htmlTable(['STEP', 'Action', 'Expected', 'Actual', 'Oracle', '状态', '证据'], item.steps.map((step) => [step.stepId, step.action, step.expected, step.actual, step.oracle, step.status, htmlEvidenceLinks(step.evidenceLinks)]))}</div></div></details>`).join('')
+    : content.caseDetails.map((item) => `<details class="case-detail" data-case data-case-status="${html(item.status)}" data-case-mode="${html(item.executionMode)}" data-case-search="${html(`${item.caseId} ${item.title} ${item.status} ${item.executionMode}`.toLocaleLowerCase('zh-CN'))}"><summary>${html(item.caseId)} · ${html(item.title)} · ${html(item.status)}</summary><div class="case-body"><p>模式：${html(item.executionMode)}；必要性：${html(item.necessity)}；状态：${html(item.status)}</p><p><strong>前置：</strong>${item.preconditions.length === 0 ? '无' : item.preconditions.map(html).join('；')}</p><div class="table-scroll">${htmlTable(['STEP', 'Action', 'Expected', 'Actual', 'Oracle', '状态', '证据'], item.steps.map((step) => [step.stepId, step.action, step.expected, step.actual, step.oracle, step.status, htmlEvidenceLinks(step.evidenceLinks)]))}${htmlAssertionSection(item.steps)}</div></div></details>`).join('')
   if (index === 9) return `<p>状态：${html(content.gatewayAudit.status)}；forwarded=${content.gatewayAudit.forwarded}；blocked=${content.gatewayAudit.blocked}；injected=${content.gatewayAudit.injected}</p>${htmlFindingTable(content.gatewayAudit.findings)}`
   if (index === 10) return htmlFindingTable(content.browserHealth)
   if (index === 11) return content.diagnostics.map((item) => `<article><h3>${html(item.caseId)} · ${html(item.category)}</h3><p>${html(item.rationale)}</p>${htmlTable(['Attempt', '状态', '变更摘要', '副作用'], item.attempts.map((attempt) => [attempt.attemptId, attempt.status, attempt.changeDigest ?? '无', attempt.sideEffectState]))}</article>`).join('')
@@ -380,6 +381,30 @@ function table(headers: string[], rows: Array<Array<string | MarkdownFragment>>)
 function caseSummaryTable(cases: FinalReportArtifact['content']['caseDetails']): string {
   return table(['CASE', '标题', '模式', '必要性', '状态'], cases.map((item) => [
     item.caseId, item.title, item.executionMode, item.necessity, item.status,
+  ]))
+}
+
+type ReportStep = FinalReportArtifact['content']['caseDetails'][number]['steps'][number]
+
+function markdownAssertionSection(steps: ReportStep[]): string[] {
+  const rows = assertionRows(steps)
+  return rows.length === 0 ? [] : [
+    '', '断言投影：',
+    table(['CHECKPOINT', 'ORACLE', 'Expected JSON', 'Actual JSON', '状态', 'EVIDENCE'], rows),
+  ]
+}
+
+function htmlAssertionSection(steps: ReportStep[]): string {
+  const rows = assertionRows(steps)
+  return rows.length === 0 ? ''
+    : `<h4>断言投影</h4>${htmlTable(['CHECKPOINT', 'ORACLE', 'Expected JSON', 'Actual JSON', '状态', 'EVIDENCE'], rows)}`
+}
+
+function assertionRows(steps: ReportStep[]): string[][] {
+  return steps.flatMap((step) => (step.assertionResults ?? []).map((assertion) => [
+    assertion.checkpointId, assertion.oracleId,
+    assertion.expected.canonicalJson, assertion.actual.canonicalJson,
+    assertion.status, assertion.evidenceRefs.join('、'),
   ]))
 }
 
