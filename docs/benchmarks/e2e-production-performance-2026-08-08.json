@@ -1,0 +1,187 @@
+{
+  "schemaVersion": "2.0.0",
+  "fixtureDigest": "sha256:66dd87cc7d6673abbd1f54334fd97dceee11978c603d2cf1aa10e1ceac37d81b",
+  "fixtureCounts": {
+    "requirements": 500,
+    "rules": 2000,
+    "obligations": 5000,
+    "cases": 1000
+  },
+  "warmupSamples": 3,
+  "sampleCount": 20,
+  "runner": {
+    "runnerId": "local-darwin-arm64-node24",
+    "stableResources": false,
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v24.18.0",
+    "cpuModel": "Apple M1 Pro",
+    "cpuCount": 10,
+    "totalMemoryBytes": 17179869184
+  },
+  "phases": {
+    "compiler": {
+      "samples": 20,
+      "successfulSamples": 20,
+      "failures": 0,
+      "failureRate": 0,
+      "failureReasonCodes": [],
+      "p50Ms": 59.903,
+      "p95Ms": 62.294,
+      "p99Ms": 62.585,
+      "maxMs": 62.584790999999996,
+      "peakRssBytes": 460750848,
+      "outputBytes": {
+        "p50": 1160027,
+        "p95": 1160027,
+        "p99": 1160027,
+        "max": 1160027
+      },
+      "budgetMs": 500,
+      "budgetPassed": true
+    },
+    "requirement-graph": {
+      "samples": 20,
+      "successfulSamples": 20,
+      "failures": 0,
+      "failureRate": 0,
+      "failureReasonCodes": [],
+      "p50Ms": 13.957,
+      "p95Ms": 14.792,
+      "p99Ms": 15.195,
+      "maxMs": 15.19541700000002,
+      "peakRssBytes": 344768512,
+      "outputBytes": {
+        "p50": 666741,
+        "p95": 666741,
+        "p99": 666741,
+        "max": 666741
+      },
+      "budgetMs": 300,
+      "budgetPassed": true
+    },
+    "coverage-audit": {
+      "samples": 20,
+      "successfulSamples": 20,
+      "failures": 0,
+      "failureRate": 0,
+      "failureReasonCodes": [],
+      "p50Ms": 76.376,
+      "p95Ms": 79.836,
+      "p99Ms": 80.309,
+      "maxMs": 80.30904199999986,
+      "peakRssBytes": 368705536,
+      "outputBytes": {
+        "p50": 1817859,
+        "p95": 1817859,
+        "p99": 1817859,
+        "max": 1817859
+      },
+      "budgetMs": 500,
+      "budgetPassed": true
+    },
+    "case-schedule": {
+      "samples": 20,
+      "successfulSamples": 20,
+      "failures": 0,
+      "failureRate": 0,
+      "failureReasonCodes": [],
+      "p50Ms": 20.98,
+      "p95Ms": 21.863,
+      "p99Ms": 21.898,
+      "maxMs": 21.898208000000068,
+      "peakRssBytes": 319668224,
+      "outputBytes": {
+        "p50": 113216,
+        "p95": 113216,
+        "p99": 113216,
+        "max": 113216
+      },
+      "budgetMs": 200,
+      "budgetPassed": true
+    },
+    "checkpoint-finalization": {
+      "samples": 20,
+      "successfulSamples": 20,
+      "failures": 0,
+      "failureRate": 0,
+      "failureReasonCodes": [],
+      "p50Ms": 64.155,
+      "p95Ms": 73.232,
+      "p99Ms": 73.42,
+      "maxMs": 73.41983400000004,
+      "peakRssBytes": 534429696,
+      "outputBytes": {
+        "p50": 2178359,
+        "p95": 2178359,
+        "p99": 2178359,
+        "max": 2178359
+      },
+      "budgetMs": 500,
+      "budgetPassed": true
+    },
+    "engine-verdict": {
+      "samples": 20,
+      "successfulSamples": 20,
+      "failures": 0,
+      "failureRate": 0,
+      "failureReasonCodes": [],
+      "p50Ms": 15.561,
+      "p95Ms": 17.005,
+      "p99Ms": 17.818,
+      "maxMs": 17.817875000000072,
+      "peakRssBytes": 429309952,
+      "outputBytes": {
+        "p50": 1771,
+        "p95": 1771,
+        "p99": 1771,
+        "max": 1771
+      },
+      "budgetMs": 500,
+      "budgetPassed": true
+    },
+    "report-render": {
+      "samples": 20,
+      "successfulSamples": 20,
+      "failures": 0,
+      "failureRate": 0,
+      "failureReasonCodes": [],
+      "p50Ms": 160.516,
+      "p95Ms": 171.771,
+      "p99Ms": 172.322,
+      "maxMs": 172.32175000000007,
+      "peakRssBytes": 614547456,
+      "outputBytes": {
+        "p50": 7744837,
+        "p95": 7744837,
+        "p99": 7744837,
+        "max": 7744837
+      },
+      "budgetMs": 2000,
+      "budgetPassed": true
+    },
+    "artifact-publication": {
+      "samples": 20,
+      "successfulSamples": 20,
+      "failures": 0,
+      "failureRate": 0,
+      "failureReasonCodes": [],
+      "p50Ms": 822.02,
+      "p95Ms": 835.288,
+      "p99Ms": 835.872,
+      "maxMs": 835.871666,
+      "peakRssBytes": 501202944,
+      "outputBytes": {
+        "p50": 9500619,
+        "p95": 9500619,
+        "p99": 9500619,
+        "max": 9500619
+      },
+      "budgetMs": 3000,
+      "budgetPassed": true
+    }
+  },
+  "passed": true,
+  "gateEligible": false,
+  "proofDigest": "sha256:d9d1884e28fd6f31941d5b109c7ec8ca9a312daf106b68cb6a76caefead938d3"
+}

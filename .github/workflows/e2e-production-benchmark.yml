@@ -1,0 +1,51 @@
+name: E2E Production Benchmark
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-production-benchmark
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Stable production-module p95 gate
+    runs-on: [self-hosted, e2e-benchmark, macos, arm64]
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout candidate commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: Run fixed-scale production benchmark
+        run: npm run verify:e2e-production-benchmark
+        env:
+          E2E_PRODUCTION_BENCHMARK_STABLE_RUNNER: '1'
+          E2E_PRODUCTION_BENCHMARK_RUNNER_ID: stable-macos-arm64-e2e-01
+          E2E_PRODUCTION_BENCHMARK_OUTPUT: production-performance-proof.json
+
+      - name: Require a stable all-green proof
+        run: node -e "const p=require('./production-performance-proof.json'); if(!p.passed || !p.gateEligible) process.exit(1)"
+
+      - name: Upload immutable proof
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-production-performance-proof
+          path: production-performance-proof.json
+          if-no-files-found: error
+          retention-days: 30
