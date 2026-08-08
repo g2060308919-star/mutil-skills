@@ -1,3 +1,6 @@
+import { chmod, lstat, readdir, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+
 const RELEASE_CONTROL_KEYS = [
   'E2E_RUNTIME_RUN_TODOMVC_PUBLIC',
   'E2E_RUNTIME_TODOMVC_ONLY',
@@ -25,4 +28,29 @@ export function releaseChildEnvironment(inherited, overrides = {}) {
     else environment[key] = value
   }
   return environment
+}
+
+export async function removeOwnedTemporaryTree(root) {
+  const metadata = await lstat(root).catch((error) => {
+    if (error?.code === 'ENOENT') return undefined
+    throw error
+  })
+  if (metadata === undefined) return
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error('E2E_RELEASE_TEMP_ROOT_INVALID')
+  }
+  await makeOwnedDirectoriesWritable(root)
+  await rm(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+}
+
+async function makeOwnedDirectoriesWritable(directory) {
+  const metadata = await lstat(directory)
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) return
+  await chmod(directory, 0o700)
+  const entries = await readdir(directory, { withFileTypes: true })
+  for (const entry of entries) {
+    if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      await makeOwnedDirectoriesWritable(join(directory, entry.name))
+    }
+  }
 }

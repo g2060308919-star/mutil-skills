@@ -1,8 +1,12 @@
 import { spawn } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, realpath, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { classifyReleaseFailures, releaseChildEnvironment } from './e2e-release-support.mjs'
+import {
+  classifyReleaseFailures,
+  releaseChildEnvironment,
+  removeOwnedTemporaryTree,
+} from './e2e-release-support.mjs'
 
 const mode = process.argv[2]
 if (mode !== 'pack' && mode !== 'registry' && mode !== 'diagnostic') {
@@ -25,6 +29,7 @@ async function run(releaseMode) {
     mkdir(npmCache, { recursive: true, mode: 0o700 }),
   ])
   let completed = false
+  let successResult
   try {
     if (releaseMode === 'registry') await verifyReleaseTruth(sourceRoot)
     const npmEnvironment = {
@@ -77,13 +82,13 @@ async function run(releaseMode) {
       })
     }
     completed = true
-    process.stdout.write(`${JSON.stringify({
+    successResult = {
       ok: true,
       mode: releaseMode,
       skippedTests: 0,
       packageSource: releaseMode === 'registry' ? 'npm-registry' : 'workspace-tarballs',
       ...(releaseMode === 'diagnostic' ? { diagnosticVerdict: 'rejected-as-detected' } : {}),
-    })}\n`)
+    }
   } catch (error) {
     process.stderr.write(`${JSON.stringify({
       ok: false,
@@ -98,10 +103,26 @@ async function run(releaseMode) {
     if (process.env.E2E_RELEASE_PRESERVE === '1') {
       process.stderr.write(`E2E_RELEASE_PRESERVED_ROOT:${root}\n`)
     } else {
-      await rm(root, { recursive: true, force: true })
+      await removeOwnedTemporaryTree(root).catch(() => {
+        if (completed) {
+          completed = false
+          process.stderr.write(`${JSON.stringify({
+            ok: false,
+            category: 'environment',
+            phase: 'environment/cleanup',
+            code: 'E2E_RELEASE_TEMP_CLEANUP_FAILED',
+            remediation: '确认 Runner 自有临时目录可写，并检查 Runtime 安装树是否被外部进程占用',
+            failures: [],
+          })}\n`)
+          process.exitCode = 1
+        } else {
+          process.stderr.write('E2E_RELEASE_CLEANUP_AFTER_FAILURE_FAILED\n')
+        }
+      })
     }
     if (!completed) process.stderr.write('正式发布门禁未通过；不得发布或标记 release。\n')
   }
+  if (completed) process.stdout.write(`${JSON.stringify(successResult)}\n`)
 }
 
 function goldenEnvironment(packageSource, npmCache, packs) {
