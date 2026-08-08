@@ -2,6 +2,7 @@ import {
   RequirementModelSchema,
   canonicalizeJson,
   deriveExecutionResultId,
+  digestBytes,
   digestOracleCheckpointValue,
   digestPrdUnderstandingProjection,
   digestPrdUnderstandingQuote,
@@ -23,6 +24,7 @@ import { Buffer } from 'node:buffer'
 import { realpath } from 'node:fs/promises'
 import { compilePrdRun } from '../packages/e2e-runtime/src/prd-run-compiler.js'
 import { createCaseSchedule } from '../packages/e2e-runtime/src/multi-case-scheduler.js'
+import { createPersistedRuntimeFinalizationMaterial } from '../packages/e2e-runtime/src/production-finalization-material-provider.js'
 import type { ProductionBenchmarkPhase } from '../packages/e2e-runtime/src/production-performance-proof.js'
 import { createArtifactStoreAuthority } from '../packages/e2e-engine/test/artifact-store-authority.js'
 import { completeGenerationFixture } from '../packages/e2e-engine/test/complete-generation.fixture.js'
@@ -79,6 +81,33 @@ export async function createProductionBenchmarkWorkload(input: {
   const verdictInput = createVerdictInput(coverage.obligations, source.modelDigest, coverage.universeDigest)
   const verdict = computeVerdict(verdictInput, { verifyAttemptSelection: () => true })
   if (verdict.verdict !== 'accepted') throw new Error(`E2E_PRODUCTION_BENCHMARK_VERDICT_INVALID:${verdict.verdict}`)
+  const finalizationFixture = completeGenerationFixture()
+  const finalizationMaterialInput = {
+    runId: 'RUN-BENCHMARK',
+    attemptId: 'ATTEMPT-BENCHMARK',
+    artifacts: buildCompleteGeneration(finalizationFixture).artifacts
+      .filter((artifact) => !['final-report', 'generation-manifest'].includes(artifact.artifactType))
+      .map((artifact) => ({ artifact, relativePath: `run/${artifact.artifactType}.json` })),
+    execution: {
+      runId: 'RUN-BENCHMARK', attemptId: 'ATTEMPT-BENCHMARK',
+      realEnvironmentResults: [], injectionResults: [],
+    },
+    gatewayAudit: { status: 'valid', forwarded: 0, blocked: 0 },
+    evidence: checkpointSources.map((checkpoint, index) => {
+      const relativePath = `evidence/checkpoint-${index + 1}.json`
+      const bytes = Buffer.from(checkpoint.actualJson)
+      return {
+        evidenceId: checkpoint.evidenceIds[0]!, relativePath,
+        quarantinePath: `sanitized/checkpoint-${index + 1}.json`,
+        byteLength: bytes.byteLength,
+        digest: digestBytes(`generation-file:${relativePath}`, bytes),
+      }
+    }),
+    cleanup: [],
+    provenance: finalizationFixture.provenance,
+    reportPresentation: finalizationFixture.reportPresentation,
+    verifierMaterials: {},
+  }
   const reportArtifact = createScaleReportArtifact(coverage, verdictInput, verdict)
   const rendered = renderCompleteReport(reportArtifact)
   const publicationFiles = {
@@ -119,7 +148,10 @@ export async function createProductionBenchmarkWorkload(input: {
           output = createCaseSchedule(compiledPlan, createdAt)
           break
         case 'checkpoint-finalization':
-          output = checkpointSources.map(projectAssertionResultV1)
+          output = {
+            assertions: checkpointSources.map(projectAssertionResultV1),
+            material: createPersistedRuntimeFinalizationMaterial(finalizationMaterialInput),
+          }
           break
         case 'engine-verdict':
           output = computeVerdict(verdictInput, { verifyAttemptSelection: () => true })
