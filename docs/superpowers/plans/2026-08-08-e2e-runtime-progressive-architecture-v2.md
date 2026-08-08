@@ -324,6 +324,15 @@ current/new-run-default 指针原子回退到 LKG；失败版本保留诊断但�
 
 固定硬件/runner、Node 版本、warmup、样本数、fixture digest、单项 p50/p95/p99、峰值内存、产物大小、失败率。CI 只在具有稳定资源的 runner 上作为 gate；普通 PR runner 可做趋势告警。
 
+### 9.4 实施记录（2026-08-08）
+
+- 新增 v2 生产 Benchmark proof 与八阶段独立 worker，旧 `verify:e2e-scale` 继续保留为合成快速回归，不再承担生产 p95 结论。
+- 固定构造 500 Requirement / 2000 Rule / 5000 obligation / 1000 Case，并真实调用 PRDRunCompiler、Requirement graph schema、Coverage、Case Scheduler、Assertion 与 production finalization material、Verdict、完整报告和 Artifact Store。
+- 每阶段独立进程执行 3 warmup + 20 正式样本，报告 nearest-rank p50/p95/p99、max、绝对峰值 RSS、输出分布和失败率。
+- 本机 Apple M1 Pro / Node v24.18.0 趋势证明八阶段零失败且预算全通过；因非登记稳定 runner，proof 明确标记 `gateEligible=false`。
+- 新增只支持人工触发的专用 self-hosted stable runner workflow；在该 runner 注册前不加入普通 PR required checks。
+- Benchmark Spec 与结果分别见 `docs/superpowers/specs/2026-08-08-e2e-production-performance-benchmark.md`、`docs/benchmarks/e2e-production-performance-2026-08-08.json`。
+
 ## 10. Phase 8：未来非浏览器 Executor 决策门
 
 只有出现真实第二类执行器、并完成 Browser-to-Browser 基准后才评估通用 `VerificationTask`。
