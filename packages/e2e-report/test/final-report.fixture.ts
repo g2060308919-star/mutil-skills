@@ -1,9 +1,12 @@
-import { deriveExecutionResultId } from '@mutil-skills/e2e-contracts'
+import { canonicalizeJson, deriveExecutionResultId, digestText } from '@mutil-skills/e2e-contracts'
 
 const digest = (character: string) => `sha256:${character.repeat(64)}`
 const valueMetric = { status: 'value', numerator: 1, denominator: 2, percentage: 50 }
 const realResultId = deriveExecutionResultId('CASE-REAL-1', 'real-environment')
 const injectionResultId = deriveExecutionResultId('CASE-REAL-1', 'gateway-injection')
+const policyView = <T extends Record<string, unknown>>(body: T) => ({
+  ...body, decisionId: digestText('policy-decision-view/v1', canonicalizeJson(body)),
+})
 
 export const finalReportFixture = {
   artifactId: 'FINAL-REPORT-1', artifactType: 'final-report', schemaVersion: '3.0.0', engineVersion: '2.0.0',
@@ -60,6 +63,25 @@ export const finalReportFixture = {
         approvalMode: 'local-confirmation', identityVerified: false, separationOfDutiesVerified: false },
       { kind: 'execution', status: 'approved', subjectDigest: digest('4'), grantDigests: [digest('5')],
         approvalMode: 'local-confirmation', identityVerified: false, separationOfDutiesVerified: false },
+    ],
+    policyDecisions: [
+      policyView({
+        schemaVersion: '1.0.0', source: 'approval-freshness', stage: 'plan-approval',
+        decision: 'approved', evidenceDigest: digest('5'), reasonCodes: [],
+        binding: {
+          assetId: 'PRODUCT:PRD-1', prdRevision: digest('a'), subjectDigest: digest('3'),
+          runBundleDigest: digest('4'), targetOrigin: 'https://example.test',
+          actionId: 'ACTION-1', capabilityId: 'CAPABILITY-1', capabilityDigest: digest('5'),
+          operation: 'dom-read', policyDigest: digest('c'),
+        },
+      }),
+      policyView({
+        schemaVersion: '1.0.0', source: 'gateway-enforcement', stage: 'action-enforcement',
+        decision: 'forwarded', evidenceDigest: digest('6'), reasonCodes: [],
+        binding: {
+          actionId: 'ACTION-1', policyDigest: digest('c'), gatewayInstanceId: 'GATEWAY-1', sequence: 0,
+        },
+      }),
     ],
     environment: {
       environmentId: 'STAGING', origins: ['https://example.test'],

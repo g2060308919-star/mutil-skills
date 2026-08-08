@@ -6,6 +6,15 @@ import { finalReportFixture as finalReport } from './final-report.fixture.js'
 const digest = (character: string) => `sha256:${character.repeat(64)}`
 
 describe('renderCompleteReport', () => {
+  test('用同一张策略决策表区分计划级批准与动作级 Gateway 执行', () => {
+    const report = reportModule.renderCompleteReport(finalReport)
+    expect(report.markdown).toContain('计划级批准')
+    expect(report.markdown).toContain('动作级执行')
+    expect(report.markdown).toContain('CAPABILITY-1')
+    expect(report.html).toContain('计划级批准')
+    expect(report.html).toContain('动作级执行')
+  })
+
   test('Case 详情从 AssertionResultV1 展示统一断言语义', () => {
     const withAssertion = structuredClone(finalReport)
     const step: any = withAssertion.content.caseDetails[0]!.steps[0]!

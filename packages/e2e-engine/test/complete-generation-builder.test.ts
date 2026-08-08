@@ -14,6 +14,22 @@ import { addFixtureInjectionResult, bindFixtureExecutionOutcomeReceipt, complete
   setFixtureRegressionProfile } from './complete-generation.fixture.js'
 
 describe('完整 generation builder', () => {
+  test('FinalReport 统一展示计划级审批与 Gateway 动作级二次校验，但保留执行时点', () => {
+    const input = completeGenerationFixture()
+    const first: any = buildCompleteGeneration(input).artifacts
+      .find((artifact) => artifact.artifactType === 'final-report')!.content
+    const second: any = buildCompleteGeneration(completeGenerationFixture()).artifacts
+      .find((artifact) => artifact.artifactType === 'final-report')!.content
+
+    expect(first.policyDecisions).toEqual(second.policyDecisions)
+    expect(first.policyDecisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'approval-freshness', stage: 'plan-approval' }),
+      expect.objectContaining({ source: 'gateway-enforcement', stage: 'action-enforcement' }),
+    ]))
+    expect(new Set(first.policyDecisions.map((view: any) => view.decisionId)).size)
+      .toBe(first.policyDecisions.length)
+  })
+
   test('FinalReport 从 OracleCheckpointResult 确定性投影 AssertionResultV1', () => {
     const input = completeGenerationFixture()
     const expectedJson = '{"visible":true}'
@@ -990,6 +1006,12 @@ describe('完整 generation builder', () => {
         identityVerified: true,
         separationOfDutiesVerified: true,
       }
+    }],
+    ['policy decision binding', (report: any) => {
+      const view = report.policyDecisions[0]
+      view.binding.actionId = 'ACTION-FORGED'
+      const { decisionId: _decisionId, ...body } = view
+      view.decisionId = digestText('policy-decision-view/v1', canonicalizeJson(body))
     }],
     ['gateway status', (report: any) => { report.gatewayAudit.status = 'invalid' }],
     ['gateway counters', (report: any) => { report.gatewayAudit.forwarded += 1 }],

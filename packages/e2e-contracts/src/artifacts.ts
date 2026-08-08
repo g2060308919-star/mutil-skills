@@ -57,6 +57,7 @@ import {
 } from './compiler-input.js'
 import { E2ECaseExecutionFieldsSchema } from './e2e-flow.js'
 import { AssertionResultV1Schema, projectAssertionResultV1 } from './assertion-result.js'
+import { PolicyDecisionViewV1Schema } from './policy-decision-view.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -1185,6 +1186,9 @@ export const FinalReportContentSchema = z.object({
     approvalMode: z.enum(['local-confirmation', 'webauthn']),
     identityVerified: z.boolean(), separationOfDutiesVerified: z.boolean(),
   }).strict()).length(3),
+  policyDecisions: z.array(PolicyDecisionViewV1Schema).max(1_000_000)
+    .refine((views) => new Set(views.map((view) => view.decisionId)).size === views.length,
+      '策略决策 decisionId 必须唯一'),
   environment: z.object({
     environmentId: SafeIdSchema,
     origins: z.array(z.string().url()).min(1).max(256),

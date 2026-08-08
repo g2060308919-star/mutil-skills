@@ -74,6 +74,15 @@ function renderMarkdown(report: FinalReportArtifact): string {
         approvalLabel(item.kind), item.status, approvalAssuranceLabel(item),
         item.subjectDigest, item.grantDigests.join('、') || '无',
       ])),
+      '',
+      '策略决策（同一语义视图，保留执行时点）：',
+      table(['时点', '决策', 'Action', 'Capability', 'Target / Policy', '证据'],
+        content.policyDecisions.map((view) => [
+          policyStageLabel(view.stage), view.decision, view.binding.actionId,
+          view.binding.capabilityId ?? '无',
+          view.binding.targetOrigin ?? view.binding.policyDigest,
+          view.evidenceDigest,
+        ])),
     ]),
     markdownSection(SECTION_TITLES[2], [
       `- 环境：${cell(content.environment.environmentId)}`,
@@ -237,7 +246,7 @@ function htmlSection(index: number, report: FinalReportArtifact): string {
     `Approval grants：${content.summaries.approvalGrantDigests.join('、') || '无'}`,
     `审批保证：${approvalAssuranceLabel(content.approvalAssurance)}`,
     `Generation：${report.generationId} · ${content.summaries.generationDigest}`,
-  ])}${htmlTable(['审批类型', '状态', '保证', 'Subject digest', 'Grant digests'], content.approvals.map((item) => [approvalLabel(item.kind), item.status, approvalAssuranceLabel(item), item.subjectDigest, item.grantDigests.join('、') || '无']))}`
+  ])}${htmlTable(['审批类型', '状态', '保证', 'Subject digest', 'Grant digests'], content.approvals.map((item) => [approvalLabel(item.kind), item.status, approvalAssuranceLabel(item), item.subjectDigest, item.grantDigests.join('、') || '无']))}<h3>策略决策（同一语义视图，保留执行时点）</h3>${htmlTable(['时点', '决策', 'Action', 'Capability', 'Target / Policy', '证据'], content.policyDecisions.map((view) => [policyStageLabel(view.stage), view.decision, view.binding.actionId, view.binding.capabilityId ?? '无', view.binding.targetOrigin ?? view.binding.policyDigest, view.evidenceDigest]))}`
   if (index === 2) return `${htmlList([
     `环境：${content.environment.environmentId}`,
     `Origin：${content.environment.origins.join('、')}`,
@@ -435,6 +444,10 @@ function formatMetric(metric: Metric): string {
 function approvalLabel(kind: 'scope' | 'lineage' | 'execution'): string {
   if (kind === 'scope') return '范围审批'
   return kind === 'lineage' ? '谱系审批' : '执行审批'
+}
+
+function policyStageLabel(stage: 'plan-approval' | 'action-enforcement'): string {
+  return stage === 'plan-approval' ? '计划级批准' : '动作级执行'
 }
 
 function approvalAssuranceLabel(value: {
