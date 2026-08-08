@@ -42,7 +42,26 @@ export {
   type ResolveRuntimeInstallationOptions,
   type RuntimeResolution,
   type RuntimeResolverPolicy,
+  type StableRuntimeResolver,
 } from './runtime-resolver.js'
+export {
+  RuntimeTargetCustomSchema,
+  RuntimeUpdateError,
+  RuntimeUpdateStateSchema,
+  SignedRuntimeTargetSchema,
+  advanceTrustedMetadata,
+  validateRuntimeTarget,
+  type InstalledRuntimeIdentity,
+  type RuntimeTargetEnvironment,
+  type RuntimeUpdateState,
+  type SignedRuntimeTarget,
+  type TrustedMetadataSet,
+} from './runtime-update-trust.js'
+export {
+  createStableRuntimeResolver,
+  type RuntimeUpdateClient,
+  type StableRuntimeUpdateServiceOptions,
+} from './stable-runtime-update-service.js'
 
 export {
   RuntimeCompatibilityDescriptorV1Schema,

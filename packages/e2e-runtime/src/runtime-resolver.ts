@@ -18,6 +18,7 @@ const ExactVersionSchema = z.string().refine(isExactRuntimeVersion, 'Runtime 版
 
 export const RuntimeResolverPolicySchema = z.discriminatedUnion('mode', [
   z.object({ mode: z.literal('offline') }).strict(),
+  z.object({ mode: z.literal('stable') }).strict(),
   z.object({
     mode: z.literal('pinned'),
     version: ExactVersionSchema,
@@ -34,11 +35,21 @@ export interface ResolveRuntimeInstallationOptions {
   homeDir: string
   policy: RuntimeResolverPolicy
   existingRun?: ExistingRunRuntimeBinding
+  stableResolver?: StableRuntimeResolver
+}
+
+export interface StableRuntimeResolver {
+  (): Promise<{
+    runtimeVersion: string
+    installationDigest: string
+    revocationStatus: 'revocation-checked'
+  }>
 }
 
 export interface RuntimeResolution {
   selectionKind: 'new-run' | 'existing-run'
-  policyMode: 'offline' | 'pinned' | 'run-bound'
+  policyMode: 'offline' | 'pinned' | 'stable' | 'run-bound'
+  revocationStatus: 'revocation-checked' | 'offline-unchecked' | 'metadata-expired'
   installation: RuntimeInstallation
   runBinding: { runtimeVersion: string; installationDigest: string }
   selectionDigest: string
@@ -47,7 +58,7 @@ export interface RuntimeResolution {
 export type RuntimeResolverPolicy = z.infer<typeof RuntimeResolverPolicySchema>
 
 /**
- * Phase 5 的纯本地解析器：只选择已安装且完整验真的 closure，不联网、不安装，也不移动 current。
+ * Phase 5/6 Resolver：offline/pinned 只选择本地 closure；stable 只委托经批准的签名更新服务。
  * 已有 Run 的 installation digest 优先于任何新 Run policy。
  */
 export async function resolveRuntimeInstallation(
@@ -68,6 +79,24 @@ export async function withResolvedRuntimeInstallation<T>(
   const existingRun = parseExistingRun(options.existingRun)
   const layout = runtimeLayout(options.homeDir)
   await verifyRuntimeRoot(layout)
+  if (existingRun === undefined && policy.mode === 'stable') {
+    if (options.stableResolver === undefined) runtimeError(
+      'E2E_RUNTIME_STABLE_UPDATE_UNAVAILABLE',
+      'stable 签名更新服务未配置；不得静默降级为 offline',
+      'environment',
+    )
+    const candidate = await options.stableResolver()
+    assertStableCandidate(candidate)
+    return await withRuntimeInstallLock(layout, async () => {
+      await verifyRuntimeRoot(layout)
+      const verified = await verifyInstalledRuntimeVersion(layout, candidate.runtimeVersion)
+      if (verified.manifest.installationDigest !== candidate.installationDigest) runtimeError(
+        'E2E_RUNTIME_STABLE_DIGEST_MISMATCH',
+        'stable 更新结果与本地已验证 closure 摘要不一致',
+      )
+      return await bind(resolution('new-run', 'stable', verified, undefined, candidate.revocationStatus))
+    })
+  }
   return await withRuntimeInstallLock(layout, async () => {
     await verifyRuntimeRoot(layout)
     const selected = await resolveVerifiedRuntimeInstallation(layout, policy, existingRun)
@@ -87,25 +116,30 @@ async function resolveVerifiedRuntimeInstallation(
       `Run ${existingRun.runId} 绑定的 Runtime closure 不存在或未通过验证`,
       'environment',
     )
-    return resolution('existing-run', 'run-bound', installation, existingRun.runId)
+    return resolution('existing-run', 'run-bound', installation, existingRun.runId, 'offline-unchecked')
   }
   if (policy.mode === 'offline') {
     const { installation } = await verifyCurrentRuntimeInstallation(layout)
-    return resolution('new-run', 'offline', installation)
+    return resolution('new-run', 'offline', installation, undefined, 'offline-unchecked')
   }
+  if (policy.mode === 'stable') runtimeError(
+    'E2E_RUNTIME_STABLE_UPDATE_UNAVAILABLE',
+    'stable 新 Run 必须先通过签名更新服务',
+    'internal',
+  )
   const installation = await verifyInstalledRuntimeVersion(layout, policy.version)
   if (policy.installationDigest !== undefined
     && installation.manifest.installationDigest !== policy.installationDigest) {
     runtimeError('E2E_RUNTIME_PINNED_DIGEST_MISMATCH', 'pinned Runtime 版本与 installation digest 不一致')
   }
-  return resolution('new-run', 'pinned', installation)
+  return resolution('new-run', 'pinned', installation, undefined, 'offline-unchecked')
 }
 
 function parsePolicy(candidate: unknown): RuntimeResolverPolicy {
   const parsed = RuntimeResolverPolicySchema.safeParse(candidate)
   if (!parsed.success) runtimeError(
     'E2E_RUNTIME_RESOLVER_POLICY_INVALID',
-    'Phase 5 只接受 offline 或精确 pinned 本地策略',
+    '只接受 offline、stable 或精确 pinned 策略；latest 尚未批准',
     'input',
   )
   return parsed.data
@@ -144,6 +178,7 @@ function resolution(
   policyMode: RuntimeResolution['policyMode'],
   verified: VerifiedRuntimeVersion,
   runId?: string,
+  revocationStatus: RuntimeResolution['revocationStatus'] = 'offline-unchecked',
 ): RuntimeResolution {
   const installation: RuntimeInstallation = {
     version: verified.version,
@@ -155,16 +190,28 @@ function resolution(
   }
   const body = {
     schemaVersion: '1.0.0', selectionKind, policyMode,
-    runtimeVersion: installation.version,
+    runtimeVersion: installation.version, revocationStatus,
     installationDigest: installation.installationDigest,
     ...(runId === undefined ? {} : { runId }),
   }
   return {
-    selectionKind, policyMode, installation,
+    selectionKind, policyMode, installation, revocationStatus,
     runBinding: {
       runtimeVersion: installation.version,
       installationDigest: installation.installationDigest,
     },
     selectionDigest: digestText('runtime-resolution/v1', canonicalizeJson(body)),
   }
+}
+
+function assertStableCandidate(candidate: unknown): asserts candidate is Awaited<ReturnType<StableRuntimeResolver>> {
+  const parsed = z.object({
+    runtimeVersion: ExactVersionSchema,
+    installationDigest: DigestSchema,
+    revocationStatus: z.literal('revocation-checked'),
+  }).strict().safeParse(candidate)
+  if (!parsed.success) runtimeError(
+    'E2E_RUNTIME_STABLE_RESULT_INVALID',
+    'stable 更新服务返回了无效或未完成撤销检查的结果',
+  )
 }

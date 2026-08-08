@@ -11,7 +11,7 @@ import {
 describe('E2E release failure classification', () => {
   test('Runner 自有临时根包含只读 Runtime 安装树时仍完成清理', async () => {
     const root = await mkdtemp(join(tmpdir(), 'mutil-release-cleanup-test-'))
-    const hardened = join(root, 'home', '.mutil-skills', 'runtime', 'e2e', 'versions', '0.5.2')
+    const hardened = join(root, 'home', '.mutil-skills', 'runtime', 'e2e', 'versions', '0.6.0')
     await mkdir(hardened, { recursive: true, mode: 0o700 })
     await writeFile(join(hardened, 'manifest.json'), '{}\n', { mode: 0o400 })
     await chmod(hardened, 0o500)

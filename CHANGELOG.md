@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-09
+
+### Added
+
+- 新增基于官方 `tuf-js` 的签名 `stable` Runtime 客户端、四角色 metadata 高水位、严格 target 身份、候选 closure、doctor/canary、new-run default 与 LKG 事务；`latest` 继续拒绝。
+- 新增签名更新运维说明和 ADR 0017。真实离线 2-of-3 密钥、审核后的 bootstrap root、metadata HTTPS origin 与跨平台 Registry Golden 未提供前，生产 `stable` 保持 fail-closed。
+
+### Changed
+
+- Runtime Resolver 允许新 Run 显式选择已配置的签名 `stable` 服务，并在安装锁中复验 closure；已有 Run 仍按原 installation digest 恢复，`offline`/`pinned` 行为不变。
+- 全部工作区包、E2E Skill 安装指引、协议与 Engine 版本真相统一为 `0.6.0`。
+
+### Security
+
+- TUF target 的 SHA-512、npm integrity、实际 target URL 与 registry URL 必须互相绑定；下载文件和 metadata 使用当前用户私有权限、有限长度、有限重定向及 HTTPS origin allowlist。
+- installer 在同一文件描述符上复验签名 tarball 的长度、SHA-512 与读取期间不变性，继续禁用 lifecycle scripts 并清洗安装环境；已验签 metadata 高水位在解释撤销/坏 target 前持久化，防止重新接受旧 metadata。
+- stable 更新锁绑定当前用户、PID、随机 nonce 与 inode；活 owner/PID 复用保持阻断，只有 OS 可证明死亡的崩溃遗留锁会被安全回收。
+- 签名 tarball installer 改为由 bootstrap 显式传入并验证 npm CLI 绝对路径，不再隐式依赖 `npm_execpath` 环境变量。
+
 ## [0.5.2] - 2026-08-04
 
 ### Fixed

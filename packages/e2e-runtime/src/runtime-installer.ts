@@ -15,7 +15,7 @@ import {
   writeFile,
 } from 'node:fs/promises'
 import { dirname, isAbsolute, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fixedLauncherSource } from './launcher-template.js'
 import { runtimeLayout, type RuntimeLayout } from './runtime-layout.js'
 import {
@@ -46,6 +46,8 @@ export interface RuntimeClosureInstallInput {
 export interface InstallRuntimeOptions {
   homeDir: string
   version: string
+  /** Phase 6：允许先发布并验真 closure，canary 通过后再显式激活。默认保持旧行为。 */
+  activate?: boolean
   installClosure?: (input: RuntimeClosureInstallInput) => Promise<void>
 }
 
@@ -63,6 +65,15 @@ export interface RuntimeInstallResult {
 export interface ProductionClosureInstallInput {
   prefix: string
   packageSpec: string
+  env: NodeJS.ProcessEnv
+}
+
+export interface SignedTarballClosureInstallInput {
+  prefix: string
+  tarballPath: string
+  npmCliPath: string
+  expectedLength: number
+  expectedIntegrity: string
   env: NodeJS.ProcessEnv
 }
 
@@ -143,6 +154,46 @@ export class ProductionClosureInstaller {
     ]
     await spawnAndWait(process.execPath, npmArguments, input.prefix, sanitizeInstallerEnvironment(input.env))
   }
+
+  async installTarball(input: SignedTarballClosureInstallInput): Promise<void> {
+    if (!isAbsolute(input.prefix) || !isAbsolute(input.tarballPath)) {
+      runtimeError('E2E_RUNTIME_SIGNED_TARBALL_UNSAFE', '签名 tarball 与 closure prefix 必须是绝对路径', 'input')
+    }
+    if (!isAbsolute(input.npmCliPath)) {
+      runtimeError('E2E_RUNTIME_NPM_BOOTSTRAP_INVALID', '无法从当前 bootstrap 固定 npm CLI', 'environment')
+    }
+    let handle
+    try {
+      handle = await open(input.tarballPath, constants.O_RDONLY | constants.O_NOFOLLOW)
+      const before = await handle.stat()
+      if (!before.isFile() || before.uid !== currentUid() || before.nlink !== 1
+        || (before.mode & 0o777) !== 0o600 || before.size <= 0 || before.size > 512 * 1024 * 1024) {
+        runtimeError('E2E_RUNTIME_SIGNED_TARBALL_UNSAFE', '签名 tarball 必须是当前用户独占的有限长 0600 普通文件')
+      }
+      if (!Number.isSafeInteger(input.expectedLength) || input.expectedLength !== before.size
+        || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(input.expectedIntegrity)) {
+        runtimeError('E2E_RUNTIME_SIGNED_TARBALL_IDENTITY_MISMATCH', '签名 tarball 长度或 integrity metadata 无效')
+      }
+      const hash = createHash('sha512')
+      for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk)
+      const actualIntegrity = `sha512-${hash.digest('base64')}`
+      const after = await handle.stat()
+      if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+        || before.mtimeMs !== after.mtimeMs || actualIntegrity !== input.expectedIntegrity) {
+        runtimeError('E2E_RUNTIME_SIGNED_TARBALL_IDENTITY_MISMATCH', '签名 tarball bytes 与 metadata 不一致')
+      }
+    } catch (cause) {
+      if (cause instanceof Error && (cause.message.includes('E2E_RUNTIME_SIGNED_TARBALL_UNSAFE')
+        || cause.message.includes('E2E_RUNTIME_SIGNED_TARBALL_IDENTITY_MISMATCH'))) throw cause
+      runtimeError('E2E_RUNTIME_SIGNED_TARBALL_UNSAFE', '无法安全打开签名 tarball')
+    } finally { await handle?.close() }
+    const canonicalTarball = await realpath(input.tarballPath)
+    const npmArguments = [
+      input.npmCliPath, 'install', '--prefix', input.prefix, '--ignore-scripts', '--omit=dev', '--no-bin-links',
+      '--no-audit', '--no-fund', '--save-exact', canonicalTarball,
+    ]
+    await spawnAndWait(process.execPath, npmArguments, input.prefix, sanitizeInstallerEnvironment(input.env))
+  }
 }
 
 export async function installRuntime(options: InstallRuntimeOptions): Promise<RuntimeInstallResult> {
@@ -206,7 +257,7 @@ export async function installRuntimeWithOperations(
         runtimeError('E2E_RUNTIME_VERSION_CONFLICT', '相同版本已存在但 Runtime content identity 不同')
       }
       await transaction.markPublished()
-      await activateRuntimeFiles(layout, verified, operations)
+      if (options.activate !== false) await activateRuntimeFiles(layout, verified, operations)
       activated = true
       return {
         version: verified.version,

@@ -2,7 +2,7 @@
 
 ## 状态
 
-Proposed，2026-08-08。**Requires explicit human approval before implementation.**
+Accepted，2026-08-09。规格已获人工批准，客户端实现已落地；生产 `stable` 激活仍受真实离线密钥、metadata origin 与跨平台 Registry Golden 门禁约束。
 
 ## 背景
 
@@ -41,7 +41,7 @@ Phase 5 只从本机已安装且完整验真的 Runtime closure 中执行 `offli
 - `minimumBootstrapVersion`
 - `revoked: boolean` 与非敏感 `revocationReasonCode`
 
-下载 bytes 必须依次通过 TUF length/hash、npm integrity、package identity、closure manifest/content/executable digest、Node/平台/协议兼容与现有 installer 的 staging 验证。任一身份不一致都不得安装、激活或写入 LKG。
+下载 bytes 必须依次通过 TUF length/hash、与同一 SHA-512 绑定的 npm integrity、实际 target URL 与签名 registry URL 一致性、package identity、closure manifest/content/executable digest、Node/平台/协议兼容与现有 installer 的 staging 验证。下载文件必须转为当前用户独占的 `0600` 普通文件，installer 在同一文件描述符上再次验证精确长度、SHA-512 与读取期间不变性。任一身份不一致都不得安装、激活或写入 LKG。
 
 ### 3. npm provenance 的职责边界
 
@@ -54,7 +54,7 @@ npm trusted publishing/OIDC 与 provenance 用于证明“哪个受信 workflow 
 
 ### 4. 回滚、防冻结、缓存与离线语义
 
-1. 本地私有 update state 原子保存最高可信 root/timestamp/snapshot/targets 版本、metadata digest/expiry、固定 update start time、高水位 wall clock、已验证 target 和审计链。版本降低、metadata 消失、摘要混搭或本地时钟倒退超过 5 分钟均阻断在线解析。
+1. 本地私有 update state 原子保存最高可信 root/timestamp/snapshot/targets 版本、metadata digest/expiry、固定 update start time、高水位 wall clock、已验证 target 和审计链。已验签 metadata 高水位必须在 target 业务校验前落盘，避免撤销或坏 target 被拒绝后重新接受更旧 metadata；版本降低、metadata 消失、摘要混搭或本地时钟倒退超过 5 分钟均阻断在线解析。
 2. root 计划有效期 365 天、targets 30 天、snapshot 7 天、timestamp 24 小时；具体签发自动化必须在 50% 生命周期前刷新在线 metadata，并在 root/targets 到期前人工轮换。实现测试必须使用可注入时钟覆盖边界值。
 3. `stable`/`latest` 没有“过期后继续安装”的宽限：网络不可用时，只能使用尚未过期的完整缓存来选择已经下载并验真的 target；任一 metadata 过期后，新 Run 的在线 channel 解析 fail-closed。
 4. `offline` 是明确策略，不是 `stable` 失败后的静默降级。它仍可执行本机 current 的完整已验证 closure；已有 Run 仍按原 installation digest 恢复。因此 metadata 过期不会使已存在的离线闭包凭空失效。
@@ -121,18 +121,22 @@ Runtime package 仍声明最低 Node 版本，但在线 Resolver 只接受 targe
 
 - 在线 stable 的供应链边界可审计，并能检测仓库/缓存攻击与坏版本；代价是四类 metadata、离线签名运维、时钟/缓存状态和更大的测试矩阵。
 - 网络不可用或 metadata 过期时 stable 会明确阻断；用户仍可显式 offline，但不能得到“已检查最新撤销”的声明。
-- 2-of-3 root/targets 阈值要求真实的离线密钥保管与轮换流程；在该组织能力确认前不能实施。
+- 2-of-3 root/targets 阈值要求真实的离线密钥保管与轮换流程；客户端可以先发布但必须 fail-closed，在该组织能力确认前不能启用生产 `stable`。
 - npm provenance 与 TUF 形成两条互补证明链，发布流程和客户端安装会更慢，但不改变业务 E2E 执行语义。
 
 ## 回滚
 
 关闭 `stable`/`latest` feature flag，停止更新 metadata refresh，原子恢复现有 LKG 为 new-run-default。保留所有已固化 Run 绑定、本地可信 metadata 高水位和审计记录，禁止通过删除状态来“回滚”防降级记忆。若 root 信任本身失效，只能发布带新内置 root 的 Bootstrap/package 并由人工完成带外恢复。
 
-## 待人工批准事项
+## 生产激活前置（不由代码仓库伪造）
 
-1. 是否具备 3 把 root 与 3 把 targets 离线 key、2-of-3 阈值的保管和轮换能力；
-2. metadata 托管 origin、维护者与紧急响应责任人；
-3. 365/30/7/1 天有效期和 5 分钟时钟回退阈值；
-4. 紧急撤销对已有 Run 采用 `safety-blocked` 而非继续或自动迁移；
-5. stable 的 Node 22/24 支持矩阵，以及 Node 26 延后准入；
-6. stable 是否默认启用；`latest` 仍必须在后续独立批准。
+已批准客户端安全语义：365/30/7/1 天计划有效期、5 分钟时钟回退阈值、已有 Run 紧急撤销后 `safety-blocked`、Node 22/24 准入、Node 26 延后，以及 `latest` 独立审批。
+
+仍需由发布组织提供且不能提交到 Git/npm/CI artifact 的运营材料：
+
+1. 3 把 root 与 3 把 targets 离线私钥的真实保管、2-of-3 签名与轮换演练；
+2. 经审核的 bootstrap `root.json` 公钥材料；
+3. metadata HTTPS origin、维护者、签发自动化与紧急响应责任人；
+4. Linux/macOS、Node 22/24 的 clean-HOME Registry Golden 与撤销演练。
+
+缺少任一项时，0.6.0 客户端保留 `offline`/`pinned` 能力并对 `stable` fail-closed；不得内置测试私钥、临时 origin 或把 npm provenance 当作信任根。
