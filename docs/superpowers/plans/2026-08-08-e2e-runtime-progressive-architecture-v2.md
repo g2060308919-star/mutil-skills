@@ -347,6 +347,14 @@ current/new-run-default 指针原子回退到 LKG；失败版本保留诊断但�
 
 未满足这些条件时保持浏览器领域模型，不创建通用 `VerificationCase`。
 
+### 10.1 独立审计记录（2026-08-08）
+
+- 仓库生产执行路径全部属于浏览器领域；Target Probe、Preflight、Read、Reversible Write、Injection 和 Full Playwright 是同一 Executor 的能力/品牌，不构成真实第二类 Executor。
+- Evidence、Assertion、Verdict、Policy 等下游边界具备复用基础，但没有第二执行器、迁移 corpus、复杂度对比或抽象候选 Golden，不能据此推导通用 Case。
+- 决策门六项仅“下游边界可复用”部分满足，其余均缺少可验证证据，因此保持 `DeclarativeCase` / `CompiledCase` / `BrowserExecutorProtocolV1`，不新增 `VerificationCase`、通用注册表或持久 schema。
+- ADR 0018 固化重开条件：真实第二 Executor、≥90% 无语义变化迁移、例外清单、字段级复用、复杂度净降低，以及覆盖表单、Popup、多页面、下载、Trace、JSON 写、Cleanup、Reload 的 Browser-to-Browser 对照 Golden。
+- Phase 8 是架构审计，不改变 Runtime 行为、历史 Run 或 Artifact；满足证据前只允许无生产导出、无 schema 承诺的 prototype。
+
 ## 11. 全局发布与验证门禁
 
 每阶段至少执行：
