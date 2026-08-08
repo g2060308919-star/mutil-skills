@@ -11,6 +11,7 @@ test('public Runtime package exposes the safe facade, status model, and protocol
     'E2EInputPreparer',
     'RUNTIME_PACKAGE_VERSION',
     'RunStatusPublisher',
+    'RuntimeCompatibilityDescriptorV1Schema',
     'RuntimeDoctorProbeSchema',
     'RuntimeDoctorReportSchema',
     'RuntimeErrorSchema',
@@ -26,6 +27,7 @@ test('public Runtime package exposes the safe facade, status model, and protocol
     'confirmAcceptanceReview',
     'createRunHandle',
     'createTargetContractFact',
+    'describeRuntimeCompatibility',
     'projectRunStage',
     'runTargetProbe',
   ])

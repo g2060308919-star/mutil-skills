@@ -33,8 +33,10 @@ export {
   type PreparedE2EInput,
 } from './e2e-input-preparer.js'
 export { RunStatusPublisher } from './run-status-publisher.js'
+export { describeRuntimeCompatibility } from './runtime-compatibility.js'
 
 export {
+  RuntimeCompatibilityDescriptorV1Schema,
   RuntimeDoctorProbeSchema,
   RuntimeDoctorReportSchema,
   RuntimeErrorSchema,
@@ -42,6 +44,7 @@ export {
   RuntimeResponseEnvelopeSchema,
   type RuntimeDoctorProbe,
   type RuntimeDoctorReport,
+  type RuntimeCompatibilityDescriptorV1,
   type RuntimeError,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
