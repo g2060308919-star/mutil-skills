@@ -138,6 +138,7 @@ import {
   selectTargetProbePolicy,
   type TargetProbeCapability,
 } from './target-probe.js'
+import { projectTaskStateViewV1 } from './task-state-view.js'
 import type { RunStatusPublisher } from './run-status-publisher.js'
 import { assertCompiledCaseProjection } from './compiled-case-projection.js'
 
@@ -473,7 +474,7 @@ export class E2ERuntimeHost {
       if (beforeRead === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
       this.requireInstallation(beforeRead)
       const projectedStatus = RuntimeStatusResultSchema.parse(
-        statusResult(beforeRead, this.dependencies.now()),
+        statusResult(beforeRead, this.dependencies.now(), request.payload.includeTaskState === true),
       )
       await this.dependencies.runStatusPublisher?.publish(projectedStatus)
       const outcome = await this.dependencies.runStore.readRunOutcome(
@@ -3380,7 +3381,11 @@ function createRunResult(snapshot: RuntimeRunSnapshot): Record<string, unknown> 
   })
 }
 
-function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, unknown> {
+function statusResult(
+  snapshot: RuntimeRunSnapshot,
+  now: Date,
+  includeTaskState = false,
+): Record<string, unknown> {
   const projection = runtimeStatusProjection(snapshot, now)
   const targetInvalidation = targetInvalidationProjection(snapshot)
   const acceptanceReview = acceptanceReviewForStatus(snapshot)
@@ -3392,7 +3397,7 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
   const targetProbeBlocker = snapshot.targetProbe !== undefined
     && snapshot.targetProbe.status !== 'ready'
     ? snapshot.targetProbe.reasonCode ?? 'E2E_TARGET_PROBE_BLOCKED' : undefined
-  return RuntimeStatusResultSchema.parse({
+  const legacyStatus = RuntimeStatusResultSchema.parse({
     runId: snapshot.runId,
     assetId: snapshot.assetId,
     projectIdentityDigest: snapshot.projectIdentityDigest,
@@ -3442,6 +3447,11 @@ function statusResult(snapshot: RuntimeRunSnapshot, now: Date): Record<string, u
     ...(snapshot.preflightBlocker === undefined
       ? {} : { preflightBlocker: snapshot.preflightBlocker }),
     ...(snapshot.pendingDecision === undefined ? {} : { pendingDecision: snapshot.pendingDecision }),
+  })
+  if (!includeTaskState) return legacyStatus
+  return RuntimeStatusResultSchema.parse({
+    ...legacyStatus,
+    taskState: projectTaskStateViewV1(snapshot, legacyStatus),
   })
 }
 

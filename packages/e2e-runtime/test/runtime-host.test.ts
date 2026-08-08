@@ -1,6 +1,7 @@
 import {
   RuntimeRequestEnvelopeSchema,
   RuntimeResponseEnvelopeSchema,
+  RuntimeStatusResultSchema,
   ReadApprovalSubjectSchema,
   SignedGrantSchema,
   canonicalGrantApprovalSubjectDigest,
@@ -288,6 +289,41 @@ describe('E2ERuntimeHost', () => {
       ok: false,
       error: { code: 'E2E_RUNTIME_RUN_NOT_FOUND' },
     })
+    await fixture.store.close()
+  })
+
+  test('get-status 默认保持旧响应，显式选择时附加只读 TaskStateViewV1', async () => {
+    const fixture = await hostFixture()
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-TASK-STATE-CREATE', fixture.roots.project),
+    ))
+    const legacy = successResult(await handleRequest(fixture.host, getStatusRequest(
+      'REQUEST-TASK-STATE-LEGACY', fixture.roots.project, created.runId as string,
+    )))
+    expect(legacy).not.toHaveProperty('taskState')
+
+    const optedIn = RuntimeStatusResultSchema.parse(successResult(await handleRequest(
+      fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-TASK-STATE-V1'), command: 'get-status',
+      projectRoot: fixture.roots.project,
+      payload: { runId: created.runId, includeTaskState: true },
+      }),
+    )))
+    expect(optedIn).toMatchObject({
+      workflow: { current: 'created' }, stage: 'requirements', condition: { kind: 'ready' },
+      taskState: {
+        schemaVersion: '1.0.0', runId: created.runId, assetId: 'ASSET-1',
+        workflow: { current: 'created' }, stage: 'requirements', condition: { kind: 'ready' },
+        artifactValidity: expect.arrayContaining([
+          { assetKey: 'prd-source', validity: 'preserved', contentDigest: created.prdRevision },
+        ]),
+        minimumMissingInput: ['prd-understanding-prepared'], recovery: { kind: 'none' },
+      },
+    })
+    expect(optedIn.taskState).toBeDefined()
+    if (optedIn.taskState === undefined) throw new Error('TaskStateViewV1 missing')
+    expect(optedIn.taskState.workflow).toEqual(optedIn.workflow)
+    expect(optedIn.taskState.minimumMissingInput).toEqual(optedIn.minimumMissingInput)
     await fixture.store.close()
   })
 

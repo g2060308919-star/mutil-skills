@@ -3,6 +3,7 @@ import {
   RuntimeRequestEnvelopeSchema,
   RuntimeResponseEnvelopeSchema,
   RuntimeStatusResultSchema,
+  TaskStateViewV1Schema,
   canonicalizeJson,
   type RunHandle,
   type ApprovalGrantSubject,
@@ -10,6 +11,7 @@ import {
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
   type RuntimeStatusResult,
+  type TaskStateViewV1,
   type TargetContract,
 } from '@mutil-skills/e2e-contracts'
 import { randomUUID } from 'node:crypto'
@@ -113,6 +115,16 @@ export class E2EFacade {
     return await this.#statusByRunId(handle.runId, handle)
   }
 
+  async taskState(handle: RunHandle): Promise<TaskStateViewV1> {
+    const status = await this.#statusByRunId(handle.runId, handle, true)
+    if (status.taskState === undefined) throw new E2EFacadeError({
+      code: 'E2E_FACADE_TASK_STATE_UNAVAILABLE', category: 'migration',
+      message: '当前 Runtime 未返回 TaskStateViewV1，请升级 Runtime', retryable: false,
+      requestId: 'FACADE-LOCAL', runId: handle.runId,
+    })
+    return TaskStateViewV1Schema.parse(status.taskState)
+  }
+
   async review(handle: RunHandle): Promise<RuntimeAcceptanceReviewResult> {
     await this.status(handle)
     return RuntimeAcceptanceReviewResultSchema.parse(
@@ -196,9 +208,15 @@ export class E2EFacade {
     }, handle.runId))
   }
 
-  async #statusByRunId(runId: string, expected?: RunHandle): Promise<RuntimeStatusResult> {
+  async #statusByRunId(
+    runId: string,
+    expected?: RunHandle,
+    includeTaskState = false,
+  ): Promise<RuntimeStatusResult> {
     const result = RuntimeStatusResultSchema.parse(
-      await this.#invoke('get-status', { runId }, runId),
+      await this.#invoke('get-status', {
+        runId, ...(includeTaskState ? { includeTaskState: true } : {}),
+      }, runId),
     )
     if (result.handle === undefined) throw new E2EFacadeError({
       code: 'E2E_FACADE_RUN_HANDLE_REQUIRED', category: 'migration',

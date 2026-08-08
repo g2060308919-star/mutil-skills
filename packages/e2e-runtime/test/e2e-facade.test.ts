@@ -98,6 +98,39 @@ describe('E2EFacade', () => {
     }), expect.any(Uint8Array))
   })
 
+  test('taskState 通过显式 opt-in 读取投影，不改变普通 status 协议', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const host = vi.fn(async (request: RuntimeRequestEnvelope) => {
+      const status = statusResult(handle)
+      return success(request.requestId, {
+        ...status,
+        ...(request.command === 'get-status' && request.payload.includeTaskState === true ? {
+          taskState: {
+            schemaVersion: '1.0.0', runId: 'RUN-1', assetId: 'ASSET-1', snapshotRevision: 2,
+            workflow: status.workflow, stage: status.stage, condition: status.condition,
+            caseAttempts: [], artifactValidity: [{
+              assetKey: 'prd-source', validity: 'preserved', contentDigest: d('3'),
+            }],
+            verifiedDigests: status.verifiedDigests,
+            minimumMissingInput: status.minimumMissingInput,
+            recovery: {
+              kind: 'retry', command: 'run-preflight', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH',
+            },
+          },
+        } : {}),
+      })
+    })
+    const facade = new E2EFacade({ projectRoot: '/project', host: { handle: host },
+      requestId: () => 'FACADE-TASK-STATE-1' })
+
+    await expect(facade.taskState(handle)).resolves.toMatchObject({
+      schemaVersion: '1.0.0', runId: 'RUN-1', recovery: { kind: 'retry' },
+    })
+    expect(host).toHaveBeenCalledWith(expect.objectContaining({
+      command: 'get-status', payload: { runId: 'RUN-1', includeTaskState: true },
+    }), expect.any(Uint8Array))
+  })
+
   test('retry 只重试当前可恢复 blocker，并返回更新状态', async () => {
     const oldHandle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
     const newHandle = { ...oldHandle, revision: 3 }

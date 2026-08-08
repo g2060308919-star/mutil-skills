@@ -42,10 +42,12 @@ export {
   RuntimeErrorSchema,
   RuntimeRequestEnvelopeSchema,
   RuntimeResponseEnvelopeSchema,
+  TaskStateViewV1Schema,
   type RuntimeDoctorProbe,
   type RuntimeDoctorReport,
   type RuntimeCompatibilityDescriptorV1,
   type RuntimeError,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
+  type TaskStateViewV1,
 } from '@mutil-skills/e2e-contracts'

@@ -145,6 +145,16 @@ Phase 0 完成后停止，提交差异、测试证据、语义比较结果和下
 
 原 `RuntimeStatusResult` 继续保留；新 view 先作为可选投影并进行双写对比，但只有旧状态权威存在，不产生第二份持久化数据。回滚时移除投影，不迁移数据库。
 
+### 3.4 实施记录（2026-08-08）
+
+- 已新增严格 `TaskStateViewV1` Schema，统一 Workflow、Stage/Condition、Case Attempt、Artifact validity、最小缺失输入与 recovery 分类。
+- 普通 `get-status` 响应保持不变；只有请求显式设置 `includeTaskState: true` 时才附加投影，旧严格客户端不会被未协商字段破坏。
+- `E2EFacade.taskState(handle)` 已作为公开只读入口，并继续复验完整 RunHandle。
+- retry 只允许无业务副作用的 Target Probe / Preflight；running/cleanup Case 和 effect-unknown 写一律 reconcile；缺少 Case attemptId 的旧快照一律 migration-required。
+- `new-run` 已进入 Schema，但当前 Runtime 不从不充分事实猜测。未来 Resolver/Ingress 只有在形成 Source、Target 或 installation 不兼容的可信事实后才能输出该分类。
+- 没有新增持久文件、状态迁移或第二状态机；架构决策见 `docs/adr/0012-task-state-read-only-projection.md`。
+- 变更后 `npm run build`、`npm run typecheck`、`npm run lint:architecture` 通过；`npm test` 连续两次全绿：209 个测试文件通过、1 个条件跳过，1829 个测试通过、31 个宿主条件跳过。
+
 ## 4. Phase 2：Browser Executor 协议化
 
 ### 4.1 目标
