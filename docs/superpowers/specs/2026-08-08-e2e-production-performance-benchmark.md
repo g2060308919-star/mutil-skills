@@ -25,12 +25,12 @@
 | `requirement-graph` | `RequirementModelSchema.parse` | 500 Requirement / 2000 Rule / 2000 Oracle 的闭合双向图 |
 | `coverage-audit` | `buildCoverageUniverse` | 5000 required automated obligation |
 | `case-schedule` | `createCaseSchedule` | 1000 个持久调度记录 |
-| `checkpoint-finalization` | `projectAssertionResultV1` | 5000 个 checkpoint/evidence 绑定 Assertion |
+| `checkpoint-finalization` | `projectAssertionResultV1` + `createPersistedRuntimeFinalizationMaterial` | 5000 个 Assertion 与 5000 条 Evidence 引用的 schema/digest 绑定 material |
 | `engine-verdict` | `computeVerdict` | 5000 obligation + 1000 real result 的 accepted Verdict 与 metrics |
 | `report-render` | `renderCompleteReport` | 5000 obligation、5000 trace row、1000 Case 的 JSON/Markdown/HTML |
 | `artifact-publication` | `LocalArtifactStore.publish` | requirement、compile、coverage、verdict、JSON/HTML 的原子 generation |
 
-fixture 构造和上游输入准备在计时前完成。报告阶段只测 Renderer；Verdict 的真实性和规模由独立 `engine-verdict` 阶段证明，报告不重新计算 Verdict。Artifact 阶段真实执行 helper、签名、fsync、generation 选择和 publication integrity。
+fixture 构造和上游输入准备在计时前完成。Checkpoint 阶段测量 Assertion 投影及生产 finalization material 的 5000 条 Evidence 引用校验、JSON 规范化与摘要绑定，不把 Quarantine I/O 或最终 Artifact publication 重复计入；后者由 `artifact-publication` 阶段独立测量。报告阶段只测 Renderer；Verdict 的真实性和规模由独立 `engine-verdict` 阶段证明，报告不重新计算 Verdict。Artifact 阶段真实执行 helper、签名、fsync、generation 选择和 publication integrity。
 
 ## 4. 测量方法
 
@@ -74,14 +74,14 @@ fixture 构造和上游输入准备在计时前完成。报告阶段只测 Rende
 
 | 阶段 | p50 | p95 | p99 | 峰值 RSS | p95 输出 | 失败率 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| compiler | 59.903 ms | 62.294 ms | 62.585 ms | 439 MiB | 1.11 MiB | 0% |
-| requirement-graph | 13.957 ms | 14.792 ms | 15.195 ms | 329 MiB | 0.64 MiB | 0% |
-| coverage-audit | 76.376 ms | 79.836 ms | 80.309 ms | 352 MiB | 1.73 MiB | 0% |
-| case-schedule | 20.980 ms | 21.863 ms | 21.898 ms | 305 MiB | 0.11 MiB | 0% |
-| checkpoint-finalization | 64.155 ms | 73.232 ms | 73.420 ms | 510 MiB | 2.08 MiB | 0% |
-| engine-verdict | 15.561 ms | 17.005 ms | 17.818 ms | 409 MiB | <0.01 MiB | 0% |
-| report-render | 160.516 ms | 171.771 ms | 172.322 ms | 586 MiB | 7.39 MiB | 0% |
-| artifact-publication | 822.020 ms | 835.288 ms | 835.872 ms | 478 MiB | 9.06 MiB | 0% |
+| compiler | 58.820 ms | 61.259 ms | 61.399 ms | 586 MiB | 1.11 MiB | 0% |
+| requirement-graph | 14.008 ms | 14.815 ms | 14.959 ms | 460 MiB | 0.64 MiB | 0% |
+| coverage-audit | 80.797 ms | 83.699 ms | 90.736 ms | 563 MiB | 1.73 MiB | 0% |
+| case-schedule | 24.361 ms | 27.241 ms | 33.768 ms | 593 MiB | 0.11 MiB | 0% |
+| checkpoint-finalization | 98.724 ms | 109.542 ms | 112.872 ms | 762 MiB | 3.20 MiB | 0% |
+| engine-verdict | 15.789 ms | 17.076 ms | 27.673 ms | 529 MiB | <0.01 MiB | 0% |
+| report-render | 168.844 ms | 181.323 ms | 185.552 ms | 785 MiB | 7.39 MiB | 0% |
+| artifact-publication | 821.027 ms | 827.550 ms | 830.021 ms | 661 MiB | 9.06 MiB | 0% |
 
 这份结果证明生产模块在该机器上的大规模趋势全绿；只有在专用稳定 runner 上复跑得到 `gateEligible=true` 后，才能宣称完成稳定 CI p95 硬门禁。
 

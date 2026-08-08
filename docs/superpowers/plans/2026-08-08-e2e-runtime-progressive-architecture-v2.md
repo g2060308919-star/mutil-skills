@@ -327,7 +327,7 @@ current/new-run-default 指针原子回退到 LKG；失败版本保留诊断但�
 ### 9.4 实施记录（2026-08-08）
 
 - 新增 v2 生产 Benchmark proof 与八阶段独立 worker，旧 `verify:e2e-scale` 继续保留为合成快速回归，不再承担生产 p95 结论。
-- 固定构造 500 Requirement / 2000 Rule / 5000 obligation / 1000 Case，并真实调用 PRDRunCompiler、Requirement graph schema、Coverage、Case Scheduler、Assertion、Verdict、完整报告和 Artifact Store。
+- 固定构造 500 Requirement / 2000 Rule / 5000 obligation / 1000 Case，并真实调用 PRDRunCompiler、Requirement graph schema、Coverage、Case Scheduler、Assertion 与 production finalization material、Verdict、完整报告和 Artifact Store。
 - 每阶段独立进程执行 3 warmup + 20 正式样本，报告 nearest-rank p50/p95/p99、max、绝对峰值 RSS、输出分布和失败率。
 - 本机 Apple M1 Pro / Node v24.18.0 趋势证明八阶段零失败且预算全通过；因非登记稳定 runner，proof 明确标记 `gateEligible=false`。
 - 新增只支持人工触发的专用 self-hosted stable runner workflow；在该 runner 注册前不加入普通 PR required checks。
