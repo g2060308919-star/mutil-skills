@@ -1,7 +1,30 @@
+import { access, chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
-import { classifyReleaseFailures, releaseChildEnvironment } from './e2e-release-support.mjs'
+import {
+  classifyReleaseFailures,
+  releaseChildEnvironment,
+  removeOwnedTemporaryTree,
+} from './e2e-release-support.mjs'
 
 describe('E2E release failure classification', () => {
+  test('Runner 自有临时根包含只读 Runtime 安装树时仍完成清理', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'mutil-release-cleanup-test-'))
+    const hardened = join(root, 'home', '.mutil-skills', 'runtime', 'e2e', 'versions', '0.5.2')
+    await mkdir(hardened, { recursive: true, mode: 0o700 })
+    await writeFile(join(hardened, 'manifest.json'), '{}\n', { mode: 0o400 })
+    await chmod(hardened, 0o500)
+
+    try {
+      await removeOwnedTemporaryTree(root)
+      await expect(access(root)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      await chmod(hardened, 0o700).catch(() => undefined)
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test('将 Node、Chrome、Gateway 与临时目录问题归为 Runtime 环境失败', () => {
     expect(classifyReleaseFailures('release/registry-golden', [{
       test: 'fresh HOME',

@@ -1,0 +1,38 @@
+name: E2E Golden
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-golden-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pack-golden:
+    name: macOS pack Golden
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout candidate commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: Run workspace package and Golden gates
+        run: npm run verify:e2e-pack
