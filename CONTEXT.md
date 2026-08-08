@@ -191,6 +191,10 @@ _避免使用_：daily Chrome automation、arbitrary Playwright host
 Runtime 内部位于现有品牌化执行器之外的统一适配协议。V1 为 Target Probe、Preflight、Read、Reversible Write、Injection 和 Full Playwright 提供同一能力描述、进度、dispatch 前 deadline/cancellation、结果、证据材料、cleanup、reconcile 与重试安全语义；适配器只闭合持有原 WeakMap capability，不公开原 backend，也不允许任意浏览器代码跨越可信边界。迁移期旧路径仍为默认，read shadow 只执行一次浏览器动作，再对旧结果与协议投影做 fail-closed 语义比较；写 effect 为 unknown 时只能 reconcile。
 _避免使用_：second browser runtime、generic callback executor、retry unknown write
 
+**Verification Abstraction Decision Gate**：
+把 Browser Case/Executor 提升为通用 Verification 模型前必须通过的架构决策门。真实第二类生产 Executor、至少 90% Browser Case 无语义变化迁移、浏览器专属例外清单、下游契约复用、复杂度净降低和 Browser-to-Browser 全能力 Golden 缺一不可；Probe、Read、Write、Injection 与 Full Playwright 只是同一浏览器领域的能力，不算第二类 Executor。当前决策是保留浏览器领域模型。
+_避免使用_：generic VerificationCase by anticipation、multiple browser modes mean multiple executors、rename-first abstraction
+
 **Standalone Run Workspace**：
 与 Git、业务仓库和当前工作目录解耦的单 Run 输出目录。默认位于 `~/.mutil-skills/e2e/reports/<asset-id>/<run-id>/`，也可以显式指定 `outputRoot`。
 _避免使用_：mandatory .biztest、Git evidence directory
