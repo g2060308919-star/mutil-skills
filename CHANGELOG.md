@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-09
+
+### Added
+
+- 新增 `resolve-runtime` 友好命令，并把同一 `offline`/`pinned` 解析策略带入 `prepare-input` 与 `create-run`，在安装锁内原子绑定精确 Runtime closure。
+- 新增由真实编译计划驱动的 B2B 验收证明，逐场景闭合 Scheduler、Authority、Gateway、Browser、Cleanup、Reload、证据与负向控制。
+- 新增生产 Browser Executor Protocol ADR、真实 Trace 证据引用和稳定宿主资格证明。
+
+### Changed
+
+- Browser Executor Protocol 成为 Probe、Preflight、Read、Reversible Write、Injection 与 Full Playwright 的生产默认路由；保留显式 `legacy` 回滚与 `shadow` 等价性诊断。
+- Runtime 恢复按 Run 已冻结的 installation digest 选择 closure；新 Run 不再依赖解析后再绑定的竞态窗口。
+- 全部工作区包、内部依赖、E2E Skill 安装指引、协议与 Engine 版本真相统一为 `0.8.0`。
+
+### Fixed
+
+- 协议结果完整保留执行器已持久化的截图、DOM、URL 与 Playwright Trace 证据引用，避免适配层重建引用造成证据链漂移。
+- B2B 门禁拒绝未注册、配置漂移或能力不足的宿主，防止开发机结果被误记为稳定性能证明。
+
 ## [0.7.0] - 2026-08-09
 
 ### Added

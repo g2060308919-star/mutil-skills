@@ -45,10 +45,10 @@ await Promise.all([
   mkdir(join(runtimePackage, 'dist', 'src', 'bin'), { recursive: true }),
 ])
 await writeFile(join(runtimePackage, 'package.json'), JSON.stringify({
-  name: '@mutil-skills/e2e-runtime', version: '0.7.0',
+  name: '@mutil-skills/e2e-runtime', version: '0.8.0',
 }))
 await writeFile(join(runtimePackage, 'dist', 'src', 'bin', 'repo-e2e.js'), '#!/usr/bin/env node\n')
-await installRuntime({ homeDir: runtimeHome, version: '0.7.0', installClosure: async ({ stagingPrefix }) => {
+await installRuntime({ homeDir: runtimeHome, version: '0.8.0', installClosure: async ({ stagingPrefix }) => {
   await cp(runtimeSource, stagingPrefix, { recursive: true })
 } })
 const store = new LocalArtifactStore(await realpath(artifactRoot), createArtifactStoreAuthority())
@@ -77,7 +77,7 @@ try {
             resolveRuntimeInstallation({ homeDir: runtimeHome, policy: { mode: 'offline' },
               existingRunRevocationChecker: async () => ({ status: 'revocation-checked', revoked: false }) })))
           if (results.some((item) => item.revocationStatus !== 'revocation-checked'
-            || item.installation.version !== '0.7.0')) {
+            || item.installation.version !== '0.8.0')) {
             throw new Error('E2E_CONCURRENT_RESULT_INVALID')
           }
         } else if (phase === 'diagnostic-classification') {
@@ -228,7 +228,7 @@ async function createTufClient(homeDir: string, production: boolean): Promise<Tu
   const trustedRootPath = join(source, 'root.json')
   const rootDocument = tufRootDocument()
   await writeFile(trustedRootPath, JSON.stringify(rootDocument))
-  const targetPath = '@mutil-skills/e2e-runtime/-/e2e-runtime-0.7.0.tgz'
+  const targetPath = '@mutil-skills/e2e-runtime/-/e2e-runtime-0.8.0.tgz'
   const updaterFactory = (options: Record<string, unknown>): TufUpdaterLike => ({
     refresh: async () => {
       await mkdir(options.metadataDir as string, { recursive: true })
@@ -256,7 +256,7 @@ function tufRootDocument() {
 }
 
 function tufTargetCustom(targetPath: string) {
-  return { schemaVersion: '1.0.0', packageName: '@mutil-skills/e2e-runtime', runtimeVersion: '0.7.0',
+  return { schemaVersion: '1.0.0', packageName: '@mutil-skills/e2e-runtime', runtimeVersion: '0.8.0',
     protocolMajor: 1, channel: 'stable', npmIntegrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}`,
     registryUrl: new URL(targetPath, 'https://registry.npmjs.org/').href,
     contentDigest: `sha256:${'1'.repeat(64)}`, executableDigest: `sha256:${'2'.repeat(64)}`,

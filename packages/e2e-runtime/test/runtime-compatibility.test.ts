@@ -8,7 +8,7 @@ import { describeRuntimeCompatibility } from '../src/runtime-compatibility.js'
 const digest = (character: string) => `sha256:${character.repeat(64)}`
 
 describe('describeRuntimeCompatibility', () => {
-  test('只读投影 0.7.0 已证明的协议、状态、PRD、执行器和 Run 绑定事实', () => {
+  test('只读投影 0.8.0 已证明的协议、状态、PRD、执行器和 Run 绑定事实', () => {
     const result = describeRuntimeCompatibility({
       artifactSchemaSetDigest: digest('a'),
       runtimeInstallationDigest: digest('b'),
@@ -18,7 +18,7 @@ describe('describeRuntimeCompatibility', () => {
       schemaVersion: '1.0.0',
       runtime: {
         packageName: '@mutil-skills/e2e-runtime',
-        packageVersion: '0.7.0',
+        packageVersion: '0.8.0',
         nodeRange: '>=22.13.0',
         protocol: { major: 1, envelopeSchemaVersion: '1.0.0' },
       },
@@ -77,9 +77,9 @@ describe('describeRuntimeCompatibility', () => {
       'packages/e2e-contracts/schemas/current.json', 'utf8',
     )) as { setDigest: string }
     const installation: VerifiedRuntimeVersion = {
-      version: '0.7.0',
-      versionRoot: '/verified/runtime/0.7.0',
-      entrypoint: '/verified/runtime/0.7.0/repo-e2e.js',
+      version: '0.8.0',
+      versionRoot: '/verified/runtime/0.8.0',
+      entrypoint: '/verified/runtime/0.8.0/repo-e2e.js',
       manifest: { schemaVersion: '1.0.0', files: [], installationDigest: digest('b') },
     }
     const current = createRuntimeCurrent(installation)
