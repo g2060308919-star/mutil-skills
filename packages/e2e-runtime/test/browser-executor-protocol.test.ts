@@ -10,11 +10,25 @@ import {
   assertLegacyBrowserExecutorSemanticEquivalentV1,
   describeBrowserExecutorV1,
   executeBrowserExecutorV1,
+  executeRuntimeFullPlaywrightWithBrowserExecutorProtocolV1,
+  executeRuntimeInjectionWithBrowserExecutorProtocolV1,
   executeRuntimeReadWithBrowserExecutorProtocolV1,
+  executeRuntimeWriteWithBrowserExecutorProtocolV1,
   projectLegacyBrowserExecutorResultV1,
 } from '../src/browser-executor-protocol.js'
-import { authorizeRuntimeReadExecutor } from '../src/trusted-action-runner.js'
+import {
+  authorizeRuntimeFullPlaywrightExecutor,
+  authorizeRuntimeInjectionExecutor,
+  authorizeRuntimeReadExecutor,
+  authorizeRuntimeWriteExecutor,
+} from '../src/trusted-action-runner.js'
 import { projectionFixture } from './trusted-action-runner.test.js'
+import { runtimeWriteProjectionFixture } from './runtime-write-projector.test.js'
+import { injectionOutput, realWriteOutput } from './runtime-write-fixtures.js'
+import {
+  runtimeFullPlaywrightOutput,
+  runtimeFullPlaywrightProjectionFixture,
+} from './runtime-full-playwright-projector.test.js'
 
 const d = (label: string) => digestText('browser-executor-protocol-test/v1', label)
 
@@ -64,6 +78,45 @@ describe('BrowserExecutorProtocolV1 Runtime 适配', () => {
     expect(output.status).toBe('passed')
     expect(execute).toHaveBeenCalledTimes(1)
     expect(progress).toEqual(['accepted', 'dispatching', 'executed', 'completed'])
+  })
+
+  it.each(['legacy', 'shadow'] as const)('%s 路由只执行一次 reversible-write backend 并保留 cleanup', async (route) => {
+    const snapshot = runtimeWriteProjectionFixture()
+    const execute = vi.fn(async () => realWriteOutput({ actionId: 'ACTION-1' }))
+    const output = await executeRuntimeWriteWithBrowserExecutorProtocolV1(authorizeRuntimeWriteExecutor(execute), {
+      snapshot, attemptId: 'ATTEMPT-WRITE-1', route,
+    })
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(output).toMatchObject({ status: 'passed', effectObservation: 'applied',
+      cleanup: { status: 'verified-clean' } })
+  })
+
+  it.each(['legacy', 'shadow'] as const)('%s 路由执行 injection 且不覆盖已通过的真实结果', async (route) => {
+    const snapshot = runtimeWriteProjectionFixture()
+    snapshot.executionResults = { realEnvironment: {
+      'ACTION-1': realWriteOutput({ actionId: 'ACTION-1' }),
+    }, gatewayInjection: {} }
+    const execute = vi.fn(async () => injectionOutput({
+      actionId: 'ACTION-1', attemptId: 'ATTEMPT-INJECTION-1',
+    }))
+    const output = await executeRuntimeInjectionWithBrowserExecutorProtocolV1(
+      authorizeRuntimeInjectionExecutor(execute),
+      { snapshot, attemptId: 'ATTEMPT-INJECTION-1', route },
+    )
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(output).toMatchObject({ status: 'passed', actionId: 'ACTION-1' })
+  })
+
+  it.each(['legacy', 'shadow'] as const)('%s 路由执行 full-playwright 并绑定冻结 case/action', async (route) => {
+    const snapshot = runtimeFullPlaywrightProjectionFixture()
+    const execute = vi.fn(async ({ projection }: { projection: { caseId: string; actionId: string } }) =>
+      runtimeFullPlaywrightOutput(projection.caseId, projection.actionId))
+    const output = await executeRuntimeFullPlaywrightWithBrowserExecutorProtocolV1(
+      authorizeRuntimeFullPlaywrightExecutor(execute),
+      { snapshot, attemptId: 'ATTEMPT-FULL-1', route },
+    )
+    expect(execute).toHaveBeenCalledTimes(1)
+    expect(output).toMatchObject({ caseId: 'CASE-1', actionId: 'ACTION-1', status: 'passed' })
   })
 
   it('在 dispatch 前响应取消与过期 deadline，不触发旧 backend', async () => {

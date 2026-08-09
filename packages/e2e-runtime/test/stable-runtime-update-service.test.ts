@@ -72,9 +72,12 @@ describe('生产 stable Runtime 更新服务', () => {
 })
 
 function metadata(): TrustedMetadataSet {
-  return Object.fromEntries(['root', 'timestamp', 'snapshot', 'targets'].map((role, index) => [role, {
-    version: 1, digest: D(String(index + 4)), expires: '2027-08-09T00:00:00.000Z',
-  }])) as TrustedMetadataSet
+  return {
+    root: { version: 1, digest: D('4'), expires: '2027-08-09T00:00:00.000Z' },
+    timestamp: { version: 1, digest: D('5'), expires: '2026-08-10T00:00:00.000Z' },
+    snapshot: { version: 1, digest: D('6'), expires: '2026-08-16T00:00:00.000Z' },
+    targets: { version: 1, digest: D('7'), expires: '2026-09-08T00:00:00.000Z' },
+  }
 }
 
 function target(): SignedRuntimeTarget {

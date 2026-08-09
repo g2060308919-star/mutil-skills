@@ -5,6 +5,7 @@ import { installRuntime } from '../src/runtime-installer.js'
 import { runtimeLayout } from '../src/runtime-layout.js'
 import { uninstallRuntime } from '../src/runtime-uninstaller.js'
 import { resolveRuntimeInstallation, withResolvedRuntimeInstallation } from '../src/runtime-resolver.js'
+import { writeRuntimeUpdateState } from '../src/tuf-runtime-update-client.js'
 import { createRuntimeTestRoots } from './fixtures.js'
 
 describe('Runtime Resolver offline / pinned', () => {
@@ -118,6 +119,68 @@ describe('Runtime Resolver offline / pinned', () => {
     expect(result).toMatchObject({ policyMode: 'run-bound', revocationStatus: 'offline-unchecked' })
   })
 
+  test.each([
+    ['revocation-checked', 'revocation-checked'],
+    ['metadata-expired', 'metadata-expired'],
+    ['offline-unchecked', 'offline-unchecked'],
+  ] as const)('已有 Run 保留撤销检查状态 %s', async (status, expected) => {
+    const roots = await createRuntimeTestRoots()
+    const original = await installFixture(roots.source, roots.home, '0.5.2', status)
+    const result = await resolveRuntimeInstallation({
+      homeDir: roots.home, policy: { mode: 'offline' },
+      existingRun: { runId: 'RUN-CHECKED', installationDigest: original.installationDigest },
+      existingRunRevocationChecker: async () => ({ status, revoked: false }),
+    })
+    expect(result.revocationStatus).toBe(expected)
+  })
+
+  test('已有 Run 命中可信撤销事实时安全阻断', async () => {
+    const roots = await createRuntimeTestRoots()
+    const original = await installFixture(roots.source, roots.home, '0.5.2', 'revoked')
+    await expect(resolveRuntimeInstallation({
+      homeDir: roots.home, policy: { mode: 'offline' },
+      existingRun: { runId: 'RUN-REVOKED', installationDigest: original.installationDigest },
+      existingRunRevocationChecker: async () => ({
+        status: 'revocation-checked', revoked: true, reasonCode: 'EMERGENCY-REVOKED',
+      }),
+    })).rejects.toMatchObject({ code: 'E2E_RUNTIME_RUN_INSTALLATION_REVOKED', category: 'safety' })
+  })
+
+  test.each([
+    { mode: 'offline' as const },
+    { mode: 'pinned' as const, version: '0.5.2' },
+  ])('$mode 新 Run 也必须拒绝本地已知撤销的 closure', async (policy) => {
+    const roots = await createRuntimeTestRoots()
+    const original = await installFixture(roots.source, roots.home, '0.5.2', `revoked-${policy.mode}`)
+    await expect(resolveRuntimeInstallation({
+      homeDir: roots.home, policy,
+      existingRunRevocationChecker: async ({ installationDigest }) => ({
+        status: 'revocation-checked',
+        revoked: installationDigest === original.installationDigest,
+        reasonCode: 'EMERGENCY-REVOKED',
+      }),
+    })).rejects.toMatchObject({ code: 'E2E_RUNTIME_INSTALLATION_REVOKED', category: 'safety' })
+  })
+
+  test('调用方不注入 checker 时也必须读取 HOME 中持久化的撤销 tombstone', async () => {
+    const roots = await createRuntimeTestRoots()
+    const original = await installFixture(roots.source, roots.home, '0.5.2', 'persisted-revocation')
+    await writeRuntimeUpdateState(roots.home, {
+      schemaVersion: '1.1.0', highwaterWallClock: '2026-08-09T00:00:00.000Z',
+      metadata: { root: role('1'), timestamp: role('2'), snapshot: role('3'), targets: role('4') },
+      verifiedTargets: [], revocations: [{ runtimeVersion: '0.5.2',
+        installationDigest: original.installationDigest, reasonCode: 'EMERGENCY-REVOKED',
+        targetsMetadataVersion: 1, observedAt: '2026-08-09T00:00:00.000Z' }],
+      revocationOverflow: null, newRunDefault: null, lkg: null, audit: [],
+    })
+
+    await expect(resolveRuntimeInstallation({ homeDir: roots.home, policy: { mode: 'offline' } }))
+      .rejects.toMatchObject({ code: 'E2E_RUNTIME_INSTALLATION_REVOKED', category: 'safety' })
+    await expect(resolveRuntimeInstallation({ homeDir: roots.home, policy: { mode: 'offline' },
+      existingRun: { runId: 'RUN-PERSISTED-REVOKED', installationDigest: original.installationDigest } }))
+      .rejects.toMatchObject({ code: 'E2E_RUNTIME_RUN_INSTALLATION_REVOKED', category: 'safety' })
+  })
+
   test('在同一安装锁内完成解析和 Run 绑定，阻断解析与固化之间的卸载竞态', async () => {
     const roots = await createRuntimeTestRoots()
     await installFixture(roots.source, roots.home, '0.5.2', 'selected')
@@ -137,7 +200,27 @@ describe('Runtime Resolver offline / pinned', () => {
     expect(result.persistedDigest).toMatch(/^sha256:[a-f0-9]{64}$/)
     await expect(stat(layout.installLock)).rejects.toMatchObject({ code: 'ENOENT' })
   })
+
+  test('同进程并发新 Run 解析按安装锁安全排队而不是随机失败', async () => {
+    const roots = await createRuntimeTestRoots()
+    const installed = await installFixture(roots.source, roots.home, '0.5.2', 'concurrent-resolution')
+
+    const results = await Promise.all(Array.from({ length: 32 }, async () =>
+      await resolveRuntimeInstallation({
+        homeDir: roots.home,
+        policy: { mode: 'offline' },
+        existingRunRevocationChecker: async () => ({ status: 'revocation-checked', revoked: false }),
+      })))
+
+    expect(new Set(results.map((item) => item.installation.installationDigest)))
+      .toEqual(new Set([installed.installationDigest]))
+    expect(results.every((item) => item.revocationStatus === 'revocation-checked')).toBe(true)
+  })
 })
+
+function role(character: string) {
+  return { version: 1, digest: `sha256:${character.repeat(64)}`, expires: '2027-08-09T00:00:00.000Z' }
+}
 
 async function installFixture(sourceRoot: string, homeDir: string, version: string, body: string) {
   const source = join(sourceRoot, `${version}-${body}`)

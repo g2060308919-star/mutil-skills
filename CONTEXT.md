@@ -135,6 +135,26 @@ _避免使用_：backend service、Skill runtime
 只从受控 Runtime closure 中选择执行版本，并把精确 installation digest 固化到 Run。Phase 5 仅支持本地 `offline` 与精确 `pinned`；新 Run 必须在安装锁内完成选择和持久绑定，已有 Run 必须按原摘要恢复，活跃引用阻止卸载或 GC。
 _避免使用_：SemVer range at execution、current means run identity、resolve then bind later
 
+**Runtime Update State**：
+当前用户私有、原子保存的签名更新防降级记忆。它记录四角色 metadata 高水位、已验证 target、精确撤销事实、撤销集合溢出标记、new-run-default、LKG 和最小审计事实；1.0 状态读取后确定性迁移为 1.1。撤销、指针清除与审计作为一次事务保存；容量耗尽后全局 fail-closed，不能通过截断忘记旧撤销事实。删除该状态不能作为回滚手段。
+_避免使用_：download cache、latest version file、revocation boolean only
+
+**Stable Activation Audit**：
+生产 stable 开关之前的汇总门禁。它使用官方 TUF refresh 的真实结果，并要求稳定 p95、B 端覆盖、非功能、Registry Golden、生产签名撤销演练和 LKG 恢复演练全部闭合。每份原始 artifact 都按 proof 类型执行严格 schema、语义不变量及内外两层摘要复算，再由 target 内 activation policy 登记的证据密钥达到阈值签名；版本、installation、commit 与 environment 必须一致。它不生成或保管私钥，也不能用测试 fixture 代替生产 proof。
+_避免使用_：test key smoke test、npm dist-tag check、self-declared ready flag
+
+**Browser Executor Protocol**：
+Probe、Preflight、Read、Reversible Write、Injection 与 Full Playwright 的统一发现和执行语义。迁移期的 shadow 路由只执行一次 backend，再独立比较 legacy 与协议投影；写结果未知时只能 reconcile。各执行域可独立切换，legacy 默认值在等价性 Golden 批准前保持不变。
+_避免使用_：duplicate shadow execution、generic callback、retry unknown write
+
+**B2B Scenario Coverage Proof**：
+独立、加权、可重复的真实浏览器能力基准。Requirement、Rule、Oracle 与 Case 来自正式 PRD Compiler/Coverage 模块，浏览器循环由编译后 Case 队列驱动；每个 Case 的变异结果独立进入正式 Verdict。ArtifactStore 中的 active generation 同时绑定已发布执行集合与逐 Case Verdict 集合，最终 executions 再绑定 generation digest。每个声明的 Evidence kind 必须有逐文件摘要；任何 skip、缺证据、generation 不一致、集合替换或 flaky 都不能获得门禁资格。
+_避免使用_：Playwright API checklist、passed tests / executed tests、skipped as covered
+
+**Operational Performance Proof**：
+Runtime 模块冷启动、TUF 更新冷/热缓存、32 路真实新 Run Resolver、诊断分类与 Artifact 持久 validation reference 保留/解除/GC/回读生命周期的固定样本 p95 证明，并绑定 B2B flaky rate。每阶段保存 sample digest、baseline 偏差，报告绑定版本化预算及 CPU/内存指纹。开发机可用受控 updater fixture 产生趋势结论；批准 self-hosted runner 必须使用真实 TUF origin，且仓库 baseline 与真实 runner facts 全部吻合才能得到 gateEligible。
+_避免使用_：single timing、developer laptop gate、silent capability skip
+
 **Target Contract**：
 一次 Run 唯一的目标环境契约，闭合目标 URL、base origin、环境标签、允许导航来源和页面身份策略。Policy、Probe、Discovery、Preflight 与 Execution 必须引用同一摘要，不能分别提交彼此矛盾的 environment ID。
 _避免使用_：scattered baseUrl、caller environment flag

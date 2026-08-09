@@ -1,0 +1,20 @@
+{
+  "schemaVersion": "1.0.0",
+  "runnerName": "stable-macos-arm64-e2e-01",
+  "platform": "darwin",
+  "arch": "arm64",
+  "nodeMajor": 24,
+  "browserChannel": "chrome",
+  "cpuModel": "Apple M1 Pro",
+  "minimumCpuCount": 10,
+  "minimumMemoryBytes": 17179869184,
+  "budgetsMs": {
+    "runtime-module-cold-start": 2000,
+    "tuf-update-cold": 2000,
+    "tuf-update-warm": 2000,
+    "concurrent-run-resolution": 2000,
+    "diagnostic-classification": 25,
+    "artifact-retention-lifecycle": 2000
+  },
+  "purpose": "E2E B2B coverage and operational baseline"
+}

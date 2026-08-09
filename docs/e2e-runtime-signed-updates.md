@@ -31,3 +31,34 @@
 - Linux/macOS、Node 22/24 clean-HOME Registry Golden。
 
 仓库当前没有这些真实运营材料，因此实现默认 fail-closed。用测试私钥或临时 URL 让 CI“变绿”不构成生产验收。
+
+## 生产激活审计命令
+
+`npm run verify:e2e-stable-activation` 是唯一的生产 stable 激活汇总入口。它先让官方 `tuf-js` 从内置 root 对真实 HTTPS origin 执行 refresh，再校验 Runtime target 身份、metadata 最大剩余寿命、2-of-3 治理事实和以下六份不可替代的门禁证明：
+
+1. 500/2000/5000/1000 生产模块 p95 proof；
+2. 稳定系统 Chrome 的加权 B 端覆盖 proof；
+3. Runtime 模块冷启动、TUF 更新冷/热缓存、32 路真实 Resolver、诊断和 Artifact retention 生命周期非功能 proof；
+4. Linux/macOS、Node 22/24 clean-HOME Registry Golden proof；
+5. 使用生产签名 staging metadata 完成的紧急撤销 drill proof；
+6. 使用同一 staging 环境完成的 LKG recovery drill proof。
+
+命令要求显式提供 `E2E_STABLE_AUDIT_HOME`、`E2E_STABLE_TRUSTED_ROOT`、metadata/target URL 与 path、registry allowlist origin、六份证据 envelope 路径及输出路径。每个 envelope 必须包含原始 `artifact`、绑定 Runtime/installation/commit/environment 的 payload，以及 target `activationPolicy` 登记证据密钥达到阈值的 Ed25519 签名。审计器不仅重算 envelope 中的原始 artifact digest，还按 proof 类型执行严格 schema、语义不变量、完整阶段集合和内部 proof digest 复算；签名正确但内容无意义的 artifact 仍会 fail-closed。
+
+`npm run verify:e2e-tuf-preflight` 用于发布前检查候选 metadata origin：官方 `tuf-js` 完成阈值验签和角色链更新，Runtime 再检查历史高水位、四角色寿命上限、2-of-3 root/targets 治理、target 身份和 registry allowlist。它不写生产 update state，也不生成或接触私钥。
+
+`npm run verify:e2e-stable-update-drill` 生成撤销或 LKG 恢复演练 artifact。`revocation` 模式比较演练前后状态并要求 metadata 前进、tombstone 命中以及新旧 Run 同时阻断；`lkg-recovery` 模式调用显式 `restoreRuntimeLkg`，原子保存后复读，要求 metadata 高水位不变、LKG 成为新 Run default 且已有 Run installation digest 不变。
+
+`npm run verify:e2e-registry-golden-proof` 汇总发布后四格 Registry Golden：macOS/arm64 与 Linux/x64 分别在 Node 22、24 上都必须 `ok=true`、`mode=registry`、`skippedTests=0`、`packageSource=npm-registry`。命令绑定 14 个包、Runtime version、installation digest 和 source commit，workspace tarball 结果不能代替 Registry proof。
+
+本命令不会生成私钥、不会替发布组织声明演练成功，也不会自行实现 TUF 签名验证。最终输出 `ready=true` 仍只是“允许启用 stable feature flag”的审计凭证，不替代持续监控、轮换和值班责任。
+
+## 撤销与 LKG 演练步骤
+
+1. 在与生产相同密钥治理的隔离 staging origin 发布一个可安装 target，完成 Registry Golden、doctor、canary 并成为 new-run-default。
+2. 创建一个绑定该 installation digest 的 Run，保存恢复句柄。
+3. 以 targets 2-of-3 流程发布更高版本 metadata，将该精确 target 标记 revoked 并给出原因码。
+4. 新 Run 解析必须拒绝该 target；第 2 步旧 Run 在恢复边界必须得到 `E2E_RUNTIME_RUN_INSTALLATION_REVOKED`，保持原绑定且进入 safety-blocked。
+5. 发布一个故意 canary 失败的更高版本 target，验证 default 不变化、旧 default/LKG 不被污染。
+6. 关闭 stable refresh 并显式恢复既有 LKG 为 new-run-default；验证已有 Run 摘要未变化、metadata 高水位未删除。
+7. 两项演练分别生成带 environmentId、metadata versions/digests、target installation digest、前后 default/LKG 和审计摘要的签名 proof。proof 不得包含私钥、token、HOME、PRD、目标业务 URL 或响应正文。

@@ -153,7 +153,9 @@ test.runIf(existsSync(executablePath))(
         await program!.page.goto(`${origin}/`)
         const popupReady = program!.context.waitForEvent('page')
         await program!.page.getByRole('link', { name: 'Details' }).click()
-        expect(await (await popupReady).title()).toBe('popup')
+        const popup = await popupReady
+        await popup.waitForLoadState('domcontentloaded')
+        await expect.poll(async () => await popup.title()).toBe('popup')
       })
       const rawBrowser = program.context.browser()
       expect(rawBrowser).not.toBeNull()

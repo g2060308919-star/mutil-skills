@@ -50,14 +50,14 @@ describe('E2E skill package', () => {
           'verified installation manifest + protocol major + safety probes',
         ],
         whenMissing: {
-          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.6.0',
+          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.7.0',
           terminalState: 'environment-blocked', reasonCode: 'E2E_RUNTIME_HOST_UNAVAILABLE',
         },
       }],
       source: {
-        url: 'https://github.com/g2060308919-star/mutil-skills/blob/v0.6.0/packages/skills/skills/testing/e2e/SKILL.md',
-        rawUrl: 'https://raw.githubusercontent.com/g2060308919-star/mutil-skills/v0.6.0/packages/skills/skills/testing/e2e/SKILL.md',
-        ref: 'v0.6.0',
+        url: 'https://github.com/g2060308919-star/mutil-skills/blob/v0.7.0/packages/skills/skills/testing/e2e/SKILL.md',
+        rawUrl: 'https://raw.githubusercontent.com/g2060308919-star/mutil-skills/v0.7.0/packages/skills/skills/testing/e2e/SKILL.md',
+        ref: 'v0.7.0',
       },
     })
   })
@@ -159,7 +159,9 @@ describe('E2E skill package', () => {
     expect(entry).toContain('默认流程不执行 `identity enroll`')
     expect(entry).toContain('`confirmation-required`')
     expect(entry).toContain('必须暂停并等待调用者明确确认')
-    expect(entry).toContain('@mutil-skills/e2e-runtime@0.6.0')
+    expect(entry).toContain('@mutil-skills/e2e-runtime@0.7.0')
+    expect(entry).not.toContain('Runtime 0.5.x')
+    expect(entry).not.toContain('同为 `0.5.x`')
     expect(approval).toContain('`confirm-approval`')
     expect(approval).toContain('本地确认不验证自然人身份，也不证明职责分离')
     expect(browser).toContain('系统 Google Chrome')
@@ -398,10 +400,10 @@ describe('E2E skill package', () => {
     expect(entry).toContain('remediation')
   })
 
-  test('0.5 工作流以高层编译和目标探测为主线，submit-candidate 只服务旧 Run', async () => {
+  test('0.7 工作流以高层编译和目标探测为主线，submit-candidate 只服务旧 Run', async () => {
     const entry = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
 
-    expect(entry).toContain('## Runtime 0.5.x 工作流契约')
+    expect(entry).toContain('## Runtime 0.7.x 工作流契约')
     for (const command of [
       'create-run', 'prepare-prd-understanding', 'compile-prd-run',
       'configure-target', 'probe-target', 'get-acceptance-review',
@@ -410,7 +412,7 @@ describe('E2E skill package', () => {
       expect(entry).toContain(`\`${command}\``)
     }
     expect(entry).toContain('`submit-candidate` 不属于新 Run 的默认主线')
-    expect(entry).toContain('Skill 版本与 Runtime 版本必须同为 `0.5.x`')
+    expect(entry).toContain('Skill 版本与 Runtime 版本必须同为 `0.7.x`')
   })
 
   test('调用者只提供 PRD 与目标地址，Skill 自动准备并冻结 Runtime 输入材料', async () => {

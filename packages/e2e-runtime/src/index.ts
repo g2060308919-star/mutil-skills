@@ -39,6 +39,7 @@ export {
   resolveRuntimeInstallation,
   withResolvedRuntimeInstallation,
   type ExistingRunRuntimeBinding,
+  type ExistingRunRevocationChecker,
   type ResolveRuntimeInstallationOptions,
   type RuntimeResolution,
   type RuntimeResolverPolicy,
@@ -50,6 +51,8 @@ export {
   RuntimeUpdateStateSchema,
   SignedRuntimeTargetSchema,
   advanceTrustedMetadata,
+  checkRuntimeInstallationRevocation,
+  restoreRuntimeLkg,
   validateRuntimeTarget,
   type InstalledRuntimeIdentity,
   type RuntimeTargetEnvironment,
@@ -58,6 +61,13 @@ export {
   type TrustedMetadataSet,
 } from './runtime-update-trust.js'
 export {
+  RuntimeLkgRecoveryDrillArtifactSchema,
+  RuntimeRevocationDrillArtifactSchema,
+  createRuntimeLkgRecoveryDrillArtifact,
+  createRuntimeRevocationDrillArtifact,
+} from './stable-activation-drills.js'
+export {
+  createExistingRunRevocationChecker,
   createStableRuntimeResolver,
   type RuntimeUpdateClient,
   type StableRuntimeUpdateServiceOptions,
