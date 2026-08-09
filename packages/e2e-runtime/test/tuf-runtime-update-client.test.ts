@@ -11,7 +11,14 @@ import {
 import { createRuntimeTestRoots } from './fixtures.js'
 
 const D = (character: string) => `sha256:${character.repeat(64)}`
-const ROOT = JSON.stringify({ signed: { _type: 'root', version: 1, expires: '2027-08-09T00:00:00Z' } })
+const ROOT_DOCUMENT = { signed: { _type: 'root', version: 1, expires: '2027-08-09T00:00:00Z',
+  keys: Object.fromEntries(['ROOT-1', 'ROOT-2', 'ROOT-3', 'TARGETS-1', 'TARGETS-2', 'TARGETS-3']
+    .map((keyId) => [keyId, { keytype: 'ed25519', scheme: 'ed25519', keyval: { public: keyId } }])),
+  roles: {
+    root: { keyids: ['ROOT-1', 'ROOT-2', 'ROOT-3'], threshold: 2 },
+    targets: { keyids: ['TARGETS-1', 'TARGETS-2', 'TARGETS-3'], threshold: 2 },
+  } } }
+const ROOT = JSON.stringify(ROOT_DOCUMENT)
 
 function custom() {
   return {
@@ -41,7 +48,7 @@ describe('官方 tuf-js Runtime 更新适配层', () => {
             ['root', 1, '2027-08-09T00:00:00Z'], ['timestamp', 2, '2026-08-10T00:00:00Z'],
             ['snapshot', 3, '2026-08-16T00:00:00Z'], ['targets', 4, '2026-09-08T00:00:00Z'],
           ] as const) await writeFile(join(options.metadataDir as string, `${role}.json`),
-            JSON.stringify({ signed: { _type: role, version, expires } }))
+            role === 'root' ? ROOT : JSON.stringify({ signed: { _type: role, version, expires } }))
         },
         getTargetInfo: async () => targetInfo,
         downloadTarget: async (_target, filePath) => {
@@ -61,6 +68,10 @@ describe('官方 tuf-js Runtime 更新适配层', () => {
     expect(refreshed.target).toMatchObject({ name: targetInfo.path, custom: { runtimeVersion: '0.6.0' } })
     expect(refreshed.metadata).toMatchObject({ root: { version: 1 }, timestamp: { version: 2 },
       snapshot: { version: 3 }, targets: { version: 4 } })
+    expect(refreshed.governance).toMatchObject({
+      root: { keyIds: ['ROOT-1', 'ROOT-2', 'ROOT-3'], threshold: 2 },
+      targets: { keyIds: ['TARGETS-1', 'TARGETS-2', 'TARGETS-3'], threshold: 2 },
+    })
     expect(await readFile(join(updaterOptions!.metadataDir as string, 'root.json'), 'utf8')).toBe(ROOT)
     expect((await stat(updaterOptions!.metadataDir as string)).mode & 0o777).toBe(0o700)
     expect(updaterOptions).toMatchObject({ config: { maxRootRotations: 32, fetchTimeout: 30_000,
@@ -80,7 +91,8 @@ describe('官方 tuf-js Runtime 更新适配层', () => {
       refresh: async () => {
         for (const role of ['root', 'timestamp', 'snapshot', 'targets'] as const) {
           await writeFile(join(roots.home, '.mutil-skills/e2e/state/runtime-update/metadata', `${role}.json`),
-            JSON.stringify({ signed: { _type: role, version: 1, expires: '2027-08-09T00:00:00Z' } }))
+            role === 'root' ? ROOT
+              : JSON.stringify({ signed: { _type: role, version: 1, expires: '2027-08-09T00:00:00Z' } }))
         }
       },
       getTargetInfo: async () => ({
@@ -97,10 +109,11 @@ describe('官方 tuf-js Runtime 更新适配层', () => {
   test('更新状态以当前用户 0600 普通文件原子保存，损坏或 symlink 状态 fail closed', async () => {
     const roots = await createRuntimeTestRoots()
     const state = {
-      schemaVersion: '1.0.0' as const, highwaterWallClock: '2026-08-09T00:00:00.000Z',
+      schemaVersion: '1.1.0' as const, highwaterWallClock: '2026-08-09T00:00:00.000Z',
       metadata: Object.fromEntries(['root', 'timestamp', 'snapshot', 'targets'].map((role, index) =>
         [role, { version: index + 1, digest: D(String(index + 4)), expires: '2027-08-09T00:00:00.000Z' }])) as never,
-      verifiedTargets: [], newRunDefault: null, lkg: null, audit: [],
+      verifiedTargets: [], revocations: [], revocationOverflow: null,
+      newRunDefault: null, lkg: null, audit: [],
     }
     await writeRuntimeUpdateState(roots.home, state)
     expect(await readRuntimeUpdateState(roots.home)).toEqual(state)

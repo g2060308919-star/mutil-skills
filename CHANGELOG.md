@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-09
+
+### Added
+
+- 新增 Browser Executor Protocol，为写操作、Fixture 注入、完整 Playwright 和多 Case 调度提供独立的 legacy/shadow 路由及语义一致性校验。
+- 新增真实浏览器 B2B 加权场景覆盖证明，按 12 类能力分别审计 Requirement、Rule、Oracle、Case、页面绑定、重复执行、负向控制和证据完整性。
+- 新增 Runtime 模块冷启动、TUF 更新冷/热缓存、32 路真实 Resolver、诊断分类和 Artifact 持久引用保留/解除/GC 生命周期的运行性能证明，并接入带 CPU/内存预算的仓库 baseline 门禁。
+- 新增生产 stable 激活审计，强制校验官方 TUF 刷新、六类原始证明摘要、同一 staging 环境以及 target policy 登记密钥的阈值签名。
+- 新增 TUF metadata 发布前检查、显式 LKG 恢复、撤销/LKG 演练 artifact 命令，以及 Linux/macOS × Node 22/24 Registry Golden proof 汇总器。
+
+### Changed
+
+- Runtime 更新状态升级为 `1.1.0`，记录 channel、运行平台、metadata 版本与摘要、default/LKG 变化，并对 metadata 过长有效期和撤销记录容量实施边界约束。
+- offline、pinned 与已有 Run 恢复前统一复核 installation revocation；撤销命中时原子清除匹配指针，容量溢出后全局 fail-closed，避免把未知状态误当作安全。
+- Resolver 即使未由调用方注入撤销 checker，也会从 Runtime HOME 读取可信 tombstone；full-playwright 恢复只有 `prepared + resume-full-playwright` 才能继续浏览器执行。
+- 同进程并发新 Run Runtime 解析改为在 Resolver 边界安全排队；跨进程安装/卸载锁仍保持 fail-closed。
+- 全部工作区包、内部依赖、E2E Skill 安装指引、协议与 Engine 版本真相统一为 `0.7.0`。
+
+### Fixed
+
+- 系统 Chrome Golden 等待 Popup 的最终页面标题，消除临时 `Loading` 文档导致的竞态失败。
+- B2B 证明改为由编译计划驱动执行，并将逐 Case 负样本 Verdict、执行集合与 active generation 互相绑定，阻止未发布结果替换。
+
 ## [0.6.0] - 2026-08-09
 
 ### Added

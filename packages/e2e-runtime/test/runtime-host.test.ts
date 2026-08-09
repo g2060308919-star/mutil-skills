@@ -47,6 +47,7 @@ import type { ProjectPublisher } from '../src/project-publisher.js'
 import { projectionFixture } from './trusted-action-runner.test.js'
 import {
   multiCaseFixture,
+  runtimeFullPlaywrightProjectionFixture,
   runtimeFullPlaywrightOutput,
 } from './runtime-full-playwright-projector.test.js'
 import { injectionOutput, realWriteOutput, runtimeWriteDigest } from './runtime-write-fixtures.js'
@@ -1469,6 +1470,7 @@ describe('E2ERuntimeHost', () => {
   test('execute-run 通过正式 Host 持久串行调度三个 full-playwright Case', async () => {
     const calls: Array<{ caseId: string; attemptId: string }> = []
     const fixture = await hostFixture({
+      browserExecutorProtocolFullPlaywrightRoute: 'shadow',
       executeFullPlaywrightRun: async ({ snapshot, attemptId, projection }) => {
         calls.push({ caseId: projection.caseId, attemptId })
         expect(snapshot.writeAttempts?.[attemptId]).toMatchObject({
@@ -1698,6 +1700,7 @@ describe('E2ERuntimeHost', () => {
     'execute-run 通过 Host 调用可信 %s executor，并在同一 fenced attempt 内持久化分域结果',
     async (mode) => {
       const fixture = await hostFixture(mode === 'write' ? {
+        browserExecutorProtocolWriteRoute: 'shadow',
         executeWriteRun: async ({ snapshot, attemptId, actionId }) => {
           expect(snapshot?.workflow.current).toBe('running-real')
           expect(attemptId).toMatch(/^ATTEMPT-/)
@@ -1707,6 +1710,7 @@ describe('E2ERuntimeHost', () => {
           return realWriteOutput({ actionId }) as never
         },
       } : {
+        browserExecutorProtocolInjectionRoute: 'shadow',
         executeInjectionRun: async ({ snapshot, actionId }) => {
           expect(snapshot?.workflow.current).toBe('running-real')
           return injectionOutput({ actionId, finalizationFacts: {
@@ -2460,6 +2464,52 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('single-case full-playwright 在 recovery 阻断时绝不重放浏览器写操作', async () => {
+    const recover = vi.fn(async () => ({ status: 'blocked' as const,
+      reasonCode: 'E2E_RUNTIME_WRITE_EFFECT_UNCERTAIN', browserCalls: 0 as const }))
+    const executeFullPlaywrightRun = vi.fn(async ({ projection }) =>
+      runtimeFullPlaywrightOutput(projection.caseId, projection.actionId))
+    const fixture = await hostFixture({ writeRecovery: { recover }, executeFullPlaywrightRun })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CREATE-FULL-RECOVERY-BLOCKED', fixture.roots.project)))
+    const projected = runtimeFullPlaywrightProjectionFixture()
+    const grant = structuredClone(
+      projected.trustedExecutionFacts['signed-execution-grant'],
+    ) as SignedGrant
+    grant.approvalContext.runId = created.runId as string
+    grant.approvalContext.installationDigest = installation.installationDigest
+    const plan = compiledPlanForMultiCase(projected)
+    await fixture.store.beginRequest('SEED-FULL-RECOVERY-BLOCKED', digest('c'))
+    const lock = await fixture.store.acquireRunLock(
+      created.projectIdentityDigest as string, created.runId as string)
+    await fixture.store.updateRunOutcome(
+      created.projectIdentityDigest as string, created.runId as string,
+      'SEED-FULL-RECOVERY-BLOCKED', digest('c'),
+      (snapshot) => ({ snapshot: { ...snapshot,
+        artifactDigests: { ...snapshot.artifactDigests, ...Object.fromEntries(
+          Object.entries(projected.frozenArtifacts).map(([key, artifact]) => [key, artifact.contentDigest])) },
+        frozenArtifacts: projected.frozenArtifacts,
+        trustedExecutionFacts: { ...projected.trustedExecutionFacts,
+          'signed-execution-grant': grant },
+        compiledPrdRun: plan,
+        caseSchedule: createCaseSchedule(plan, '2026-07-17T00:00:00.000Z'),
+        workflow: { current: 'compiled', sequence: 9, eventChainDigest: digest('d') },
+      }, response: { seeded: true } }),
+      'test-seed-full-recovery-blocked', lock,
+    )
+    await lock.close()
+
+    const response = await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-RESUME-FULL-RECOVERY-BLOCKED'), command: 'resume-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId,
+        decision: { kind: 'recover-write-attempt', expectedAttemptId: 'ATTEMPT-FULL-1' } },
+    }))
+    expect(response).toMatchObject({ ok: true, result: { status: 'blocked',
+      reasonCode: 'E2E_RUNTIME_WRITE_EFFECT_UNCERTAIN' } })
+    expect(executeFullPlaywrightRun).not.toHaveBeenCalled()
+    await fixture.store.close()
+  })
+
   test('globally reserves invalid-project errors before identity parsing', async () => {
     const fixture = await hostFixture()
     const invalid = createRunRequest('REQUEST-GLOBAL-1', join(fixture.roots.root, 'missing-project'))
@@ -2577,6 +2627,9 @@ async function hostFixture(options: {
   quarantineEvidence?: Parameters<typeof authorizeRuntimeEvidenceQuarantine>[0]
   reserveExecutionLeases?: NonNullable<ConstructorParameters<typeof E2ERuntimeHost>[0]['reserveExecutionLeases']>
   browserExecutorProtocolReadRoute?: 'legacy' | 'shadow'
+  browserExecutorProtocolWriteRoute?: 'legacy' | 'shadow'
+  browserExecutorProtocolInjectionRoute?: 'legacy' | 'shadow'
+  browserExecutorProtocolFullPlaywrightRoute?: 'legacy' | 'shadow'
 } = {}) {
   const roots = options.roots ?? await createRuntimeTestRoots()
   await mkdir(join(roots.project, '.biztest'), { recursive: true })
@@ -2612,8 +2665,23 @@ async function hostFixture(options: {
     ...(options.executeReadOnlyRun === undefined ? {} : {
       readExecutor: authorizeRuntimeReadExecutor(options.executeReadOnlyRun),
     }),
-    ...(options.browserExecutorProtocolReadRoute === undefined ? {} : {
-      browserExecutorProtocolV1: { readRoute: options.browserExecutorProtocolReadRoute },
+    ...([options.browserExecutorProtocolReadRoute, options.browserExecutorProtocolWriteRoute,
+      options.browserExecutorProtocolInjectionRoute, options.browserExecutorProtocolFullPlaywrightRoute]
+      .every((route) => route === undefined) ? {} : {
+      browserExecutorProtocolV1: {
+        ...(options.browserExecutorProtocolReadRoute === undefined ? {} : {
+          readRoute: options.browserExecutorProtocolReadRoute,
+        }),
+        ...(options.browserExecutorProtocolWriteRoute === undefined ? {} : {
+          writeRoute: options.browserExecutorProtocolWriteRoute,
+        }),
+        ...(options.browserExecutorProtocolInjectionRoute === undefined ? {} : {
+          injectionRoute: options.browserExecutorProtocolInjectionRoute,
+        }),
+        ...(options.browserExecutorProtocolFullPlaywrightRoute === undefined ? {} : {
+          fullPlaywrightRoute: options.browserExecutorProtocolFullPlaywrightRoute,
+        }),
+      },
     }),
     ...(options.executeWriteRun === undefined ? {} : {
       writeExecutor: authorizeRuntimeWriteExecutor(options.executeWriteRun),

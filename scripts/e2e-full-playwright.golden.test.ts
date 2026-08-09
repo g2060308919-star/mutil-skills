@@ -216,6 +216,7 @@ test('真实 Chromium：受控完整 Playwright program 与独立 cleanup sessio
     expectedOrder: index + 1 }))
   try {
     const fixture = await readyFixture({ source, cleanupSource, networkRequests: requests,
+      programTimeoutMs: 30_000, cleanupTimeoutMs: 30_000,
       networkRequestBodies: [{ intentId: 'API', kind: 'json', canonicalJson: jsonBody }],
       programBindings: { page: programPage, context: programContext, browser: controlledBrowser,
         request: controlledRequest(programRequest), expect: playwrightExpect, testInfo: { title: 'Golden' }, state },

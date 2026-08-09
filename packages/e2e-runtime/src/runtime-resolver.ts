@@ -1,5 +1,6 @@
 import { canonicalizeJson, digestText } from '@mutil-skills/e2e-contracts'
 import { readdir } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import { z } from 'zod'
 import { runtimeLayout } from './runtime-layout.js'
 import { withRuntimeInstallLock } from './runtime-installer.js'
@@ -12,6 +13,8 @@ import {
   type VerifiedRuntimeVersion,
 } from './runtime-manifest.js'
 import type { RuntimeInstallation } from './runtime-discovery.js'
+import { readRuntimeUpdateState } from './tuf-runtime-update-client.js'
+import { checkRuntimeInstallationRevocation } from './runtime-update-trust.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const ExactVersionSchema = z.string().refine(isExactRuntimeVersion, 'Runtime 版本必须是精确稳定 SemVer')
@@ -36,6 +39,15 @@ export interface ResolveRuntimeInstallationOptions {
   policy: RuntimeResolverPolicy
   existingRun?: ExistingRunRuntimeBinding
   stableResolver?: StableRuntimeResolver
+  existingRunRevocationChecker?: ExistingRunRevocationChecker
+}
+
+export interface ExistingRunRevocationChecker {
+  (input: { runtimeVersion: string; installationDigest: string }): Promise<{
+    status: 'revocation-checked' | 'offline-unchecked' | 'metadata-expired'
+    revoked: boolean
+    reasonCode?: string
+  }>
 }
 
 export interface StableRuntimeResolver {
@@ -75,9 +87,19 @@ export async function withResolvedRuntimeInstallation<T>(
   options: ResolveRuntimeInstallationOptions,
   bind: (runtimeResolution: RuntimeResolution) => Promise<T>,
 ): Promise<T> {
+  return await withInProcessResolutionQueue(options.homeDir, async () =>
+    await withResolvedRuntimeInstallationUnlocked(options, bind))
+}
+
+async function withResolvedRuntimeInstallationUnlocked<T>(
+  options: ResolveRuntimeInstallationOptions,
+  bind: (runtimeResolution: RuntimeResolution) => Promise<T>,
+): Promise<T> {
   const policy = parsePolicy(options.policy)
   const existingRun = parseExistingRun(options.existingRun)
   const layout = runtimeLayout(options.homeDir)
+  const revocationChecker = options.existingRunRevocationChecker
+    ?? defaultRevocationChecker(options.homeDir)
   await verifyRuntimeRoot(layout)
   if (existingRun === undefined && policy.mode === 'stable') {
     if (options.stableResolver === undefined) runtimeError(
@@ -99,15 +121,46 @@ export async function withResolvedRuntimeInstallation<T>(
   }
   return await withRuntimeInstallLock(layout, async () => {
     await verifyRuntimeRoot(layout)
-    const selected = await resolveVerifiedRuntimeInstallation(layout, policy, existingRun)
+    const selected = await resolveVerifiedRuntimeInstallation(
+      layout, policy, existingRun, revocationChecker,
+    )
     return await bind(selected)
   })
+}
+
+function defaultRevocationChecker(homeDir: string): ExistingRunRevocationChecker {
+  return async ({ installationDigest }) => checkRuntimeInstallationRevocation(
+    await readRuntimeUpdateState(homeDir), installationDigest, new Date(),
+  )
+}
+
+const resolutionTails = new Map<string, Promise<void>>()
+
+/**
+ * 文件锁继续防止跨进程安装/卸载竞态；同一 Host 进程内的多个 Run 则先排队，
+ * 避免正常并发被误判为环境故障。队列只覆盖 Resolver，不改变安装器 fail-closed 语义。
+ */
+async function withInProcessResolutionQueue<T>(homeDir: string, operation: () => Promise<T>): Promise<T> {
+  const key = resolve(homeDir)
+  const previous = resolutionTails.get(key) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>((resolvePromise) => { release = resolvePromise })
+  const tail = previous.catch(() => undefined).then(() => current)
+  resolutionTails.set(key, tail)
+  await previous.catch(() => undefined)
+  try {
+    return await operation()
+  } finally {
+    release()
+    if (resolutionTails.get(key) === tail) resolutionTails.delete(key)
+  }
 }
 
 async function resolveVerifiedRuntimeInstallation(
   layout: ReturnType<typeof runtimeLayout>,
   policy: RuntimeResolverPolicy,
   existingRun: ExistingRunRuntimeBinding | undefined,
+  existingRunRevocationChecker: ExistingRunRevocationChecker | undefined,
 ): Promise<RuntimeResolution> {
   if (existingRun !== undefined) {
     const installation = await findInstallationByDigest(layout, existingRun.installationDigest)
@@ -116,11 +169,19 @@ async function resolveVerifiedRuntimeInstallation(
       `Run ${existingRun.runId} 绑定的 Runtime closure 不存在或未通过验证`,
       'environment',
     )
-    return resolution('existing-run', 'run-bound', installation, existingRun.runId, 'offline-unchecked')
+    const revocation = await checkInstallationRevocation(installation, existingRunRevocationChecker)
+    if (revocation.revoked) runtimeError(
+      'E2E_RUNTIME_RUN_INSTALLATION_REVOKED',
+      `Run ${existingRun.runId} 绑定的 Runtime closure 已撤销：${revocation.reasonCode ?? 'UNKNOWN'}`,
+      'safety',
+    )
+    return resolution('existing-run', 'run-bound', installation, existingRun.runId, revocation.status)
   }
   if (policy.mode === 'offline') {
     const { installation } = await verifyCurrentRuntimeInstallation(layout)
-    return resolution('new-run', 'offline', installation, undefined, 'offline-unchecked')
+    const revocation = await checkInstallationRevocation(installation, existingRunRevocationChecker)
+    assertNewRunNotRevoked(revocation)
+    return resolution('new-run', 'offline', installation, undefined, revocation.status)
   }
   if (policy.mode === 'stable') runtimeError(
     'E2E_RUNTIME_STABLE_UPDATE_UNAVAILABLE',
@@ -132,7 +193,45 @@ async function resolveVerifiedRuntimeInstallation(
     && installation.manifest.installationDigest !== policy.installationDigest) {
     runtimeError('E2E_RUNTIME_PINNED_DIGEST_MISMATCH', 'pinned Runtime 版本与 installation digest 不一致')
   }
-  return resolution('new-run', 'pinned', installation, undefined, 'offline-unchecked')
+  const revocation = await checkInstallationRevocation(installation, existingRunRevocationChecker)
+  assertNewRunNotRevoked(revocation)
+  return resolution('new-run', 'pinned', installation, undefined, revocation.status)
+}
+
+async function checkInstallationRevocation(
+  installation: VerifiedRuntimeVersion,
+  checker: ExistingRunRevocationChecker | undefined,
+): Promise<Awaited<ReturnType<ExistingRunRevocationChecker>>> {
+  const revocation = checker === undefined
+    ? { status: 'offline-unchecked' as const, revoked: false }
+    : await checker({ runtimeVersion: installation.version,
+      installationDigest: installation.manifest.installationDigest })
+  assertRevocationCheck(revocation)
+  return revocation
+}
+
+function assertNewRunNotRevoked(
+  revocation: Awaited<ReturnType<ExistingRunRevocationChecker>>,
+): void {
+  if (revocation.revoked) runtimeError(
+    'E2E_RUNTIME_INSTALLATION_REVOKED',
+    `新 Run 候选 Runtime closure 已撤销：${revocation.reasonCode ?? 'UNKNOWN'}`,
+    'safety',
+  )
+}
+
+function assertRevocationCheck(candidate: unknown): asserts candidate is Awaited<ReturnType<ExistingRunRevocationChecker>> {
+  const parsed = z.object({
+    status: z.enum(['revocation-checked', 'offline-unchecked', 'metadata-expired']),
+    revoked: z.boolean(), reasonCode: z.string().min(1).max(128).optional(),
+  }).strict().superRefine((value, context) => {
+    if (value.revoked && value.status !== 'revocation-checked') {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: '撤销命中必须来自可信撤销检查' })
+    }
+  }).safeParse(candidate)
+  if (!parsed.success) runtimeError(
+    'E2E_RUNTIME_REVOCATION_CHECK_INVALID', '已有 Run 撤销检查器返回无效结果', 'safety',
+  )
 }
 
 function parsePolicy(candidate: unknown): RuntimeResolverPolicy {

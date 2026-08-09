@@ -141,7 +141,13 @@ import {
 import { projectTaskStateViewV1 } from './task-state-view.js'
 import type { RunStatusPublisher } from './run-status-publisher.js'
 import { assertCompiledCaseProjection } from './compiled-case-projection.js'
-import { executeRuntimeReadWithBrowserExecutorProtocolV1 } from './browser-executor-protocol.js'
+import {
+  executeRuntimeFullPlaywrightWithBrowserExecutorProtocolV1,
+  executeRuntimeFullPlaywrightProjectionWithBrowserExecutorProtocolV1,
+  executeRuntimeInjectionWithBrowserExecutorProtocolV1,
+  executeRuntimeReadWithBrowserExecutorProtocolV1,
+  executeRuntimeWriteWithBrowserExecutorProtocolV1,
+} from './browser-executor-protocol.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -173,7 +179,12 @@ export interface RuntimeHostDependencies {
     | 'prepareManualResult' | 'requestManualResultRole' | 'recoverManualResultRole'>>>
   presentUserPresenceUrl?(url: string): void | Promise<void>
   readExecutor?: RuntimeReadExecutorCapability
-  browserExecutorProtocolV1?: { readRoute: 'legacy' | 'shadow' }
+  browserExecutorProtocolV1?: {
+    readRoute?: 'legacy' | 'shadow'
+    writeRoute?: 'legacy' | 'shadow'
+    injectionRoute?: 'legacy' | 'shadow'
+    fullPlaywrightRoute?: 'legacy' | 'shadow'
+  }
   writeExecutor?: RuntimeWriteExecutorCapability
   injectionExecutor?: RuntimeInjectionExecutorCapability
   fullPlaywrightExecutor?: RuntimeFullPlaywrightExecutorCapability
@@ -2163,15 +2174,24 @@ export class E2ERuntimeHost {
           now: () => this.dependencies.now().toISOString(),
         })
         : executionMode === 'write'
-          ? await executeRuntimeWrite(this.dependencies.writeExecutor!, {
+          ? await executeRuntimeWriteWithBrowserExecutorProtocolV1(this.dependencies.writeExecutor!, {
             snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
+            route: this.dependencies.browserExecutorProtocolV1?.writeRoute ?? 'legacy',
+            executionId: `WRITE-${started!.attempt.attemptId}`,
+            now: () => this.dependencies.now().toISOString(),
           })
           : executionMode === 'full-playwright'
-            ? await executeRuntimeFullPlaywright(this.dependencies.fullPlaywrightExecutor!, {
+            ? await executeRuntimeFullPlaywrightWithBrowserExecutorProtocolV1(this.dependencies.fullPlaywrightExecutor!, {
               snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
+              route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'legacy',
+              executionId: `FULL-${started!.attempt.attemptId}`,
+              now: () => this.dependencies.now().toISOString(),
             })
-          : await executeRuntimeInjection(this.dependencies.injectionExecutor!, {
+          : await executeRuntimeInjectionWithBrowserExecutorProtocolV1(this.dependencies.injectionExecutor!, {
             snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
+            route: this.dependencies.browserExecutorProtocolV1?.injectionRoute ?? 'legacy',
+            executionId: `INJECTION-${started!.attempt.attemptId}`,
+            now: () => this.dependencies.now().toISOString(),
           }))
     } catch (cause) {
       let releaseCause: unknown
@@ -2471,6 +2491,15 @@ export class E2ERuntimeHost {
             attemptIds,
             ...(resumeAttemptId === undefined ? {} : { resumeAttemptId }),
             now: () => this.dependencies.now().toISOString(),
+            executeCase: async ({ snapshot, attemptId, projection }) =>
+              await executeRuntimeFullPlaywrightProjectionWithBrowserExecutorProtocolV1(
+                this.dependencies.fullPlaywrightExecutor!, {
+                  snapshot, attemptId, projection,
+                  route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'legacy',
+                  executionId: `FULL-${attemptId}`,
+                  now: () => this.dependencies.now().toISOString(),
+                },
+              ),
             persistSchedule: async (schedule) => {
               const lock = await this.dependencies.runStore.acquireRunLock(
                 projectIdentityDigest,
@@ -2768,7 +2797,9 @@ export class E2ERuntimeHost {
       }
       const result = await recoverRuntimeProductionWrite(production, { projectIdentityDigest: identity.digest,
         runId: request.payload.runId, attemptId: decision.expectedAttemptId })
-      if (recoverMultiCase && result.status === 'recovered') {
+      const resumeFullPlaywright = result.status === 'recovered'
+        && result.writeState === 'prepared' && result.next === 'resume-full-playwright'
+      if (recoverMultiCase && resumeFullPlaywright) {
         return await this.executeMultiCaseFullPlaywrightRun(
           request,
           requestDigest,
@@ -2777,9 +2808,12 @@ export class E2ERuntimeHost {
           decision.expectedAttemptId,
         )
       }
-      const fullPlaywrightTerminal = recoverFullPlaywright && !recoverMultiCase
-        ? await executeRuntimeFullPlaywright(this.dependencies.fullPlaywrightExecutor!, {
+      const fullPlaywrightTerminal = recoverFullPlaywright && !recoverMultiCase && resumeFullPlaywright
+        ? await executeRuntimeFullPlaywrightWithBrowserExecutorProtocolV1(this.dependencies.fullPlaywrightExecutor!, {
           snapshot: snapshot!, attemptId: decision.expectedAttemptId,
+          route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'legacy',
+          executionId: `FULL-${decision.expectedAttemptId}`,
+          now: () => this.dependencies.now().toISOString(),
         }) : undefined
       const response = this.successResponse(request.requestId, {
         runId: request.payload.runId, recoveredAttemptId: decision.expectedAttemptId, ...result,

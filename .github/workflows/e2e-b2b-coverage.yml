@@ -1,0 +1,62 @@
+name: E2E B2B Coverage
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-b2b-coverage
+  cancel-in-progress: false
+
+jobs:
+  coverage:
+    name: Stable system-Chrome B2B coverage gate
+    runs-on: [self-hosted, e2e-benchmark, macos, arm64, system-chrome]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm ci
+      - name: Run repeated real-browser scenarios
+        run: npm run verify:e2e-b2b-coverage
+        env:
+          E2E_STABLE_RUNNER_BASELINE: .github/e2e-baselines/stable-macos-arm64-e2e-01.json
+          E2E_B2B_BROWSER_CHANNEL: chrome
+          E2E_B2B_COVERAGE_REPETITIONS: '5'
+          E2E_B2B_COVERAGE_OUTPUT_DIR: b2b-scenario-coverage
+      - name: Require weighted 90 percent gate
+        run: node -e "const p=require('./b2b-scenario-coverage/proof.json'); if(!p.passed || !p.gateEligible || p.weightedCoverage<90 || p.flakyRate!==0) process.exit(1)"
+      - name: Run operational non-functional gate
+        run: npm run verify:e2e-operational
+        env:
+          E2E_B2B_COVERAGE_PROOF: b2b-scenario-coverage/proof.json
+          E2E_STABLE_RUNNER_BASELINE: .github/e2e-baselines/stable-macos-arm64-e2e-01.json
+          E2E_OPERATIONAL_BASELINE: .github/e2e-baselines/stable-macos-arm64-e2e-01.json
+          E2E_B2B_BROWSER_CHANNEL: chrome
+          E2E_OPERATIONAL_RUNNER_ID: stable-macos-arm64-e2e-01
+          E2E_OPERATIONAL_OUTPUT: operational-performance-proof.json
+          E2E_TUF_TRUSTED_ROOT_PATH: ${{ vars.E2E_TUF_TRUSTED_ROOT_PATH }}
+          E2E_TUF_METADATA_BASE_URL: ${{ vars.E2E_TUF_METADATA_BASE_URL }}
+          E2E_TUF_TARGET_BASE_URL: ${{ vars.E2E_TUF_TARGET_BASE_URL }}
+          E2E_TUF_TARGET_PATH: ${{ vars.E2E_TUF_TARGET_PATH }}
+      - name: Require operational proof
+        run: node -e "const p=require('./operational-performance-proof.json'); if(!p.passed || !p.gateEligible || p.flakyRate!==0 || p.diagnosticRate!==100 || !p.artifactRetentionVerified) process.exit(1)"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: e2e-b2b-scenario-coverage
+          path: b2b-scenario-coverage
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v7
+        with:
+          name: e2e-operational-performance-proof
+          path: operational-performance-proof.json
+          if-no-files-found: error
+          retention-days: 30

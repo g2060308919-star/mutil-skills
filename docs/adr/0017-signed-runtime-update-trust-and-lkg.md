@@ -139,4 +139,6 @@ Runtime package 仍声明最低 Node 版本，但在线 Resolver 只接受 targe
 3. metadata HTTPS origin、维护者、签发自动化与紧急响应责任人；
 4. Linux/macOS、Node 22/24 的 clean-HOME Registry Golden 与撤销演练。
 
-缺少任一项时，0.6.0 客户端保留 `offline`/`pinned` 能力并对 `stable` fail-closed；不得内置测试私钥、临时 origin 或把 npm provenance 当作信任根。
+缺少任一项时，0.7.0 客户端保留 `offline`/`pinned` 能力并对 `stable` fail-closed；不得内置测试私钥、临时 origin 或把 npm provenance 当作信任根。
+
+实现补记（2026-08-09）：update state 已升级为可迁移的 1.1 状态，持久保存撤销事实；撤销命中会在同一原子事务中清除匹配 default/LKG 并写入审计。撤销集合达到容量上限时记录 overflow marker，所有安装 fail-closed，不通过 `slice` 遗忘 tombstone。offline、pinned 和已有 Run 即使调用方未注入 checker，也默认从 Runtime HOME 安全读取同一撤销状态。四角色 metadata 同时校验“尚未过期”和 365/30/7/1 天最大剩余寿命。生产激活由 `verify:e2e-stable-activation` 汇总官方 TUF refresh、严格解析六类 artifact、复算内外两层 digest，并验证 target activation policy 登记密钥的阈值签名；未满足时仍 fail-closed。LKG 只能经显式 `restoreRuntimeLkg` 恢复，且必须仍在 verifiedTargets、未撤销、metadata 未过期，恢复会留下 `lkg-restored` 审计事件而不删除防降级高水位。

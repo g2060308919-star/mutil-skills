@@ -464,6 +464,24 @@ export class LocalArtifactStore {
     }
   }
 
+  /** 按已持久化且签名的 validation references 执行 GC，不允许调用参数覆盖引用事实。 */
+  async gcUsingPersistedValidationReferences(assetId: string): Promise<void> {
+    validateId(assetId, 'assetId')
+    const session = await SafeAssetSession.acquire(this.assetRoot(assetId))
+    try {
+      await cleanupAtomicTemps(session)
+      const active = await this.readActiveSession(assetId, session)
+      if (!active) throw artifactError(
+        'E2E_ARTIFACT_NO_RELIABLE_GENERATION', `Asset ${assetId} 没有可靠 generation`,
+      )
+      const references = await this.readValidationReferences(session)
+      const fencingToken = await this.nextFencingToken(session, active.fencingToken)
+      await this.runGcSession(assetId, session, references, fencingToken)
+    } finally {
+      await session.close()
+    }
+  }
+
   private assetRoot(assetId: string): string {
     return join(this.root, '.biztest', 'assets', assetId)
   }

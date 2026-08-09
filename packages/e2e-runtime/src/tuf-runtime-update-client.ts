@@ -15,12 +15,31 @@ import {
   type SignedRuntimeTarget,
   type TrustedMetadataSet,
 } from './runtime-update-trust.js'
+import {
+  issueVerifiedTufGovernance,
+  type VerifiedTufGovernance,
+} from './stable-activation-audit.js'
 
 const MetadataEnvelopeSchema = z.object({
   signed: z.object({
     _type: z.enum(['root', 'timestamp', 'snapshot', 'targets']),
     version: z.number().int().positive(),
     expires: z.string().datetime({ offset: true }),
+  }).passthrough(),
+}).passthrough()
+
+const RootGovernanceEnvelopeSchema = z.object({
+  signed: z.object({
+    _type: z.literal('root'),
+    keys: z.record(z.object({
+      keytype: z.string().min(1).max(64),
+      scheme: z.string().min(1).max(128),
+      keyval: z.object({ public: z.string().min(1).max(16_384) }).strict(),
+    }).strict()),
+    roles: z.object({
+      root: z.object({ keyids: z.array(z.string()).length(3), threshold: z.literal(2) }).strict(),
+      targets: z.object({ keyids: z.array(z.string()).length(3), threshold: z.literal(2) }).strict(),
+    }).passthrough(),
   }).passthrough(),
 }).passthrough()
 
@@ -102,7 +121,9 @@ export class TufRuntimeUpdateClient {
     this.#options = options
   }
 
-  async refresh(): Promise<{ metadata: TrustedMetadataSet; target: SignedRuntimeTarget }> {
+  async refresh(): Promise<{
+    metadata: TrustedMetadataSet; target: SignedRuntimeTarget; governance: VerifiedTufGovernance
+  }> {
     const config = validateClientConfig(this.#options)
     const roots = updateRoots(this.#options.homeDir)
     await ensurePrivateDirectory(roots.root)
@@ -159,11 +180,12 @@ export class TufRuntimeUpdateClient {
       throw updateError('E2E_RUNTIME_UPDATE_TARGET_URL_MISMATCH', '签名 registry URL 与实际 TUF target URL 不一致')
     }
     const metadata = await readTrustedMetadataSet(roots.metadata)
+    const governance = await readVerifiedTufGovernance(roots.metadata, metadata.root.digest)
     this.#updater = updater
     this.#targetInfo = targetInfo
     this.#target = parsedTarget.data
     this.#targetDir = roots.targets
-    return { metadata, target: parsedTarget.data }
+    return { metadata, target: parsedTarget.data, governance }
   }
 
   async downloadTarget(target: SignedRuntimeTarget): Promise<string> {
@@ -252,6 +274,31 @@ async function readTrustedMetadataSet(metadataDir: string): Promise<TrustedMetad
     }
   }
   return roles as TrustedMetadataSet
+}
+
+async function readVerifiedTufGovernance(
+  metadataDir: string,
+  rootMetadataDigest: string,
+): Promise<VerifiedTufGovernance> {
+  let parsed: z.infer<typeof RootGovernanceEnvelopeSchema>
+  try {
+    parsed = RootGovernanceEnvelopeSchema.parse(
+      JSON.parse((await readBoundedFile(join(metadataDir, 'root.json'), metadataLimit('root'))).toString('utf8')),
+    )
+  } catch (cause) {
+    throw updateError('E2E_RUNTIME_UPDATE_ROOT_GOVERNANCE_INVALID', '已验证 root 不满足 2-of-3 治理约束', cause)
+  }
+  const available = new Set(Object.keys(parsed.signed.keys))
+  for (const role of [parsed.signed.roles.root, parsed.signed.roles.targets]) {
+    if (new Set(role.keyids).size !== role.keyids.length || role.keyids.some((keyId) => !available.has(keyId))) {
+      throw updateError('E2E_RUNTIME_UPDATE_ROOT_GOVERNANCE_INVALID', 'root/targets role key IDs 无效')
+    }
+  }
+  return issueVerifiedTufGovernance({
+    root: { keyIds: parsed.signed.roles.root.keyids, threshold: parsed.signed.roles.root.threshold },
+    targets: { keyIds: parsed.signed.roles.targets.keyids, threshold: parsed.signed.roles.targets.threshold },
+    rootMetadataDigest,
+  })
 }
 
 async function ensureBootstrapRoot(source: string, target: string): Promise<void> {

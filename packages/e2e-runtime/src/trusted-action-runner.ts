@@ -164,16 +164,23 @@ export async function executeRuntimeFullPlaywright(
   capability: RuntimeFullPlaywrightExecutorCapability,
   input: { snapshot: RuntimeRunSnapshot; attemptId: string },
 ): Promise<RuntimeWriteExecutionOutput> {
+  const projection = projectRuntimeFullPlaywrightSnapshot(input.snapshot)
+  return await executeRuntimeFullPlaywrightProjection(capability, { ...input, projection })
+}
+
+export async function executeRuntimeFullPlaywrightProjection(
+  capability: RuntimeFullPlaywrightExecutorCapability,
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; projection: RuntimeFullPlaywrightProjection },
+): Promise<RuntimeWriteExecutionOutput> {
   const backend = runtimeFullPlaywrightExecutors.get(capability)
   if (!backend) throw trustedActionError(
     'E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_CAPABILITY_INVALID',
     'Full Playwright executor capability 未由生产装配层签发',
   )
-  const projection = projectRuntimeFullPlaywrightSnapshot(input.snapshot)
   const output = parseRuntimeWriteExecutionOutput(await backend({
-    snapshot: structuredClone(input.snapshot), attemptId: input.attemptId, projection,
+    snapshot: structuredClone(input.snapshot), attemptId: input.attemptId, projection: input.projection,
   }))
-  if (output.caseId !== projection.caseId || output.actionId !== projection.actionId) {
+  if (output.caseId !== input.projection.caseId || output.actionId !== input.projection.actionId) {
     throw trustedActionError('E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_OUTPUT_INVALID',
       'Full Playwright executor 输出未闭合 frozen case/action')
   }
@@ -236,6 +243,11 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
       attemptId: string
       output: RuntimeWriteExecutionOutput
     }): Promise<void>
+    executeCase?(input: {
+      snapshot: RuntimeRunSnapshot
+      attemptId: string
+      projection: RuntimeFullPlaywrightProjection
+    }): Promise<RuntimeWriteExecutionOutput>
   },
 ): Promise<{ outputs: RuntimeWriteExecutionOutput[]; schedule: RuntimeCaseSchedule }> {
   const backend = runtimeFullPlaywrightExecutors.get(capability)
@@ -273,14 +285,16 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
     const executionSnapshot = resuming || input.prepareCase === undefined
       ? input.snapshot
       : await input.prepareCase({ schedule, projection, attemptId })
-    const output = new RuntimeExecutionBatch({
-      runId: input.snapshot.runId,
-      attemptId,
-    }).commitRealWrite(parseRuntimeWriteExecutionOutput(await backend({
-      snapshot: structuredClone(executionSnapshot),
-      attemptId,
-      projection,
-    })))
+    const output = input.executeCase === undefined
+      ? new RuntimeExecutionBatch({
+        runId: input.snapshot.runId,
+        attemptId,
+      }).commitRealWrite(parseRuntimeWriteExecutionOutput(await backend({
+        snapshot: structuredClone(executionSnapshot),
+        attemptId,
+        projection,
+      })))
+      : await input.executeCase({ snapshot: executionSnapshot, attemptId, projection })
     outputs.push(output)
     schedule = completeCase(schedule, {
       caseId: projection.caseId,

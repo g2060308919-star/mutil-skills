@@ -6,9 +6,10 @@ import { join } from 'node:path'
 import { runtimeLayout } from './runtime-layout.js'
 import { currentUid, verifyInstalledRuntimeVersion } from './runtime-manifest.js'
 import { installRuntime, ProductionClosureInstaller } from './runtime-installer.js'
-import type { StableRuntimeResolver } from './runtime-resolver.js'
+import type { ExistingRunRevocationChecker, StableRuntimeResolver } from './runtime-resolver.js'
 import {
   applyStableRuntimeUpdate,
+  checkRuntimeInstallationRevocation,
   RuntimeUpdateError,
   type InstalledRuntimeIdentity,
   type RuntimeTargetEnvironment,
@@ -24,6 +25,15 @@ import {
 export interface RuntimeUpdateClient {
   refresh(): Promise<{ metadata: TrustedMetadataSet; target: SignedRuntimeTarget }>
   downloadTarget?(target: SignedRuntimeTarget): Promise<string>
+}
+
+export function createExistingRunRevocationChecker(
+  homeDir: string,
+  now: () => Date = () => new Date(),
+): ExistingRunRevocationChecker {
+  return async ({ installationDigest }) => checkRuntimeInstallationRevocation(
+    await readRuntimeUpdateState(homeDir), installationDigest, now(),
+  )
 }
 
 export interface StableRuntimeUpdateServiceOptions {

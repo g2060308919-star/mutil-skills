@@ -233,6 +233,21 @@ describe('Artifact kill-point 与恢复矩阵', () => {
     await expect(readdir(generations)).resolves.toEqual(['GENERATION-1'])
   })
 
+  test('持久 validation reference 在无调用参数的专用 GC 中保留，解除后才删除', async () => {
+    const { root, store } = await createStore()
+    await publish(store, 'GENERATION-1')
+    await expect(publish(store, 'GENERATION-2', 'after-generation-durable')).rejects.toMatchObject({
+      code: 'E2E_ARTIFACT_FAULT_INJECTED',
+    })
+    const generations = join(root, '.biztest', 'assets', 'PRODUCT-PRD-1', 'generations')
+    await store.setValidationReferences('PRODUCT-PRD-1', ['GENERATION-2'])
+    await store.gcUsingPersistedValidationReferences('PRODUCT-PRD-1')
+    await expect(readdir(generations)).resolves.toEqual(['GENERATION-1', 'GENERATION-2'])
+    await store.setValidationReferences('PRODUCT-PRD-1', [])
+    await store.gcUsingPersistedValidationReferences('PRODUCT-PRD-1')
+    await expect(readdir(generations)).resolves.toEqual(['GENERATION-1'])
+  })
+
   test('GC 在 slot normalization、journal 和 delete/fsync 崩溃后仍可幂等收敛', async () => {
     for (const faultAt of [
       'after-gc-first-slot', 'after-gc-journal-committed', 'crash-during-gc-delete',

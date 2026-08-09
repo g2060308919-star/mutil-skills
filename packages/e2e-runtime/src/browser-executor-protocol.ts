@@ -11,6 +11,7 @@ import {
 } from '@mutil-skills/e2e-contracts'
 import {
   executeRuntimeFullPlaywright,
+  executeRuntimeFullPlaywrightProjection,
   executeRuntimeInjection,
   executeRuntimeRead,
   executeRuntimeWrite,
@@ -20,6 +21,7 @@ import {
   type RuntimeReadExecutorCapability,
   type RuntimeWriteExecutorCapability,
 } from './trusted-action-runner.js'
+import type { RuntimeInjectionExecutionOutput, RuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
 import { executeRuntimePreflight, type RuntimePreflightCapability } from './runtime-preflight.js'
 import { runTargetProbe, type TargetProbeCapability } from './target-probe.js'
 
@@ -149,12 +151,82 @@ export async function executeRuntimeReadWithBrowserExecutorProtocolV1(
     onProgress?: BrowserExecutorInvocationV1['onProgress']
   },
 ): Promise<RuntimeReadExecutionOutput> {
-  if ((input.route ?? 'legacy') === 'legacy') return await executeRuntimeRead(capability, input)
-  const executionId = input.executionId ?? `READ-${input.attemptId}`
-  const protocol = adaptRuntimeReadExecutorV1(capability)
+  return await executeRoutedRuntimeExecutor(
+    capability, input, 'READ', executeRuntimeRead, adaptRuntimeReadExecutorV1,
+  )
+}
+
+type RoutedExecutorInput = Parameters<typeof executeRuntimeRead>[1] & {
+  route?: 'legacy' | 'shadow'
+  executionId?: string
+  deadlineAt?: string
+  signal?: AbortSignal
+  now?: () => string
+  onProgress?: BrowserExecutorInvocationV1['onProgress']
+}
+
+export async function executeRuntimeWriteWithBrowserExecutorProtocolV1(
+  capability: RuntimeWriteExecutorCapability,
+  input: RoutedExecutorInput,
+): Promise<RuntimeWriteExecutionOutput> {
+  return await executeRoutedRuntimeExecutor(
+    capability, input, 'WRITE', executeRuntimeWrite, adaptRuntimeWriteExecutorV1,
+  )
+}
+
+export async function executeRuntimeInjectionWithBrowserExecutorProtocolV1(
+  capability: RuntimeInjectionExecutorCapability,
+  input: RoutedExecutorInput,
+): Promise<RuntimeInjectionExecutionOutput> {
+  return await executeRoutedRuntimeExecutor(
+    capability, input, 'INJECTION', executeRuntimeInjection, adaptRuntimeInjectionExecutorV1,
+  )
+}
+
+export async function executeRuntimeFullPlaywrightWithBrowserExecutorProtocolV1(
+  capability: RuntimeFullPlaywrightExecutorCapability,
+  input: RoutedExecutorInput,
+): Promise<RuntimeWriteExecutionOutput> {
+  return await executeRoutedRuntimeExecutor(
+    capability, input, 'FULL', executeRuntimeFullPlaywright, adaptRuntimeFullPlaywrightExecutorV1,
+  )
+}
+
+export async function executeRuntimeFullPlaywrightProjectionWithBrowserExecutorProtocolV1(
+  capability: RuntimeFullPlaywrightExecutorCapability,
+  input: Parameters<typeof executeRuntimeFullPlaywrightProjection>[1] & Omit<RoutedExecutorInput, 'snapshot' | 'attemptId'>,
+): Promise<RuntimeWriteExecutionOutput> {
+  return await executeRoutedRuntimeExecutor(
+    capability, input, 'FULL', executeRuntimeFullPlaywrightProjection,
+    (value) => createAdapter(descriptor('full-playwright'), async (candidate) =>
+      await executeRuntimeFullPlaywrightProjection(
+        value,
+        candidate as Parameters<typeof executeRuntimeFullPlaywrightProjection>[1],
+      )),
+  )
+}
+
+async function executeRoutedRuntimeExecutor<
+  TCapability,
+  TInput extends { snapshot: { runId: string }; attemptId: string },
+  TOutput,
+>(
+  capability: TCapability,
+  input: TInput & Omit<RoutedExecutorInput, 'snapshot' | 'attemptId'>,
+  executionPrefix: string,
+  legacy: (capability: TCapability, input: TInput) => Promise<TOutput>,
+  adapt: (capability: TCapability) => BrowserExecutorProtocolCapabilityV1,
+): Promise<TOutput> {
+  const { route: _route, executionId: _executionId, deadlineAt: _deadlineAt,
+    signal: _signal, now: _now, onProgress: _onProgress, ...legacyInput } = input
+  const executableInput = legacyInput as unknown as TInput
+  if ((input.route ?? 'legacy') === 'legacy') return await legacy(capability, executableInput)
+  const protocol = adapt(capability)
   const executed = await executeBrowserExecutorV1(protocol, {
-    executionId, runId: input.snapshot.runId, attemptId: input.attemptId,
-    input: { snapshot: input.snapshot, attemptId: input.attemptId },
+    executionId: input.executionId ?? `${executionPrefix}-${input.attemptId}`,
+    runId: input.snapshot.runId,
+    attemptId: input.attemptId,
+    input: executableInput,
     ...(input.deadlineAt === undefined ? {} : { deadlineAt: input.deadlineAt }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
     ...(input.now === undefined ? {} : { now: input.now }),
@@ -165,7 +237,7 @@ export async function executeRuntimeReadWithBrowserExecutorProtocolV1(
     legacyOutput: executed.legacyOutput,
     protocolResult: executed.result,
   })
-  return executed.legacyOutput as RuntimeReadExecutionOutput
+  return executed.legacyOutput as TOutput
 }
 
 /** 独立读取旧输出字段，不调用协议结果 projector，用于 shadow fail-closed 对比。 */
