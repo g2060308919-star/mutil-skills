@@ -298,6 +298,24 @@ Assertion 不允许独立写入；Verdict 继续由 Engine 基于 checkpoint/cov
 
 current/new-run-default 指针原子回退到 LKG；失败版本保留诊断但不再被自动选择。活跃 Run 继续使用各自绑定版本。
 
+### 8.4 实施记录（2026-08-09）
+
+- 精确锁定官方 `tuf-js@5.0.1`；该版本兼容仓库 Node `>=22.13.0`，由官方客户端执行 root continuity 与 timestamp/snapshot/targets 校验，不自行实现签名算法。
+- 新增严格签名 target schema、Node/平台/协议/bootstrap/origin 约束、撤销阻断、四角色高水位、同版本摘要混搭检测、五分钟时钟回退检测和 metadata 过期阻断。
+- 更新缓存与状态固定在用户私有目录，状态以 0600 普通文件原子提交；metadata/target 下载使用 HTTPS origin allowlist、三次重定向上限、30 秒超时和角色大小上限。
+- installer 支持 `activate=false`：候选 closure 经 TUF length/hash、npm integrity、package/内部版本、manifest/content/executable identity 全部复验后只发布，canary 前不移动兼容 `current`。
+- stable 服务用独占更新锁串行执行 refresh → 下载/安装 → doctor → canary；只有全绿才原子提交 `new-run-default` 并把旧默认保存为 LKG。失败保留 metadata 防降级记忆，但不改变 default/LKG。
+- Resolver 只对新 Run 调用 stable 服务，随后在安装锁内二次复验精确 closure 并固化 installation digest；已有 Run 始终按原摘要恢复，`latest` 继续 fail-closed。
+- npm 高危传递依赖已升级到 `ip-address@10.4.0` 与 `nanoid@3.3.18`，实施时审计为 0 vulnerabilities。
+- 客户端实现完成不等于线上启用。仓库没有真实 2-of-3 离线私钥、审核 root 或 metadata origin，因此 0.6.0 不内置测试信任材料；生产 stable 继续由 ADR 0017 的运营门禁关闭。
+
+### 8.4 前置 ADR 记录（2026-08-08）
+
+- 已形成 `docs/adr/0017-signed-runtime-update-trust-and-lkg.md`，状态为 `Proposed / Requires explicit human approval`。
+- ADR 采用 TUF root/timestamp/snapshot/targets 与官方 `tuf-js`，明确 npm provenance 只证明发布来源，不能替代 channel、撤销、回滚或 LKG 决策。
+- 已闭合 root/targets 阈值、连续轮换、metadata/target schema、回滚/冻结防护、缓存过期、紧急撤销、canary/LKG、Node 兼容和最小审计语义。
+- 在离线密钥保管、metadata 托管责任与安全阈值获得人工批准前，不实现或启用在线 `stable`/`latest`。
+
 ## 9. Phase 7：生产模块大规模 p95 Benchmark
 
 该阶段必须有独立 Benchmark Spec，不能直接沿用现有合成脚本的结论。

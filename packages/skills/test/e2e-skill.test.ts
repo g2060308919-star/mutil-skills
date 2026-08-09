@@ -50,14 +50,14 @@ describe('E2E skill package', () => {
           'verified installation manifest + protocol major + safety probes',
         ],
         whenMissing: {
-          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.5.2',
+          action: 'prompt-install', package: '@mutil-skills/e2e-runtime', version: '0.6.0',
           terminalState: 'environment-blocked', reasonCode: 'E2E_RUNTIME_HOST_UNAVAILABLE',
         },
       }],
       source: {
-        url: 'https://github.com/g2060308919-star/mutil-skills/blob/v0.5.2/packages/skills/skills/testing/e2e/SKILL.md',
-        rawUrl: 'https://raw.githubusercontent.com/g2060308919-star/mutil-skills/v0.5.2/packages/skills/skills/testing/e2e/SKILL.md',
-        ref: 'v0.5.2',
+        url: 'https://github.com/g2060308919-star/mutil-skills/blob/v0.6.0/packages/skills/skills/testing/e2e/SKILL.md',
+        rawUrl: 'https://raw.githubusercontent.com/g2060308919-star/mutil-skills/v0.6.0/packages/skills/skills/testing/e2e/SKILL.md',
+        ref: 'v0.6.0',
       },
     })
   })
@@ -159,7 +159,7 @@ describe('E2E skill package', () => {
     expect(entry).toContain('默认流程不执行 `identity enroll`')
     expect(entry).toContain('`confirmation-required`')
     expect(entry).toContain('必须暂停并等待调用者明确确认')
-    expect(entry).toContain('@mutil-skills/e2e-runtime@0.5.2')
+    expect(entry).toContain('@mutil-skills/e2e-runtime@0.6.0')
     expect(approval).toContain('`confirm-approval`')
     expect(approval).toContain('本地确认不验证自然人身份，也不证明职责分离')
     expect(browser).toContain('系统 Google Chrome')

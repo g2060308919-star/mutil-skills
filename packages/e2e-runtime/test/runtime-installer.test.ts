@@ -52,6 +52,27 @@ describe('versioned runtime installer', () => {
     expect((await stat(runtimeLayout(roots.home).bin)).mode & 0o777).toBe(0o700)
   })
 
+  test('可只发布已验证 closure，待 canary 通过后再显式激活 current/launcher', async () => {
+    const roots = await createRuntimeTestRoots()
+    const old = await installFixture(roots.source, roots.home, '0.0.0', 'active')
+    const layout = runtimeLayout(roots.home)
+    const currentBefore = await readFile(layout.current, 'utf8')
+    const source = join(roots.source, '0.0.1-candidate')
+    await writePreparedClosure(source, '0.0.1', 'candidate')
+
+    const candidate = await installRuntime({
+      homeDir: roots.home, version: '0.0.1', activate: false,
+      installClosure: async ({ stagingPrefix }) => {
+        const { cp } = await import('node:fs/promises')
+        await cp(source, stagingPrefix, { recursive: true })
+      },
+    })
+    expect(await readFile(layout.current, 'utf8')).toBe(currentBefore)
+    expect(JSON.parse(currentBefore)).toMatchObject({ runtimeManifestDigest: old.installationDigest })
+    expect((await stat(join(layout.versions, '0.0.1'))).isDirectory()).toBe(true)
+    expect(candidate).toMatchObject({ version: '0.0.1', installationDigest: expect.stringMatching(/^sha256:/) })
+  })
+
   test('rejects an unowned root and symlinked version directory', async () => {
     const roots = await createRuntimeTestRoots()
     const runtimeRoot = join(roots.home, '.mutil-skills/runtime/e2e')
@@ -419,6 +440,52 @@ describe('versioned runtime installer', () => {
     expect(observed.env).not.toHaveProperty('INIT_CWD')
     expect(observed.env).not.toHaveProperty('npm_config_prefix')
     expect(observed.env).not.toHaveProperty('SECRET_TOKEN')
+  })
+
+  test('签名更新只从当前用户 0600 的绝对 tarball 安装，并继续禁用 scripts', async () => {
+    const roots = await createRuntimeTestRoots()
+    const prefix = join(roots.home, 'signed-staging')
+    const tarball = join(roots.source, 'runtime.tgz')
+    const npmCli = join(roots.source, 'fake-signed-npm.mjs')
+    await mkdir(prefix)
+    await writeFile(tarball, 'signed tarball', { mode: 0o600 })
+    const { createHash } = await import('node:crypto')
+    const expectedIntegrity = `sha512-${createHash('sha512').update('signed tarball').digest('base64')}`
+    await writeFile(npmCli, [
+      "import { writeFile } from 'node:fs/promises'",
+      "import { join } from 'node:path'",
+      "await writeFile(join(process.cwd(), 'observed-signed.json'), JSON.stringify(process.argv.slice(2)))",
+    ].join('\n'))
+    await new ProductionClosureInstaller().installTarball({
+      prefix, tarballPath: tarball, npmCliPath: npmCli, expectedLength: 14, expectedIntegrity,
+      env: { HOME: roots.home, PATH: process.env.PATH ?? '' },
+    })
+    await chmod(tarball, 0o644)
+    await expect(new ProductionClosureInstaller().installTarball({
+      prefix, tarballPath: tarball, npmCliPath: npmCli, expectedLength: 14, expectedIntegrity, env: {},
+    })).rejects.toThrow(/E2E_RUNTIME_SIGNED_TARBALL_UNSAFE/)
+    expect(JSON.parse(await readFile(join(prefix, 'observed-signed.json'), 'utf8'))).toEqual([
+      'install', '--prefix', prefix, '--ignore-scripts', '--omit=dev', '--no-bin-links', '--no-audit', '--no-fund',
+      '--save-exact', await realpath(tarball),
+    ])
+  })
+
+  test('签名 tarball 长度或 SHA-512 与 metadata 不一致时不调用 npm', async () => {
+    const roots = await createRuntimeTestRoots()
+    const prefix = join(roots.home, 'signed-integrity-staging')
+    const tarball = join(roots.source, 'runtime-integrity.tgz')
+    const npmCli = join(roots.source, 'must-not-run-npm.mjs')
+    await mkdir(prefix)
+    await writeFile(tarball, 'signed tarball', { mode: 0o600 })
+    await writeFile(npmCli, "throw new Error('must not run')")
+    await expect(new ProductionClosureInstaller().installTarball({
+      prefix, tarballPath: tarball, npmCliPath: npmCli, expectedLength: 13,
+      expectedIntegrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}`, env: {},
+    })).rejects.toThrow(/E2E_RUNTIME_SIGNED_TARBALL_IDENTITY_MISMATCH/)
+    await expect(new ProductionClosureInstaller().installTarball({
+      prefix, tarballPath: tarball, npmCliPath: npmCli, expectedLength: 14,
+      expectedIntegrity: `sha512-${Buffer.alloc(64, 1).toString('base64')}`, env: {},
+    })).rejects.toThrow(/E2E_RUNTIME_SIGNED_TARBALL_IDENTITY_MISMATCH/)
   })
 
   test('never removes the active version without an explicit verified replacement', async () => {
