@@ -18,7 +18,7 @@ import {
 } from '../src/protocol.js'
 
 const digest = `sha256:${'0'.repeat(64)}`
-const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.7.0 -- repo-e2e install-runtime --version 0.7.0'
+const installRemediation = 'npm exec --yes --package=@mutil-skills/e2e-runtime@0.8.0 -- repo-e2e install-runtime --version 0.8.0'
 const doctorRequest = {
   schemaVersion: '1.0.0',
   requestId: 'REQ-1',
@@ -75,7 +75,7 @@ describe('Runtime protocol', () => {
     expect(response).toMatchObject({
       schemaVersion: '1.0.0',
       requestId: 'REQ-1',
-      runtime: { version: '0.7.0', installationDigest: digest },
+      runtime: { version: '0.8.0', installationDigest: digest },
       ok: false,
       error: {
         code: 'E2E_RUNTIME_NOT_INSTALLED',
@@ -399,7 +399,7 @@ describe('repo-e2e CLI protocol slice', () => {
     const exitCode = await runCli(['--version'], Readable.from([]), stdout.stream, stderr.stream)
 
     expect(exitCode).toBe(0)
-    expect(stdout.text()).toBe('0.7.0\n')
+    expect(stdout.text()).toBe('0.8.0\n')
     expect(stderr.text()).toBe('')
   })
 
@@ -408,10 +408,10 @@ describe('repo-e2e CLI protocol slice', () => {
     const resolveRuntimeInstallation = vi.fn(async () => ({
       selectionKind: 'new-run' as const, policyMode: 'offline' as const,
       revocationStatus: 'offline-unchecked' as const,
-      installation: { version: '0.7.0', protocolMajor: 1 as const, versionRoot: '/safe/runtime/0.7.0',
-        entrypoint: '/safe/runtime/0.7.0/repo-e2e.js', installationDigest: digest,
+      installation: { version: '0.8.0', protocolMajor: 1 as const, versionRoot: '/safe/runtime/0.8.0',
+        entrypoint: '/safe/runtime/0.8.0/repo-e2e.js', installationDigest: digest,
         sourceRepositoryIndependent: true as const },
-      runBinding: { runtimeVersion: '0.7.0', installationDigest: digest },
+      runBinding: { runtimeVersion: '0.8.0', installationDigest: digest },
       selectionDigest: digest,
     }))
     const exitCode = await runCli(['resolve-runtime', '--offline'], Readable.from([]), stdout.stream,
@@ -422,7 +422,7 @@ describe('repo-e2e CLI protocol slice', () => {
       homeDir: '/safe/home', policy: { mode: 'offline' },
     })
     expect(JSON.parse(stdout.text())).toMatchObject({ ok: true, result: {
-      selectionKind: 'new-run', policyMode: 'offline', runtimeVersion: '0.7.0',
+      selectionKind: 'new-run', policyMode: 'offline', runtimeVersion: '0.8.0',
       installationDigest: digest, revocationStatus: 'offline-unchecked', selectionDigest: digest,
     } })
   })
@@ -434,8 +434,8 @@ describe('repo-e2e CLI protocol slice', () => {
       return successResponse()
     })
     const installation = {
-      version: '0.7.0', protocolMajor: 1 as const, versionRoot: '/safe/runtime/0.7.0',
-      entrypoint: '/safe/runtime/0.7.0/repo-e2e.js', installationDigest: digest,
+      version: '0.8.0', protocolMajor: 1 as const, versionRoot: '/safe/runtime/0.8.0',
+      entrypoint: '/safe/runtime/0.8.0/repo-e2e.js', installationDigest: digest,
       sourceRepositoryIndependent: true as const,
     }
     const resolveAndBind = vi.fn(async (_options: unknown,
@@ -448,13 +448,13 @@ describe('repo-e2e CLI protocol slice', () => {
 
     await expect(handleRuntimeRequestWithResolutionBinding({
       request: { command: 'create-run', payload: {
-        runtimePolicy: { mode: 'pinned', version: '0.7.0', installationDigest: digest },
+        runtimePolicy: { mode: 'pinned', version: '0.8.0', installationDigest: digest },
       } } as never, initialInstallation: installation,
       homeDir: '/safe/home', resolveAndBind: resolveAndBind as never, handle,
     })).resolves.toEqual(successResponse())
     expect(handle).toHaveBeenCalledOnce()
     expect(resolveAndBind).toHaveBeenCalledWith({ homeDir: '/safe/home', policy: {
-      mode: 'pinned', version: '0.7.0', installationDigest: digest,
+      mode: 'pinned', version: '0.8.0', installationDigest: digest,
     } }, expect.any(Function))
 
     const changed = { ...installation, installationDigest: `sha256:${'1'.repeat(64)}` }

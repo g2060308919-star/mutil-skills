@@ -8,7 +8,7 @@ import {
   type WorkflowTransitionEvent,
 } from '@mutil-skills/e2e-contracts'
 
-export const E2E_ENGINE_VERSION = '0.7.0'
+export const E2E_ENGINE_VERSION = '0.8.0'
 
 const allowedTransitions: Readonly<Record<WorkflowNode, readonly WorkflowNode[]>> = {
   created: ['source-frozen'],
