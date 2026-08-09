@@ -1,8 +1,11 @@
 import { canonicalizeJson, digestText, E2EError } from '@mutil-skills/e2e-contracts'
 import { z } from 'zod'
+import { isRuntimeEvidenceUri } from './evidence-reference.js'
 
 const Id = z.string().min(1).max(128).regex(/^[A-Z0-9._:-]+$/)
 const Digest = z.string().regex(/^sha256:[a-f0-9]{64}$/)
+const Verdict = z.enum(['accepted', 'rejected', 'incomplete', 'environment-blocked', 'automation-blocked',
+  'safety-blocked', 'artifact-blocked', 'migration-required', 'pending-decision'])
 
 export const B2BScenarioCategorySchema = z.enum([
   'table-query', 'filter-sort-pagination', 'form-validation', 'modal-drawer',
@@ -25,6 +28,8 @@ export const B2BScenarioDefinitionSchema = z.object({
 
 const RepetitionSchema = z.object({
   repetition: z.number().int().positive(),
+  runId: Id,
+  attemptId: Id,
   status: z.enum(['passed', 'failed', 'skipped']),
   oraclePassed: z.boolean(),
   negativeControlDetected: z.boolean(),
@@ -49,8 +54,10 @@ export const B2BScenarioExecutionSchema = z.object({
   compiledPlanDigest: Digest,
   publishedExecutionsDigest: Digest,
   publishedVerdictsDigest: Digest,
-  positiveVerdict: z.enum(['accepted', 'rejected', 'incomplete', 'environment-blocked', 'automation-blocked', 'safety-blocked', 'artifact-blocked', 'migration-required', 'pending-decision']),
-  negativeVerdict: z.enum(['accepted', 'rejected', 'incomplete', 'environment-blocked', 'automation-blocked', 'safety-blocked', 'artifact-blocked', 'migration-required', 'pending-decision']),
+  positiveVerdict: Verdict,
+  positiveVerdicts: z.array(z.object({ runId: Id, verdict: Verdict, verdictDigest: Digest })
+    .strict()).min(2).max(20),
+  negativeVerdict: Verdict,
   generation: z.object({
     expectedId: Id,
     activeId: Id,
@@ -75,6 +82,7 @@ export interface B2BCoverageProof {
   falseNegativeRate: number
   flakyRate: number
   categoryResults: Record<string, { passed: number; total: number; passRate: number; minimumPassRate: number }>
+  runtimeChain: { scheduler: boolean; authority: boolean; gateway: boolean; browserExecutor: boolean }
   failures: Array<{ scenarioId: string; reasonCode: string }>
   passed: boolean
   gateEligible: boolean
@@ -82,9 +90,103 @@ export interface B2BCoverageProof {
   proofDigest: string
 }
 
+declare const b2bRuntimeChainProofBrand: unique symbol
+export interface B2BRuntimeChainProofV1 {
+  readonly [b2bRuntimeChainProofBrand]: true
+}
+
+interface B2BRuntimeChainFactsV1 {
+  binding: { corpusDigest: string; executionsDigest: string; generationDigest: string }
+  expected: Array<{ runId: string; caseId: string; actionId: string; attemptId: string }>
+  scheduler: Array<{ runId: string; caseId: string; attemptId: string }>
+  authority: Array<{ runId: string; caseId: string; attemptId: string; eventChainDigest: string;
+    terminalOutcomeDigest: string }>
+  gateway: Array<{ runId: string; caseId: string; actionId: string; attemptId: string;
+    terminalOutcomeDigest: string }>
+  browserExecutions: Array<{ runId: string; caseId: string; actionId: string; attemptId: string; outcomeDigest: string;
+    evidenceReferences: Array<{ kind: string; uri: string; digest: string }> }>
+}
+
+const runtimeChainProofs = new WeakMap<object, {
+  runtimeChain: B2BCoverageProof['runtimeChain']
+  binding: B2BRuntimeChainFactsV1['binding']
+}>()
+
+/** 仓库内 Verification Harness 用事实集合推导链路结果；不从 package root 导出。 */
+export function verifyB2BRuntimeChainFactsV1(input: B2BRuntimeChainFactsV1): B2BRuntimeChainProofV1 {
+  const binding = z.object({ corpusDigest: Digest, executionsDigest: Digest, generationDigest: Digest })
+    .strict().parse(input.binding)
+  const expected = z.array(z.object({ runId: Id, caseId: Id, actionId: Id, attemptId: Id })
+    .strict()).min(1).parse(input.expected)
+  const scheduler = z.array(z.object({ runId: Id, caseId: Id, attemptId: Id }).strict()).parse(input.scheduler)
+  const authority = z.array(z.object({ runId: Id, caseId: Id, attemptId: Id,
+    eventChainDigest: Digest, terminalOutcomeDigest: Digest }).strict())
+    .parse(input.authority)
+  const gateway = z.array(z.object({ runId: Id, caseId: Id, actionId: Id, attemptId: Id,
+    terminalOutcomeDigest: Digest }).strict())
+    .parse(input.gateway)
+  const browserExecutions = z.array(z.object({ runId: Id, caseId: Id, actionId: Id, attemptId: Id,
+    outcomeDigest: Digest, evidenceReferences: z.array(z.object({
+      kind: z.enum(['screenshot', 'dom', 'trace', 'gateway-audit', 'diagnostics']),
+      uri: z.string().refine(isRuntimeEvidenceUri), digest: Digest,
+    }).strict()).min(1) }).strict()).parse(input.browserExecutions)
+  const attemptIdentity = (item: { runId: string; caseId: string; attemptId: string }) =>
+    canonicalizeJson({ runId: item.runId, caseId: item.caseId, attemptId: item.attemptId })
+  const actionIdentity = (item: { runId: string; caseId: string; actionId: string; attemptId: string }) =>
+    canonicalizeJson({ runId: item.runId, caseId: item.caseId,
+      actionId: item.actionId, attemptId: item.attemptId })
+  const exactBindings = (actual: Array<{ runId: string; caseId: string; attemptId: string }>) => {
+    const expectedKeys = expected.map(attemptIdentity)
+    const actualKeys = actual.map(attemptIdentity)
+    return new Set(expectedKeys).size === expectedKeys.length
+      && new Set(actualKeys).size === actualKeys.length
+      && actualKeys.length === expectedKeys.length
+      && expectedKeys.every((item) => actualKeys.includes(item))
+  }
+  const exactActionBindings = (actual: Array<{
+    runId: string; caseId: string; actionId: string; attemptId: string
+  }>) => {
+    const expectedKeys = expected.map(actionIdentity)
+    const actualKeys = actual.map(actionIdentity)
+    return new Set(expectedKeys).size === expectedKeys.length
+      && new Set(actualKeys).size === actualKeys.length
+      && actualKeys.length === expectedKeys.length
+      && expectedKeys.every((item) => actualKeys.includes(item))
+  }
+  const runtimeChain = {
+    scheduler: exactBindings(scheduler),
+    authority: exactBindings(authority) && expected.every((item) => {
+      const browser = browserExecutions.find((candidate) => actionIdentity(candidate) === actionIdentity(item))
+      const terminalDigest = browser === undefined ? undefined
+        : digestText('e2e-b2b-attempt-outcome/v1', browser.outcomeDigest)
+      return authority.some((candidate) => attemptIdentity(candidate) === attemptIdentity(item)
+        && candidate.terminalOutcomeDigest === terminalDigest)
+    }),
+    gateway: exactActionBindings(gateway) && expected.every((item) => {
+      const browser = browserExecutions.find((candidate) => actionIdentity(candidate) === actionIdentity(item))
+      const terminalDigest = browser === undefined ? undefined
+        : digestText('e2e-b2b-attempt-outcome/v1', browser.outcomeDigest)
+      return gateway.some((candidate) => actionIdentity(candidate) === actionIdentity(item)
+        && candidate.terminalOutcomeDigest === terminalDigest)
+    }),
+    browserExecutor: exactActionBindings(browserExecutions) && expected.every((item) => {
+      const executions = browserExecutions.filter((candidate) => candidate.runId === item.runId
+        && candidate.caseId === item.caseId && candidate.attemptId === item.attemptId)
+      return executions.length === 1 && executions.every((candidate) =>
+        candidate.actionId === item.actionId
+        && ['screenshot', 'dom', 'trace'].every((kind) => candidate.evidenceReferences.some((reference) =>
+          reference.kind === kind)))
+    }),
+  }
+  const proof = Object.freeze({}) as B2BRuntimeChainProofV1
+  runtimeChainProofs.set(proof, { runtimeChain, binding })
+  return proof
+}
+
 export function digestPublishedB2BExecutions(executions: readonly Record<string, unknown>[]): string {
   return digestText('e2e-b2b-published-executions/v1', canonicalizeJson(executions.map((execution) => {
-    const { positiveVerdict: _positiveVerdict, negativeVerdict: _negativeVerdict,
+    const { positiveVerdict: _positiveVerdict, positiveVerdicts: _positiveVerdicts,
+      negativeVerdict: _negativeVerdict,
       generation: _generation, publishedExecutionsDigest: _publishedExecutionsDigest,
       publishedVerdictsDigest: _publishedVerdictsDigest, ...published } = execution
     return published
@@ -94,8 +196,16 @@ export function digestPublishedB2BExecutions(executions: readonly Record<string,
 export function digestPublishedB2BVerdicts(executions: readonly B2BScenarioExecution[]): string {
   const positive = [...new Set(executions.map((execution) => execution.positiveVerdict))]
   if (positive.length !== 1) throw coverageError('E2E_B2B_POSITIVE_VERDICT_INCONSISTENT')
+  const publishedSets = [...new Set(executions.map((execution) => canonicalizeJson(execution.positiveVerdicts)))]
+  if (publishedSets.length !== 1) throw coverageError('E2E_B2B_POSITIVE_VERDICTS_INCONSISTENT')
+  const positiveVerdicts = executions[0]?.positiveVerdicts ?? []
+  if (new Set(positiveVerdicts.map((item) => item.runId)).size !== positiveVerdicts.length
+    || positiveVerdicts.some((item) => item.verdict !== positive[0])) {
+    throw coverageError('E2E_B2B_POSITIVE_VERDICTS_INVALID')
+  }
   return digestText('e2e-b2b-published-verdicts/v1', canonicalizeJson({
     positiveVerdict: positive[0],
+    positiveVerdicts,
     negativeVerdicts: executions.map((execution) => ({ scenarioId: execution.scenarioId,
       caseId: execution.caseId, verdict: execution.negativeVerdict })),
   }))
@@ -105,9 +215,12 @@ export function createB2BCoverageProof(input: {
   corpus: B2BScenarioDefinition[]
   executions: B2BScenarioExecution[]
   environmentEligible: boolean
+  runtimeChainProof: B2BRuntimeChainProofV1
 }): B2BCoverageProof {
   const corpus = z.array(B2BScenarioDefinitionSchema).min(1).parse(input.corpus)
   const executions = z.array(B2BScenarioExecutionSchema).parse(input.executions)
+  const corpusDigest = digestText('e2e-b2b-scenario-corpus/v1', canonicalizeJson(corpus))
+  const executionsDigest = digestText('e2e-b2b-scenario-executions/v1', canonicalizeJson(executions))
   if (new Set(corpus.map((item) => item.scenarioId)).size !== corpus.length
     || new Set(executions.map((item) => item.scenarioId)).size !== executions.length) {
     throw coverageError('E2E_B2B_SCENARIO_ID_DUPLICATED')
@@ -153,7 +266,11 @@ export function createB2BCoverageProof(input: {
     const generationBound = execution.publishedExecutionsDigest === publishedExecutionsDigest
       && execution.publishedVerdictsDigest === publishedVerdictsDigest
     const closed = generationMatched && generationBound && execution.targetBound && evidenceComplete && !flaky
-      && execution.positiveVerdict === 'accepted' && execution.negativeVerdict === 'rejected'
+      && execution.positiveVerdict === 'accepted'
+      && execution.positiveVerdicts.length === execution.repetitions.length
+      && execution.positiveVerdicts.every((item) => item.verdict === 'accepted'
+        && execution.repetitions.some((repetition) => repetition.runId === item.runId))
+      && execution.negativeVerdict === 'rejected'
       && execution.repetitions.every((item) => item.status === 'passed'
         && item.oraclePassed && item.negativeControlDetected && item.reasonCode === null)
     if (closed) {
@@ -179,16 +296,27 @@ export function createB2BCoverageProof(input: {
   const weightedCoverage = round(passedWeight / totalWeight * 100)
   const categoryMinimumsPassed = Object.values(categoryResults).every((result) =>
     result.passed / result.total >= result.minimumPassRate)
-  const passed = weightedCoverage >= 90 && categoryMinimumsPassed && falseNegatives === 0
+  const storedRuntimeChain = runtimeChainProofs.get(input.runtimeChainProof)
+  if (storedRuntimeChain === undefined) throw coverageError('E2E_B2B_RUNTIME_CHAIN_PROOF_INVALID')
+  const generationDigests = [...new Set(executions.map((item) => item.generation.activeDigest))]
+  const bindingMatches = storedRuntimeChain.binding.corpusDigest === corpusDigest
+    && storedRuntimeChain.binding.executionsDigest === executionsDigest
+    && generationDigests.length === 1
+    && storedRuntimeChain.binding.generationDigest === generationDigests[0]
+  const runtimeChain = bindingMatches ? storedRuntimeChain.runtimeChain
+    : { scheduler: false, authority: false, gateway: false, browserExecutor: false }
+  const runtimeChainComplete = Object.values(runtimeChain).every(Boolean)
+  const passed = runtimeChainComplete && weightedCoverage >= 90 && categoryMinimumsPassed && falseNegatives === 0
     && flakyScenarios === 0 && failures.length === 0
   const gateIneligibleReasons = [
     ...(!input.environmentEligible ? ['ENVIRONMENT_NOT_APPROVED'] : []),
+    ...(!runtimeChainComplete ? ['RUNTIME_CHAIN_INCOMPLETE'] : []),
     ...(!passed ? ['COVERAGE_GATE_FAILED'] : []),
   ]
   const draft = {
     schemaVersion: '1.0.0' as const,
-    corpusDigest: digestText('e2e-b2b-scenario-corpus/v1', canonicalizeJson(corpus)),
-    executionsDigest: digestText('e2e-b2b-scenario-executions/v1', canonicalizeJson(executions)),
+    corpusDigest,
+    executionsDigest,
     scenarioCount: corpus.length,
     categoryCount: categoryAccumulator.size,
     capabilitySupportRate: round(supportedWeight / totalWeight * 100),
@@ -198,6 +326,7 @@ export function createB2BCoverageProof(input: {
     falseNegativeRate: round(repetitionCount === 0 ? 100 : falseNegatives / repetitionCount * 100),
     flakyRate: round(corpus.length === 0 ? 100 : flakyScenarios / corpus.length * 100),
     categoryResults,
+    runtimeChain,
     failures,
     passed,
     gateEligible: passed && input.environmentEligible,

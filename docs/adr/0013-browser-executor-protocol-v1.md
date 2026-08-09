@@ -4,6 +4,8 @@
 
 Accepted，2026-08-08。
 
+迁移默认值与仓库内 B2B proof 适配边界已由 ADR 0019 supersede；其余决定保持有效。
+
 ## 背景
 
 Runtime 已有 Target Probe、Preflight、Read、Reversible Write、Injection 和 Full Playwright 六类生产执行器。它们分别形成了可靠的 Gateway、Authority、一次性 Profile、证据和恢复边界，但能力发现、进度、deadline/cancellation、结果投影和 retry/reconcile 语言并不统一。直接替换现有执行器会同时改变安全品牌、Case、Verdict 和恢复路径，回归面过大。

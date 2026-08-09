@@ -55,6 +55,7 @@ export class ProcessSupervisor {
     if (exit.exited()) throw childExitedEarly()
     if (await exitsWithin(exit.promise, 10)) throw childExitedEarly()
     if (child.pid === undefined) throw childStartFailed()
+    if (!processIsAlive(child.pid)) throw childExitedEarly()
 
     return {
       pid: child.pid,
@@ -111,6 +112,15 @@ function observeExit(child: ChildProcess): { exited: () => boolean; promise: Pro
   return { exited: () => exited, promise }
 }
 
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return !(error instanceof Error && 'code' in error && error.code === 'ESRCH')
+  }
+}
+
 async function terminateFailedStart(
   child: ChildProcess,
   exit: { exited: () => boolean; promise: Promise<void> },
@@ -142,6 +152,10 @@ async function waitForReady(child: ChildProcess, timeoutMs: number): Promise<voi
       cleanup()
       reject(childStartFailed())
     }
+    const onDisconnect = (): void => {
+      cleanup()
+      reject(childStartFailed())
+    }
     const onMessage = (message: unknown): void => {
       if (!isControlMessage(message, 'ready')) return
       cleanup()
@@ -151,10 +165,12 @@ async function waitForReady(child: ChildProcess, timeoutMs: number): Promise<voi
       clearTimeout(timer)
       child.off('error', onError)
       child.off('exit', onExit)
+      child.off('disconnect', onDisconnect)
       child.off('message', onMessage)
     }
     child.once('error', onError)
     child.once('exit', onExit)
+    child.once('disconnect', onDisconnect)
     child.on('message', onMessage)
   })
 }

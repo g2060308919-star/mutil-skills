@@ -21,15 +21,16 @@ Skill 版本与 Runtime 版本必须同为 `0.7.x`，并由 `skill.manifest.json
 2. 缺少 Runtime 时，只提示用户显式安装精确 `0.7.0`。
 3. 运行 `~/.mutil-skills/bin/repo-e2e configure-browser --system`，验证并选择系统 Google Chrome；只有系统 Chrome 不可用且用户明确选择兜底时，才运行 `install-browser` 安装托管 Chromium。
 4. 运行 `~/.mutil-skills/bin/repo-e2e configure-approval --mode local-confirmation`。默认流程不执行 `identity enroll`；WebAuthn 是用户显式选择的增强模式。
-5. 运行 `~/.mutil-skills/bin/repo-e2e doctor --json`；仅在 `ready:true` 后创建 Run。
-6. Skill 逐字读取 PRD 与必要来源一次，完成同一次需求理解并取得调用者确认后，把这些已读取 bytes 通过 `~/.mutil-skills/bin/repo-e2e prepare-input` 自动封装；该命令不联网、不重新理解 PRD，只幂等创建接入工作区中的 `.biztest/project.json`、requirements contract、来源快照和 project policy，并返回严格 `create-run` payload。不得要求调用者手工创建这些内部文件或手写 JSON。`create-run` 同时冻结带严格 front matter 的唯一 requirements contract 原文、主 PRD 与执行所需依赖来源；把 Runtime 返回的 `understandingContractDigest`、`sourceRevision` 与 Source Bundle 绑定进同一契约的 E2E execution projection。调用一次 `prepare-prd-understanding`，让 Runtime 复算并持久化唯一 prepared projection。随后把声明式 Case、Action 和 Oracle 设计一次性交给 `compile-prd-run`；只使用 Runtime 返回的稳定 Case ID、Action ID、Oracle ID、`compilerDigest` 和 `caseSchedule`，不得由 Skill 生成或覆盖这些可信事实。
-7. 根据用户给出的唯一验证地址配置 `TargetContract`，明确环境、目标 URL、允许导航 origin 与可配置页面身份策略；立即由系统 Chrome 在任何授权前执行无副作用 Target Probe。命令行无法访问 localhost 不是目标不可用的证明，浏览器侧探测结果才是诊断依据。Probe 只确认地址可达和页面身份，不推导 locator、不执行 Case、不产生写请求。
-8. 覆盖资产与 Target Probe 齐备后取得 Runtime 的 `AcceptanceReview`，在 Discovery 授权和可信浏览器预检前按“PRD 原文 → Clause 原文与处置 → Requirement → Rule → Oracle → Case”向调用者展示，并用 `review --run` 读取、`confirm-review --run` 确认当前 `reviewDigest`。Runtime 返回 `confirmation-required` 时必须暂停并等待调用者明确确认；确认前不得执行 Discovery、可信浏览器预检或 locator 绑定。该确认只核对 LLM 的需求、交互、范围和用例理解；它不是 Execution Approval，也不是第二次 `$understand-prd`。确认后按 Runtime `nextEdge` 完成 Discovery、只读预检与绑定、执行审批和 Case 执行。
-9. Runtime 完成最终化后调用 `render-report`。需要指定位置时传 `outputRoot`；否则报告写入 `~/.mutil-skills/e2e/reports/<asset-id>/<run-id>/`。交付独立 Run Workspace 中的 JSON、Markdown、HTML、原始 PNG 和 Playwright Trace；`.biztest`、Git、CI Artifact 和对象存储只作为可选发布适配器。
+5. 运行 `~/.mutil-skills/bin/repo-e2e resolve-runtime --offline`，从本机受控 closure 解析精确 Runtime 版本与 installation digest；默认不得联网，也不得把 `current` 字样当成 Run 身份。需要复现指定版本时改用 `--pinned <exact-version> [--digest <sha256:...>]`。把同一选择写入 `prepare-input` 草稿的 `runtimePolicy`，使 `create-run` 在安装锁内按该策略重新解析并固化同一 installation；不得只运行查询命令后丢弃策略。
+6. 运行 `~/.mutil-skills/bin/repo-e2e doctor --json`；仅在 Resolver 成功且 `ready:true` 后创建 Run。
+7. Skill 逐字读取 PRD 与必要来源一次，完成同一次需求理解并取得调用者确认后，把这些已读取 bytes 通过 `~/.mutil-skills/bin/repo-e2e prepare-input` 自动封装；该命令不联网、不重新理解 PRD，只幂等创建接入工作区中的 `.biztest/project.json`、requirements contract、来源快照和 project policy，并返回严格 `create-run` payload。不得要求调用者手工创建这些内部文件或手写 JSON。`create-run` 同时冻结带严格 front matter 的唯一 requirements contract 原文、主 PRD 与执行所需依赖来源；把 Runtime 返回的 `understandingContractDigest`、`sourceRevision` 与 Source Bundle 绑定进同一契约的 E2E execution projection。调用一次 `prepare-prd-understanding`，让 Runtime 复算并持久化唯一 prepared projection。随后把声明式 Case、Action 和 Oracle 设计一次性交给 `compile-prd-run`；只使用 Runtime 返回的稳定 Case ID、Action ID、Oracle ID、`compilerDigest` 和 `caseSchedule`，不得由 Skill 生成或覆盖这些可信事实。
+8. 根据用户给出的唯一验证地址配置 `TargetContract`，明确环境、目标 URL、允许导航 origin 与可配置页面身份策略；立即由系统 Chrome 在任何授权前执行无副作用 Target Probe。命令行无法访问 localhost 不是目标不可用的证明，浏览器侧探测结果才是诊断依据。Probe 只确认地址可达和页面身份，不推导 locator、不执行 Case、不产生写请求。
+9. 覆盖资产与 Target Probe 齐备后取得 Runtime 的 `AcceptanceReview`，在 Discovery 授权和可信浏览器预检前按“PRD 原文 → Clause 原文与处置 → Requirement → Rule → Oracle → Case”向调用者展示，并用 `review --run` 读取、`confirm-review --run` 确认当前 `reviewDigest`。Runtime 返回 `confirmation-required` 时必须暂停并等待调用者明确确认；确认前不得执行 Discovery、可信浏览器预检或 locator 绑定。该确认只核对 LLM 的需求、交互、范围和用例理解；它不是 Execution Approval，也不是第二次 `$understand-prd`。确认后按 Runtime `nextEdge` 完成 Discovery、只读预检与绑定、执行审批和 Case 执行。
+10. Runtime 完成最终化后调用 `render-report`。需要指定位置时传 `outputRoot`；否则报告写入 `~/.mutil-skills/e2e/reports/<asset-id>/<run-id>/`。交付独立 Run Workspace 中的 JSON、Markdown、HTML、原始 PNG 和 Playwright Trace；`.biztest`、Git、CI Artifact 和对象存储只作为可选发布适配器。
 
 ## Runtime 能力门
 
-启动任何状态转换前读取 `skill.manifest.json`，并且只验证 `e2e.runtime-host`。固定执行 `~/.mutil-skills/bin/repo-e2e doctor --json`；只有安装清单、协议 major 与全部安全探针都通过，才允许调用 Runtime。`ready=false` 时进入 docs-only，原样展示 Doctor 的 `reasonCode` 与 `remediation`，不执行 Case、不生成审批、不发布资产。
+启动任何状态转换前读取 `skill.manifest.json`，并且只验证 `e2e.runtime-host`。先固定执行 `~/.mutil-skills/bin/repo-e2e resolve-runtime --offline`，再执行 `~/.mutil-skills/bin/repo-e2e doctor --json`；只有解析出的精确 installation、安装清单、协议 major 与全部安全探针都通过，才允许调用 Runtime。Resolver 或 Doctor 失败时进入 docs-only，原样展示 `reasonCode` 与 `remediation`，不执行 Case、不生成审批、不发布资产。
 
 | 唯一能力 | 机器证明 | 缺失时 |
 | --- | --- | --- |
@@ -42,7 +43,8 @@ Skill 版本与 Runtime 版本必须同为 `0.7.x`，并由 `skill.manifest.json
 调用者不需要构造 `RuntimeRequestEnvelope`，也不需要理解 requestId、project identity 或状态跳转。Skill 使用 Runtime 的 `Facade` 生成 envelope、跟随 `nextEdge`，并把 `reasonCode`、`remediation`、RunHandle 与最小缺失输入原样呈现。面向调用者和排障优先使用固定 launcher 的友好命令：
 
 - `~/.mutil-skills/bin/repo-e2e status --run <RUN>`：读取当前阶段、condition、`semanticCases`、保留/失效资产和下一步，并刷新 `~/.mutil-skills/e2e/runs/<asset>/<run>/run-status.html`。
-- `~/.mutil-skills/bin/repo-e2e prepare-input`：从标准输入接收 Skill 已读取并确认的 PRD/契约/必要来源 bytes，创建私有、不可变接入快照并输出 `create-run` payload；它不发起网络请求，也不替代需求理解。
+- `~/.mutil-skills/bin/repo-e2e resolve-runtime --offline`：离线验证并选择当前受控 Runtime closure；`--pinned <exact-version> [--digest <sha256:...>]` 用于精确复现。未配置生产 TUF 服务时不得使用 `--stable`，`latest` 始终拒绝。
+- `~/.mutil-skills/bin/repo-e2e prepare-input`：从标准输入接收 Skill 已读取并确认的 PRD/契约/必要来源 bytes 以及已选择的 `runtimePolicy`，创建私有、不可变接入快照并输出 `create-run` payload；它不发起网络请求，也不替代需求理解。
 - `~/.mutil-skills/bin/repo-e2e review --run <RUN>`：展示不可改写的 AcceptanceReview。
 - `~/.mutil-skills/bin/repo-e2e confirm-review --run <RUN> --digest <sha256:...>`：只确认当前语义审查摘要。
 - `~/.mutil-skills/bin/repo-e2e retry --run <RUN>`：仅重试 Runtime 明确标为可恢复的 Target Probe 或 preflight，不重放写操作。

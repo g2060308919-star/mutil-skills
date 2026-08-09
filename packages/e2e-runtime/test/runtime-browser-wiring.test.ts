@@ -9,6 +9,7 @@ import {
   issueRuntimeFullPlaywrightExecutionFreshness,
   renderRuntimeFullPlaywrightRequestBodies,
   persistRuntimeFullPlaywrightRecoveryEvidence,
+  projectRuntimeFullPlaywrightEvidenceReferences,
   projectDiscoveryPreflightRequests,
   restoreRuntimeFullPlaywrightRecoveryOutput,
   RuntimeFullPlaywrightTraceRecorder,
@@ -175,6 +176,23 @@ describe('Runtime browser production wiring cleanup', () => {
       expect(stops).toHaveLength(1)
       expect(await readFile(stops[0]!)).toEqual(Buffer.from([0x50, 0x4b, 0x03, 0x04, 1, 2, 3, 4]))
     } finally { await rm(roots.root, { recursive: true, force: true }) }
+  })
+
+  test('full Playwright 执行结果把 Trace 持久引用交给 Browser Executor 协议', () => {
+    const traceDigest = digestText('test/v1', 'trace')
+    expect(projectRuntimeFullPlaywrightEvidenceReferences([
+      { evidenceId: 'AFTER-TRACE', stage: 'after', kind: 'trace', byteLength: 8,
+        digest: traceDigest,
+        references: ['runtime-artifact://full-playwright-traces/ATTEMPT-1/program-after.zip'] },
+      { evidenceId: 'AFTER-URL', stage: 'after', kind: 'url', byteLength: 10,
+        digest: digestText('test/v1', 'url') },
+    ])).toEqual([{ kind: 'trace',
+      uri: 'runtime-artifact://full-playwright-traces/ATTEMPT-1/program-after.zip',
+      digest: traceDigest }])
+    expect(() => projectRuntimeFullPlaywrightEvidenceReferences([
+      { evidenceId: 'AFTER-TRACE', stage: 'after', kind: 'trace', byteLength: 8,
+        digest: traceDigest, references: ['file:///Users/example/.ssh/id_ed25519'] },
+    ])).toThrow(/E2E_RUNTIME_FULL_PLAYWRIGHT_EVIDENCE_REFERENCE_INVALID/)
   })
 
   test('full Playwright checkpoint 以摘要约束的 Git 外 artifact ref 恢复 evidence 与完整 finalization facts', async () => {

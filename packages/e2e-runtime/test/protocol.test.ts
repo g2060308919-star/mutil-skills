@@ -8,7 +8,7 @@ import {
   type RuntimeResponseEnvelope,
 } from '@mutil-skills/e2e-contracts'
 import { describe, expect, test, vi } from 'vitest'
-import { runCli } from '../src/cli.js'
+import { handleRuntimeRequestWithResolutionBinding, runCli, runtimeBindingForRequest } from '../src/cli.js'
 import { authorizeRuntimeWriteProduction } from '../src/runtime-write-production.js'
 import { createRuntimeTestRoots } from './fixtures.js'
 import {
@@ -403,9 +403,91 @@ describe('repo-e2e CLI protocol slice', () => {
     expect(stderr.text()).toBe('')
   })
 
+  test('resolve-runtime 通过正式 Resolver 输出精确新 Run binding', async () => {
+    const stdout = captureWritable()
+    const resolveRuntimeInstallation = vi.fn(async () => ({
+      selectionKind: 'new-run' as const, policyMode: 'offline' as const,
+      revocationStatus: 'offline-unchecked' as const,
+      installation: { version: '0.7.0', protocolMajor: 1 as const, versionRoot: '/safe/runtime/0.7.0',
+        entrypoint: '/safe/runtime/0.7.0/repo-e2e.js', installationDigest: digest,
+        sourceRepositoryIndependent: true as const },
+      runBinding: { runtimeVersion: '0.7.0', installationDigest: digest },
+      selectionDigest: digest,
+    }))
+    const exitCode = await runCli(['resolve-runtime', '--offline'], Readable.from([]), stdout.stream,
+      captureWritable().stream, { ...minimalCliDependencies(), resolveRuntimeInstallation })
+
+    expect(exitCode).toBe(0)
+    expect(resolveRuntimeInstallation).toHaveBeenCalledWith({
+      homeDir: '/safe/home', policy: { mode: 'offline' },
+    })
+    expect(JSON.parse(stdout.text())).toMatchObject({ ok: true, result: {
+      selectionKind: 'new-run', policyMode: 'offline', runtimeVersion: '0.7.0',
+      installationDigest: digest, revocationStatus: 'offline-unchecked', selectionDigest: digest,
+    } })
+  })
+
+  test('create-run 只在 Resolver 安装锁回调内持久化同一 installation binding', async () => {
+    let insideBinding = false
+    const handle = vi.fn(async () => {
+      expect(insideBinding).toBe(true)
+      return successResponse()
+    })
+    const installation = {
+      version: '0.7.0', protocolMajor: 1 as const, versionRoot: '/safe/runtime/0.7.0',
+      entrypoint: '/safe/runtime/0.7.0/repo-e2e.js', installationDigest: digest,
+      sourceRepositoryIndependent: true as const,
+    }
+    const resolveAndBind = vi.fn(async (_options: unknown,
+      persist: (resolution: any) => Promise<RuntimeResponseEnvelope>) => {
+      insideBinding = true
+      try {
+        return await persist({ installation })
+      } finally { insideBinding = false }
+    })
+
+    await expect(handleRuntimeRequestWithResolutionBinding({
+      request: { command: 'create-run', payload: {
+        runtimePolicy: { mode: 'pinned', version: '0.7.0', installationDigest: digest },
+      } } as never, initialInstallation: installation,
+      homeDir: '/safe/home', resolveAndBind: resolveAndBind as never, handle,
+    })).resolves.toEqual(successResponse())
+    expect(handle).toHaveBeenCalledOnce()
+    expect(resolveAndBind).toHaveBeenCalledWith({ homeDir: '/safe/home', policy: {
+      mode: 'pinned', version: '0.7.0', installationDigest: digest,
+    } }, expect.any(Function))
+
+    const changed = { ...installation, installationDigest: `sha256:${'1'.repeat(64)}` }
+    await expect(handleRuntimeRequestWithResolutionBinding({
+      request: { command: 'create-run' } as never, initialInstallation: installation,
+      homeDir: '/safe/home', resolveAndBind: (async (_options: unknown, persist: any) =>
+        await persist({ installation: changed })) as never, handle,
+    })).rejects.toMatchObject({ code: 'E2E_RUNTIME_INSTALLATION_BINDING_MISMATCH' })
+    expect(handle).toHaveBeenCalledOnce()
+  })
+
+  test('已有 Run 请求向 Resolver 提供持久 installation digest 而不是重新采用 current', async () => {
+    const roots = await createRuntimeTestRoots()
+    await mkdir(join(roots.project, '.biztest'), { recursive: true })
+    await writeFile(join(roots.project, '.biztest', 'project.json'), JSON.stringify({
+      schemaVersion: '1.0.0', projectId: 'PROJECT-RUNTIME-BINDING',
+    }))
+    const getRun = vi.fn(async () => ({
+      runId: 'RUN-OLD', runtimeInstallationDigest: `sha256:${'2'.repeat(64)}`,
+    }))
+
+    await expect(runtimeBindingForRequest(
+      { payload: { runId: 'RUN-OLD' } } as never, { getRun } as never, roots.project,
+    )).resolves.toEqual({
+      runId: 'RUN-OLD', installationDigest: `sha256:${'2'.repeat(64)}`,
+    })
+    expect(getRun).toHaveBeenCalledWith(expect.stringMatching(/^sha256:/), 'RUN-OLD')
+  })
+
   test('returns one canonical not-installed response for a valid rpc request', async () => {
     const stdout = captureWritable()
     const stderr = captureWritable()
+    const resolveRuntimeInstallation = vi.fn(async () => { throw new Error('not installed') })
 
     const exitCode = await runCli(
       ['rpc'],
@@ -418,7 +500,7 @@ describe('repo-e2e CLI protocol slice', () => {
           version: '0.0.0', installationDigest: digest, launcher: '/safe/uninstalled-home/bin/repo-e2e',
         }),
         uninstallRuntime: async () => ({ version: '0.0.0' }),
-        inspectRuntimeInstallation: async () => { throw new Error('not installed') },
+        resolveRuntimeInstallation,
       },
     )
 
@@ -436,6 +518,9 @@ describe('repo-e2e CLI protocol slice', () => {
     })
     expect(stdout.text()).toBe(`${canonicalizeJson(response)}\n`)
     expect(stderr.text()).toBe('')
+    expect(resolveRuntimeInstallation).toHaveBeenCalledWith({
+      homeDir: '/safe/uninstalled-home', policy: { mode: 'offline' },
+    })
   })
 
   test('routes a parsed rpc request through the installed Runtime Host', async () => {

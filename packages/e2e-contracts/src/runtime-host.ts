@@ -85,6 +85,12 @@ const commandSchemas = [
         source: z.object({ kind: z.literal('file'), path: z.string().min(1) }).strict(),
       }).strict(),
       projectPolicyPath: z.string().min(1),
+      runtimePolicy: z.discriminatedUnion('mode', [
+        z.object({ mode: z.literal('offline') }).strict(),
+        z.object({ mode: z.literal('stable') }).strict(),
+        z.object({ mode: z.literal('pinned'), version: z.string().regex(/^\d+\.\d+\.\d+$/),
+          installationDigest: DigestSchema.optional() }).strict(),
+      ]).optional(),
     }).strict(),
   }).strict(),
   z.object({

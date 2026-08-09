@@ -1,6 +1,6 @@
 # E2E Runtime 渐进式架构优化 V2：分阶段实施计划
 
-> 状态：Phase 0 已实施；支持宿主 Golden 待 CI/真实宿主完成
+> 状态：Phase 0–7 的仓库实现已完成；Phase 8 按决策门结论不创建通用 Verification 抽象；稳定 Runner 与生产 TUF 属于外部运营门禁
 > 依据：`docs/superpowers/specs/2026-08-08-e2e-runtime-progressive-architecture-v2-audit.md`
 > 行为兼容基线：`v0.5.2`
 > 核心规则：每一阶段独立验证、独立提交、可回滚；不跨阶段预先实现。
@@ -119,7 +119,7 @@ Phase 0 完成后停止，提交差异、测试证据、语义比较结果和下
 - Package 验证已完成 TypeScript build 和 14 个 workspace tarball 构建；完整 pack Golden 未取得最终通过结论。
 - 宿主证明：process、filesystem、system Chrome 和 disposable profile 已执行；当前受限沙箱 loopback 不可用，Gateway canary 未执行，不能把本地结果记为真实 Golden 全绿。
 - 新增 `.github/workflows/e2e-golden.yml`：PR 到 `master` 或手动触发时，在无发布权限的 `macos-14` runner 执行 `verify:e2e-pack`；它不持有 OIDC、不发布 npm，也不运行 Registry Golden。
-- Phase 1 未开始。下一步只能是在这个非发布型 macOS CI/支持宿主完成 pack Golden，再决定是否批准 Phase 1。
+- 历史状态（Phase 0 完成时）：当时 Phase 1 尚未开始，下一步门禁是在非发布型 macOS CI/支持宿主完成 pack Golden；该门禁后来已满足，当前完成状态以文首为准。
 
 ## 3. Phase 1：Task State 只读投影与恢复语义收敛
 
@@ -180,6 +180,13 @@ Phase 0 完成后停止，提交差异、测试证据、语义比较结果和下
 ### 4.3 回滚
 
 关闭 adapter 路由即可恢复旧 capability 调用；不得同时修改 Case Schema 或 Verdict 语义。
+
+### 4.4 实施记录（2026-08-09）
+
+- Probe、Preflight、Read、Reversible Write、Injection 与 Full Playwright 已统一接入 `BrowserExecutorProtocolV1`，生产默认路由切换为 `protocol`。
+- `legacy` 保留为显式回滚路径；`shadow` 只执行一次 backend，并独立比较结果、cleanup、effect、reconcile 与完整 evidence refs。
+- Runtime 浏览器投影不再丢弃执行器已经持久化的 URI/digest；Full Playwright Trace 已闭合。Screenshot/DOM 原始 bytes 仍先进入 Quarantine，URL、Network、Console 继续由既有证据与审计资产承载。
+- B 端真实浏览器证明已通过协议分派，并把 Scheduler、Authority 签名 Attempt 链、真实 Gateway 与 Browser Executor 四段写入 proof；任一段未接通即失败。
 
 ## 5. Phase 3：Assertion 语义显式化
 
@@ -270,6 +277,7 @@ Assertion 不允许独立写入；Verdict 继续由 Engine 基于 checkpoint/cov
 - 新增 `withResolvedRuntimeInstallation`，要求调用方在同一安装锁回调内持久化 Run 绑定，关闭“选择完成、绑定尚未固化”之间的卸载竞态。
 - Run Store 提供活跃 installation 引用投影；卸载器在同一安装锁内检查引用，拒绝删除任何非终态 Run 仍绑定的 closure。
 - 固定 launcher 和 installer 没有重写，现有 current 默认行为保持兼容；在线 stable/LKG 仍受 Phase 6 人工 ADR 门禁约束。
+- 新增友好 `resolve-runtime` CLI；默认 RPC 创建新 Run 时使用 offline Resolver，`pinned` 支持精确版本与可选摘要，`stable` 缺少生产服务时 fail-closed。
 - 架构决策见 `docs/adr/0016-local-runtime-resolution-and-run-binding.md`。
 
 ## 8. Phase 6：Runtime Resolver（签名 stable 与 LKG）
@@ -350,6 +358,7 @@ current/new-run-default 指针原子回退到 LKG；失败版本保留诊断但�
 - 本机 Apple M1 Pro / Node v24.18.0 趋势证明八阶段零失败且预算全通过；因非登记稳定 runner，proof 明确标记 `gateEligible=false`。
 - 新增只支持人工触发的专用 self-hosted stable runner workflow；在该 runner 注册前不加入普通 PR required checks。
 - Benchmark Spec 与结果分别见 `docs/superpowers/specs/2026-08-08-e2e-production-performance-benchmark.md`、`docs/benchmarks/e2e-production-performance-2026-08-08.json`。
+- B 端覆盖证明于 2026-08-09 重新经 Scheduler、Authority 签名 Attempt 链、真实 Gateway、Browser Executor Protocol 和系统 Chrome 跑通 12 个类别、24 次执行，覆盖率 100%、负样本漏报率 0%、flaky 0；本地开发机只产生趋势证明，因未登记稳定 runner 而保持 `gateEligible=false`。
 
 ## 10. Phase 8：未来非浏览器 Executor 决策门
 

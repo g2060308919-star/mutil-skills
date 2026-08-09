@@ -22,6 +22,7 @@ import {
   type RuntimeWriteExecutorCapability,
 } from './trusted-action-runner.js'
 import type { RuntimeInjectionExecutionOutput, RuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
+import { isRuntimeEvidenceUri } from './evidence-reference.js'
 import { executeRuntimePreflight, type RuntimePreflightCapability } from './runtime-preflight.js'
 import { runTargetProbe, type TargetProbeCapability } from './target-probe.js'
 
@@ -136,14 +137,43 @@ export function adaptRuntimeFullPlaywrightExecutorV1(
     await executeRuntimeFullPlaywright(capability, value as Parameters<typeof executeRuntimeFullPlaywright>[1]))
 }
 
+/** 只供仓库内覆盖证明持有的不可伪造能力；不从 package root 导出。 */
+export interface B2BProofBrowserExecutorCapabilityV1 {
+  readonly __brand: 'B2BProofBrowserExecutorCapabilityV1'
+}
+
+const b2bProofExecutors = new WeakMap<object, (input: unknown) => Promise<unknown>>()
+
+export function authorizeB2BProofBrowserExecutorV1(
+  execute: (input: unknown) => Promise<unknown>,
+): B2BProofBrowserExecutorCapabilityV1 {
+  const capability = Object.freeze({}) as B2BProofBrowserExecutorCapabilityV1
+  b2bProofExecutors.set(capability, execute)
+  return capability
+}
+
 /**
- * Phase 2 的 read 迁移入口。legacy 为默认权威路径；shadow 仍只执行一次浏览器动作，
+ * 仅供仓库内 B2B 生产能力证明使用的协议入口。它不从 package root 导出，
+ * 后端仍被 WeakMap capability 封装；正式 Runtime Case 必须继续使用上述受信 adapter。
+ */
+export function adaptB2BProofBrowserExecutorV1(
+  capability: B2BProofBrowserExecutorCapabilityV1,
+): BrowserExecutorProtocolCapabilityV1 {
+  const execute = b2bProofExecutors.get(capability)
+  if (execute === undefined) throw protocolError(
+    'E2E_BROWSER_EXECUTOR_CAPABILITY_INVALID', 'B2B proof executor capability 无效', false,
+  )
+  return createAdapter(descriptor('full-playwright'), execute)
+}
+
+/**
+ * Phase 2 的 read 迁移入口。protocol 为默认权威路径；shadow 仍只执行一次浏览器动作，
  * 随后由旧结果和协议适配器各自投影语义并 fail-closed 比较，避免只读动作被重复执行。
  */
 export async function executeRuntimeReadWithBrowserExecutorProtocolV1(
   capability: RuntimeReadExecutorCapability,
   input: Parameters<typeof executeRuntimeRead>[1] & {
-    route?: 'legacy' | 'shadow'
+    route?: 'legacy' | 'shadow' | 'protocol'
     executionId?: string
     deadlineAt?: string
     signal?: AbortSignal
@@ -157,7 +187,7 @@ export async function executeRuntimeReadWithBrowserExecutorProtocolV1(
 }
 
 type RoutedExecutorInput = Parameters<typeof executeRuntimeRead>[1] & {
-  route?: 'legacy' | 'shadow'
+  route?: 'legacy' | 'shadow' | 'protocol'
   executionId?: string
   deadlineAt?: string
   signal?: AbortSignal
@@ -220,7 +250,8 @@ async function executeRoutedRuntimeExecutor<
   const { route: _route, executionId: _executionId, deadlineAt: _deadlineAt,
     signal: _signal, now: _now, onProgress: _onProgress, ...legacyInput } = input
   const executableInput = legacyInput as unknown as TInput
-  if ((input.route ?? 'legacy') === 'legacy') return await legacy(capability, executableInput)
+  const route = input.route ?? 'protocol'
+  if (route === 'legacy') return await legacy(capability, executableInput)
   const protocol = adapt(capability)
   const executed = await executeBrowserExecutorV1(protocol, {
     executionId: input.executionId ?? `${executionPrefix}-${input.attemptId}`,
@@ -232,9 +263,8 @@ async function executeRoutedRuntimeExecutor<
     ...(input.now === undefined ? {} : { now: input.now }),
     ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
   })
-  assertLegacyBrowserExecutorSemanticEquivalentV1({
-    descriptor: describeBrowserExecutorV1(protocol),
-    legacyOutput: executed.legacyOutput,
+  if (route === 'shadow') assertLegacyBrowserExecutorSemanticEquivalentV1({
+    descriptor: describeBrowserExecutorV1(protocol), legacyOutput: executed.legacyOutput,
     protocolResult: executed.result,
   })
   return executed.legacyOutput as TOutput
@@ -256,13 +286,7 @@ export function assertLegacyBrowserExecutorSemanticEquivalentV1(input: {
     ? source.cleanup.status : 'not-applicable'
   const expectedRecovery = expectedEffect === 'unknown' ? 'reconcile'
     : expectedStatus === 'input-blocked' || expectedStatus === 'environment-blocked' ? 'retry' : 'none'
-  const expectedMaterials: string[] = []
-  if (source.diagnostics !== undefined) expectedMaterials.push('diagnostics')
-  if (isRecord(source.evidence)) {
-    if (source.evidence.screenshot instanceof Uint8Array) expectedMaterials.push('screenshot')
-    if (source.evidence.dom instanceof Uint8Array) expectedMaterials.push('dom')
-  }
-  if (source.gatewayAudit !== undefined) expectedMaterials.push('gateway-audit')
+  const expectedEvidence = projectEvidence(source)
   const existingDigest = [source.resultDigest, source.gatewayAuditDigest, source.diagnosticDigest,
     source.outcomeDigest, source.preflightDigest].find((value) => typeof value === 'string' && DIGEST.test(value))
   const equivalent = result.executorId === descriptorValue.executorId
@@ -272,7 +296,7 @@ export function assertLegacyBrowserExecutorSemanticEquivalentV1(input: {
     && result.cleanupStatus === expectedCleanup
     && result.recovery === expectedRecovery
     && (existingDigest === undefined || result.outcomeDigest === existingDigest)
-    && canonicalizeJson(result.evidence.materialKinds) === canonicalizeJson(expectedMaterials)
+    && canonicalizeJson(result.evidence) === canonicalizeJson(expectedEvidence)
   if (!equivalent) throw protocolError(
     'E2E_BROWSER_EXECUTOR_SHADOW_SEMANTIC_MISMATCH', 'legacy 与 BrowserExecutorProtocolV1 语义不一致', false,
   )
@@ -294,13 +318,7 @@ export function projectLegacyBrowserExecutorResultV1(input: {
     ? projectCleanup(source.cleanup) : 'not-applicable'
   const recovery = effectObservation === 'unknown' ? 'reconcile'
     : status === 'input-blocked' || status === 'environment-blocked' ? 'retry' : 'none'
-  const materialKinds: Array<'diagnostics' | 'screenshot' | 'dom' | 'trace' | 'gateway-audit'> = []
-  if (source.diagnostics !== undefined) materialKinds.push('diagnostics')
-  if (isRecord(source.evidence)) {
-    if (source.evidence.screenshot instanceof Uint8Array) materialKinds.push('screenshot')
-    if (source.evidence.dom instanceof Uint8Array) materialKinds.push('dom')
-  }
-  if (source.gatewayAudit !== undefined) materialKinds.push('gateway-audit')
+  const evidence = projectEvidence(source)
   const existingDigest = [source.resultDigest, source.gatewayAuditDigest, source.diagnosticDigest,
     source.outcomeDigest, source.preflightDigest].find((value) => typeof value === 'string' && DIGEST.test(value))
   const outcomeDigest = existingDigest as string | undefined ?? digestText(
@@ -313,8 +331,35 @@ export function projectLegacyBrowserExecutorResultV1(input: {
     executorId: descriptorValue.executorId, kind: descriptorValue.kind,
     runId: input.runId, attemptId: input.attemptId, status, outcomeDigest,
     effectObservation, cleanupStatus, recovery,
-    evidence: { materialKinds, references: [] },
+    evidence,
   })
+}
+
+function projectEvidence(source: Record<string, unknown>): BrowserExecutorExecutionResultV1['evidence'] {
+  type Evidence = BrowserExecutorExecutionResultV1['evidence']
+  type EvidenceKind = Evidence['materialKinds'][number]
+  const supportedKinds: EvidenceKind[] = ['diagnostics', 'screenshot', 'dom', 'trace', 'gateway-audit']
+  const materialKinds: EvidenceKind[] = []
+  if (source.diagnostics !== undefined) materialKinds.push('diagnostics')
+  if (isRecord(source.evidence)) {
+    if (source.evidence.screenshot instanceof Uint8Array) materialKinds.push('screenshot')
+    if (source.evidence.dom instanceof Uint8Array) materialKinds.push('dom')
+  }
+  if (source.gatewayAudit !== undefined) materialKinds.push('gateway-audit')
+  const references: Evidence['references'] = []
+  if (Array.isArray(source.evidenceReferences)) for (const reference of source.evidenceReferences) {
+    if (!isRecord(reference) || typeof reference.kind !== 'string'
+      || !supportedKinds.includes(reference.kind as EvidenceKind)
+      || !isRuntimeEvidenceUri(reference.uri)
+      || typeof reference.digest !== 'string' || !DIGEST.test(reference.digest)) throw protocolError(
+      'E2E_BROWSER_EXECUTOR_OUTPUT_INVALID', '旧执行器 evidence reference 无法映射', false,
+    )
+    references.push({ kind: reference.kind as EvidenceKind, uri: reference.uri, digest: reference.digest })
+  }
+  for (const reference of references) {
+    if (!materialKinds.includes(reference.kind)) materialKinds.push(reference.kind)
+  }
+  return { materialKinds, references }
 }
 
 function createAdapter(

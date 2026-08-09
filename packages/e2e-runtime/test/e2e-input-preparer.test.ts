@@ -14,7 +14,8 @@ describe('E2EInputPreparer', () => {
     const root = await mkdtemp(join('.tmp', 'e2e-input-preparer-'))
     roots.push(root)
     const preparer = new E2EInputPreparer(root)
-    const draft = inputDraft()
+    const draft = { ...inputDraft(), runtimePolicy: { mode: 'pinned' as const, version: '0.7.0',
+      installationDigest: `sha256:${'a'.repeat(64)}` } }
 
     const first = await preparer.prepare(draft)
     const second = await preparer.prepare(draft)
@@ -26,6 +27,7 @@ describe('E2EInputPreparer', () => {
       understandingContract: { header: draft.understandingContract.header,
         source: { kind: 'file' } },
       supportingSources: [{ sourceId: 'RULES', relevance: 'necessary-dependency' }],
+      runtimePolicy: draft.runtimePolicy,
     })
     for (const path of [
       first.create.prdSource.path,
