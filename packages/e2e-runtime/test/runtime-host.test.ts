@@ -2626,10 +2626,10 @@ async function hostFixture(options: {
   finalizeGeneration?: Parameters<typeof authorizeRuntimeGenerationFinalizer>[0]
   quarantineEvidence?: Parameters<typeof authorizeRuntimeEvidenceQuarantine>[0]
   reserveExecutionLeases?: NonNullable<ConstructorParameters<typeof E2ERuntimeHost>[0]['reserveExecutionLeases']>
-  browserExecutorProtocolReadRoute?: 'legacy' | 'shadow'
-  browserExecutorProtocolWriteRoute?: 'legacy' | 'shadow'
-  browserExecutorProtocolInjectionRoute?: 'legacy' | 'shadow'
-  browserExecutorProtocolFullPlaywrightRoute?: 'legacy' | 'shadow'
+  browserExecutorProtocolReadRoute?: 'legacy' | 'shadow' | 'protocol'
+  browserExecutorProtocolWriteRoute?: 'legacy' | 'shadow' | 'protocol'
+  browserExecutorProtocolInjectionRoute?: 'legacy' | 'shadow' | 'protocol'
+  browserExecutorProtocolFullPlaywrightRoute?: 'legacy' | 'shadow' | 'protocol'
 } = {}) {
   const roots = options.roots ?? await createRuntimeTestRoots()
   await mkdir(join(roots.project, '.biztest'), { recursive: true })

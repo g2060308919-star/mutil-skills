@@ -180,10 +180,10 @@ export interface RuntimeHostDependencies {
   presentUserPresenceUrl?(url: string): void | Promise<void>
   readExecutor?: RuntimeReadExecutorCapability
   browserExecutorProtocolV1?: {
-    readRoute?: 'legacy' | 'shadow'
-    writeRoute?: 'legacy' | 'shadow'
-    injectionRoute?: 'legacy' | 'shadow'
-    fullPlaywrightRoute?: 'legacy' | 'shadow'
+    readRoute?: 'legacy' | 'shadow' | 'protocol'
+    writeRoute?: 'legacy' | 'shadow' | 'protocol'
+    injectionRoute?: 'legacy' | 'shadow' | 'protocol'
+    fullPlaywrightRoute?: 'legacy' | 'shadow' | 'protocol'
   }
   writeExecutor?: RuntimeWriteExecutorCapability
   injectionExecutor?: RuntimeInjectionExecutorCapability
@@ -2169,27 +2169,27 @@ export class E2ERuntimeHost {
       execution = await executeWithOwnerHeartbeat(started.owner, async () => executionMode === 'read'
         ? await executeRuntimeReadWithBrowserExecutorProtocolV1(this.dependencies.readExecutor!, {
           snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
-          route: this.dependencies.browserExecutorProtocolV1?.readRoute ?? 'legacy',
+          route: this.dependencies.browserExecutorProtocolV1?.readRoute ?? 'protocol',
           executionId: `READ-${started!.attempt.attemptId}`,
           now: () => this.dependencies.now().toISOString(),
         })
         : executionMode === 'write'
           ? await executeRuntimeWriteWithBrowserExecutorProtocolV1(this.dependencies.writeExecutor!, {
             snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
-            route: this.dependencies.browserExecutorProtocolV1?.writeRoute ?? 'legacy',
+            route: this.dependencies.browserExecutorProtocolV1?.writeRoute ?? 'protocol',
             executionId: `WRITE-${started!.attempt.attemptId}`,
             now: () => this.dependencies.now().toISOString(),
           })
           : executionMode === 'full-playwright'
             ? await executeRuntimeFullPlaywrightWithBrowserExecutorProtocolV1(this.dependencies.fullPlaywrightExecutor!, {
               snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
-              route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'legacy',
+              route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'protocol',
               executionId: `FULL-${started!.attempt.attemptId}`,
               now: () => this.dependencies.now().toISOString(),
             })
           : await executeRuntimeInjectionWithBrowserExecutorProtocolV1(this.dependencies.injectionExecutor!, {
             snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
-            route: this.dependencies.browserExecutorProtocolV1?.injectionRoute ?? 'legacy',
+            route: this.dependencies.browserExecutorProtocolV1?.injectionRoute ?? 'protocol',
             executionId: `INJECTION-${started!.attempt.attemptId}`,
             now: () => this.dependencies.now().toISOString(),
           }))
@@ -2495,7 +2495,7 @@ export class E2ERuntimeHost {
               await executeRuntimeFullPlaywrightProjectionWithBrowserExecutorProtocolV1(
                 this.dependencies.fullPlaywrightExecutor!, {
                   snapshot, attemptId, projection,
-                  route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'legacy',
+                  route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'protocol',
                   executionId: `FULL-${attemptId}`,
                   now: () => this.dependencies.now().toISOString(),
                 },
@@ -2811,7 +2811,7 @@ export class E2ERuntimeHost {
       const fullPlaywrightTerminal = recoverFullPlaywright && !recoverMultiCase && resumeFullPlaywright
         ? await executeRuntimeFullPlaywrightWithBrowserExecutorProtocolV1(this.dependencies.fullPlaywrightExecutor!, {
           snapshot: snapshot!, attemptId: decision.expectedAttemptId,
-          route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'legacy',
+          route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'protocol',
           executionId: `FULL-${decision.expectedAttemptId}`,
           now: () => this.dependencies.now().toISOString(),
         }) : undefined

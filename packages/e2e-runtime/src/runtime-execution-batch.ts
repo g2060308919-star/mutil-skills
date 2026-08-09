@@ -6,6 +6,7 @@ import {
   E2EError,
   type OracleCheckpointResult,
 } from '@mutil-skills/e2e-contracts'
+import { isRuntimeEvidenceUri } from './evidence-reference.js'
 
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/
 const DIGEST = /^sha256:[a-f0-9]{64}$/
@@ -30,6 +31,12 @@ export interface RuntimeWriteExecutionOutput {
   oracleCheckpoints?: OracleCheckpointResult[]
   /** 仅允许在执行器到 Host 的短生命周期边界存在；Host 必须先写 Quarantine 并在持久化前剥离。 */
   evidence?: { screenshot: Uint8Array; dom: Uint8Array }
+  /** 已持久化且经摘要绑定的协议证据引用；不含原始证据字节。 */
+  evidenceReferences?: Array<{
+    kind: 'diagnostics' | 'screenshot' | 'dom' | 'trace' | 'gateway-audit'
+    uri: string
+    digest: string
+  }>
   finalizationFacts?: RuntimeExecutionFinalizationFacts
 }
 
@@ -162,9 +169,11 @@ export class RuntimeExecutionBatch {
 export function parseRuntimeWriteExecutionOutput(value: unknown): RuntimeWriteExecutionOutput {
   const finalizationKeys = plain(value) && Object.hasOwn(value, 'finalizationFacts') ? ['finalizationFacts'] : []
   const evidenceKeys = plain(value) && Object.hasOwn(value, 'evidence') ? ['evidence'] : []
+  const evidenceReferenceKeys = plain(value) && Object.hasOwn(value, 'evidenceReferences')
+    ? ['evidenceReferences'] : []
   const checkpointKeys = plain(value) && Object.hasOwn(value, 'oracleCheckpoints') ? ['oracleCheckpoints'] : []
   if (!plain(value) || !exact(value, ['actionId', 'caseId', 'cleanup', 'effectObservation', 'gatewayCommit',
-    'resultDigest', 'status', ...checkpointKeys, ...evidenceKeys, ...finalizationKeys])
+    'resultDigest', 'status', ...checkpointKeys, ...evidenceKeys, ...evidenceReferenceKeys, ...finalizationKeys])
     || !safeId(value.caseId) || !safeId(value.actionId)
     || !['passed', 'failed', 'environment-blocked', 'safety-blocked'].includes(String(value.status))
     || !['proven-not-applied', 'applied', 'unknown'].includes(String(value.effectObservation))
@@ -178,11 +187,23 @@ export function parseRuntimeWriteExecutionOutput(value: unknown): RuntimeWriteEx
     || value.effectObservation === 'applied' && value.status === 'passed' && value.cleanup.status !== 'verified-clean'
     || value.effectObservation === 'unknown' && value.cleanup.status === 'verified-clean'
     || value.evidence !== undefined && !parseEphemeralEvidence(value.evidence)
+    || value.evidenceReferences !== undefined && !parseEvidenceReferences(value.evidenceReferences)
     || value.oracleCheckpoints !== undefined && !zodCheckpoints(value.oracleCheckpoints)
     || value.finalizationFacts !== undefined && !parseFinalizationFacts(value.finalizationFacts)) {
     throw batchError('E2E_RUNTIME_WRITE_EXECUTOR_OUTPUT_INVALID')
   }
   return structuredClone(value) as unknown as RuntimeWriteExecutionOutput
+}
+
+function parseEvidenceReferences(
+  value: unknown,
+): value is NonNullable<RuntimeWriteExecutionOutput['evidenceReferences']> {
+  const kinds = ['diagnostics', 'screenshot', 'dom', 'trace', 'gateway-audit']
+  return Array.isArray(value) && value.length <= 10_000 && value.every((reference) =>
+    plain(reference) && exact(reference, ['digest', 'kind', 'uri'])
+    && kinds.includes(String(reference.kind))
+    && isRuntimeEvidenceUri(reference.uri)
+    && digest(reference.digest))
 }
 
 function zodCheckpoints(value: unknown): boolean {

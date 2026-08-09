@@ -52,6 +52,44 @@ describe('write Runtime vertical flow', () => {
     expect(batch.canAutoRetry).toBe(true)
   })
 
+  test('严格执行批次接受并保留 Browser Executor 已持久化的 Trace 引用', () => {
+    const traceDigest = runtimeWriteDigest('trace')
+    const batch = new RuntimeExecutionBatch({ runId: 'RUN-1', attemptId: 'ATTEMPT-TRACE' })
+
+    const output = batch.commitRealWrite(realWriteOutput({
+      evidenceReferences: [{
+        kind: 'trace',
+        uri: 'runtime-artifact://full-playwright-traces/ATTEMPT-TRACE/program-after.zip',
+        digest: traceDigest,
+      }],
+    }))
+
+    expect(output.evidenceReferences).toEqual([{
+      kind: 'trace',
+      uri: 'runtime-artifact://full-playwright-traces/ATTEMPT-TRACE/program-after.zip',
+      digest: traceDigest,
+    }])
+  })
+
+  test('严格执行批次拒绝畸形或未支持的持久证据引用', () => {
+    const batch = new RuntimeExecutionBatch({ runId: 'RUN-1', attemptId: 'ATTEMPT-TRACE-BAD' })
+    expect(() => batch.commitRealWrite(realWriteOutput({
+      evidenceReferences: [{ kind: 'video', uri: '', digest: 'not-a-digest' }],
+    }) as never)).toThrow(/E2E_RUNTIME_WRITE_EXECUTOR_OUTPUT_INVALID/)
+    expect(() => batch.commitRealWrite(realWriteOutput({
+      evidenceReferences: [{ kind: 'trace', uri: 'file:///Users/example/.ssh/id_ed25519',
+        digest: runtimeWriteDigest('trace') }],
+    }))).toThrow(/E2E_RUNTIME_WRITE_EXECUTOR_OUTPUT_INVALID/)
+    for (const uri of [
+      'https://example.com/trace.zip',
+      'runtime-artifact://full-playwright-traces/ATTEMPT/../secret',
+      'runtime-artifact://full-playwright-traces/ATTEMPT/trace.zip?token=secret',
+      'artifact://untrusted/evidence.png',
+    ]) expect(() => batch.commitRealWrite(realWriteOutput({
+      evidenceReferences: [{ kind: 'trace', uri, digest: runtimeWriteDigest(uri) }],
+    }))).toThrow(/E2E_RUNTIME_WRITE_EXECUTOR_OUTPUT_INVALID/)
+  })
+
   test('effect unknown 一经提交即禁止自动重试且不能被第二次结果覆盖', async () => {
     const unknown = realWriteOutput({
       status: 'environment-blocked',

@@ -9,6 +9,13 @@
 
 `stable` 失败不会静默退化为 `offline`。用户必须明确选择离线策略，报告也不会把“未取得最新撤销信息”显示成安全通过。
 
+用户可通过固定 launcher 直接查看 Resolver 选择结果：
+
+- `repo-e2e resolve-runtime --offline`
+- `repo-e2e resolve-runtime --pinned <exact-version> [--digest <sha256:...>]`
+
+命令返回精确版本、installation digest、selection digest 和撤销检查状态。查询本身不创建 Run；调用方必须把同一策略放入 `prepare-input` 草稿的 `runtimePolicy`，由生成的 `create-run` payload 在安装锁内重新解析并固化同一 installation。省略时新 Run 明确采用 `offline`；测试或兼容注入若没有提供 Resolver，才保留原安装检查路径。`repo-e2e resolve-runtime --stable` 在没有生产 TUF 服务配置时明确失败，不会回落为 offline。
+
 ## stable 固定流程
 
 1. 从 npm package 内的已审核 `root.json` 引导 TUF，不从网络首次信任密钥。

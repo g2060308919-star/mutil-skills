@@ -27,6 +27,12 @@ const SourceTextSchema = z.string().min(1).max(1024 * 1024).refine(
   (value) => Buffer.byteLength(value, 'utf8') <= 1024 * 1024,
   'UTF-8 bytes 不得超过 1 MiB',
 )
+const RuntimePolicySchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('offline') }).strict(),
+  z.object({ mode: z.literal('stable') }).strict(),
+  z.object({ mode: z.literal('pinned'), version: z.string().regex(/^\d+\.\d+\.\d+$/),
+    installationDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional() }).strict(),
+])
 
 export const E2EInputDraftSchema = z.object({
   schemaVersion: z.literal('1.0.0'),
@@ -36,6 +42,7 @@ export const E2EInputDraftSchema = z.object({
     text: SourceTextSchema,
     header: PrdUnderstandingContractHeaderSchema,
   }).strict(),
+  runtimePolicy: RuntimePolicySchema.optional(),
   supportingSources: z.array(z.object({
     sourceId: SafeIdSchema,
     text: SourceTextSchema,
@@ -99,6 +106,7 @@ export class E2EInputPreparer {
         source: { kind: 'file', path: path('requirements-contract.md') },
       },
       projectPolicyPath: path('project-policy.json'),
+      ...(draft.runtimePolicy === undefined ? {} : { runtimePolicy: draft.runtimePolicy }),
       supportingSources: draft.supportingSources.map((source, index) => ({
         sourceId: source.sourceId, kind: 'file',
         path: path(`supporting-${String(index + 1).padStart(3, '0')}.txt`),

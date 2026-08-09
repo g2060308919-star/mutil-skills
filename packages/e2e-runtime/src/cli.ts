@@ -48,6 +48,13 @@ import {
   type RuntimeDoctorReport,
 } from './runtime-doctor.js'
 import { isExactRuntimeVersion } from './runtime-manifest.js'
+import {
+  resolveRuntimeInstallation as resolveRuntimeInstallationDefault,
+  withResolvedRuntimeInstallation as withResolvedRuntimeInstallationDefault,
+  type ResolveRuntimeInstallationOptions,
+  type RuntimeResolution,
+  type RuntimeResolverPolicy,
+} from './runtime-resolver.js'
 import { E2ERuntimeHost } from './runtime-host.js'
 import { ProjectPublisher } from './project-publisher.js'
 import { StandaloneEvidencePublisher } from './standalone-evidence-publisher.js'
@@ -134,6 +141,10 @@ export interface RuntimeCliDependencies {
   installRuntime: (options: InstallRuntimeOptions) => Promise<RuntimeInstallResult>
   uninstallRuntime: (options: UninstallRuntimeOptions) => Promise<RuntimeUninstallResult>
   inspectRuntimeInstallation?: (options: InspectRuntimeInstallationOptions) => Promise<RuntimeInstallation>
+  resolveRuntimeInstallation?: (options: ResolveRuntimeInstallationOptions) =>
+    ReturnType<typeof resolveRuntimeInstallationDefault>
+  withResolvedRuntimeInstallation?: <T>(options: ResolveRuntimeInstallationOptions,
+    bind: (resolution: RuntimeResolution) => Promise<T>) => Promise<T>
   runRuntimeDoctor?: (options: RunRuntimeDoctorOptions) => Promise<RuntimeDoctorReport>
   serializeRuntimeDoctorReport?: (report: unknown) => string
   runtimeHost?: Pick<E2ERuntimeHost, 'handle'>
@@ -302,6 +313,29 @@ export async function runCli(
 
   if (arguments_[0] === 'install-runtime' || arguments_[0] === 'uninstall-runtime') {
     return runInstallManagementCommand(arguments_, responseWriter, dependencies)
+  }
+
+  if (arguments_[0] === 'resolve-runtime') {
+    const policy = parseRuntimeResolutionArguments(arguments_)
+    if (policy === undefined) return writeErrorResponse(responseWriter, 'RESOLVE-RUNTIME', friendlyCommandError(
+      'resolve-runtime 只接受 --offline、--stable 或 --pinned <exact-version> [--digest <sha256>]'
+    ))
+    try {
+      const resolution = await (dependencies.resolveRuntimeInstallation
+        ?? resolveRuntimeInstallationDefault)({ homeDir: dependencies.homeDir, policy })
+      await responseWriter.write(`${canonicalizeJson({ ok: true, result: {
+        selectionKind: resolution.selectionKind, policyMode: resolution.policyMode,
+        runtimeVersion: resolution.runBinding.runtimeVersion,
+        installationDigest: resolution.runBinding.installationDigest,
+        revocationStatus: resolution.revocationStatus, selectionDigest: resolution.selectionDigest,
+      } })}\n`)
+      return 0
+    } catch (cause) {
+      return writeErrorResponse(responseWriter, 'RESOLVE-RUNTIME', cause instanceof E2EError ? cause : new E2EError({
+        code: 'E2E_RUNTIME_RESOLUTION_FAILED', category: 'environment',
+        message: 'Runtime Resolver 无法安全选择执行 closure', retryable: false, cause,
+      }))
+    }
   }
 
   if (arguments_[0] === 'configure-browser') {
@@ -489,12 +523,28 @@ export async function runCli(
       await responseWriter.write(`${canonicalizeJson(response)}\n`)
       return exitCodeForResponse(response)
     }
+    const projectRoot = 'projectRoot' in request ? request.projectRoot : undefined
+    const requestHasRunBinding = runtimeRequestRunId(request) !== undefined && projectRoot !== undefined
+    let runStore = requestHasRunBinding
+      ? await (dependencies.openRunStore ?? RuntimeRunStore.open)({
+        homeDir: dependencies.homeDir, projectRoot,
+      })
+      : undefined
     let installation: RuntimeInstallation
     try {
-      installation = await (dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault)({
-        homeDir: dependencies.homeDir,
-      })
+      const existingRun = runStore === undefined ? undefined
+        : await runtimeBindingForRequest(request, runStore, projectRoot)
+      installation = dependencies.resolveRuntimeInstallation === undefined
+        ? await (dependencies.inspectRuntimeInstallation ?? inspectRuntimeInstallationDefault)({
+          homeDir: dependencies.homeDir,
+        })
+        : (await dependencies.resolveRuntimeInstallation({
+          homeDir: dependencies.homeDir, policy: runtimePolicyForRequest(request),
+          ...(existingRun === undefined ? {} : { existingRun }),
+        })).installation
     } catch (cause) {
+      await runStore?.close().catch(() => undefined)
+      if (cause instanceof E2EError) throw cause
       throw new E2EError({
         code: 'E2E_RUNTIME_NOT_INSTALLED',
         category: 'environment',
@@ -503,12 +553,11 @@ export async function runCli(
         cause,
       })
     }
-    const projectRoot = 'projectRoot' in request ? request.projectRoot : undefined
-    const configuredApprovalMode = (await readApprovalMode(dependencies.homeDir)).mode
-    const runStore = await RuntimeRunStore.open({
+    runStore ??= await (dependencies.openRunStore ?? RuntimeRunStore.open)({
       homeDir: dependencies.homeDir,
       ...(projectRoot === undefined ? {} : { projectRoot }),
     })
+    const configuredApprovalMode = (await readApprovalMode(dependencies.homeDir)).mode
     let authorityHost: RuntimeAuthorityHost | undefined
     let artifactAuthority: RuntimeArtifactStoreAuthority | undefined
     let executionSecretBroker: RuntimeSecretBroker | undefined
@@ -762,7 +811,19 @@ export async function runCli(
           }),
         }),
       })
-      response = await host.handle(request, requestBytes)
+      const bind = dependencies.withResolvedRuntimeInstallation
+        ?? (dependencies.resolveRuntimeInstallation === undefined
+          ? withResolvedRuntimeInstallationDefault
+          : undefined)
+      if (bind === undefined && request.command === 'create-run') throw new E2EError({
+        code: 'E2E_RUNTIME_RESOLVER_LOCK_REQUIRED', category: 'safety',
+        message: '自定义 Runtime Resolver 必须同时提供持锁 resolve-and-bind 能力', retryable: false,
+      })
+      response = await handleRuntimeRequestWithResolutionBinding({
+        request, initialInstallation: installation, homeDir: dependencies.homeDir,
+        resolveAndBind: bind ?? withResolvedRuntimeInstallationDefault,
+        handle: async () => await host.handle(request, requestBytes),
+      })
     } catch (error) {
       processingError = error
     }
@@ -815,6 +876,53 @@ export async function runCli(
 function parseFriendlyRunId(arguments_: string[]): string | undefined {
   return arguments_.length === 3 && arguments_[1] === '--run' && SAFE_ID.test(arguments_[2]!)
     ? arguments_[2] : undefined
+}
+
+export async function runtimeBindingForRequest(
+  request: RuntimeRequestEnvelope,
+  runStore: Pick<RuntimeRunStore, 'getRun'>,
+  projectRoot: string | undefined,
+): Promise<{ runId: string; installationDigest: string } | undefined> {
+  const runId = runtimeRequestRunId(request)
+  if (projectRoot === undefined || runId === undefined) return undefined
+  const identity = await resolveProjectIdentity(projectRoot)
+  const snapshot = await runStore.getRun(identity.digest, runId)
+  return snapshot === undefined ? undefined : {
+    runId: snapshot.runId, installationDigest: snapshot.runtimeInstallationDigest,
+  }
+}
+
+function runtimeRequestRunId(request: RuntimeRequestEnvelope): string | undefined {
+  return 'payload' in request && typeof request.payload === 'object' && request.payload !== null
+    && 'runId' in request.payload && typeof request.payload.runId === 'string'
+    ? request.payload.runId : undefined
+}
+
+export async function handleRuntimeRequestWithResolutionBinding(input: {
+  request: RuntimeRequestEnvelope
+  initialInstallation: RuntimeInstallation
+  homeDir: string
+  resolveAndBind: <T>(options: ResolveRuntimeInstallationOptions,
+    bind: (resolution: RuntimeResolution) => Promise<T>) => Promise<T>
+  handle: () => Promise<RuntimeResponseEnvelope>
+}): Promise<RuntimeResponseEnvelope> {
+  if (input.request.command !== 'create-run') return await input.handle()
+  return await input.resolveAndBind({ homeDir: input.homeDir, policy: runtimePolicyForRequest(input.request) },
+    async (resolution) => {
+      if (resolution.installation.installationDigest !== input.initialInstallation.installationDigest) {
+        throw new E2EError({
+          code: 'E2E_RUNTIME_INSTALLATION_BINDING_MISMATCH', category: 'safety',
+          message: '创建 Run 前 Runtime installation 已变化；拒绝跨版本固化', retryable: false,
+        })
+      }
+      return await input.handle()
+    })
+}
+
+function runtimePolicyForRequest(request: RuntimeRequestEnvelope): RuntimeResolverPolicy {
+  return request.command === 'create-run' && request.payload?.runtimePolicy !== undefined
+    ? request.payload.runtimePolicy
+    : { mode: 'offline' }
 }
 
 function friendlyCommandError(message: string): E2EError {
@@ -1194,12 +1302,27 @@ function installArgumentError(message: string): E2EError {
   })
 }
 
+function parseRuntimeResolutionArguments(arguments_: string[]): RuntimeResolverPolicy | undefined {
+  if (arguments_.length === 2 && arguments_[1] === '--offline') return { mode: 'offline' }
+  if (arguments_.length === 2 && arguments_[1] === '--stable') return { mode: 'stable' }
+  if ((arguments_.length === 3 || arguments_.length === 5) && arguments_[1] === '--pinned'
+    && isExactRuntimeVersion(arguments_[2]!)
+    && (arguments_.length === 3 || arguments_[3] === '--digest'
+      && /^sha256:[a-f0-9]{64}$/.test(arguments_[4]!))) {
+    return { mode: 'pinned', version: arguments_[2]!,
+      ...(arguments_.length === 5 ? { installationDigest: arguments_[4]! } : {}) }
+  }
+  return undefined
+}
+
 function defaultDependencies(): RuntimeCliDependencies {
   return {
     homeDir: process.env.HOME ?? homedir(),
     installRuntime: installRuntimeDefault,
     uninstallRuntime: uninstallRuntimeDefault,
     inspectRuntimeInstallation: inspectRuntimeInstallationDefault,
+    resolveRuntimeInstallation: resolveRuntimeInstallationDefault,
+    withResolvedRuntimeInstallation: withResolvedRuntimeInstallationDefault,
     runRuntimeDoctor: runRuntimeDoctorDefault,
   }
 }

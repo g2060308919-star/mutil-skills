@@ -14,6 +14,7 @@ import {
   runBrowserPreflight,
   runFullPlaywrightCase,
   type FullPlaywrightEvidenceStage,
+  type FullPlaywrightEvidenceSummary,
 } from '@mutil-skills/e2e-playwright-runtime'
 import {
   ApprovalCapabilityRecordSchema,
@@ -100,6 +101,7 @@ import {
 import type { RuntimeRunSnapshot } from './run-store.js'
 import { RuntimeFullPlaywrightCheckpointStore } from './runtime-full-playwright-checkpoint.js'
 import type { RuntimeWriteExecutionOutput } from './runtime-execution-batch.js'
+import { isRuntimeEvidenceUri } from './evidence-reference.js'
 import { projectRuntimeWriteSnapshot } from './runtime-write-projector.js'
 import { executeSecretTemplateAtBridge, type SecretTemplateBroker } from './secret-template.js'
 import { GatewayCleanupTransport, authorizeGatewayCleanupTransport } from './gateway-cleanup-transport.js'
@@ -1558,6 +1560,7 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
           reservationReceiptDigest: result.finalization.authorityReceiptDigest ?? result.finalization.terminalIntentDigest,
           outcomeReceiptDigest: result.outcome?.signedDigest ?? result.resultDigest, committed: true as const },
         cleanup: result.cleanup, evidence: { screenshot: after.screenshot, dom: after.dom },
+        evidenceReferences: projectRuntimeFullPlaywrightEvidenceReferences(result.evidence),
         finalizationFacts: { executionGrant: projection.grant as unknown as Record<string, unknown>,
           gatewayAudit: publishedGatewayAudit, cleanup: result.cleanup as unknown as Record<string, unknown>,
           executionOutcomeReceipt: (result.outcome ?? { terminal: result.finalization }) as unknown as Record<string, unknown>,
@@ -1754,6 +1757,24 @@ function runtimeFullEvidence(stage: FullPlaywrightEvidenceStage,
   return { evidenceId: `${identity}-${kind.toUpperCase()}`, stage, kind,
     ...(checkpointId === undefined ? {} : { checkpointId }),
     byteLength: bytes.byteLength, digest: digestBytes(`runtime-evidence/${kind}/v1`, bytes) }
+}
+
+export function projectRuntimeFullPlaywrightEvidenceReferences(
+  evidence: readonly FullPlaywrightEvidenceSummary[],
+): NonNullable<RuntimeWriteExecutionOutput['evidenceReferences']> {
+  const references: NonNullable<RuntimeWriteExecutionOutput['evidenceReferences']> = []
+  for (const item of evidence) {
+    if (!['screenshot', 'dom', 'trace', 'gateway-audit'].includes(item.kind)) continue
+    for (const uri of item.references ?? []) {
+      if (!isRuntimeEvidenceUri(uri)
+        || !/^sha256:[a-f0-9]{64}$/.test(item.digest)) {
+        throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_EVIDENCE_REFERENCE_INVALID')
+      }
+      references.push({ kind: item.kind as 'screenshot' | 'dom' | 'trace' | 'gateway-audit',
+        uri, digest: item.digest })
+    }
+  }
+  return references
 }
 
 const MAX_FULL_PLAYWRIGHT_TRACE_BYTES = 256 * 1024 * 1024

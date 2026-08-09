@@ -132,7 +132,7 @@ E2E 唯一 RPC、工作流和恢复权威。它协调 Contracts、Engine、Autho
 _避免使用_：backend service、Skill runtime
 
 **Runtime Resolver**：
-只从受控 Runtime closure 中选择执行版本，并把精确 installation digest 固化到 Run。Phase 5 仅支持本地 `offline` 与精确 `pinned`；新 Run 必须在安装锁内完成选择和持久绑定，已有 Run 必须按原摘要恢复，活跃引用阻止卸载或 GC。
+只从受控 Runtime closure 中选择执行版本，并把精确 installation digest 固化到 Run。友好 CLI 提供 `resolve-runtime --offline` 与 `resolve-runtime --pinned <exact-version> [--digest <sha256:...>]`；查询结果的同一策略通过 `prepare-input.runtimePolicy` 进入 `create-run`，在安装锁内重新解析并原子固化，省略时明确使用 offline；已有 Run 按原摘要恢复，活跃引用阻止卸载或 GC。`stable` 客户端只在生产 TUF/doctor/canary 门禁配置齐全时启用，`latest` 继续 fail-closed。
 _避免使用_：SemVer range at execution、current means run identity、resolve then bind later
 
 **Runtime Update State**：
@@ -144,7 +144,7 @@ _避免使用_：download cache、latest version file、revocation boolean only
 _避免使用_：test key smoke test、npm dist-tag check、self-declared ready flag
 
 **Browser Executor Protocol**：
-Probe、Preflight、Read、Reversible Write、Injection 与 Full Playwright 的统一发现和执行语义。迁移期的 shadow 路由只执行一次 backend，再独立比较 legacy 与协议投影；写结果未知时只能 reconcile。各执行域可独立切换，legacy 默认值在等价性 Golden 批准前保持不变。
+Probe、Preflight、Read、Reversible Write、Injection 与 Full Playwright 的统一发现和执行语义。生产默认路由为 `protocol`；`shadow` 路由只执行一次 backend，再独立比较 legacy 与协议投影；写结果未知时只能 reconcile。协议严格保留执行器已经持久化的证据引用，Full Playwright Trace 已闭合；Screenshot/DOM 原始 bytes 继续先进入 Quarantine，URL、Network、Console 继续由既有证据与审计资产承载。
 _避免使用_：duplicate shadow execution、generic callback、retry unknown write
 
 **B2B Scenario Coverage Proof**：
@@ -208,7 +208,7 @@ _避免使用_：page.route mock、optional proxy
 _避免使用_：daily Chrome automation、arbitrary Playwright host
 
 **Browser Executor Protocol**：
-Runtime 内部位于现有品牌化执行器之外的统一适配协议。V1 为 Target Probe、Preflight、Read、Reversible Write、Injection 和 Full Playwright 提供同一能力描述、进度、dispatch 前 deadline/cancellation、结果、证据材料、cleanup、reconcile 与重试安全语义；适配器只闭合持有原 WeakMap capability，不公开原 backend，也不允许任意浏览器代码跨越可信边界。迁移期旧路径仍为默认，read shadow 只执行一次浏览器动作，再对旧结果与协议投影做 fail-closed 语义比较；写 effect 为 unknown 时只能 reconcile。
+Runtime 内部位于现有品牌化执行器之外的统一适配协议。V1 为 Target Probe、Preflight、Read、Reversible Write、Injection 和 Full Playwright 提供同一能力描述、进度、dispatch 前 deadline/cancellation、结果、证据材料、cleanup、reconcile 与重试安全语义；适配器只闭合持有原 WeakMap capability，不公开原 backend，也不允许任意浏览器代码跨越可信边界。生产默认走协议路径，shadow 只执行一次浏览器动作，再对旧结果与协议投影做 fail-closed 语义比较；写 effect 为 unknown 时只能 reconcile，Playwright Trace 等持久证据引用不得在投影中丢失。
 _避免使用_：second browser runtime、generic callback executor、retry unknown write
 
 **Verification Abstraction Decision Gate**：
