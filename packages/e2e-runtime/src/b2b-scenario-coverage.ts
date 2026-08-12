@@ -72,6 +72,7 @@ export type B2BScenarioExecution = z.infer<typeof B2BScenarioExecutionSchema>
 
 export interface B2BCoverageProof {
   schemaVersion: '1.0.0'
+  proofKind: 'browser-capability'
   corpusDigest: string
   executionsDigest: string
   scenarioCount: number
@@ -315,6 +316,7 @@ export function createB2BCoverageProof(input: {
   ]
   const draft = {
     schemaVersion: '1.0.0' as const,
+    proofKind: 'browser-capability' as const,
     corpusDigest,
     executionsDigest,
     scenarioCount: corpus.length,
