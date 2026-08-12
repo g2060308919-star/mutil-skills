@@ -54,7 +54,12 @@ export interface E2EJourneyResult {
     command: RuntimeStatusResult['nextEdge'] extends infer _ ? string : never
     missingInput: string[]
   }
-  metrics: { generatorCalls: number; humanInteractions: number }
+  metrics: { generatorCalls: number; humanInteractions: number; elapsedMs?: number }
+}
+
+export interface AcceptFromPrdInput {
+  intake: E2EInputDraft
+  targetContract: TargetContract
 }
 
 export class E2EFacadeError extends Error {
@@ -118,6 +123,13 @@ export class E2EFacade {
       create: prepared.create,
       ...(input.targetContract === undefined ? {} : { targetContract: input.targetContract }),
     })
+  }
+
+  /** 首次验收产品入口：只接收已确认的 PRD intake 与目标，不暴露 Runtime envelope。 */
+  async acceptFromPrd(input: AcceptFromPrdInput): Promise<E2EJourneyResult> {
+    const startedAt = Date.now()
+    const status = await this.startFromInput(input)
+    return withElapsed(journeyFromStatus(status), Date.now() - startedAt)
   }
 
   async start(input: {
@@ -265,19 +277,7 @@ export class E2EFacade {
    */
   async continueJourney(handle: RunHandle): Promise<E2EJourneyResult> {
     const status = await this.status(handle)
-    const currentHandle = status.handle!
-    if (['accepted', 'rejected', 'incomplete'].includes(status.state)) return {
-      schemaVersion: 'e2e-journey-result/v1', status: 'completed', handle: currentHandle,
-      runtimeState: status.state, metrics: { generatorCalls: 0, humanInteractions: 0 },
-    }
-    const command = status.nextEdge?.command
-    return {
-      schemaVersion: 'e2e-journey-result/v1', status: 'pending-decision', handle: currentHandle,
-      runtimeState: status.state,
-      pending: { kind: pendingKind(command), command: command ?? 'get-status',
-        missingInput: status.minimumMissingInput },
-      metrics: { generatorCalls: 0, humanInteractions: humanEdge(command) ? 1 : 0 },
-    }
+    return journeyFromStatus(status)
   }
 
   /** Frozen replay 只复用已冻结语义；不接触 generator，当次 Target/Approval/Lease 仍由 Runtime 要求。 */
@@ -338,6 +338,23 @@ export class E2EFacade {
     }
     return response.result
   }
+}
+
+function journeyFromStatus(status: RuntimeStatusResult): E2EJourneyResult {
+  const currentHandle = status.handle!
+  if (['accepted', 'rejected', 'incomplete', 'cancelled'].includes(status.state)) return {
+    schemaVersion: 'e2e-journey-result/v1', status: 'completed', handle: currentHandle,
+    runtimeState: status.state, metrics: { generatorCalls: 0, humanInteractions: 0 },
+  }
+  const command = status.nextEdge?.command
+  return { schemaVersion: 'e2e-journey-result/v1', status: 'pending-decision', handle: currentHandle,
+    runtimeState: status.state, pending: { kind: pendingKind(command), command: command ?? 'get-status',
+      missingInput: status.minimumMissingInput },
+    metrics: { generatorCalls: 0, humanInteractions: humanEdge(command) ? 1 : 0 } }
+}
+
+function withElapsed(result: E2EJourneyResult, elapsedMs: number): E2EJourneyResult {
+  return { ...result, metrics: { ...result.metrics, elapsedMs } }
 }
 
 type JourneyCommand = NonNullable<RuntimeStatusResult['nextEdge']>['command'] | undefined

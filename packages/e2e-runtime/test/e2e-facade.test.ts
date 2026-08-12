@@ -254,6 +254,46 @@ describe('E2EFacade', () => {
     expect(host.handle).toHaveBeenCalledTimes(1)
   })
 
+  test('acceptFromPrd 只接收已理解 intake 与 Target，并返回可恢复 RunHandle', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 1, generationDigest: d('1') }
+    const commands: string[] = []
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'create-run') return success(request.requestId, { runId: 'RUN-1' })
+      if (request.command === 'configure-target') return success(request.requestId, { runId: 'RUN-1' })
+      return success(request.requestId, statusResult(handle, false, {
+        command: 'prepare-prd-understanding', from: 'created', expectedState: 'created',
+      }))
+    }) }
+    const inputPreparer = { prepare: vi.fn(async () => ({ schemaVersion: '1.0.0' as const,
+      intakeId: 'INTAKE-1', projectRoot: '/project', create: {
+        assetId: 'ASSET-1', prdSource: { kind: 'file' as const, path: 'prd.md',
+          origin: { kind: 'text' as const, ref: 'caller' } },
+        understandingContract: { header: { schemaVersion: '1.0.0' as const,
+          contractId: 'CONTRACT-1', contractVersion: 1, contractStatus: 'confirmed-by-caller' as const,
+          authorization: { status: 'confirmed-by-caller' as const, contractVersion: 1,
+            confirmedAt: '2026-08-12T00:00:00.000Z' } },
+        source: { kind: 'file' as const, path: 'contract.md' } }, projectPolicyPath: 'policy.json',
+      },
+    })) }
+    const facade = new E2EFacade({ projectRoot: '/project', host, inputPreparer,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+    const result = await facade.acceptFromPrd({
+      intake: {} as never,
+      targetContract: { schemaVersion: '1.0.0', targetUrl: 'https://example.test/',
+        baseOrigin: 'https://example.test', environmentLabel: 'test',
+        allowedNavigationOrigins: ['https://example.test'], pageIdentityPolicy: {
+          schemaVersion: '1.0.0', url: { origin: 'https://example.test', pathPattern: '/' },
+          signals: [{ kind: 'test-id', value: 'home' }], match: { mode: 'all' },
+        } },
+    })
+
+    expect(result).toMatchObject({ status: 'pending-decision', handle,
+      pending: { kind: 'semantic-generation', command: 'prepare-prd-understanding' },
+      metrics: { generatorCalls: 0, humanInteractions: 0, elapsedMs: expect.any(Number) } })
+    expect(commands).toEqual(['create-run', 'configure-target', 'get-status'])
+  })
+
   test('frozen replay 不调用生成器，只返回当次 probe/approval/lease 的下一合法边', async () => {
     const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
     const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => success(request.requestId,
