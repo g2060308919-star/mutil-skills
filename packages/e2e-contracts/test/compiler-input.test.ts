@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import {
   canonicalizeJson,
+  CompilerInputV2Schema,
   CompilerInputV1Schema,
   computeCompilerInputDigest,
   computeFullPlaywrightCleanupSourceDigest,
@@ -130,5 +131,38 @@ describe('CompilerInputV1', () => {
       .toBe(false)
     expect(CompilerInputV1Schema.safeParse({ ...input, executionProfile: 'full-playwright' }).success)
       .toBe(false)
+  })
+})
+
+describe('CompilerInputV2 declarative browser', () => {
+  test('完整保留结构化动作与 Oracle，并拒绝自由 JavaScript 和 actionId 漂移', () => {
+    const legacy = compilerInput()
+    const action = {
+      kind: 'fill' as const, actionId: 'ACTION-1', effect: 'read' as const,
+      pageScope: { page: 'current' as const, frame: { kind: 'main' as const } },
+      locatorCandidates: [{ kind: 'role' as const, role: 'textbox' as const, name: '待办事项' }],
+      timeout: { timeoutMs: 5_000, retry: 'read-only-max-2' as const }, value: '完成发布',
+    }
+    const oracle = {
+      kind: 'text' as const, oracleId: 'ORACLE-1', actionId: 'ACTION-1',
+      locatorCandidates: [{ kind: 'text' as const, value: '完成发布', exact: true }],
+      comparator: 'equals' as const, expected: '完成发布', deadlineMs: 5_000,
+      evidenceKinds: ['screenshot' as const, 'dom' as const],
+    }
+    const input = {
+      ...legacy, schemaVersion: 'compiler-input/v2' as const,
+      executionProfile: 'declarative-browser' as const,
+      cases: [{ ...legacy.cases[0], actions: [{
+        kind: 'declarativeBrowser' as const, actionId: 'ACTION-1', action, oracles: [oracle],
+      }] }],
+    }
+
+    expect(CompilerInputV2Schema.parse(input)).toEqual(input)
+    expect(CompilerInputV2Schema.safeParse({ ...input, cases: [{ ...input.cases[0], actions: [{
+      ...input.cases[0]!.actions[0]!, source: 'await page.evaluate(() => process.env.HOME)',
+    }] }] }).success).toBe(false)
+    expect(CompilerInputV2Schema.safeParse({ ...input, cases: [{ ...input.cases[0], actions: [{
+      ...input.cases[0]!.actions[0]!, actionId: 'ACTION-DRIFT',
+    }] }] }).success).toBe(false)
   })
 })

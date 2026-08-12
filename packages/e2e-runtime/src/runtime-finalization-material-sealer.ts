@@ -1329,7 +1329,7 @@ function resolveBrowserActionMap(
 }
 
 function schemaVersion(type: ArtifactType): string {
-  if (type === 'execution-contract') return '1.1.0'
+  if (type === 'execution-contract') return '1.2.0'
   if (type === 'browser-action-map') return '2.1.0'
   if (['cleanup-results', 'approval-grants', 'browser-preflight', 'run-bundle', 'project-policy',
     'browser-evidence', 'acceptance-scope', 'prd-diff', 'regression-manifest', 'workflow-events',

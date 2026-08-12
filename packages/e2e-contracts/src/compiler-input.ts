@@ -2,6 +2,10 @@ import { z } from 'zod'
 import { AssetIdSchema, canonicalizeJson, digestText } from './common.js'
 import { RegressionBlockedCasesSchema } from './regression-discovery.js'
 import { ApprovalFreshnessReceiptSchema } from './approval-freshness.js'
+import {
+  DeclarativeBrowserActionSchema,
+  DeclarativeOracleObservationSchema,
+} from './declarative-execution-binding.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -101,6 +105,30 @@ export const CompilerActionSchema = z.discriminatedUnion('kind', [
   if (action.kind === 'fullPlaywright') refineFullPlaywrightCompilerAction(action, context)
 })
 
+export const DeclarativeBrowserCompilerActionSchema = z.object({
+  kind: z.literal('declarativeBrowser'),
+  actionId: SafeIdSchema,
+  action: DeclarativeBrowserActionSchema,
+  oracles: z.array(DeclarativeOracleObservationSchema).max(10_000),
+}).strict().superRefine((value, context) => {
+  if (value.action.actionId !== value.actionId) context.addIssue({
+    code: 'custom', path: ['actionId'], message: 'Compiler actionId 必须绑定声明式 actionId',
+  })
+  if (value.oracles.some((oracle) => oracle.actionId !== value.actionId)) context.addIssue({
+    code: 'custom', path: ['oracles'], message: 'Compiler Oracle 必须绑定同一 actionId',
+  })
+})
+
+export const DeclarativeBrowserExecutableCaseSchema = z.object({
+  caseId: SafeIdSchema,
+  title: NonEmptyTextSchema,
+  reqIds: z.array(SafeIdSchema).min(1).max(10_000),
+  ruleIds: z.array(SafeIdSchema).min(1).max(10_000),
+  obligationIds: z.array(SafeIdSchema).min(1).max(10_000),
+  mode: z.enum(['real-environment', 'fault-injection']),
+  actions: z.array(DeclarativeBrowserCompilerActionSchema).min(1).max(10_000),
+}).strict().superRefine(refineExecutableCase)
+
 export const DeclarativeExecutableCaseSchema = z.object({
   caseId: SafeIdSchema,
   title: NonEmptyTextSchema,
@@ -179,9 +207,62 @@ export type DeclarativeExecutableCase = z.infer<typeof DeclarativeExecutableCase
 export const CompilerInputV1Schema = CompilerInputV1InternalSchema
 export type CompilerInputV1 = z.infer<typeof CompilerInputV1Schema>
 
-export function computeCompilerInputDigest(input: CompilerInputV1): string {
-  const parsed = CompilerInputV1Schema.parse(input)
+export const CompilerInputV2Schema = z.object({
+  schemaVersion: z.literal('compiler-input/v2'),
+  assetId: AssetIdSchema,
+  generationId: SafeIdSchema,
+  runId: SafeIdSchema,
+  prdRevision: DigestSchema,
+  scopeDigest: DigestSchema,
+  lineageDecisionDigest: DigestSchema,
+  contractsVersion: SemverSchema,
+  environmentId: SafeIdSchema,
+  baseOrigin: z.string().url(),
+  approvalDigest: DigestSchema,
+  approvalFreshnessReceipt: ApprovalFreshnessReceiptSchema,
+  policyDigest: DigestSchema,
+  playwrightVersion: SemverSchema,
+  nodeVersion: SemverSchema,
+  executionProfile: z.literal('declarative-browser'),
+  cases: z.array(DeclarativeBrowserExecutableCaseSchema).min(1).max(100_000),
+  blockedCases: RegressionBlockedCasesSchema,
+}).strict().superRefine((input, context) => refineCompilerInputCases(input, context))
+
+export type CompilerInputV2 = z.infer<typeof CompilerInputV2Schema>
+export type CompilerInput = CompilerInputV1 | CompilerInputV2
+
+export function computeCompilerInputDigest(input: CompilerInput): string {
+  const parsed = input.schemaVersion === 'compiler-input/v2'
+    ? CompilerInputV2Schema.parse(input) : CompilerInputV1Schema.parse(input)
   return digestText('regression-compiler-input/v2', canonicalizeJson(parsed))
+}
+
+function refineExecutableCase(testCase: {
+  reqIds: string[]
+  ruleIds: string[]
+  obligationIds: string[]
+  actions: Array<{ actionId: string }>
+}, context: z.RefinementCtx): void {
+  for (const key of ['reqIds', 'ruleIds', 'obligationIds'] as const) {
+    if (!isUnique(testCase[key])) context.addIssue({ code: 'custom', message: `${key} 不得重复`, path: [key] })
+    if (!isSorted(testCase[key])) context.addIssue({ code: 'custom', message: `${key} 必须按稳定 ID 排序`, path: [key] })
+  }
+  if (!isUnique(testCase.actions.map((action) => action.actionId))) context.addIssue({
+    code: 'custom', message: '同一 Case 的 actionId 不得重复', path: ['actions'],
+  })
+}
+
+function refineCompilerInputCases(input: {
+  cases: Array<{ caseId: string }>
+  blockedCases: Array<{ caseId: string }>
+}, context: z.RefinementCtx): void {
+  const caseIds = input.cases.map((testCase) => testCase.caseId)
+  if (!isUnique(caseIds)) context.addIssue({ code: 'custom', message: '可执行 caseId 不得重复', path: ['cases'] })
+  if (!isSorted(caseIds)) context.addIssue({ code: 'custom', message: '可执行 Case 必须按 caseId 排序', path: ['cases'] })
+  const executableIds = new Set(caseIds)
+  if (input.blockedCases.some((blocked) => executableIds.has(blocked.caseId))) context.addIssue({
+    code: 'custom', message: '可执行 Case 与 blocked Case 必须互斥', path: ['blockedCases'],
+  })
 }
 
 function isUnique(values: string[]): boolean {

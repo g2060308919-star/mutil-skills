@@ -158,6 +158,22 @@ describe('compileReadOnlyProject', () => {
     expect(listed).toContain('CASE-WRITE-1 批准订单')
   })
 
+  test('declarative browser 资产生成可列举的真实 Playwright 项目', async () => {
+    const outputDir = await mkdtemp(join(process.cwd(), '.tmp', 'e2e-declarative-compiler-'))
+    createdDirectories.push(outputDir)
+    await compileTrustedProject({ outputDir, compilerInput: projectCompilerInputFromArtifacts({
+      artifacts: approvedCompilerArtifacts({ declarativeBinding: true }), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    }) })
+    const spec = await readFile(join(outputDir, 'tests/generated.spec.ts'), 'utf8')
+    expect(spec).toContain("import { test, expect } from '@playwright/test'")
+    expect(spec).toContain('getByRole("textbox", { name: "搜索订单" }).fill("待审核"')
+    expect(spec).toContain('// Oracle ORACLE-1')
+    expect(spec).not.toMatch(/eval\(|Function\(|process\.env/)
+    const listed = execFileSync(process.execPath, [playwrightCli, 'test', '--list'], { cwd: outputDir, encoding: 'utf8' })
+    expect(listed).toContain('CASE-READ-1 读取订单')
+  })
+
   test.each([
     ["}\ntest.afterEach(() => {})\nif (true) {", '直接闭合 wrapper'],
     ["}/* close */\ntest.afterEach(() => {})\nif (true) {", 'comment trivia 闭合 wrapper'],

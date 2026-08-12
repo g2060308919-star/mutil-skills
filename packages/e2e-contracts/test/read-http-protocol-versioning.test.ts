@@ -74,14 +74,17 @@ const readV20 = {
 }
 
 describe('SPA/API 只读请求协议版本', () => {
-  test('execution-contract 1.1 冻结完整请求；1.0 只能经显式补充事实迁移', () => {
+  test('execution-contract 1.2 冻结完整请求；旧 envelope 只能经显式迁移', () => {
     const migrated = migrateExecutionContractV10ToV11(
       executionV10, [readRequest], { 'ACTION-1': ['REQUEST-1'] },
     )
-    const current = envelope('execution-contract', '1.1.0', migrated)
+    const current = envelope('execution-contract', '1.2.0', migrated)
     expect(ArtifactSchemaRegistry['execution-contract'].parse(current)).toEqual(current)
     expect(() => parseArtifactDocument(
       envelope('execution-contract', '1.0.0', executionV10),
+    )).toThrow('E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED')
+    expect(() => parseArtifactDocument(
+      envelope('execution-contract', '1.1.0', migrated),
     )).toThrow('E2E_ARTIFACT_SCHEMA_MIGRATION_REQUIRED')
     expect(() => ArtifactSchemaRegistry['execution-contract'].parse({
       ...current, content: { ...migrated, unexpected: true },

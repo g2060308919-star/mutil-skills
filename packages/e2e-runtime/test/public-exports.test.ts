@@ -40,6 +40,8 @@ test('public Runtime package exposes the safe facade, status model, and protocol
     'createRuntimeLkgRecoveryDrillArtifact',
     'createRuntimeRevocationDrillArtifact',
     'createStableRuntimeResolver',
+    'createSupportedHostProof',
+    'createSupportedHostProofFromCapabilityProof',
     'createTargetContractFact',
     'describeRuntimeCompatibility',
     'projectRunStage',

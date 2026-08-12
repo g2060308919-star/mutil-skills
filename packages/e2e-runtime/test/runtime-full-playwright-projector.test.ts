@@ -84,7 +84,7 @@ export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
     unmappedSteps: [], discoveredRisks: [],
   }
   const testCases = artifact('test-cases', '1.0.0', testCasesContent)
-  const execution = artifact('execution-contract', '1.1.0', executionContent)
+  const execution = artifact('execution-contract', '1.2.0', executionContent)
   const actionMap = artifact('browser-action-map', '2.1.0', actionMapContent)
   const capability = {
     capabilityId: 'CAP-FULL', nonce: '1'.repeat(64), transport: 'browser-local' as const,

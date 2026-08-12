@@ -1,5 +1,6 @@
 import {
   CompilerInputV1Schema,
+  CompilerInputV2Schema,
   E2EError,
   ApprovalFreshnessReceiptSchema,
   canonicalizeJson,
@@ -9,6 +10,7 @@ import {
   parseArtifactDocument,
   type ArtifactDocument,
   type CompilerInputV1,
+  type CompilerInput,
   type DeclarativeExecutableCase,
   type RegressionBlockedCase,
 } from '@mutil-skills/e2e-contracts'
@@ -34,7 +36,7 @@ const REQUIRED_TYPES = [
   'approval-grants',
 ] as const
 
-const trustedInputs = new WeakMap<object, CompilerInputV1>()
+const trustedInputs = new WeakMap<object, CompilerInput>()
 
 export interface TrustedCompilerInput {}
 
@@ -115,6 +117,12 @@ export function projectCompilerInputFromArtifacts(
     throw projectorError('E2E_COMPILER_INPUT_INVALID', 'Action Map 与 Execution Contract executionProfile 不一致')
   }
   const fullPlaywright = executionProfile === 'full-playwright'
+  const declarativeBrowser = executionProfile === 'declarative-browser'
+  const declarativeBinding = declarativeBrowser
+    ? record(executionContent.declarativeExecutionBinding) : undefined
+  const declarativeCases = declarativeBinding === undefined ? new Map<string, Record<string, unknown>>()
+    : indexUnique(records(declarativeBinding.cases), (testCase) => text(testCase.caseId),
+      'declarative binding caseId 重复')
   const actionMapPrograms = optionalRecords(actionMapContent.fullPlaywrightPrograms)
   const executionPrograms = optionalRecords(executionContent.fullPlaywrightPrograms)
   if (fullPlaywright && (actionMapPrograms.length === 0
@@ -133,7 +141,7 @@ export function projectCompilerInputFromArtifacts(
   const runBundleContent = record(runBundle.content)
   const schedules = records(runBundleContent.schedule)
   const signedCapabilities = records(runBundleContent.signedCapabilities)
-  const executableCases: DeclarativeExecutableCase[] = []
+  const executableCases: Array<Record<string, unknown>> = []
   const blockedCases: RegressionBlockedCase[] = []
   const queueIdSet = new Set(queueIds)
 
@@ -172,7 +180,7 @@ export function projectCompilerInputFromArtifacts(
     const obligationIds = strings(testCase.obligationIds)
     const trace = fullIndexes ? projectFullPlaywrightRequirementTrace(caseId, obligationIds, fullIndexes)
       : projectRequirementTrace(caseId, obligationIds, obligations)
-    const actions = [] as DeclarativeExecutableCase['actions']
+    const actions: Array<Record<string, unknown>> = []
     for (const step of steps) {
       const stepId = text(step.stepId)
       const mapping = fullIndexes
@@ -189,7 +197,19 @@ export function projectCompilerInputFromArtifacts(
       }
       const oracles = records(step.oracles)
       if (oracles.length === 0) throw projectorError('E2E_COMPILER_INPUT_INVALID', `Step ${stepId} 缺少 Oracle`)
-      if (fullPlaywright) {
+      if (declarativeBrowser) {
+        const declarativeCase = declarativeCases.get(caseId)
+        if (!declarativeCase) throw projectorError('E2E_COMPILER_INPUT_INVALID',
+          `Case ${caseId} 缺少声明式执行绑定`)
+        const declarativeAction = uniqueMatch(records(declarativeCase.actions),
+          (candidate) => text(candidate.actionId) === actionId, `Action ${actionId} 声明式绑定未唯一闭合`)
+        const declarativeOracles = records(declarativeCase.oracles)
+          .filter((candidate) => text(candidate.actionId) === actionId)
+        if (declarativeOracles.length === 0) throw projectorError('E2E_COMPILER_INPUT_INVALID',
+          `Action ${actionId} 缺少声明式 Oracle`)
+        actions.push({ kind: 'declarativeBrowser', actionId,
+          action: declarativeAction as never, oracles: declarativeOracles as never })
+      } else if (fullPlaywright) {
         const indexes = fullIndexes!
         const program = consumeIndex(indexes.programsByAction, actionId, `Action ${actionId} program 未唯一闭合`)
         const cleanupPlan = consumeIndex(indexes.cleanupByAction, actionId, `Action ${actionId} cleanup 未唯一闭合`)
@@ -250,8 +270,10 @@ export function projectCompilerInputFromArtifacts(
   }
   if (fullIndexes) assertFullPlaywrightIndexesConsumed(fullIndexes)
 
-  const input = CompilerInputV1Schema.parse({
-    schemaVersion: 'compiler-input/v1',
+  if (declarativeBrowser && declarativeCases.size !== executableCases.length) throw projectorError(
+    'E2E_COMPILER_INPUT_INVALID', '声明式执行绑定包含未被 active Case 唯一消费的 Case')
+  const compilerInput = {
+    schemaVersion: declarativeBrowser ? 'compiler-input/v2' as const : 'compiler-input/v1' as const,
     assetId: projectPolicy.assetId,
     generationId: projectPolicy.generationId,
     runId: text(record(runBundle.content).runId),
@@ -266,10 +288,13 @@ export function projectCompilerInputFromArtifacts(
     policyDigest: projectPolicy.contentDigest,
     playwrightVersion: request.playwrightVersion,
     nodeVersion: request.nodeVersion,
-    ...(fullPlaywright ? { executionProfile: 'full-playwright' as const } : {}),
+    ...(declarativeBrowser ? { executionProfile: 'declarative-browser' as const }
+      : fullPlaywright ? { executionProfile: 'full-playwright' as const } : {}),
     cases: executableCases,
     blockedCases: fullPlaywright ? blockedCases : blockedCases.sort(byId('caseId')),
-  })
+  }
+  const input = declarativeBrowser
+    ? CompilerInputV2Schema.parse(compilerInput) : CompilerInputV1Schema.parse(compilerInput)
   const token = Object.freeze({})
   trustedInputs.set(token, structuredClone(input))
   return token
@@ -461,7 +486,7 @@ function assertConsumedApprovalBinding(input: {
 }
 
 /** 仅供同包 Compiler/Discovery 消费；不会从 package root 导出。 */
-export function inspectTrustedCompilerInput(value: TrustedCompilerInput): CompilerInputV1 {
+export function inspectTrustedCompilerInput(value: TrustedCompilerInput): CompilerInput {
   const input = trustedInputs.get(value as object)
   if (!input) throw projectorError('E2E_COMPILER_INPUT_INVALID', 'Compiler Input 不是可信 Projector 产物')
   return structuredClone(input)

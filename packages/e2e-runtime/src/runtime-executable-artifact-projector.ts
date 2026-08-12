@@ -87,7 +87,7 @@ export function projectRuntimeExecutableArtifacts(input: {
         .map((oracle) => oracle.oracleId), effect: action.effect,
       capabilities: [{ operation: action.kind === 'navigate' ? 'local-navigation' as const : 'dom-read' as const,
         capabilityId: `PENDING-${action.actionId}` }], requestIds: [],
-    }))), unmappedSteps: [], discoveredRisks: [], executionProfile: 'trusted-read-only' as const,
+    }))), unmappedSteps: [], discoveredRisks: [], executionProfile: 'declarative-browser' as const,
   }
   const executionContractContent = {
     environment: 'RUNTIME-TARGET', baseOrigin: input.snapshot.targetProbe
@@ -99,12 +99,13 @@ export function projectRuntimeExecutableArtifacts(input: {
       intentDigest: digestText('runtime-declarative-action-intent/v1', canonicalizeJson(action)), requestIds: [],
     }))), readHttpRequests: [], dataNeeds: [], manualProcedures: [],
     evidencePolicyDigest: digestText('runtime-declarative-evidence-policy/v1', 'screenshot,dom,url,network,console'),
-    runtimeIsolation: null, unresolvedItems: [], executionProfile: 'trusted-read-only' as const,
+    runtimeIsolation: null, unresolvedItems: [], executionProfile: 'declarative-browser' as const,
+    declarativeExecutionBinding: withoutBindingDigest(input.compilation.normalizedBinding),
   }
   const artifacts = {
     'test-cases': artifact(input, 'test-cases', '1.0.0', testCasesContent),
     'browser-action-map': artifact(input, 'browser-action-map', '2.1.0', browserActionMapContent),
-    'execution-contract': artifact(input, 'execution-contract', '1.1.0', executionContractContent),
+    'execution-contract': artifact(input, 'execution-contract', '1.2.0', executionContractContent),
   }
   const recipe = {
     artifacts,
@@ -153,6 +154,10 @@ function projectLocator(locator: Record<string, unknown>) {
 function unique<T>(values: T[]): T[] { return [...new Set(values)] }
 function uniqueBy<T>(values: T[], key: (value: T) => string): T[] {
   return [...new Map(values.map((value) => [key(value), value])).values()]
+}
+function withoutBindingDigest(binding: ExecutableRunCompilation['normalizedBinding']) {
+  const { bindingDigest: _bindingDigest, ...candidate } = binding
+  return candidate
 }
 function projectorError(code: string, cause?: unknown): E2EError {
   return new E2EError({ code, category: 'artifact', message: code, retryable: false, cause })

@@ -233,7 +233,7 @@ export function projectionFixture() {
 
 function artifact(type: 'test-cases' | 'execution-contract' | 'browser-action-map', content: unknown): ArtifactDocument {
   const schemaVersion = type === 'browser-action-map' ? '2.1.0'
-    : type === 'execution-contract' ? '1.1.0' : '1.0.0'
+    : type === 'execution-contract' ? '1.2.0' : '1.0.0'
   const document: Record<string, unknown> = {
     artifactId: `ARTIFACT-${type}`, artifactType: type, schemaVersion, engineVersion: '0.1.0',
     assetId: 'ASSET-1', prdRevision: d('prd'), generationId: 'RUN-1',
