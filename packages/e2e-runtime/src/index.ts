@@ -1,5 +1,9 @@
 export { RUNTIME_PACKAGE_VERSION } from './protocol.js'
 export {
+  createSupportedHostProof, createSupportedHostProofFromCapabilityProof,
+  type CreateSupportedHostProofInput,
+} from './supported-host-proof.js'
+export {
   AcceptanceReviewReceiptSchema,
   buildAcceptanceReview,
   confirmAcceptanceReview,
