@@ -5,7 +5,7 @@ import {
 import { RUNTIME_PACKAGE_VERSION } from './protocol.js'
 import { RuntimeStateMigrationRegistry } from './runtime-state-migration.js'
 
-const CURRENT_SNAPSHOT_SCHEMA_VERSION = '1.8.0' as const
+const CURRENT_SNAPSHOT_SCHEMA_VERSION = '1.9.0' as const
 
 /**
  * 把 Runtime 当前已经证明的兼容边界投影为严格、只读事实。

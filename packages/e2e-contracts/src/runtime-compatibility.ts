@@ -12,6 +12,7 @@ const MigrationSourceSchemaVersionsSchema = z.tuple([
   z.literal('1.5.0'),
   z.literal('1.6.0'),
   z.literal('1.7.0'),
+  z.literal('1.8.0'),
 ])
 
 const ExecutorCapabilitiesSchema = z.tuple([
@@ -38,7 +39,7 @@ export const RuntimeCompatibilityDescriptorV1Schema = z.object({
     }).strict(),
   }).strict(),
   state: z.object({
-    currentSnapshotSchemaVersion: z.literal('1.8.0'),
+    currentSnapshotSchemaVersion: z.literal('1.9.0'),
     migrationSourceSchemaVersions: MigrationSourceSchemaVersionsSchema,
     restrictions: z.tuple([z.object({
       schemaVersion: z.literal('1.0.0'),
