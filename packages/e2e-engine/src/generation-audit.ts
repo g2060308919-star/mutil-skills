@@ -87,6 +87,56 @@ export interface GenerationAuditResult {
   findings: GenerationAuditFinding[]
 }
 
+export interface ExecutableCompilationClosureView {
+  cases: Array<{ caseId: string; actionIds: string[]; oracleIds: string[] }>
+}
+
+export function auditExecutableCompilationClosure(input: {
+  plan: ExecutableCompilationClosureView
+  binding: ExecutableCompilationClosureView
+  artifacts: ExecutableCompilationClosureView
+}): GenerationAuditResult {
+  const findings: GenerationAuditFinding[] = []
+  const binding = uniqueCaseMap(input.binding.cases, 'E2E_EXECUTABLE_BINDING_CASE_DUPLICATE')
+  const artifacts = uniqueCaseMap(input.artifacts.cases, 'E2E_EXECUTABLE_ARTIFACT_CASE_DUPLICATE')
+  for (const planCase of input.plan.cases) {
+    const bound = binding.get(planCase.caseId)
+    const projected = artifacts.get(planCase.caseId)
+    if (bound === undefined) add('E2E_EXECUTABLE_BINDING_CASE_MISSING', planCase.caseId)
+    if (projected === undefined) add('E2E_EXECUTABLE_ARTIFACT_CASE_MISSING', planCase.caseId)
+    if (bound !== undefined) {
+      if (!sameIds(planCase.actionIds, bound.actionIds)) add('E2E_EXECUTABLE_BINDING_ACTION_MISMATCH', planCase.caseId)
+      if (!sameIds(planCase.oracleIds, bound.oracleIds)) add('E2E_EXECUTABLE_BINDING_ORACLE_MISMATCH', planCase.caseId)
+    }
+    if (projected !== undefined) {
+      if (!sameIds(planCase.actionIds, projected.actionIds)) add('E2E_EXECUTABLE_ARTIFACT_ACTION_MISMATCH', planCase.caseId)
+      if (!sameIds(planCase.oracleIds, projected.oracleIds)) add('E2E_EXECUTABLE_ARTIFACT_ORACLE_MISMATCH', planCase.caseId)
+    }
+  }
+  const expected = new Set(input.plan.cases.map((item) => item.caseId))
+  for (const caseId of binding.keys()) if (!expected.has(caseId)) add('E2E_EXECUTABLE_BINDING_CASE_UNKNOWN', caseId)
+  for (const caseId of artifacts.keys()) if (!expected.has(caseId)) add('E2E_EXECUTABLE_ARTIFACT_CASE_UNKNOWN', caseId)
+  findings.sort((left, right) => left.code.localeCompare(right.code) || left.artifactId.localeCompare(right.artifactId))
+  return { valid: findings.length === 0, findings }
+
+  function add(code: string, caseId: string) {
+    findings.push({ code, artifactId: caseId, refs: [caseId] })
+  }
+
+  function uniqueCaseMap(cases: ExecutableCompilationClosureView['cases'], duplicateCode: string) {
+    const result = new Map<string, ExecutableCompilationClosureView['cases'][number]>()
+    for (const testCase of cases) {
+      if (result.has(testCase.caseId)) add(duplicateCode, testCase.caseId)
+      else result.set(testCase.caseId, testCase)
+    }
+    return result
+  }
+}
+
+function sameIds(left: string[], right: string[]): boolean {
+  return [...left].sort().join('\0') === [...right].sort().join('\0')
+}
+
 /** 审计已通过单体 Schema 校验的 Artifact 引用图。 */
 export function auditArtifactGraph(
   artifacts: AuditableArtifact[],
