@@ -13,11 +13,19 @@ interface BrowserPerformanceSample {
 }
 
 export function summarizeBrowserPerformance(input: { runnerIdentity: string; warmupSamples: number;
-  samples: BrowserPerformanceSample[]; budgetMs: number; stableResources: boolean }) {
+  samples: BrowserPerformanceSample[]; budgetMs: number; stableResources: boolean
+  journeyCaseCounts: number[]; concurrentRuns: number; concurrentFailures: number
+  soakIterations: number; soakFailures: number; soakRssGrowthBytes: number }) {
   if (input.warmupSamples < 3 || input.samples.length < 20) throw new Error('E2E_BROWSER_PERFORMANCE_SAMPLE_COUNT_INVALID')
   const durations = input.samples.filter((item) => item.passed).map((item) => item.durationMs)
   const round = (value: number) => Math.round(value * 1_000) / 1_000
   const percentile = (rank: number) => round(nearestRankPercentile(durations, rank))
+  const coverageComplete = canonicalizeJson([...new Set(input.journeyCaseCounts)].sort((a, b) => a - b))
+      === canonicalizeJson([10, 50, 100])
+    && input.concurrentRuns >= 4 && input.concurrentFailures === 0
+    && input.soakIterations >= 100 && input.soakFailures === 0
+  const passed = input.samples.every((item) => item.passed) && percentile(95) <= input.budgetMs
+    && coverageComplete
   const body = { schemaVersion: 'browser-performance-proof/v1' as const,
     runnerIdentity: input.runnerIdentity, stableResources: input.stableResources,
     warmupSamples: input.warmupSamples, sampleCount: input.samples.length,
@@ -26,8 +34,10 @@ export function summarizeBrowserPerformance(input: { runnerIdentity: string; war
     peakProfileBytes: Math.max(...input.samples.map((item) => item.profileBytes)),
     peakTraceBytes: Math.max(...input.samples.map((item) => item.traceBytes)),
     failures: input.samples.filter((item) => !item.passed).length,
-    passed: input.samples.every((item) => item.passed) && percentile(95) <= input.budgetMs,
-    gateEligible: input.stableResources }
+    journeyCaseCounts: input.journeyCaseCounts, concurrentRuns: input.concurrentRuns,
+    concurrentFailures: input.concurrentFailures, soakIterations: input.soakIterations,
+    soakFailures: input.soakFailures, soakRssGrowthBytes: input.soakRssGrowthBytes,
+    passed, gateEligible: input.stableResources && passed }
   return { ...body, proofDigest: digestText('browser-performance-proof/v1', canonicalizeJson(body)) }
 }
 
@@ -43,6 +53,10 @@ export async function runBrowserPerformanceProof() {
   const address = server.address(); if (address === null || typeof address === 'string') throw new Error('E2E_BROWSER_PERFORMANCE_SERVER_FAILED')
   const origin = `http://127.0.0.1:${address.port}`
   const samples: BrowserPerformanceSample[] = []
+  const caseCounts = [10, 50, 100]
+  let concurrentFailures = 0
+  let soakFailures = 0
+  let soakRssGrowthBytes = 0
   try {
     for (let index = 0; index < warmupSamples + sampleCount; index += 1) {
       const profile = await mkdtemp(join(tmpdir(), 'mutil-e2e-browser-perf-'))
@@ -52,8 +66,8 @@ export async function runBrowserPerformanceProof() {
       try {
         await context.tracing.start({ screenshots: true, snapshots: true, sources: false })
         const page = context.pages()[0] ?? await context.newPage(); await page.goto(origin)
-        await page.getByLabel('名称').fill(`sample-${index}`); await page.getByRole('button', { name: '保存' }).click()
-        passed = await page.locator('#result').textContent() === `sample-${index}`
+        const cases = caseCounts[index % caseCounts.length]!
+        passed = await exerciseCases(page, cases, `sample-${index}`)
         await context.tracing.stop({ path: tracePath })
       } finally {
         await context.close()
@@ -63,10 +77,37 @@ export async function runBrowserPerformanceProof() {
         await rm(profile, { recursive: true, force: true })
       }
     }
+    const browser = await chromium.launch({ channel: 'chrome', headless: true })
+    try {
+      const concurrent = await Promise.all(Array.from({ length: 4 }, async (_, index) => {
+        const context = await browser.newContext(); const page = await context.newPage()
+        try { await page.goto(origin); return await exerciseCases(page, 10, `concurrent-${index}`) }
+        finally { await context.close() }
+      }))
+      concurrentFailures = concurrent.filter((passed) => !passed).length
+      const context = await browser.newContext(); const page = await context.newPage(); await page.goto(origin)
+      const beforeRss = Math.round(process.resourceUsage().maxRSS * 1024)
+      try { if (!await exerciseCases(page, 100, 'soak')) soakFailures += 1 }
+      catch { soakFailures += 1 }
+      soakRssGrowthBytes = Math.max(0, Math.round(process.resourceUsage().maxRSS * 1024) - beforeRss)
+      await context.close()
+    } finally { await browser.close() }
   } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())) }
   return summarizeBrowserPerformance({ runnerIdentity: process.env.E2E_BROWSER_PERFORMANCE_RUNNER_ID
     ?? `${process.platform}-${process.arch}-node${process.versions.node.split('.')[0]}-system-chrome`,
-  warmupSamples, samples, budgetMs, stableResources: process.env.E2E_BROWSER_PERFORMANCE_STABLE_RUNNER === '1' })
+  warmupSamples, samples, budgetMs, stableResources: process.env.E2E_BROWSER_PERFORMANCE_STABLE_RUNNER === '1',
+  journeyCaseCounts: caseCounts, concurrentRuns: 4, concurrentFailures,
+  soakIterations: 100, soakFailures, soakRssGrowthBytes })
+}
+
+async function exerciseCases(page: import('playwright').Page, cases: number, prefix: string): Promise<boolean> {
+  for (let index = 0; index < cases; index += 1) {
+    const value = `${prefix}-${index}`
+    await page.getByLabel('名称').fill(value)
+    await page.getByRole('button', { name: '保存' }).click()
+    if (await page.locator('#result').textContent() !== value) return false
+  }
+  return true
 }
 
 async function directoryBytes(path: string): Promise<number> {
