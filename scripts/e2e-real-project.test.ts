@@ -1,7 +1,13 @@
+import { createServer } from 'node:http'
 import { describe, expect, test } from 'vitest'
 import { runRealProjectFixture } from './e2e-real-project.js'
 
-describe('真实复杂前端项目 Chrome proof', () => {
+const loopbackAvailable = await canBindLoopback()
+if (process.env.E2E_REQUIRED_TEST_CAPABILITIES?.split(',').includes('loopback') && !loopbackAvailable) {
+  throw new Error('E2E_HOST_CAPABILITY_NOT_EXECUTED:loopback')
+}
+
+describe.skipIf(!loopbackAvailable)('真实复杂前端项目 Chrome proof（无 loopback 时不计功能通过）', () => {
   test('组件式复杂 DOM 应用通过 browser-product 主链且准确披露 Mock 替代边界', async () => {
     const proof = await runRealProjectFixture({ stack: 'react-like', defect: 'none' })
     expect(proof).toMatchObject({ proofKind: 'real-project',
@@ -42,3 +48,19 @@ describe('真实复杂前端项目 Chrome proof', () => {
     ])
   }, 30_000)
 })
+
+async function canBindLoopback(): Promise<boolean> {
+  const server = createServer()
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', resolve)
+    })
+    return true
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && ['EACCES', 'EPERM'].includes(String(error.code))) return false
+    throw error
+  } finally {
+    if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()))
+  }
+}
