@@ -32,7 +32,8 @@ export function confirmAcceptanceReview(input: {
   if (review.reviewDigest !== input.expectedReviewDigest) {
     throw reviewError('E2E_ACCEPTANCE_REVIEW_DIGEST_MISMATCH')
   }
-  if (review.unresolvedItems.length > 0) {
+  if (review.unresolvedItems.length > 0 || review.confirmable === false
+    || (review.blockingReasons?.length ?? 0) > 0) {
     throw reviewError('E2E_ACCEPTANCE_REVIEW_NOT_CONFIRMABLE')
   }
   const material = {
@@ -222,6 +223,28 @@ export function buildAcceptanceReview(snapshot: RuntimeRunSnapshot): AcceptanceR
         ? {} : { pageIdentityPolicy: testCase.pageIdentityPolicy }),
     })),
   }
+  const executionCases = plan.cases
+  const reversibleWriteCount = executionCases.flatMap((testCase) => testCase.actions)
+    .filter((action) => action.effect === 'reversible-write').length
+  const dataNeedCount = executionCases.reduce((sum, testCase) => sum
+    + (testCase.fixture?.dataLease === undefined ? 0 : 1), 0)
+  const cleanupCount = executionCases.reduce((sum, testCase) => sum
+    + (testCase.fixture?.cleanup === undefined ? 0 : 1), 0)
+  const reloadOracleCount = executionCases.reduce((sum, testCase) => sum
+    + (testCase.fixture?.reloadVerification?.length ?? 0), 0)
+  const unresolvedItems = ambiguities.filter((item) => item.status === 'pending')
+    .map((item) => item.question)
+  const blockingReasons = [
+    ...(unresolvedItems.length === 0 ? [] : ['E2E_ACCEPTANCE_REVIEW_PENDING_AMBIGUITY']),
+    ...(executionCases.some((testCase) => testCase.actions.some((action) =>
+      action.effect === 'reversible-write') && (testCase.fixture?.cleanup === undefined
+        || testCase.fixture.reloadVerification === undefined))
+      ? ['E2E_ACCEPTANCE_REVIEW_WRITE_CLEANUP_REQUIRED'] : []),
+  ]
+  const executionValue = snapshot.frozenArtifacts['execution-contract']?.content
+  const executableBound = record(executionValue)
+    && (executionValue as Record<string, unknown>).declarativeBinding !== undefined
+  const target = snapshot.targetContract?.contract
   const draft = {
     schemaVersion: '1.0.0' as const,
     runId: snapshot.runId,
@@ -233,8 +256,26 @@ export function buildAcceptanceReview(snapshot: RuntimeRunSnapshot): AcceptanceR
       .map((link) => link.clauseId),
     excludedClauseIds: links.filter((link) => link.disposition === 'excluded'
       || link.disposition === 'not-applicable').map((link) => link.clauseId),
-    unresolvedItems: ambiguities.filter((item) => item.status === 'pending')
-      .map((item) => item.question),
+    unresolvedItems,
+    executionSummary: {
+      ...(target === undefined ? {} : { target: {
+        baseOrigin: target.baseOrigin,
+        environmentLabel: target.environmentLabel,
+        pageIdentityPolicyDigest: digestText(
+          'e2e-acceptance-review-page-identity/v1', canonicalizeJson(target.pageIdentityPolicy),
+        ),
+      } }),
+      bindingStatus: executableBound ? 'executable-bound' as const : 'semantic-only' as const,
+      caseCount: executionCases.length,
+      actionCount: executionCases.reduce((sum, testCase) => sum + testCase.actions.length, 0),
+      oracleCount: executionCases.reduce((sum, testCase) => sum + testCase.oracles.length, 0),
+      reversibleWriteCount,
+      dataNeedCount,
+      cleanupCount,
+      reloadOracleCount,
+    },
+    confirmable: blockingReasons.length === 0,
+    blockingReasons,
   }
   return AcceptanceReviewSchema.parse({
     ...draft,

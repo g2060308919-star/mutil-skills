@@ -57,9 +57,30 @@ describe('AcceptanceReview', () => {
         caseId: 'CASE-0001', title: '下单', actor: 'USER', contractNodeIds: ['NODE-1'],
         actions: [{ actionId: 'ACTION-1', statement: '下单', effect: 'reversible-write' }],
         oracles: [{ oracleId: 'COMPILED-ORACLE-1', acceptanceCriterion: '订单可见' }],
+        executionLane: 'real-reversible-write',
+        fixture: { actorRef: 'USER', preconditions: [{ kind: 'data-record', statement: '待下单商品' }],
+          seedStrategy: 'gateway-api', dataLease: { leaseKey: 'LEASE-order', scope: 'tenant',
+            expiresAfterSeconds: 300 }, cleanup: { kind: 'gateway-api', statement: '删除测试订单' },
+          reloadVerification: [{ statement: '删除后 Reload 仍不存在' }] },
       }],
     })
     expect(review.reviewDigest).toMatch(/^sha256:/)
+    expect(review.executionSummary).toMatchObject({
+      target: {
+        baseOrigin: 'https://shop.example.test',
+        environmentLabel: 'gold',
+      },
+      bindingStatus: 'semantic-only',
+      caseCount: 1,
+      actionCount: 1,
+      oracleCount: 1,
+      reversibleWriteCount: 1,
+      dataNeedCount: 1,
+      cleanupCount: 1,
+      reloadOracleCount: 1,
+    })
+    expect(review).toMatchObject({ confirmable: false,
+      blockingReasons: ['E2E_ACCEPTANCE_REVIEW_PENDING_AMBIGUITY'] })
     expect(buildAcceptanceReview(reviewSnapshot())).toEqual(review)
   })
 
@@ -121,6 +142,19 @@ describe('AcceptanceReview', () => {
       code: 'E2E_ACCEPTANCE_REVIEW_REQUIRED_OBLIGATION_INCOMPLETE',
     }))
   })
+
+  test('不可安全清理的写操作显示阻断原因且不能确认', () => {
+    const snapshot = reviewSnapshot()
+    ;((snapshot.frozenArtifacts['acceptance-scope']!.content as any).ambiguities) = []
+    snapshot.compiledPrdRun!.cases[0]!.fixture = undefined
+    const review = buildAcceptanceReview(snapshot)
+    expect(review).toMatchObject({ confirmable: false,
+      blockingReasons: ['E2E_ACCEPTANCE_REVIEW_WRITE_CLEANUP_REQUIRED'] })
+    expect(() => confirmAcceptanceReview({ review, expectedReviewDigest: review.reviewDigest,
+      confirmedAt: '2026-08-02T01:00:00.000Z' })).toThrowError(expect.objectContaining({
+      code: 'E2E_ACCEPTANCE_REVIEW_NOT_CONFIRMABLE',
+    }))
+  })
 })
 
 function reviewSnapshot(): RuntimeRunSnapshot {
@@ -163,6 +197,17 @@ function reviewSnapshot(): RuntimeRunSnapshot {
       }] } } as any,
     },
     trustedExecutionFacts: {},
+    targetContract: {
+      schemaVersion: '1.0.0',
+      contract: {
+        schemaVersion: '1.0.0', targetUrl: 'https://shop.example.test/orders',
+        baseOrigin: 'https://shop.example.test', environmentLabel: 'gold',
+        allowedNavigationOrigins: ['https://shop.example.test'],
+        pageIdentityPolicy: { schemaVersion: '1.0.0',
+          url: { origin: 'https://shop.example.test', pathPattern: '/orders' },
+          signals: [{ kind: 'role', role: 'main', name: '订单' }], match: { mode: 'all' } },
+      }, contractDigest: d('d'), environmentIdentityDigest: d('e'),
+    },
     compiledPrdRun: {
       schemaVersion: '1.0.0', contractProjectionDigest: d('a'), compilerDigest: d('b'),
       cases: [{
@@ -172,6 +217,11 @@ function reviewSnapshot(): RuntimeRunSnapshot {
           effect: 'reversible-write', statement: '下单' }],
         oracles: [{ oracleId: 'COMPILED-ORACLE-1', oracleKey: 'created', actionId: 'ACTION-1',
           contractNodeId: 'NODE-1', acceptanceCriterion: '订单可见' }],
+        executionLane: 'real-reversible-write',
+        fixture: { actorRef: 'USER', preconditions: [{ kind: 'data-record', statement: '待下单商品' }],
+          seedStrategy: 'gateway-api', dataLease: { leaseKey: 'LEASE-order', scope: 'tenant',
+            expiresAfterSeconds: 300 }, cleanup: { kind: 'gateway-api', statement: '删除测试订单' },
+          reloadVerification: [{ statement: '删除后 Reload 仍不存在' }] },
       }],
     } as any,
     writeAttempts: {}, executionResults: { readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} },

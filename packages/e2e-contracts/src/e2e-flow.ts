@@ -322,8 +322,30 @@ export const AcceptanceReviewSchema = z.object({
   includedClauseIds: z.array(SafeIdSchema).max(100_000),
   excludedClauseIds: z.array(SafeIdSchema).max(100_000),
   unresolvedItems: z.array(LimitedTextSchema).max(10_000),
+  executionSummary: z.object({
+    target: z.object({
+      baseOrigin: z.string().url(),
+      environmentLabel: LimitedTextSchema,
+      pageIdentityPolicyDigest: DigestSchema,
+    }).strict().optional(),
+    bindingStatus: z.enum(['semantic-only', 'executable-bound']),
+    caseCount: z.number().int().nonnegative().max(1_000),
+    actionCount: z.number().int().nonnegative().max(100_000),
+    oracleCount: z.number().int().nonnegative().max(100_000),
+    reversibleWriteCount: z.number().int().nonnegative().max(100_000),
+    dataNeedCount: z.number().int().nonnegative().max(100_000),
+    cleanupCount: z.number().int().nonnegative().max(100_000),
+    reloadOracleCount: z.number().int().nonnegative().max(100_000),
+  }).strict().optional(),
+  confirmable: z.boolean().optional(),
+  blockingReasons: z.array(z.string().regex(/^E2E_[A-Z0-9_]+$/)).max(10_000).optional(),
   reviewDigest: DigestSchema,
-}).strict()
+}).strict().superRefine((review, context) => {
+  if (review.confirmable !== undefined
+    && review.confirmable !== ((review.blockingReasons?.length ?? 0) === 0)) context.addIssue({
+    code: 'custom', path: ['confirmable'], message: 'confirmable 必须由 blockingReasons 唯一决定',
+  })
+})
 
 export function normalizeTargetUrl(raw: string): string {
   const value = raw.trim()
