@@ -195,7 +195,8 @@ describe('E2ERuntimeHost', () => {
         generationDigest: digest('7'),
         terminalVerdict: 'accepted' as const,
       },
-      rendered: { json: '{}\n', markdown: '# report\n', html: '<h1>report</h1>\n' },
+      rendered: { json: '{}\n', markdown: '# report\n', html: '<h1>report</h1>\n',
+        explanation: { json: '{}\n', markdown: '# explanation\n', html: '<h1>explanation</h1>\n' } },
       reportDirectory: '/project/.biztest/reports/ASSET-1/RUN-REQUEST-REPORT-CREATE',
     }))
     const fixture = await hostFixture({
@@ -220,7 +221,11 @@ describe('E2ERuntimeHost', () => {
       generationId: created.runId,
       generationDigest: digest('7'),
       terminalVerdict: 'accepted',
-      report: { json: '{}\n', markdown: '# report\n', html: '<h1>report</h1>\n' },
+      report: { json: '{}\n', markdown: '# report\n', html: '<h1>report</h1>\n',
+        explanation: { json: '{}\n', markdown: '# explanation\n', html: '<h1>explanation</h1>\n' } },
+      executionExplanation: {
+        json: '{}\n', markdown: '# explanation\n', html: '<h1>explanation</h1>\n',
+      },
     })
     expect(renderActiveReport).toHaveBeenCalledOnce()
     expect(renderActiveReport).toHaveBeenCalledWith({

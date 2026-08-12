@@ -1075,6 +1075,7 @@ export class E2ERuntimeHost {
         generationDigest: publication.active.generationDigest,
         terminalVerdict: publication.active.terminalVerdict,
         report: publication.rendered,
+        executionExplanation: publication.rendered.explanation,
         ...(standaloneReportRoot === undefined ? {} : { standaloneReportRoot }),
       })
       const outcome = await this.dependencies.runStore.readRunOutcome(

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { FinalVerdictSchema } from './verdict.js'
 
 const Id = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const Digest = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -34,7 +35,7 @@ export const ClaimClassificationV1Schema = z.object({
 
 export const ExecutionExplanationV1Schema = z.object({
   schemaVersion: z.literal('execution-explanation/v1'), runId: Id,
-  verdict: z.enum(['accepted', 'rejected', 'incomplete', 'cancelled']),
+  verdict: z.union([FinalVerdictSchema, z.literal('cancelled')]),
   timeline: z.array(TimelineEventV1Schema).max(1_000_000),
   failures: z.array(FailureExplanationV1Schema).max(100_000),
   claims: z.array(ClaimClassificationV1Schema).max(100_000), lineageDigest: Digest,
