@@ -178,6 +178,25 @@ describe('BrowserExecutorProtocolV1 Runtime 适配', () => {
     expect(execute).not.toHaveBeenCalled()
   })
 
+  it('dispatch 后把 signal 传入支持取消的 backend，并在只读等待中及时终止', async () => {
+    const controller = new AbortController()
+    let started!: () => void
+    const didStart = new Promise<void>((resolve) => { started = resolve })
+    const backend = authorizeB2BProofBrowserExecutorV1(async (_input, signal) => {
+      started()
+      await new Promise<void>((resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new Error('backend-aborted')), { once: true })
+      })
+      return { status: 'passed' }
+    })
+    const execution = executeBrowserExecutorV1(adaptB2BProofBrowserExecutorV1(backend), {
+      executionId: 'EXEC-CANCEL', runId: 'RUN-1', attemptId: 'ATTEMPT-1', input: {}, signal: controller.signal,
+    })
+    await didStart
+    controller.abort()
+    await expect(execution).rejects.toThrow('backend-aborted')
+  })
+
   it('把写 effect unknown 固定映射为 reconcile 且保留 cleanup 状态', () => {
     const descriptor: BrowserExecutorDescriptorV1 = {
       schemaVersion: '1.0.0', protocolVersion: '1.0.0', executorId: 'reversible-write/v1',

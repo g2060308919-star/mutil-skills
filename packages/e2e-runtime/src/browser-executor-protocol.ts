@@ -33,7 +33,7 @@ export interface BrowserExecutorProtocolCapabilityV1 {
 
 interface BrowserExecutorBackendV1 {
   descriptor: BrowserExecutorDescriptorV1
-  execute(input: unknown): Promise<unknown>
+  execute(input: unknown, signal?: AbortSignal): Promise<unknown>
 }
 
 const adapters = new WeakMap<object, BrowserExecutorBackendV1>()
@@ -82,7 +82,7 @@ export async function executeBrowserExecutorV1(
       'E2E_BROWSER_EXECUTOR_DEADLINE_EXPIRED', '浏览器执行 deadline 在 dispatch 前已过期', true,
     )
   await progress('dispatching')
-  const legacyOutput = await backend.execute(invocation.input)
+  const legacyOutput = await backend.execute(invocation.input, invocation.signal)
   await progress('executed')
   const result = projectLegacyBrowserExecutorResultV1({
     descriptor: backend.descriptor, executionId: invocation.executionId,
@@ -142,10 +142,10 @@ export interface B2BProofBrowserExecutorCapabilityV1 {
   readonly __brand: 'B2BProofBrowserExecutorCapabilityV1'
 }
 
-const b2bProofExecutors = new WeakMap<object, (input: unknown) => Promise<unknown>>()
+const b2bProofExecutors = new WeakMap<object, (input: unknown, signal?: AbortSignal) => Promise<unknown>>()
 
 export function authorizeB2BProofBrowserExecutorV1(
-  execute: (input: unknown) => Promise<unknown>,
+  execute: (input: unknown, signal?: AbortSignal) => Promise<unknown>,
 ): B2BProofBrowserExecutorCapabilityV1 {
   const capability = Object.freeze({}) as B2BProofBrowserExecutorCapabilityV1
   b2bProofExecutors.set(capability, execute)
