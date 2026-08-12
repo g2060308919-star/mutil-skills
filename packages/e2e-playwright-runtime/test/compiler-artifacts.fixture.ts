@@ -268,7 +268,7 @@ const fixtureReadiness = createTrustedCompilerReadiness({
   verifyArtifactSignature: artifactAuthority.verifyArtifactSignature.bind(artifactAuthority),
   verifyDecisionReceipt: verifyFixtureDecisionReceipt,
 })
-export const compilerArtifactVerification = { nodeVersion: '24.18.0', typescriptVersion: '5.9.3', trust: createTrustedCompilerProjectorTrust({
+export const compilerArtifactVerification = { nodeVersion: process.versions.node, typescriptVersion: '5.9.3', trust: createTrustedCompilerProjectorTrust({
   artifactAuthority: { material: artifactAuthority.artifactVerifierMaterial,
     expectedPublicKeyDigest: artifactAuthority.artifactVerifierMaterial.publicKeyDigest },
   approvalFreshnessAuthority: { material: freshnessMaterial,
