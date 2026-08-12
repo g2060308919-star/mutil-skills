@@ -2,10 +2,10 @@ import { describe, expect, test } from 'vitest'
 import { runRealProjectFixture } from './e2e-real-project.js'
 
 describe('真实复杂前端项目 Chrome proof', () => {
-  test('React 风格复杂应用通过 browser-product 主链且准确披露 Mock 替代边界', async () => {
+  test('组件式复杂 DOM 应用通过 browser-product 主链且准确披露 Mock 替代边界', async () => {
     const proof = await runRealProjectFixture({ stack: 'react-like', defect: 'none' })
     expect(proof).toMatchObject({ proofKind: 'real-project',
-      application: { stack: 'React-like component application' },
+      application: { stack: 'Component-style DOM application' },
       gate: { eligible: true, passed: true, reasons: [] } })
     expect(proof.components).toEqual(expect.arrayContaining([
       expect.objectContaining({ component: 'browser-product', mode: 'real', claim: 'verified' }),

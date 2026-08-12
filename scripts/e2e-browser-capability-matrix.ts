@@ -1,9 +1,26 @@
 import { pathToFileURL } from 'node:url'
 import {
+  E2EBenchmarkProofV1Schema,
   BrowserCapabilityMatrixV1Schema,
   computeBrowserCapabilityMatrixDigest,
   digestText,
 } from '@mutil-skills/e2e-contracts'
+import { readFile } from 'node:fs/promises'
+
+interface ComponentProofSummary {
+  schemaVersion: '1.0.0'
+  proofKind: 'browser-capability'
+  proofDigest: string
+  passed: boolean
+  gateEligible: boolean
+}
+
+interface RealProjectProofSummary {
+  schemaVersion: 'e2e-benchmark-proof/v1'
+  proofKind: 'real-project'
+  proofDigest: string
+  gate: { eligible: boolean; passed: boolean }
+}
 
 const verified = [
   ['CAP-locator-strict-actionable', '唯一 locator 与可操作性', 'role/test-id/css/text strict locator'],
@@ -19,18 +36,26 @@ const verified = [
 ] as const
 
 export function buildBrowserCapabilityMatrix(input: {
-  componentProofDigest: string
-  realProjectProofDigest?: string
+  componentProof: ComponentProofSummary
+  realProjectProof?: RealProjectProofSummary
   generatedAt?: string
 }) {
-  const supported = input.realProjectProofDigest !== undefined
+  const componentProofDigest = requireDigest(input.componentProof.proofDigest)
+  const realProjectProofDigest = input.realProjectProof === undefined
+    ? undefined : requireDigest(input.realProjectProof.proofDigest)
+  const supported = input.componentProof.schemaVersion === '1.0.0'
+    && input.componentProof.proofKind === 'browser-capability'
+    && input.componentProof.passed && input.componentProof.gateEligible
+    && input.realProjectProof?.schemaVersion === 'e2e-benchmark-proof/v1'
+    && input.realProjectProof.proofKind === 'real-project'
+    && input.realProjectProof.gate.eligible && input.realProjectProof.gate.passed
   const entries = verified.map(([capabilityId, boundary, compilerSemantics]) => ({
     capabilityId,
     status: supported ? 'supported' as const : 'unverified-on-real-project' as const,
     boundary,
     compilerSemantics,
-    componentProofDigest: input.componentProofDigest,
-    ...(input.realProjectProofDigest === undefined ? {} : { realProjectProofDigest: input.realProjectProofDigest }),
+    componentProofDigest,
+    ...(realProjectProofDigest === undefined ? {} : { realProjectProofDigest }),
     failureClassification: 'Oracle business failure; environment/capability separately classified',
     timeoutCancellation: 'bounded deadline; active cancellation is Spec 5',
     oracleEvidence: ['screenshot', 'dom', 'url', 'network', 'console'],
@@ -43,7 +68,7 @@ export function buildBrowserCapabilityMatrix(input: {
     capabilityId: 'CAP-iframe-popup-identity', status: 'unverified-on-real-project' as const,
     boundary: '组件 proof 已覆盖 iframe/popup，多 page 真实复杂样本尚未闭环',
     compilerSemantics: 'pageScope/pageId/frame identity currently full-playwright only',
-    componentProofDigest: input.componentProofDigest,
+    componentProofDigest,
     failureClassification: 'identity mismatch fail-closed', timeoutCancellation: 'bounded deadline',
     oracleEvidence: ['screenshot', 'dom', 'url'], cleanup: 'close popup/context',
     retryRecovery: 'read-only identity-bound retry', verifiedHosts: [], verifiedChrome: [],
@@ -63,9 +88,29 @@ export function buildBrowserCapabilityMatrix(input: {
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const componentProofDigest = process.env.E2E_COMPONENT_PROOF_DIGEST
-  const realProjectProofDigest = process.env.E2E_REAL_PROJECT_PROOF_DIGEST
-  if (componentProofDigest === undefined) throw new Error('E2E_COMPONENT_PROOF_DIGEST_REQUIRED')
-  process.stdout.write(`${JSON.stringify(buildBrowserCapabilityMatrix({ componentProofDigest,
-    ...(realProjectProofDigest === undefined ? {} : { realProjectProofDigest }) }), null, 2)}\n`)
+  const componentPath = process.env.E2E_COMPONENT_PROOF_PATH
+  const realProjectPath = process.env.E2E_REAL_PROJECT_PROOF_PATH
+  if (componentPath === undefined) throw new Error('E2E_COMPONENT_PROOF_PATH_REQUIRED')
+  const componentProof = parseComponentProof(JSON.parse(await readFile(componentPath, 'utf8')))
+  const realProjectProof = realProjectPath === undefined ? undefined
+    : E2EBenchmarkProofV1Schema.parse(JSON.parse(await readFile(realProjectPath, 'utf8')))
+  process.stdout.write(`${JSON.stringify(buildBrowserCapabilityMatrix({ componentProof,
+    ...(realProjectProof === undefined ? {} : { realProjectProof }) }), null, 2)}\n`)
+}
+
+function parseComponentProof(value: unknown): ComponentProofSummary {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('E2E_COMPONENT_PROOF_INVALID')
+  }
+  const proof = value as Record<string, unknown>
+  if (proof.schemaVersion !== '1.0.0' || proof.proofKind !== 'browser-capability'
+    || typeof proof.proofDigest !== 'string' || typeof proof.passed !== 'boolean'
+    || typeof proof.gateEligible !== 'boolean') throw new Error('E2E_COMPONENT_PROOF_INVALID')
+  return { schemaVersion: '1.0.0', proofKind: 'browser-capability',
+    proofDigest: proof.proofDigest, passed: proof.passed, gateEligible: proof.gateEligible }
+}
+
+function requireDigest(value: string): string {
+  if (!/^sha256:[a-f0-9]{64}$/.test(value)) throw new Error('E2E_PROOF_DIGEST_INVALID')
+  return value
 }

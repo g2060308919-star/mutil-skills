@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { writeFile } from 'node:fs/promises'
 import { pathToFileURL } from 'node:url'
 import { chromium } from 'playwright'
 import {
@@ -52,7 +53,7 @@ export async function runRealProjectFixture(input: { stack: Stack; defect: Defec
       scenarios: scenarios.map((item) => item.scenarioId) })),
     application: {
       applicationId: input.stack === 'react-like' ? 'REAL-OPS-CONSOLE' : 'REAL-SHADOW-SETTINGS',
-      stack: input.stack === 'react-like' ? 'React-like component application' : 'Web Components shadow-dom application',
+      stack: input.stack === 'react-like' ? 'Component-style DOM application' : 'Web Components shadow-dom application',
       sourceRevision: digestText('e2e-real-project-source/v1', html),
       targetOrigin: origin,
       startupCommandDigest: digestText('e2e-real-project-startup/v1', 'node:http in-process fixture server'),
@@ -147,5 +148,8 @@ async function capture(page: import('playwright').Page, id: string,
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const proof = await runRealProjectFixture({ stack: 'react-like', defect: 'none' })
+  if (process.env.E2E_REAL_PROJECT_PROOF_OUTPUT !== undefined) {
+    await writeFile(process.env.E2E_REAL_PROJECT_PROOF_OUTPUT, `${JSON.stringify(proof, null, 2)}\n`, { mode: 0o600 })
+  }
   process.stdout.write(`${JSON.stringify(proof, null, 2)}\n`)
 }
