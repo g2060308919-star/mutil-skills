@@ -27,8 +27,13 @@ const ProofBodySchema = z.object({
   samples: z.array(z.object({ sample: z.number().int().nonnegative(), metrics: MetricSchema }).strict()).min(1).max(100),
   aggregate: z.object({ meanScore: RateSchema, worstScore: RateSchema,
     variance: z.number().nonnegative().max(1), irreproducibilityRate: RateSchema }).strict(),
-  gate: z.object({ passed: z.boolean(), zeroToleranceViolations: z.array(z.string().min(1)).max(10_000),
-    thresholdRule: z.string().min(1).max(4096) }).strict(),
+  gate: z.object({
+    passed: z.boolean(),
+    zeroToleranceViolations: z.array(z.string().min(1)).max(10_000),
+    qualityViolations: z.array(z.string().min(1)).max(10_000),
+    minimumSampleScore: RateSchema,
+    thresholdRule: z.string().min(1).max(4096),
+  }).strict(),
   generatedAt: z.string().datetime(),
 }).strict()
 
@@ -60,8 +65,11 @@ export const PrdGoldBenchmarkProofV1Schema = ProofBodySchema.extend({ proofDiges
       ...(sample.metrics.unsupportedHallucinationRate === 0 ? [] : [`sample:${sample.sample}:hallucination`]),
       ...(sample.metrics.unexplainedEmptyLinks === 0 ? [] : [`sample:${sample.sample}:empty-link`]),
     ])
+    const quality = scores.flatMap((value, index) => value >= proof.gate.minimumSampleScore
+      ? [] : [`sample:${proof.samples[index]!.sample}:score-below-minimum`])
     if (canonicalizeJson(zeroTolerance) !== canonicalizeJson(proof.gate.zeroToleranceViolations)
-      || proof.gate.passed !== (zeroTolerance.length === 0)) context.addIssue({
+      || canonicalizeJson(quality) !== canonicalizeJson(proof.gate.qualityViolations)
+      || proof.gate.passed !== (zeroTolerance.length === 0 && quality.length === 0)) context.addIssue({
       code: 'custom', path: ['gate'], message: '安全不变量必须零容忍且驱动门禁结论',
     })
   })
