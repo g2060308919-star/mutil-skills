@@ -1,9 +1,29 @@
 import { describe, expect, test } from 'vitest'
 import * as contracts from '../src/index.js'
+import { DeclarativeOracleObservationSchema } from '../src/declarative-execution-binding.js'
 
 const digest = (character: string) => `sha256:${character.repeat(64)}`
 
 describe('DeclarativeExecutionBindingV1', () => {
+  test('严格支持 network、download、console 与结构化 AND/OR Oracle，不接受自由表达式', () => {
+    const base = { oracleId: 'O-1', actionId: 'A-1', deadlineMs: 5_000,
+      evidenceKinds: ['network' as const] }
+    for (const oracle of [
+      { ...base, kind: 'network', request: { method: 'POST', urlPattern: '/api/orders', bodyDigest: digest('1') },
+        response: { status: 201, bodyDigest: digest('2') } },
+      { ...base, kind: 'download', evidenceKinds: ['screenshot' as const], fileName: 'orders.csv',
+        mediaType: 'text/csv', contentDigest: digest('3') },
+      { ...base, kind: 'console', evidenceKinds: ['console' as const], severity: 'error',
+        allowlist: ['ResizeObserver'], expectedCount: 0 },
+      { ...base, kind: 'composite', evidenceKinds: ['dom' as const], operator: 'and', conditions: [
+        { kind: 'text', locatorCandidates: [{ kind: 'test-id', value: 'status' }], comparator: 'equals', expected: '已保存' },
+        { kind: 'absence', locatorCandidates: [{ kind: 'text', value: '失败', exact: true }] },
+      ] },
+    ]) expect(DeclarativeOracleObservationSchema.safeParse(oracle).success).toBe(true)
+    expect(DeclarativeOracleObservationSchema.safeParse({ ...base, kind: 'composite',
+      operator: 'expression', expression: 'window.admin === true' }).success).toBe(false)
+  })
+
   test('接受首批声明式动作和 Oracle，并将候选乱序规范化为相同摘要', () => {
     const normalize = (contracts as Record<string, unknown>).normalizeDeclarativeExecutionBinding as
       (input: unknown) => { bindingDigest: string; cases: Array<{ actions: Array<{ actionId: string }> }> }

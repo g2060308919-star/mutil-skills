@@ -18,6 +18,9 @@ export function renderDeclarativeBrowserCase(input: DeclarativeBrowserCaseProgra
   const lines: string[] = []
   for (const action of actions) {
     assertSupportedScope(action)
+    for (const oracle of oracles.filter((candidate) => candidate.actionId === action.actionId)) {
+      lines.push(...renderOraclePreparation(oracle))
+    }
     lines.push(...renderAction(action))
     for (const oracle of oracles.filter((candidate) => candidate.actionId === action.actionId)) {
       lines.push(...renderOracle(oracle))
@@ -41,6 +44,28 @@ function renderAction(action: DeclarativeBrowserAction): string[] {
 
 function renderOracle(oracle: DeclarativeOracleObservation): string[] {
   const note = `// Oracle ${oracle.oracleId}`
+  if (oracle.kind === 'network') return [note,
+    `const __response_${safe(oracle.oracleId)} = await __network_${safe(oracle.oracleId)}`,
+    `expect(__response_${safe(oracle.oracleId)}.status()).toBe(${oracle.response.status})`,
+    ...(oracle.request.bodyDigest === undefined ? [] : [
+      `expect(__requestBodyDigest(__response_${safe(oracle.oracleId)}.request())).toBe(${literal(oracle.request.bodyDigest)})`,
+    ]),
+    ...(oracle.response.bodyDigest === undefined ? [] : [
+      `expect(__bytesDigest(await __response_${safe(oracle.oracleId)}.body())).toBe(${literal(oracle.response.bodyDigest)})`,
+    ])]
+  if (oracle.kind === 'download') return [note,
+    `const __downloadResult_${safe(oracle.oracleId)} = await __download_${safe(oracle.oracleId)}`,
+    `expect(__downloadResult_${safe(oracle.oracleId)}.suggestedFilename()).toBe(${literal(oracle.fileName)})`,
+    ...(oracle.contentDigest === undefined ? [] : [
+      `expect(__bytesDigest(await __downloadResult_${safe(oracle.oracleId)}.createReadStream())).toBe(${literal(oracle.contentDigest)})`,
+    ])]
+  if (oracle.kind === 'console') return [note,
+    `expect(__console_${safe(oracle.oracleId)}.filter((message) => message.type() === ${literal(oracle.severity)}`
+      + ` && !${literal(oracle.allowlist)}.some((allowed) => message.text().includes(allowed))).length).toBe(${oracle.expectedCount})`]
+  if (oracle.kind === 'composite') {
+    const conditions = oracle.conditions.map(renderCompositeCondition)
+    return [note, `expect([${conditions.join(', ')}].${oracle.operator === 'and' ? 'every' : 'some'}(Boolean)).toBe(true)`]
+  }
   if (oracle.kind === 'url') return [note, renderStringExpectation('page.url()', oracle.comparator, oracle.expected)]
   if (oracle.kind === 'reload-state') return [note, `await page.reload({ timeout: ${oracle.deadlineMs} })`,
     ...renderReloadOracle(oracle)]
@@ -60,6 +85,41 @@ function renderOracle(oracle: DeclarativeOracleObservation): string[] {
     throw rendererError('E2E_COMPILER_DECLARATIVE_ORACLE_INVALID')
   }
   return [note, renderLocatorTextExpectation(locator, oracle.comparator, oracle.expected, oracle.deadlineMs)]
+}
+
+function renderOraclePreparation(oracle: DeclarativeOracleObservation): string[] {
+  if (oracle.kind === 'network') return [
+    `const __network_${safe(oracle.oracleId)} = page.waitForResponse((response) => response.request().method() === ${literal(oracle.request.method)}`
+      + ` && new RegExp(${literal(oracle.request.urlPattern)}).test(response.url()), { timeout: ${oracle.deadlineMs} })`,
+  ]
+  if (oracle.kind === 'download') return [
+    `const __download_${safe(oracle.oracleId)} = page.waitForEvent('download', { timeout: ${oracle.deadlineMs} })`,
+  ]
+  if (oracle.kind === 'console') return [
+    `const __console_${safe(oracle.oracleId)}: import('playwright').ConsoleMessage[] = []`,
+    `page.on('console', (message) => __console_${safe(oracle.oracleId)}.push(message))`,
+  ]
+  return []
+}
+
+function renderCompositeCondition(condition: Extract<DeclarativeOracleObservation,
+  { kind: 'composite' }>['conditions'][number]): string {
+  if (condition.kind === 'url') return stringPredicate('page.url()', condition.comparator, condition.expected)
+  const locator = renderLocator(condition.locatorCandidates)
+  if (condition.kind === 'absence') return `(await ${locator}.count()) === 0`
+  if (condition.kind === 'text') return stringPredicate(`(await ${locator}.first().textContent()) ?? ''`,
+    condition.comparator, condition.expected)
+  const method: Record<string, string> = { visible: 'isVisible', hidden: 'isHidden', enabled: 'isEnabled',
+    disabled: 'isDisabled', checked: 'isChecked', unchecked: 'isChecked' }
+  const expression = `await ${locator}.first().${method[condition.state]}()`
+  const effective = condition.state === 'unchecked' ? `!(${expression})` : expression
+  return condition.expected ? `(${effective})` : `!(${effective})`
+}
+
+function stringPredicate(actual: string, comparator: 'equals' | 'contains' | 'matches', expected: string): string {
+  if (comparator === 'equals') return `(${actual}) === ${literal(expected)}`
+  if (comparator === 'contains') return `(${actual}).includes(${literal(expected)})`
+  return `new RegExp(${literal(expected)}).test(${actual})`
 }
 
 function renderReloadOracle(oracle: Extract<DeclarativeOracleObservation, { kind: 'reload-state' }>): string[] {
@@ -117,6 +177,7 @@ function assertSupportedScope(action: DeclarativeBrowserAction): void {
 }
 
 function literal(value: unknown): string { return JSON.stringify(value) }
+function safe(value: string): string { return value.replaceAll(/[^A-Za-z0-9_]/g, '_') }
 function rendererError(code: string): E2EError {
   return new E2EError({ code, category: 'validation', message: code, retryable: false })
 }

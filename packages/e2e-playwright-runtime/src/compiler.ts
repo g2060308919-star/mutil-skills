@@ -340,7 +340,12 @@ function renderSpec(input: Extract<CompilerInput, { schemaVersion: 'compiler-inp
 }
 
 function renderDeclarativeBrowserSpec(input: Extract<CompilerInput, { schemaVersion: 'compiler-input/v2' }>): string {
-  const lines = ["import { test, expect } from '@playwright/test'", '']
+  const lines = ["import { test, expect } from '@playwright/test'", "import { createHash } from 'node:crypto'", '',
+    "const __bytesDigest = async (value: Uint8Array | NodeJS.ReadableStream) => { const hash = createHash('sha256');",
+    "  if (value instanceof Uint8Array) hash.update(value); else for await (const chunk of value) hash.update(chunk as Uint8Array);",
+    "  return `sha256:${hash.digest('hex')}` }",
+    "const __requestBodyDigest = (request: import('playwright').Request) => { const body = request.postDataBuffer();",
+    "  return body === null ? undefined : `sha256:${createHash('sha256').update(body).digest('hex')}` }", '']
   for (const testCase of input.cases) {
     lines.push(`test(${literal(`${testCase.caseId} ${testCase.title}`)}, async ({ page }) => {`)
     lines.push('  test.info().annotations.push(')

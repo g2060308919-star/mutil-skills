@@ -55,6 +55,49 @@ const OracleBase = {
   evidenceKinds: z.array(z.enum(['screenshot', 'dom', 'url', 'network', 'console'])).min(1).max(16),
 }
 const ElementOracleBase = { ...OracleBase, locatorCandidates: z.array(PageLocatorCandidateSchema).min(1).max(32) }
+const ComparatorSchema = z.enum(['equals', 'contains', 'matches'])
+const NetworkOracleSchema = z.object({
+  ...OracleBase,
+  kind: z.literal('network'),
+  request: z.object({
+    method: z.string().regex(/^[A-Z]+$/),
+    urlPattern: TextSchema.max(2_048),
+    bodyDigest: DigestSchema.optional(),
+  }).strict(),
+  response: z.object({
+    status: z.number().int().min(100).max(599),
+    bodyDigest: DigestSchema.optional(),
+  }).strict(),
+}).strict()
+const DownloadOracleSchema = z.object({
+  ...OracleBase,
+  kind: z.literal('download'),
+  fileName: TextSchema.max(512),
+  mediaType: TextSchema.max(512).optional(),
+  contentDigest: DigestSchema.optional(),
+  structuredContent: JsonValueSchema.optional(),
+}).strict()
+const ConsoleOracleSchema = z.object({
+  ...OracleBase,
+  kind: z.literal('console'),
+  severity: z.enum(['warning', 'error']),
+  allowlist: z.array(TextSchema.max(2_048)).max(100),
+  expectedCount: z.number().int().nonnegative().max(10_000),
+}).strict()
+const CompositeLeafSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('text'), locatorCandidates: z.array(PageLocatorCandidateSchema).min(1).max(32),
+    comparator: ComparatorSchema, expected: TextSchema }).strict(),
+  z.object({ kind: z.literal('absence'), locatorCandidates: z.array(PageLocatorCandidateSchema).min(1).max(32) }).strict(),
+  z.object({ kind: z.literal('url'), comparator: ComparatorSchema, expected: TextSchema.max(2_048) }).strict(),
+  z.object({ kind: z.literal('element-state'), locatorCandidates: z.array(PageLocatorCandidateSchema).min(1).max(32),
+    state: z.enum(['visible', 'hidden', 'enabled', 'disabled', 'checked', 'unchecked']), expected: z.boolean() }).strict(),
+])
+const CompositeOracleSchema = z.object({
+  ...OracleBase,
+  kind: z.literal('composite'),
+  operator: z.enum(['and', 'or']),
+  conditions: z.array(CompositeLeafSchema).min(2).max(32),
+}).strict()
 
 export const DeclarativeOracleObservationSchema = z.discriminatedUnion('kind', [
   z.object({ ...ElementOracleBase, kind: z.literal('text'), comparator: z.enum(['equals', 'contains', 'matches']),
@@ -68,6 +111,10 @@ export const DeclarativeOracleObservationSchema = z.discriminatedUnion('kind', [
     comparator: z.enum(['equals', 'contains', 'matches']).optional(), expected: JsonValueSchema }).strict(),
   z.object({ ...OracleBase, kind: z.literal('reload-state'), observation: z.enum(['text', 'url', 'element-state']),
     locatorCandidates: z.array(PageLocatorCandidateSchema).max(32), expected: JsonValueSchema }).strict(),
+  NetworkOracleSchema,
+  DownloadOracleSchema,
+  ConsoleOracleSchema,
+  CompositeOracleSchema,
 ])
 
 const DataNeedSchema = z.object({

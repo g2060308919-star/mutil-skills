@@ -59,6 +59,31 @@ describe('declarative browser renderer', () => {
       pageScope: { page: 'popup', pageId: 'POPUP-1', frame: { kind: 'main' } },
     })], oracles: [] })).toThrow('E2E_COMPILER_DECLARATIVE_SCOPE_UNSUPPORTED')
   })
+
+  test('Network/Download/Console 和结构化组合 Oracle 在动作前监听并由确定性断言验证', () => {
+    const source = renderDeclarativeBrowserCase({ caseId: 'CASE-2', actions: [action({
+      kind: 'click', actionId: 'A-1', locatorCandidates: role('button', '保存'),
+    })], oracles: [
+      oracle({ kind: 'network', oracleId: 'O-NET', actionId: 'A-1', evidenceKinds: ['network'],
+        request: { method: 'POST', urlPattern: '/api/orders' }, response: { status: 201 } }),
+      oracle({ kind: 'download', oracleId: 'O-FILE', actionId: 'A-1', fileName: 'orders.csv' }),
+      oracle({ kind: 'console', oracleId: 'O-CONSOLE', actionId: 'A-1', evidenceKinds: ['console'],
+        severity: 'error', allowlist: ['ResizeObserver'], expectedCount: 0 }),
+      oracle({ kind: 'composite', oracleId: 'O-AND', actionId: 'A-1', evidenceKinds: ['dom'],
+        operator: 'and', conditions: [
+          { kind: 'text', locatorCandidates: [{ kind: 'test-id', value: 'status' }],
+            comparator: 'equals', expected: '已保存' },
+          { kind: 'absence', locatorCandidates: [{ kind: 'text', value: '失败', exact: true }] },
+        ] }),
+    ] })
+    const listenAt = source.indexOf("page.waitForResponse")
+    const clickAt = source.indexOf('.click(')
+    expect(listenAt).toBeGreaterThanOrEqual(0)
+    expect(listenAt).toBeLessThan(clickAt)
+    expect(source).toContain("page.waitForEvent('download'")
+    expect(source).toContain("page.on('console'")
+    expect(source).toContain('.every(Boolean)')
+  })
 })
 
 function action(value: Record<string, unknown>): DeclarativeBrowserAction {
