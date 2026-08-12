@@ -240,7 +240,7 @@ export const RunConditionSchema = z.discriminatedUnion('kind', [
     kind: z.literal('blocked-requires-change'), reasonCode: ReasonCodeSchema, resumeStage: RunStageSchema,
   }).strict(),
   z.object({
-    kind: z.literal('terminal'), verdict: z.enum(['accepted', 'rejected', 'incomplete']),
+    kind: z.literal('terminal'), verdict: z.enum(['accepted', 'rejected', 'incomplete', 'cancelled']),
   }).strict(),
 ])
 

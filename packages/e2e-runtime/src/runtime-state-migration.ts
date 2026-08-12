@@ -9,6 +9,8 @@ import {
   canonicalizeJson,
   E2EError,
   WorkflowStateSchema,
+  RunCancellationResultV1Schema,
+  RunHealthSnapshotV1Schema,
 } from '@mutil-skills/e2e-contracts'
 import { z } from 'zod'
 import type { RuntimeRunSnapshot } from './run-store.js'
@@ -396,7 +398,7 @@ const RuntimePublicationRecordSchema = z.object({
 }).strict()
 
 const RuntimeRunSnapshotSchema = z.object({
-  schemaVersion: z.literal('1.8.0'),
+  schemaVersion: z.literal('1.9.0'),
   runId: RunIdSchema,
   assetId: AssetIdSchema,
   projectIdentityDigest: DigestSchema,
@@ -420,6 +422,8 @@ const RuntimeRunSnapshotSchema = z.object({
   artifactDigests: z.record(DigestSchema),
   frozenArtifacts: FrozenArtifactsSchema,
   trustedExecutionFacts: TrustedExecutionFactsSchema,
+  cancellation: RunCancellationResultV1Schema.optional(),
+  health: RunHealthSnapshotV1Schema.optional(),
   compiledPrdRun: CompiledPrdRunPlanSchema.optional(),
   caseSchedule: z.custom<RuntimeCaseSchedule>((value) => {
     try {
@@ -541,6 +545,10 @@ export const RuntimeStateMigrationRegistry: Readonly<Record<string, RuntimeState
     ...snapshot,
     schemaVersion: '1.8.0',
   }),
+  '1.8.0': (snapshot) => ({
+    ...snapshot,
+    schemaVersion: '1.9.0',
+  }),
 })
 
 export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
@@ -552,7 +560,7 @@ export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
   }
   let candidateVersion = sourceVersion
   const visited = new Set<string>()
-  while (candidateVersion !== '1.8.0') {
+  while (candidateVersion !== '1.9.0') {
     if (visited.has(candidateVersion)) throw migrationRequired(sourceVersion)
     visited.add(candidateVersion)
     const migrator = RuntimeStateMigrationRegistry[candidateVersion]

@@ -9,7 +9,7 @@ import { projectionFixture } from './trusted-action-runner.test.js'
 
 function currentSnapshot(): RuntimeRunSnapshot {
   return {
-    schemaVersion: '1.8.0',
+    schemaVersion: '1.9.0',
     runId: 'RUN-1',
     assetId: 'ASSET-1',
     projectIdentityDigest: `sha256:${'a'.repeat(64)}`,
@@ -36,7 +36,7 @@ describe('runtime state migration', () => {
     expect(migrated).not.toBe(snapshot)
   })
 
-  test('explicitly migrates 1.0 through 1.8 and preserves legacy WebAuthn approval semantics', () => {
+  test('explicitly migrates 1.0 through 1.9 and preserves legacy WebAuthn approval semantics', () => {
     const current = currentSnapshot()
     const legacy = {
       ...current,
@@ -54,7 +54,7 @@ describe('runtime state migration', () => {
     })
   })
 
-  test('explicitly migrates 1.1 to strict 1.8 with WebAuthn and empty WriteAttempt/execution result maps', () => {
+  test('explicitly migrates 1.1 to strict 1.9 with WebAuthn and empty WriteAttempt/execution result maps', () => {
     const current = currentSnapshot()
     const legacy = {
       ...current, schemaVersion: '1.1.0', trustedExecutionFacts: {},
@@ -65,7 +65,7 @@ describe('runtime state migration', () => {
     })
   })
 
-  test('explicitly migrates 1.2 to 1.8 and adds the read result domain', () => {
+  test('explicitly migrates 1.2 to 1.9 and adds the read result domain', () => {
     const current = currentSnapshot()
     const legacy = { ...current, schemaVersion: '1.2.0', trustedExecutionFacts: {} } as const
     expect(migrateRuntimeRunSnapshot(legacy)).toEqual({
@@ -73,7 +73,7 @@ describe('runtime state migration', () => {
     })
   })
 
-  test('explicitly migrates 1.3 to 1.8 without conflating read, write and injection domains', () => {
+  test('explicitly migrates 1.3 to 1.9 without conflating read, write and injection domains', () => {
     const current = currentSnapshot()
     const legacy = {
       ...current,
@@ -95,11 +95,11 @@ describe('runtime state migration', () => {
     }).trustedExecutionFacts).toEqual({ 'approval-mode': 'local-confirmation' })
   })
 
-  test('1.5 Run 显式迁移为 1.8，缺少 understand-prd 冻结事实时不伪造事实', () => {
+  test('1.5 Run 显式迁移为 1.9，缺少 understand-prd 冻结事实时不伪造事实', () => {
     const current = currentSnapshot()
     const legacy = { ...current, schemaVersion: '1.5.0' } as const
     const migrated = migrateRuntimeRunSnapshot(legacy)
-    expect(migrated.schemaVersion).toBe('1.8.0')
+    expect(migrated.schemaVersion).toBe('1.9.0')
     expect(migrated.trustedExecutionFacts['prd-understanding-contract']).toBeUndefined()
     expect(migrated.trustedExecutionFacts['prd-understanding-prepared']).toBeUndefined()
   })
@@ -117,7 +117,7 @@ describe('runtime state migration', () => {
 
     const migrated = migrateRuntimeRunSnapshot(legacy)
 
-    expect(migrated.schemaVersion).toBe('1.8.0')
+    expect(migrated.schemaVersion).toBe('1.9.0')
     expect(migrated.compiledPrdRun).toBeUndefined()
     expect(migrated.caseSchedule?.cases).toMatchObject([{
       queueOrdinal: 0,
@@ -127,7 +127,7 @@ describe('runtime state migration', () => {
     }])
   })
 
-  test.each(['1.9.0', '2.0.0', 'invalid'])(
+  test.each(['1.10.0', '2.0.0', 'invalid'])(
     'blocks unsupported snapshot version %s instead of guessing a migration',
     (schemaVersion) => {
       expect(() => migrateRuntimeRunSnapshot({ ...currentSnapshot(), schemaVersion }))

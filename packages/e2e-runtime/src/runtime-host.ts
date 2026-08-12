@@ -10,6 +10,8 @@ import {
   RuntimePreparePrdUnderstandingResultSchema,
   RuntimeResponseEnvelopeSchema,
   RuntimeStatusResultSchema,
+  RunCancellationResultV1Schema,
+  RunHealthSnapshotV1Schema,
   SignedGrantSchema,
   canonicalizeJson,
   digestArtifactContent,
@@ -37,6 +39,7 @@ import {
 import { randomUUID } from 'node:crypto'
 import {
   computePrdRevision,
+  cancelWorkflow,
   createWorkflow,
   invalidatePreflightForTargetChange,
   transitionWorkflow,
@@ -203,6 +206,7 @@ export interface RuntimeHostDependencies {
 }
 
 export class E2ERuntimeHost {
+  readonly #executionControllers = new Map<string, AbortController>()
   constructor(private readonly dependencies: RuntimeHostDependencies) {}
 
   async handle(
@@ -237,6 +241,7 @@ export class E2ERuntimeHost {
         && request.command !== 'submit-candidate'
         && request.command !== 'run-preflight'
         && request.command !== 'execute-run'
+        && request.command !== 'cancel-run'
         && request.command !== 'resume-run'
         && request.command !== 'finalize-run'
         && request.command !== 'prepare-manual-result'
@@ -279,6 +284,8 @@ export class E2ERuntimeHost {
         return await this.probeTarget(request, requestDigest)
       }
       if (request.command === 'get-status') return await this.getStatus(request, requestDigest)
+      if (request.command === 'get-health') return await this.getHealth(request, requestDigest)
+      if (request.command === 'cancel-run') return await this.cancelRun(request, requestDigest)
       if (request.command === 'submit-candidate') return await this.submitCandidate(request, requestDigest)
       if (request.command === 'open-approval') return await this.openApproval(request, requestDigest)
       if (request.command === 'confirm-approval') return await this.confirmApproval(request, requestDigest)
@@ -420,7 +427,7 @@ export class E2ERuntimeHost {
     }).prdRevision
     const timestamp = this.dependencies.now().toISOString()
     const snapshot: RuntimeRunSnapshot = {
-      schemaVersion: '1.8.0',
+      schemaVersion: '1.9.0',
       runId,
       assetId: request.payload.assetId,
       projectIdentityDigest: identity.digest,
@@ -516,6 +523,64 @@ export class E2ERuntimeHost {
         lock,
       )
       return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
+  }
+
+  private async getHealth(
+    request: Extract<RuntimeRequestEnvelope, { command: 'get-health' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      const health = RunHealthSnapshotV1Schema.parse(snapshot.health ?? projectRunHealth(snapshot))
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.readRunOutcome(
+        identity.digest, snapshot.runId, request.requestId, requestDigest,
+        () => this.successResponse(request.requestId, health), lock,
+      ))
+    })
+  }
+
+  private async cancelRun(
+    request: Extract<RuntimeRequestEnvelope, { command: 'cancel-run' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      const existing = snapshot.cancellation
+      if (existing !== undefined) return RuntimeResponseEnvelopeSchema.parse(
+        await this.dependencies.runStore.updateRunOutcome(identity.digest, snapshot.runId,
+          request.requestId, requestDigest, (current) => ({ snapshot: current,
+            response: this.successResponse(request.requestId, { ...existing, repeated: true }) }),
+          'run-cancel-repeated', lock))
+      const phase = cancellationPhase(snapshot)
+      const cancellation = RunCancellationResultV1Schema.parse({
+        schemaVersion: 'run-cancellation-result/v1', runId: snapshot.runId,
+        requestId: request.requestId, phase,
+        disposition: phase === 'pre-dispatch' ? 'cancelled'
+          : phase === 'read-running' || phase === 'write-known' ? 'cancelling'
+            : phase === 'write-unknown' ? 'reconcile-required'
+              : phase === 'cleanup-running' ? 'cleanup-continuing' : 'already-terminal',
+        repeated: false, cleanupRequired: ['write-known', 'write-unknown', 'cleanup-running'].includes(phase),
+        requestedAt: this.dependencies.now().toISOString(),
+      })
+      this.#executionControllers.get(snapshot.runId)?.abort()
+      const workflow = phase === 'pre-dispatch' ? cancelWorkflow({ state: snapshot.workflow,
+        reason: 'cancelled before browser dispatch',
+        timestamp: this.dependencies.now().toISOString(),
+        engineVersion: this.dependencies.installation.version }).state : snapshot.workflow
+      const health = projectRunHealth({ ...snapshot, workflow, cancellation })
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+        identity.digest, snapshot.runId, request.requestId, requestDigest,
+        (current) => ({ snapshot: { ...current, workflow, cancellation, health,
+          updatedAt: this.dependencies.now().toISOString() },
+        response: this.successResponse(request.requestId, cancellation) }), 'run-cancel-requested', lock,
+      ))
     })
   }
 
@@ -2268,6 +2333,8 @@ export class E2ERuntimeHost {
       | Awaited<ReturnType<typeof executeRuntimeWrite>>
       | Awaited<ReturnType<typeof executeRuntimeFullPlaywright>>
       | Awaited<ReturnType<typeof executeRuntimeInjection>>
+    const executionController = new AbortController()
+    this.#executionControllers.set(started.snapshot.runId, executionController)
     try {
       execution = await executeWithOwnerHeartbeat(started.owner, async () => executionMode === 'read'
         ? await executeRuntimeReadWithBrowserExecutorProtocolV1(this.dependencies.readExecutor!, {
@@ -2275,6 +2342,7 @@ export class E2ERuntimeHost {
           route: this.dependencies.browserExecutorProtocolV1?.readRoute ?? 'protocol',
           executionId: `READ-${started!.attempt.attemptId}`,
           now: () => this.dependencies.now().toISOString(),
+          signal: executionController.signal,
         })
         : executionMode === 'write'
           ? await executeRuntimeWriteWithBrowserExecutorProtocolV1(this.dependencies.writeExecutor!, {
@@ -2282,6 +2350,7 @@ export class E2ERuntimeHost {
             route: this.dependencies.browserExecutorProtocolV1?.writeRoute ?? 'protocol',
             executionId: `WRITE-${started!.attempt.attemptId}`,
             now: () => this.dependencies.now().toISOString(),
+            signal: executionController.signal,
           })
           : executionMode === 'full-playwright'
             ? await executeRuntimeFullPlaywrightWithBrowserExecutorProtocolV1(this.dependencies.fullPlaywrightExecutor!, {
@@ -2289,12 +2358,14 @@ export class E2ERuntimeHost {
               route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'protocol',
               executionId: `FULL-${started!.attempt.attemptId}`,
               now: () => this.dependencies.now().toISOString(),
+              signal: executionController.signal,
             })
           : await executeRuntimeInjectionWithBrowserExecutorProtocolV1(this.dependencies.injectionExecutor!, {
             snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
             route: this.dependencies.browserExecutorProtocolV1?.injectionRoute ?? 'protocol',
             executionId: `INJECTION-${started!.attempt.attemptId}`,
             now: () => this.dependencies.now().toISOString(),
+            signal: executionController.signal,
           }))
     } catch (cause) {
       let releaseCause: unknown
@@ -2306,6 +2377,10 @@ export class E2ERuntimeHost {
           causeCode === undefined ? '' : `；内部错误码 ${causeCode}`}`,
         releaseCause === undefined ? cause : new AggregateError([cause, releaseCause]),
       )
+    } finally {
+      if (this.#executionControllers.get(started.snapshot.runId) === executionController) {
+        this.#executionControllers.delete(started.snapshot.runId)
+      }
     }
     if (executionMode === 'write' || executionMode === 'full-playwright') {
       const write = execution as Awaited<ReturnType<typeof executeRuntimeWrite>>
@@ -3113,6 +3188,47 @@ function invalidateTargetDependentSnapshot(
     executionResults: { readEnvironment: {}, realEnvironment: {}, gatewayInjection: {} },
     updatedAt: timestamp,
   }
+}
+
+function cancellationPhase(snapshot: RuntimeRunSnapshot):
+  'pre-dispatch' | 'read-running' | 'write-known' | 'write-unknown' | 'cleanup-running' | 'terminal' {
+  if (['accepted', 'rejected', 'incomplete', 'cancelled'].includes(snapshot.workflow.current)) return 'terminal'
+  if (snapshot.workflow.current !== 'running-real' && snapshot.workflow.current !== 'running-injection') {
+    return 'pre-dispatch'
+  }
+  const attempts = Object.values(snapshot.writeAttempts ?? {})
+  if (attempts.length === 0) return 'read-running'
+  if (attempts.some((attempt) => attempt.state === 'effect-unknown')) return 'write-unknown'
+  if (attempts.some((attempt) => attempt.cleanupPrepared !== undefined)) return 'cleanup-running'
+  return attempts.some((attempt) => attempt.state === 'outcome-committed') ? 'write-known' : 'write-unknown'
+}
+
+function projectRunHealth(snapshot: RuntimeRunSnapshot): import('@mutil-skills/e2e-contracts').RunHealthSnapshotV1 {
+  const cancellation = snapshot.cancellation
+  const cleanup = Object.values(snapshot.writeAttempts ?? {})
+  const status = cancellation === undefined
+    ? snapshot.workflow.current.startsWith('running-') ? 'running'
+      : ['accepted', 'rejected', 'incomplete', 'cancelled'].includes(snapshot.workflow.current) ? 'terminal' : 'idle'
+    : cancellation.disposition === 'reconcile-required' ? 'reconcile'
+      : cancellation.disposition === 'cleanup-continuing' ? 'cleanup'
+        : cancellation.disposition === 'already-terminal' || cancellation.disposition === 'cancelled'
+          ? 'terminal' : 'cancelling'
+  return RunHealthSnapshotV1Schema.parse({ schemaVersion: 'run-health-snapshot/v1', runId: snapshot.runId,
+    observedWorkflowState: snapshot.workflow.current, observedWorkflowSequence: snapshot.workflow.sequence,
+    lastProgressAt: snapshot.updatedAt, status,
+    active: { ...(snapshot.caseSchedule?.currentCaseId === undefined ? {} : {
+      caseId: snapshot.caseSchedule.currentCaseId }),
+      ...(snapshot.executionAttempt?.attemptId === undefined ? {} : { attemptId: snapshot.executionAttempt.attemptId }) },
+    cancel: { requested: cancellation !== undefined,
+      ...(cancellation === undefined ? {} : { phase: cancellation.phase }) },
+    cleanup: { status: cleanup.length === 0 ? 'not-applicable'
+      : cleanup.every((attempt) => attempt.state === 'outcome-committed') ? 'verified'
+        : cleanup.some((attempt) => attempt.state === 'effect-unknown') ? 'unknown' : 'pending',
+      residualCount: cleanup.filter((attempt) => attempt.state === 'effect-unknown').length },
+    resources: { queueDepth: snapshot.caseSchedule?.cases.filter((item) => item.state === 'pending').length ?? 0,
+      lockCount: snapshot.executionAttempt === undefined ? 0 : 1, gatewayReservations: cleanup.length,
+      childProcesses: snapshot.workflow.current.startsWith('running-') ? 1 : 0,
+      rssBytes: 0, evidenceBytes: 0 } })
 }
 
 function parseCandidate(artifactType: ArtifactType, input: unknown): ArtifactDocument {

@@ -39,6 +39,7 @@ import type { RuntimeCaseSchedule } from './multi-case-scheduler.js'
 import { parseCaseSchedule } from './multi-case-scheduler.js'
 import type { TargetContractFact } from './target-contract.js'
 import type { TargetProbeFact } from './target-probe.js'
+import type { RunCancellationResultV1, RunHealthSnapshotV1 } from '@mutil-skills/e2e-contracts'
 
 const EMPTY_DIGEST = `sha256:${'0'.repeat(64)}`
 const LEASE_MILLISECONDS = 30_000
@@ -86,7 +87,7 @@ export interface RuntimeTrustedFactCapability {
 
 export interface RuntimeRunSnapshot {
   /** 1.1–1.7 仅作为显式迁移输入兼容；Store 读取与写回始终规范化为 1.8。 */
-  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.7.0' | '1.8.0'
+  schemaVersion: '1.1.0' | '1.2.0' | '1.3.0' | '1.4.0' | '1.5.0' | '1.6.0' | '1.7.0' | '1.8.0' | '1.9.0'
   runId: string
   assetId: string
   projectIdentityDigest: string
@@ -108,6 +109,9 @@ export interface RuntimeRunSnapshot {
   frozenArtifacts: Record<string, ArtifactDocument>
   /** 仅 Runtime 内部可信执行链产生；外部 submit-candidate 永远不能写入。 */
   trustedExecutionFacts: Record<string, unknown>
+  /** RuntimeHost 的取消/健康事实；调用方不可写，Report 只读投影。 */
+  cancellation?: RunCancellationResultV1
+  health?: RunHealthSnapshotV1
   /** Runtime 从唯一 requirements projection 确定性生成；调用者不能提交摘要或 ID。 */
   compiledPrdRun?: CompiledPrdRunPlan
   /** Runtime 持久化的串行多 Case 调度游标。 */
@@ -1602,7 +1606,7 @@ export class RuntimeRunStore {
         const snapshot = parseStoreSnapshot(serialized)
         let changed = false
         for (const [key, raw] of Object.entries(snapshot.runs)) {
-          if (isPlainRecord(raw) && raw.schemaVersion === '1.8.0') continue
+          if (isPlainRecord(raw) && raw.schemaVersion === '1.9.0') continue
           const rows = snapshot.journals[key]
           if (!Array.isArray(rows) || rows.length === 0) {
             throw journalIntegrityError('legacy Run 缺少可验证 journal，拒绝迁移')

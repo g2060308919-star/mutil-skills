@@ -37,6 +37,7 @@ const STAGE_BY_WORKFLOW: Record<WorkflowNode, RunStage> = {
   'automation-blocked': 'execution',
   'artifact-blocked': 'finalization',
   'migration-required': 'requirements',
+  cancelled: 'completed',
 }
 
 export function projectRunStage(workflow: WorkflowNode): RunStage {
@@ -60,7 +61,8 @@ export function classifyRunCondition(snapshot: RuntimeRunSnapshot): RunCondition
   })
   if (snapshot.workflow.current === 'accepted'
     || snapshot.workflow.current === 'rejected'
-    || snapshot.workflow.current === 'incomplete') return RunConditionSchema.parse({
+    || snapshot.workflow.current === 'incomplete'
+    || snapshot.workflow.current === 'cancelled') return RunConditionSchema.parse({
     kind: 'terminal', verdict: snapshot.workflow.current,
   })
   if (snapshot.workflow.current === 'pending-decision' && snapshot.pendingDecision !== undefined) {

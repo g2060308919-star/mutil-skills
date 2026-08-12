@@ -268,6 +268,33 @@ describe('E2EFacade', () => {
     })
     expect(generator).not.toHaveBeenCalled()
   })
+
+  test('cancel 与 health 通过公开 Facade 调用 Runtime，不由 Facade 推断副作用状态', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const commands: string[] = []
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'get-status') return success(request.requestId, statusResult(handle))
+      if (request.command === 'cancel-run') return success(request.requestId, {
+        schemaVersion: 'run-cancellation-result/v1', runId: 'RUN-1', requestId: request.requestId,
+        phase: 'read-running', disposition: 'cancelling', repeated: false, cleanupRequired: false,
+        requestedAt: '2026-08-12T00:00:00.000Z',
+      })
+      if (request.command === 'get-health') return success(request.requestId, {
+        schemaVersion: 'run-health-snapshot/v1', runId: 'RUN-1', observedWorkflowState: 'running-real',
+        observedWorkflowSequence: 9, lastProgressAt: '2026-08-12T00:00:00.000Z', status: 'cancelling',
+        active: { attemptId: 'ATTEMPT-1' }, cancel: { requested: true, phase: 'read-running' },
+        cleanup: { status: 'not-applicable', residualCount: 0 }, resources: { queueDepth: 0, lockCount: 1,
+          gatewayReservations: 0, childProcesses: 1, rssBytes: 0, evidenceBytes: 0 },
+      })
+      throw new Error(request.command)
+    }) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+    await expect(facade.cancel(handle)).resolves.toMatchObject({ disposition: 'cancelling' })
+    await expect(facade.health(handle)).resolves.toMatchObject({ status: 'cancelling' })
+    expect(commands).toEqual(['get-status', 'cancel-run', 'get-status', 'get-health'])
+  })
 })
 
 function success(requestId: string, result: unknown): RuntimeResponseEnvelope {

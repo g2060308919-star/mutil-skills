@@ -1,6 +1,8 @@
 import {
   RuntimeAcceptanceReviewResultSchema,
   RuntimeCompileExecutableRunResultSchema,
+  RunCancellationResultV1Schema,
+  RunHealthSnapshotV1Schema,
   RuntimeRequestEnvelopeSchema,
   RuntimeResponseEnvelopeSchema,
   RuntimeStatusResultSchema,
@@ -10,6 +12,8 @@ import {
   type ApprovalGrantSubject,
   type RuntimeAcceptanceReviewResult,
   type RuntimeCompileExecutableRunResult,
+  type RunCancellationResultV1,
+  type RunHealthSnapshotV1,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
   type RuntimeStatusResult,
@@ -239,6 +243,20 @@ export class E2EFacade {
     return asRecord(await this.#invoke('render-report', {
       runId: handle.runId, ...(outputRoot === undefined ? {} : { outputRoot }),
     }, handle.runId))
+  }
+
+  async cancel(handle: RunHandle): Promise<RunCancellationResultV1> {
+    await this.status(handle)
+    return RunCancellationResultV1Schema.parse(
+      await this.#invoke('cancel-run', { runId: handle.runId }, handle.runId),
+    )
+  }
+
+  async health(handle: RunHandle): Promise<RunHealthSnapshotV1> {
+    await this.status(handle)
+    return RunHealthSnapshotV1Schema.parse(
+      await this.#invoke('get-health', { runId: handle.runId }, handle.runId),
+    )
   }
 
   /**

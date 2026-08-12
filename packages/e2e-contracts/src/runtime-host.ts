@@ -20,6 +20,7 @@ import {
 } from './e2e-flow.js'
 import { TaskStateViewV1Schema } from './task-state-view.js'
 import { DeclarativeExecutionBindingV1Schema } from './declarative-execution-binding.js'
+import { RunCancellationResultV1Schema, RunHealthSnapshotV1Schema } from './run-control.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -216,6 +217,18 @@ const commandSchemas = [
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
+    command: z.literal('cancel-run'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema,
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('get-health'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema,
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
     command: z.literal('resume-run'),
     projectRoot: z.string().min(1),
     payload: z.object({ runId: SafeIdSchema, decision: JsonValueSchema }).strict(),
@@ -366,6 +379,7 @@ export const RuntimeStatusResultSchema = z.object({
   }).strict().optional(),
   pendingDecision: JsonValueSchema.optional(),
   taskState: TaskStateViewV1Schema.optional(),
+  health: RunHealthSnapshotV1Schema.optional(),
 }).strict()
 
 export const RuntimeCreateRunResultSchema = z.object({
@@ -471,6 +485,8 @@ export type RuntimePreparePrdUnderstandingResult = z.infer<
 export type RuntimeCompilePrdRunResult = z.infer<typeof RuntimeCompilePrdRunResultSchema>
 export type RuntimeCompileExecutableRunResult = z.infer<typeof RuntimeCompileExecutableRunResultSchema>
 export type RuntimeAcceptanceReviewResult = z.infer<typeof RuntimeAcceptanceReviewResultSchema>
+export const RuntimeCancelRunResultSchema = RunCancellationResultV1Schema
+export const RuntimeRunHealthResultSchema = RunHealthSnapshotV1Schema
 
 function isPlainJsonObject(value: unknown): value is Record<string, JsonValue> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)

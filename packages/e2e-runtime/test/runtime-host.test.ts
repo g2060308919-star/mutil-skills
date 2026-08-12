@@ -330,6 +330,28 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('cancel-run 在 dispatch 前原子进入 cancelled，重复取消幂等且 health 只读可见', async () => {
+    const fixture = await hostFixture()
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CANCEL-CREATE', fixture.roots.project)))
+    await seedExecutableCompilationReadyRun(fixture, created, 'REQUEST-CANCEL-SEED')
+    const cancel = (requestId: string) => RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader(requestId), command: 'cancel-run', projectRoot: fixture.roots.project,
+      payload: { runId: created.runId },
+    })
+    const first = successResult(await handleRequest(fixture.host, cancel('REQUEST-CANCEL-1')))
+    const repeated = successResult(await handleRequest(fixture.host, cancel('REQUEST-CANCEL-2')))
+    expect(first).toMatchObject({ phase: 'pre-dispatch', disposition: 'cancelled', repeated: false })
+    expect(repeated).toMatchObject({ phase: 'pre-dispatch', disposition: 'cancelled', repeated: true })
+    const health = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-CANCEL-HEALTH'), command: 'get-health', projectRoot: fixture.roots.project,
+      payload: { runId: created.runId },
+    })))
+    expect(health).toMatchObject({ status: 'terminal', observedWorkflowState: 'cancelled',
+      cancel: { requested: true, phase: 'pre-dispatch' } })
+    await fixture.store.close()
+  })
+
   test('Target Probe 在需求理解与 Case lane 编译前 fail-closed', async () => {
     const probe = vi.fn(async () => ({
       status: 'ready' as const, observedUrl: 'http://localhost:3000/orders',
