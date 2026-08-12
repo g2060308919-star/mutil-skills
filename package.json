@@ -20,6 +20,7 @@
     "build": "tsc -b",
     "generate:e2e-schemas": "npm run build && node scripts/generate-e2e-artifact-schemas.mjs",
     "lint:architecture": "node scripts/check-architecture.mjs",
+    "verify:e2e-architecture-health": "node scripts/e2e-architecture-health.mjs",
     "e2e:golden": "vitest run --config vitest.e2e.config.ts",
     "verify:e2e-pack": "node scripts/run-e2e-release.mjs pack",
     "verify:e2e-release": "node scripts/run-e2e-release.mjs registry",

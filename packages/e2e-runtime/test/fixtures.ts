@@ -10,9 +10,9 @@ import {
   digestJsonHttpPayload,
 } from '@mutil-skills/e2e-gateway'
 import {
-  createTestWriteRuntimeSession,
   runReversibleWriteCase,
 } from '@mutil-skills/e2e-playwright-runtime'
+import { createTestWriteRuntimeSession } from '../../e2e-playwright-runtime/src/production-isolation.js'
 import {
   canonicalizeJson,
   digestInjectionResponseBody,

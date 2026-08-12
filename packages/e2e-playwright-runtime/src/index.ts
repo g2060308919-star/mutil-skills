@@ -27,7 +27,6 @@ export {
 } from './runtime-host-full-playwright-session.js'
 export {
   LocalRuntimeIsolationAuthority,
-  createTestWriteRuntimeSession,
   createProductionWriteRuntimeSession,
   getWriteRuntimeSessionBinding,
 } from './production-isolation.js'

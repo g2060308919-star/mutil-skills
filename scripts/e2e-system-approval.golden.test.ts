@@ -12,8 +12,9 @@ import {
   digestJsonHttpPayload, verifyGatewayPublicationAudit,
 } from '@mutil-skills/e2e-gateway'
 import {
-  PlaywrightPageAdapter, createTestWriteRuntimeSession, runReversibleWriteCase,
+  PlaywrightPageAdapter, runReversibleWriteCase,
 } from '@mutil-skills/e2e-playwright-runtime'
+import { createTestWriteRuntimeSession } from '../packages/e2e-playwright-runtime/src/production-isolation.js'
 import { renderReadOnlyReport } from '@mutil-skills/e2e-report'
 
 const tempDirectories: string[] = []

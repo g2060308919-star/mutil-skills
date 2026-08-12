@@ -17,11 +17,11 @@ import {
 } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, LocalLeaseAuthority } from '@mutil-skills/e2e-authority'
 import {
-  createTestWriteRuntimeSession,
   runFullPlaywrightCase,
   type FullPlaywrightBindings,
   type FullPlaywrightEvidenceStage,
 } from '../src/index.js'
+import { createTestWriteRuntimeSession } from '../src/production-isolation.js'
 import { authorizeFullPlaywrightControlledSession,
   createFullPlaywrightBrowserFacade } from '../src/full-playwright-session-internal.js'
 import { registerTrustedCompilerWriteRuntimeSession } from '../src/production-isolation.js'
