@@ -112,29 +112,33 @@ export function adaptRuntimePreflightExecutorV1(
 export function adaptRuntimeReadExecutorV1(
   capability: RuntimeReadExecutorCapability,
 ): BrowserExecutorProtocolCapabilityV1 {
-  return createAdapter(descriptor('read'), async (value) =>
-    await executeRuntimeRead(capability, value as Parameters<typeof executeRuntimeRead>[1]))
+  return createAdapter(descriptor('read'), async (value, signal) =>
+    await executeRuntimeRead(capability, { ...(value as Parameters<typeof executeRuntimeRead>[1]),
+      ...(signal === undefined ? {} : { signal }) }))
 }
 
 export function adaptRuntimeWriteExecutorV1(
   capability: RuntimeWriteExecutorCapability,
 ): BrowserExecutorProtocolCapabilityV1 {
-  return createAdapter(descriptor('reversible-write'), async (value) =>
-    await executeRuntimeWrite(capability, value as Parameters<typeof executeRuntimeWrite>[1]))
+  return createAdapter(descriptor('reversible-write'), async (value, signal) =>
+    await executeRuntimeWrite(capability, { ...(value as Parameters<typeof executeRuntimeWrite>[1]),
+      ...(signal === undefined ? {} : { signal }) }))
 }
 
 export function adaptRuntimeInjectionExecutorV1(
   capability: RuntimeInjectionExecutorCapability,
 ): BrowserExecutorProtocolCapabilityV1 {
-  return createAdapter(descriptor('injection'), async (value) =>
-    await executeRuntimeInjection(capability, value as Parameters<typeof executeRuntimeInjection>[1]))
+  return createAdapter(descriptor('injection'), async (value, signal) =>
+    await executeRuntimeInjection(capability, { ...(value as Parameters<typeof executeRuntimeInjection>[1]),
+      ...(signal === undefined ? {} : { signal }) }))
 }
 
 export function adaptRuntimeFullPlaywrightExecutorV1(
   capability: RuntimeFullPlaywrightExecutorCapability,
 ): BrowserExecutorProtocolCapabilityV1 {
-  return createAdapter(descriptor('full-playwright'), async (value) =>
-    await executeRuntimeFullPlaywright(capability, value as Parameters<typeof executeRuntimeFullPlaywright>[1]))
+  return createAdapter(descriptor('full-playwright'), async (value, signal) =>
+    await executeRuntimeFullPlaywright(capability, { ...(value as Parameters<typeof executeRuntimeFullPlaywright>[1]),
+      ...(signal === undefined ? {} : { signal }) }))
 }
 
 /** 只供仓库内覆盖证明持有的不可伪造能力；不从 package root 导出。 */

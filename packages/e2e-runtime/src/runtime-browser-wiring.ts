@@ -543,7 +543,9 @@ export function createProductionBrowserCapabilities(input: {
     },
   })
 
-  const read = authorizeRuntimeReadExecutor(async ({ snapshot, action, grant, currentSubject, attemptId }) => {
+  const read = authorizeRuntimeReadExecutor(async ({ snapshot, action, grant, currentSubject, attemptId, signal }) => {
+    if (signal?.aborted) throw new E2EError({ code: 'E2E_BROWSER_EXECUTOR_CANCELLED_BEFORE_DISPATCH',
+      category: 'safety', message: '只读执行在 Browser dispatch 前取消', retryable: true })
     const authorityHost = await input.authorityHost()
     const activated = await activateRuntimeGrant(authorityHost, grant)
     const authority = activated.consumeConnection((consumed) =>
@@ -1213,7 +1215,7 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
   secretBroker?: SecretTemplateBroker
 }): RuntimeFullPlaywrightExecutorCapability {
   const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
-  return authorizeRuntimeFullPlaywrightExecutor(async ({ snapshot, attemptId, projection }) => {
+  return authorizeRuntimeFullPlaywrightExecutor(async ({ snapshot, attemptId, projection, signal }) => {
     const writeAttempt = snapshot.writeAttempts?.[attemptId]
     if (writeAttempt === undefined || writeAttempt.state !== 'prepared') {
       throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_ATTEMPT_NOT_PREPARED')
@@ -1533,7 +1535,8 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
               freshnessReceipt, freshnessAuthority, authority: authority.writeApproval },
             lease: { leaseId: projection.capability.dataLeaseId, fencingToken: projection.capability.fencingToken,
               targetFingerprint: projection.targetFingerprint, authority: authority.lease },
-            runtime: assembled.runtime, session: assembled.session })))
+            runtime: assembled.runtime, session: assembled.session,
+            ...(signal === undefined ? {} : { signal }) })))
       if (!result.reservationId || !result.cleanup || !result.finalization?.leaseReceiptDigest) {
         throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TERMINAL_RECOVERY_REQUIRED')
       }

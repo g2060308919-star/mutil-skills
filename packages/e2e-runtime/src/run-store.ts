@@ -46,6 +46,7 @@ const LEASE_MILLISECONDS = 30_000
 const TERMINAL_SECRET_RETIREMENT_STATES = new Set<WorkflowState['current']>([
   'accepted', 'rejected', 'incomplete', 'environment-blocked', 'safety-blocked',
   'automation-blocked', 'artifact-blocked', 'migration-required',
+  'cancelled',
 ])
 
 declare const runtimeSecretRetirementCapabilityBrand: unique symbol

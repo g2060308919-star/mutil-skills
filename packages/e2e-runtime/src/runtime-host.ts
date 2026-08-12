@@ -2658,6 +2658,8 @@ export class E2ERuntimeHost {
     )
     const attemptIds = started.snapshot.caseSchedule!.cases.map((item) =>
       item.attemptId ?? `ATTEMPT-${randomUUID()}`)
+    const executionController = new AbortController()
+    this.#executionControllers.set(started.snapshot.runId, executionController)
     let result: Awaited<ReturnType<typeof executeScheduledRuntimeFullPlaywrightCases>>
     try {
       result = await executeWithOwnerHeartbeat(started.owner, async () =>
@@ -2668,14 +2670,16 @@ export class E2ERuntimeHost {
             schedule: started!.snapshot.caseSchedule!,
             attemptIds,
             ...(resumeAttemptId === undefined ? {} : { resumeAttemptId }),
+            signal: executionController.signal,
             now: () => this.dependencies.now().toISOString(),
-            executeCase: async ({ snapshot, attemptId, projection }) =>
+            executeCase: async ({ snapshot, attemptId, projection, signal }) =>
               await executeRuntimeFullPlaywrightProjectionWithBrowserExecutorProtocolV1(
                 this.dependencies.fullPlaywrightExecutor!, {
                   snapshot, attemptId, projection,
                   route: this.dependencies.browserExecutorProtocolV1?.fullPlaywrightRoute ?? 'protocol',
                   executionId: `FULL-${attemptId}`,
                   now: () => this.dependencies.now().toISOString(),
+                  ...(signal === undefined ? {} : { signal }),
                 },
               ),
             persistSchedule: async (schedule) => {
@@ -2874,6 +2878,10 @@ export class E2ERuntimeHost {
         `多 Case 执行未闭合（${causeCode}）；已持久化 cursor，必须显式恢复且不得重放 terminal Case`,
         releaseCause === undefined ? cause : new AggregateError([cause, releaseCause]),
       )
+    } finally {
+      if (this.#executionControllers.get(started.snapshot.runId) === executionController) {
+        this.#executionControllers.delete(started.snapshot.runId)
+      }
     }
     if (result.schedule.status !== 'terminal') {
       let releaseCause: unknown

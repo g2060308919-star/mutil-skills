@@ -101,20 +101,22 @@ type RuntimeReadExecutorBackend = (input: {
   grant: SignedReadGrant
   currentSubject: ReadApprovalSubject
   attemptId: string
+  signal?: AbortSignal
 }) => Promise<RuntimeReadExecutionOutput>
 
 const runtimeReadExecutors = new WeakMap<object, RuntimeReadExecutorBackend>()
 
 type RuntimeWriteExecutorBackend = (input: {
-  runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot
+  runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot; signal?: AbortSignal
 }) => Promise<RuntimeWriteExecutionOutput>
 type RuntimeInjectionExecutorBackend = (input: {
-  runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot
+  runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot; signal?: AbortSignal
 }) => Promise<RuntimeInjectionExecutionOutput>
 type RuntimeFullPlaywrightExecutorBackend = (input: {
   snapshot: RuntimeRunSnapshot
   attemptId: string
   projection: RuntimeFullPlaywrightProjection
+  signal?: AbortSignal
 }) => Promise<RuntimeWriteExecutionOutput>
 
 declare const runtimeWriteExecutorCapabilityBrand: unique symbol
@@ -162,7 +164,7 @@ export function authorizeRuntimeFullPlaywrightExecutor(
 
 export async function executeRuntimeFullPlaywright(
   capability: RuntimeFullPlaywrightExecutorCapability,
-  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; signal?: AbortSignal },
 ): Promise<RuntimeWriteExecutionOutput> {
   const projection = projectRuntimeFullPlaywrightSnapshot(input.snapshot)
   return await executeRuntimeFullPlaywrightProjection(capability, { ...input, projection })
@@ -170,7 +172,7 @@ export async function executeRuntimeFullPlaywright(
 
 export async function executeRuntimeFullPlaywrightProjection(
   capability: RuntimeFullPlaywrightExecutorCapability,
-  input: { snapshot: RuntimeRunSnapshot; attemptId: string; projection: RuntimeFullPlaywrightProjection },
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; projection: RuntimeFullPlaywrightProjection; signal?: AbortSignal },
 ): Promise<RuntimeWriteExecutionOutput> {
   const backend = runtimeFullPlaywrightExecutors.get(capability)
   if (!backend) throw trustedActionError(
@@ -179,6 +181,7 @@ export async function executeRuntimeFullPlaywrightProjection(
   )
   const output = parseRuntimeWriteExecutionOutput(await backend({
     snapshot: structuredClone(input.snapshot), attemptId: input.attemptId, projection: input.projection,
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
   }))
   if (output.caseId !== input.projection.caseId || output.actionId !== input.projection.actionId) {
     throw trustedActionError('E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_OUTPUT_INVALID',
@@ -230,6 +233,7 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
     schedule: RuntimeCaseSchedule
     attemptIds: string[]
     resumeAttemptId?: string
+    signal?: AbortSignal
     now(): string
     persistSchedule(schedule: RuntimeCaseSchedule): Promise<void>
     prepareCase?(input: {
@@ -247,6 +251,7 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
       snapshot: RuntimeRunSnapshot
       attemptId: string
       projection: RuntimeFullPlaywrightProjection
+      signal?: AbortSignal
     }): Promise<RuntimeWriteExecutionOutput>
   },
 ): Promise<{ outputs: RuntimeWriteExecutionOutput[]; schedule: RuntimeCaseSchedule }> {
@@ -269,6 +274,10 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
   }
   const outputs: RuntimeWriteExecutionOutput[] = []
   for (const [index, projection] of projections.entries()) {
+    if (input.signal?.aborted) throw trustedActionError(
+      'E2E_RUNTIME_FULL_PLAYWRIGHT_CANCELLED_BEFORE_CASE_DISPATCH',
+      '多 Case Full Playwright 在下一个 Case 派发前已取消',
+    )
     const scheduled = schedule.cases[index]
     const resuming = scheduled?.state === 'running'
       && scheduled.attemptId === input.resumeAttemptId
@@ -293,8 +302,10 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
         snapshot: structuredClone(executionSnapshot),
         attemptId,
         projection,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       })))
-      : await input.executeCase({ snapshot: executionSnapshot, attemptId, projection })
+      : await input.executeCase({ snapshot: executionSnapshot, attemptId, projection,
+        ...(input.signal === undefined ? {} : { signal: input.signal }) })
     outputs.push(output)
     schedule = completeCase(schedule, {
       caseId: projection.caseId,
@@ -316,19 +327,19 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
 
 export async function executeRuntimeWrite(
   capability: RuntimeWriteExecutorCapability,
-  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; signal?: AbortSignal },
 ): Promise<RuntimeWriteExecutionOutput> {
   const action = projectSingleRuntimeAction(input.snapshot, 'reversible-write')
   const batch = new RuntimeExecutionBatch({ runId: input.snapshot.runId, attemptId: input.attemptId })
   return await new TrustedActionRunner().executeWrite({
     executor: capability, batch, runId: input.snapshot.runId, attemptId: input.attemptId,
-    ...action, snapshot: input.snapshot,
+    ...action, snapshot: input.snapshot, ...(input.signal === undefined ? {} : { signal: input.signal }),
   })
 }
 
 export async function executeRuntimeInjection(
   capability: RuntimeInjectionExecutorCapability,
-  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; signal?: AbortSignal },
 ): Promise<RuntimeInjectionExecutionOutput> {
   const action = projectSingleRuntimeAction(input.snapshot)
   const batch = new RuntimeExecutionBatch({
@@ -338,7 +349,7 @@ export async function executeRuntimeInjection(
   })
   return await new TrustedActionRunner().executeInjection({
     executor: capability, batch, runId: input.snapshot.runId, attemptId: input.attemptId,
-    ...action, snapshot: input.snapshot,
+    ...action, snapshot: input.snapshot, ...(input.signal === undefined ? {} : { signal: input.signal }),
   })
 }
 
@@ -376,7 +387,7 @@ export function authorizeRuntimeReadExecutor(
 
 export async function executeRuntimeRead(
   capability: RuntimeReadExecutorCapability,
-  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; signal?: AbortSignal },
 ): Promise<RuntimeReadExecutionOutput> {
   const backend = runtimeReadExecutors.get(capability)
   if (!backend) throw trustedActionError(
@@ -386,6 +397,7 @@ export async function executeRuntimeRead(
   const output = await backend({
     snapshot: structuredClone(input.snapshot), action: projected.action, grant: projected.grant,
     currentSubject: projected.grant.subject, attemptId: input.attemptId,
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
   })
   return parseRuntimeReadExecutionOutput(output, projected.action)
 }
@@ -638,6 +650,7 @@ export class TrustedActionRunner {
     caseId: string
     actionId: string
     snapshot?: RuntimeRunSnapshot
+    signal?: AbortSignal
   }): Promise<RuntimeWriteExecutionOutput> {
     assertBatchBinding(input.batch, input.runId, input.attemptId)
     const backend = runtimeWriteExecutors.get(input.executor)
@@ -647,6 +660,7 @@ export class TrustedActionRunner {
     const output = parseRuntimeWriteExecutionOutput(await backend({
       runId: input.runId, attemptId: input.attemptId, caseId: input.caseId, actionId: input.actionId,
       ...(input.snapshot === undefined ? {} : { snapshot: structuredClone(input.snapshot) }),
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
     }))
     if (output.caseId !== input.caseId || output.actionId !== input.actionId) throw trustedActionError(
       'E2E_RUNTIME_WRITE_EXECUTOR_OUTPUT_INVALID', 'Write executor 输出 caseId/actionId 不闭合',
@@ -662,6 +676,7 @@ export class TrustedActionRunner {
     caseId: string
     actionId: string
     snapshot?: RuntimeRunSnapshot
+    signal?: AbortSignal
   }): Promise<RuntimeInjectionExecutionOutput> {
     assertBatchBinding(input.batch, input.runId, input.attemptId)
     const backend = runtimeInjectionExecutors.get(input.executor)
@@ -673,6 +688,7 @@ export class TrustedActionRunner {
       output = parseRuntimeInjectionExecutionOutput(await backend({
         runId: input.runId, attemptId: input.attemptId, caseId: input.caseId, actionId: input.actionId,
         ...(input.snapshot === undefined ? {} : { snapshot: structuredClone(input.snapshot) }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       }))
     } catch (cause) {
       if (cause instanceof E2EError && cause.code === 'E2E_RUNTIME_INJECTION_EXECUTOR_OUTPUT_INVALID') throw cause
