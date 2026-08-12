@@ -10,10 +10,13 @@ import {
 import type { ExecutableRunCompilation } from './prd-run-compiler.js'
 import type { RuntimeRunSnapshot } from './run-store.js'
 
-type ProjectedType = 'test-cases' | 'browser-action-map' | 'execution-contract'
+type ProjectedType = 'test-cases' | 'browser-action-map' | 'execution-contract' | 'run-bundle'
 
 export interface RuntimeExecutableArtifactProjection {
   artifacts: Record<ProjectedType, ArtifactDocument>
+  closure: {
+    cases: Array<{ caseId: string; actionIds: string[]; oracleIds: string[] }>
+  }
   runBundleRecipe: {
     schedule: Array<{ ordinal: number; caseId: string; stepIds: string[]; actionIds: string[] }>
     attemptPlans: Array<{ caseId: string; slots: number }>
@@ -102,13 +105,68 @@ export function projectRuntimeExecutableArtifacts(input: {
     runtimeIsolation: null, unresolvedItems: [], executionProfile: 'declarative-browser' as const,
     declarativeExecutionBinding: withoutBindingDigest(input.compilation.normalizedBinding),
   }
-  const artifacts = {
-    'test-cases': artifact(input, 'test-cases', '1.0.0', testCasesContent),
-    'browser-action-map': artifact(input, 'browser-action-map', '2.1.0', browserActionMapContent),
-    'execution-contract': artifact(input, 'execution-contract', '1.2.0', executionContractContent),
+  const coverageArtifact = requiredArtifact(input.snapshot, 'coverage-universe')
+  const projectPolicyArtifact = requiredArtifact(input.snapshot, 'project-policy')
+  const projectPolicyContent = projectPolicyArtifact.content as { runtimePolicy: { digest: string } }
+  const testCases = artifact(input, 'test-cases', '1.0.0', testCasesContent, {
+    dependencies: [dependency(coverageArtifact)],
+    graph: { defines: input.compilation.executableCases.flatMap((testCase, caseIndex) => [
+      { kind: 'CASE', id: testCase.caseId },
+      ...testCase.actions.map((_, actionIndex) => ({ kind: 'STEP', id: stepId(testCase.caseId, actionIndex) })),
+      ...testCase.oracles.map((oracle) => ({ kind: 'ORACLE', id: oracle.oracleId })),
+    ]), references: [] },
+  })
+  const browserActionMap = artifact(input, 'browser-action-map', '2.1.0', browserActionMapContent, {
+    dependencies: [dependency(testCases)],
+    graph: { defines: [
+      ...input.compilation.executableCases.flatMap((testCase) =>
+        testCase.actions.map((action) => ({ kind: 'ACTION', id: action.actionId }))),
+      ...pagePolicies.map((_, index) => ({ kind: 'PAGE', id: `PAGE-${index + 1}` })),
+    ], references: input.compilation.executableCases.flatMap((testCase) => [
+      { kind: 'CASE', id: testCase.caseId },
+      ...testCase.actions.map((_, actionIndex) => ({ kind: 'STEP', id: stepId(testCase.caseId, actionIndex) })),
+      ...testCase.oracles.map((oracle) => ({ kind: 'ORACLE', id: oracle.oracleId })),
+    ]) },
+  })
+  const executionContract = artifact(input, 'execution-contract', '1.2.0', executionContractContent, {
+    dependencies: [dependency(testCases), dependency(browserActionMap), dependency(projectPolicyArtifact)],
+    graph: { defines: input.compilation.executableCases.flatMap((testCase) =>
+      testCase.actions.map((action) => ({ kind: 'ACTION_INTENT', id: action.actionId }))),
+    references: input.compilation.executableCases.flatMap((testCase) => [
+      { kind: 'CASE', id: testCase.caseId },
+      ...testCase.actions.map((action) => ({ kind: 'ACTION', id: action.actionId })),
+    ]) },
+  })
+  const runBundleContent = {
+    runId: input.snapshot.runId,
+    allInputRefs: [testCases, browserActionMap, executionContract].map((item) => ({
+      artifactId: item.artifactId, digest: item.contentDigest,
+    })),
+    schedule,
+    attemptPlans: schedule.map(({ caseId }) => ({ caseId, slots: 1 })),
+    signedCapabilities: [], secretRefs: [],
+    runtimePolicyDigest: projectPolicyContent.runtimePolicy.digest,
+    runtimeIsolationPolicyDigest: 'not-applicable' as const,
   }
+  const runBundle = artifact(input, 'run-bundle', '2.0.0', runBundleContent, {
+    dependencies: [dependency(testCases), dependency(browserActionMap), dependency(executionContract),
+      dependency(projectPolicyArtifact)],
+    graph: { defines: [{ kind: 'RUN', id: input.snapshot.runId }],
+      references: schedule.flatMap((item) => [
+        { kind: 'CASE', id: item.caseId },
+        ...item.stepIds.map((id) => ({ kind: 'STEP', id })),
+        ...item.actionIds.map((id) => ({ kind: 'ACTION', id })),
+      ]) },
+  })
+  const artifacts = { 'test-cases': testCases, 'browser-action-map': browserActionMap,
+    'execution-contract': executionContract, 'run-bundle': runBundle }
+  const closure = { cases: input.compilation.executableCases.map((testCase) => ({
+    caseId: testCase.caseId,
+    actionIds: testCase.actions.map((action) => action.actionId),
+    oracleIds: testCase.oracles.map((oracle) => oracle.oracleId),
+  })) }
   const recipe = {
-    artifacts,
+    artifacts, closure,
     runBundleRecipe: { schedule, attemptPlans: schedule.map(({ caseId }) => ({ caseId, slots: 1 })) },
     regressionRecipe: { caseIds: schedule.map(({ caseId }) => caseId), blockedCases: input.compilation.blockedCases },
   }
@@ -118,18 +176,33 @@ export function projectRuntimeExecutableArtifacts(input: {
 }
 
 function artifact(input: { snapshot: RuntimeRunSnapshot; createdAt: string; engineVersion: string },
-  type: ProjectedType, schemaVersion: string, content: unknown): ArtifactDocument {
+  type: ProjectedType, schemaVersion: string, content: unknown, topology: {
+    dependencies: ArtifactDocument['dependencies']
+    graph: ArtifactDocument['graph']
+  } = { dependencies: [], graph: { defines: [], references: [] } }): ArtifactDocument {
   const value: Record<string, unknown> = {
     artifactId: `ARTIFACT-${type.toUpperCase()}`, artifactType: type, schemaVersion,
     engineVersion: input.engineVersion, assetId: input.snapshot.assetId,
     prdRevision: input.snapshot.artifactDigests['prd-source'], generationId: input.snapshot.runId,
-    createdAt: input.createdAt, contentDigest: '', signatures: [], dependencies: [],
-    graph: { defines: [], references: [] }, content,
+    createdAt: input.createdAt, contentDigest: '', signatures: [], dependencies: topology.dependencies,
+    graph: topology.graph, content,
   }
   value.contentDigest = digestArtifactContent(`artifact-content/${schemaVersion}/${type}`, value)
   const parsed = ArtifactSchemaRegistry[type].safeParse(value)
   if (!parsed.success) throw projectorError('E2E_RUNTIME_EXECUTABLE_ARTIFACT_INVALID', parsed.error)
   return parsed.data as ArtifactDocument
+}
+
+function requiredArtifact(snapshot: RuntimeRunSnapshot, type: ArtifactType): ArtifactDocument {
+  const parsed = ArtifactSchemaRegistry[type].safeParse(snapshot.frozenArtifacts[type])
+  if (!parsed.success) throw projectorError(`E2E_RUNTIME_EXECUTABLE_${type.toUpperCase().replaceAll('-', '_')}_REQUIRED`, parsed.error)
+  return parsed.data as ArtifactDocument
+}
+
+function dependency(artifact: ArtifactDocument): ArtifactDocument['dependencies'][number] {
+  return { artifactId: artifact.artifactId, artifactType: artifact.artifactType,
+    schemaVersion: artifact.schemaVersion, relativePath: `artifacts/${artifact.artifactType}.json`,
+    digest: artifact.contentDigest }
 }
 
 function coverageObligations(snapshot: RuntimeRunSnapshot): Array<{

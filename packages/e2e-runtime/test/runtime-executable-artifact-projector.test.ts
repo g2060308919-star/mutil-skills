@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { ArtifactSchemaRegistry, digestArtifactContent, digestText, type ArtifactDocument } from '@mutil-skills/e2e-contracts'
+import { auditArtifactGraph, auditExecutableCompilationClosure, type AuditableArtifact } from '@mutil-skills/e2e-engine'
 import { projectRuntimeExecutableArtifacts } from '../src/runtime-executable-artifact-projector.js'
 import type { ExecutableRunCompilation } from '../src/prd-run-compiler.js'
 import type { RuntimeRunSnapshot } from '../src/run-store.js'
@@ -7,13 +8,15 @@ import type { RuntimeRunSnapshot } from '../src/run-store.js'
 const d = (value: string) => digestText('runtime-executable-projector-test/v1', value)
 
 describe('Runtime executable artifact projector', () => {
-  test('从 Runtime 编译结果确定性生成三类严格 Artifact，不接受调用方 envelope', () => {
+  test('从 Runtime 编译结果确定性生成完整可执行 Artifact 集与可审计依赖图', () => {
     const first = projectRuntimeExecutableArtifacts({ snapshot: snapshot(), compilation: compilation(),
       createdAt: '2026-08-12T00:00:00.000Z', engineVersion: '0.8.0' })
     const second = projectRuntimeExecutableArtifacts({ snapshot: snapshot(), compilation: compilation(),
       createdAt: '2026-08-12T00:00:00.000Z', engineVersion: '0.8.0' })
     expect(first).toEqual(second)
-    expect(Object.keys(first.artifacts).sort()).toEqual(['browser-action-map', 'execution-contract', 'test-cases'])
+    expect(Object.keys(first.artifacts).sort()).toEqual([
+      'browser-action-map', 'execution-contract', 'run-bundle', 'test-cases',
+    ])
     for (const [type, artifact] of Object.entries(first.artifacts)) {
       expect(ArtifactSchemaRegistry[type as keyof typeof ArtifactSchemaRegistry].safeParse(artifact).success).toBe(true)
       expect(artifact.contentDigest).toBe(digestArtifactContent(
@@ -23,6 +26,18 @@ describe('Runtime executable artifact projector', () => {
     expect(first.runBundleRecipe.schedule).toEqual([{
       ordinal: 0, caseId: 'CASE-0001', stepIds: ['STEP-CASE-0001-0001'], actionIds: ['ACTION-0001-0001'],
     }])
+    const graphArtifacts = [...Object.values(snapshot().frozenArtifacts), ...Object.values(first.artifacts)]
+    const paths = new Map(graphArtifacts.map((artifact) => [
+      artifact.artifactId, `artifacts/${artifact.artifactType}.json`,
+    ]))
+    expect(auditArtifactGraph(graphArtifacts as AuditableArtifact[], paths)).toEqual({ valid: true, findings: [] })
+    expect(auditExecutableCompilationClosure({
+      plan: { cases: [{ caseId: 'CASE-0001', actionIds: ['ACTION-0001-0001'],
+        oracleIds: ['ORACLE-0001-0001'] }] },
+      binding: { cases: [{ caseId: 'CASE-0001', actionIds: ['ACTION-0001-0001'],
+        oracleIds: ['ORACLE-0001-0001'] }] },
+      artifacts: first.closure,
+    })).toEqual({ valid: true, findings: [] })
   })
 
   test('写 Case 未完成 DataLease/Cleanup 投影时 fail closed', () => {
@@ -60,12 +75,23 @@ function snapshot(): RuntimeRunSnapshot {
       ruleIds: ['RULE-1'], oracleIds: ['ORACLE-0001-0001'], nodeIds: ['REQ-1'], actor: 'USER',
       transitionId: 'not-applicable', scenario: '查看订单', necessity: 'required', applicabilityRuleId: 'RULE-1',
       disposition: { kind: 'automated', caseIds: ['CASE-0001'] } }] })
+  const projectPolicy = artifact('project-policy', '2.0.0', { policyVersion: '1.0.0',
+    environments: [{ environmentId: 'RUNTIME-TARGET', baseOrigin: 'https://example.test', riskTier: 'test' }],
+    originPolicies: [{ origin: 'https://example.test', allowRead: true, allowWrite: false }],
+    browserMatrix: [{ browserId: 'CHROME', channel: 'chrome', required: true }],
+    coveragePolicy: { id: 'COVERAGE', digest: d('coverage-policy') },
+    evidencePolicy: { id: 'EVIDENCE', digest: d('evidence-policy') },
+    retentionPolicy: { id: 'RETENTION', digest: d('retention-policy') },
+    riskPolicy: { id: 'RISK', digest: d('risk-policy') },
+    timeoutPolicy: { id: 'TIMEOUT', digest: d('timeout-policy') },
+    runtimePolicy: { id: 'RUNTIME', digest: d('runtime-policy') } })
   return { schemaVersion: '1.8.0', runId: 'RUN-1', assetId: 'PRODUCT/PRD-1', projectIdentityDigest: d('project'),
     runtimeInstallationDigest: d('runtime'), workflow: {
       current: 'preflight-readonly', sequence: 1, eventChainDigest: d('workflow'),
     },
-    artifactDigests: { 'prd-source': d('prd'), 'coverage-universe': anchor.contentDigest },
-    frozenArtifacts: { 'coverage-universe': anchor }, trustedExecutionFacts: {},
+    artifactDigests: { 'prd-source': d('prd'), 'coverage-universe': anchor.contentDigest,
+      'project-policy': projectPolicy.contentDigest },
+    frozenArtifacts: { 'coverage-universe': anchor, 'project-policy': projectPolicy }, trustedExecutionFacts: {},
     targetProbe: { schemaVersion: '1.0.0', trust: 'untrusted-diagnostic', runId: 'RUN-1',
       targetContractDigest: d('target'), status: 'ready', observedUrl: 'https://example.test/orders',
       observedTitle: '订单', identityMatched: true, diagnostics: { strategy: 'resource-closure', attempt: 1,

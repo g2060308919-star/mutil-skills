@@ -14,6 +14,7 @@ const ExecutableRunCompilationFactDraftSchema = z.object({
     'test-cases': DigestSchema,
     'browser-action-map': DigestSchema,
     'execution-contract': DigestSchema,
+    'run-bundle': DigestSchema,
   }).strict(),
   executableCaseIds: z.array(z.string().regex(/^CASE-[A-Za-z0-9._:-]+$/)).min(1).max(10_000),
 }).strict()

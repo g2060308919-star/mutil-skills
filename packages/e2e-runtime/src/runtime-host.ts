@@ -742,6 +742,7 @@ export class E2ERuntimeHost {
           'test-cases': string
           'browser-action-map': string
           'execution-contract': string
+          'run-bundle': string
         }
       const compilationFact = createExecutableRunCompilationFact({
         compilerDigest: compilation.compilerDigest,

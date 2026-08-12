@@ -417,6 +417,7 @@ export const RuntimeCompileExecutableRunResultSchema = z.object({
     'test-cases': DigestSchema,
     'browser-action-map': DigestSchema,
     'execution-contract': DigestSchema,
+    'run-bundle': DigestSchema,
   }).strict(),
   executableCaseIds: z.array(SafeIdSchema).max(1_000),
   blockedCases: z.array(z.object({

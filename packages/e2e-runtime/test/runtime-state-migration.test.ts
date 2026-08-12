@@ -196,6 +196,7 @@ describe('runtime state migration', () => {
         'test-cases': `sha256:${'6'.repeat(64)}`,
         'browser-action-map': `sha256:${'7'.repeat(64)}`,
         'execution-contract': `sha256:${'8'.repeat(64)}`,
+        'run-bundle': `sha256:${'a'.repeat(64)}`,
       },
       executableCaseIds: ['CASE-0001'],
     })

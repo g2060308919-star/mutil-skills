@@ -585,14 +585,15 @@ describe('E2ERuntimeHost', () => {
       runId: created.runId, executableCaseIds: ['CASE-0001'], blockedCases: [],
       artifactDigests: { 'test-cases': expect.stringMatching(/^sha256:/),
         'browser-action-map': expect.stringMatching(/^sha256:/),
-        'execution-contract': expect.stringMatching(/^sha256:/) },
+        'execution-contract': expect.stringMatching(/^sha256:/),
+        'run-bundle': expect.stringMatching(/^sha256:/) },
       workflow: { current: 'awaiting-execution-approval' },
     })
     const persisted = await fixture.store.getRun(
       created.projectIdentityDigest as string, created.runId as string,
     )
     expect(Object.keys(persisted?.frozenArtifacts ?? {})).toEqual(expect.arrayContaining([
-      'test-cases', 'browser-action-map', 'execution-contract',
+      'test-cases', 'browser-action-map', 'execution-contract', 'run-bundle',
     ]))
     expect(persisted?.trustedExecutionFacts['executable-run-compilation']).toMatchObject({
       compilerDigest: expect.stringMatching(/^sha256:/),
@@ -3251,8 +3252,20 @@ async function seedExecutableCompilationReadyRun(
       scenario: '首页稳定', necessity: 'required', applicabilityRuleId: 'actor:auditor',
       disposition: { kind: 'automated', caseIds: ['CASE-0001'] } }],
   }, created.runId as string, sourceRevision)
+  const projectPolicy = runtimeHostArtifact('project-policy', '2.0.0', {
+    policyVersion: '1.0.0', environments: [{ environmentId: 'RUNTIME-TARGET',
+      baseOrigin: 'https://example.test', riskTier: 'test' }],
+    originPolicies: [{ origin: 'https://example.test', allowRead: true, allowWrite: false }],
+    browserMatrix: [{ browserId: 'CHROME', channel: 'chrome', required: true }],
+    coveragePolicy: { id: 'COVERAGE', digest: digest('a') },
+    evidencePolicy: { id: 'EVIDENCE', digest: digest('b') },
+    retentionPolicy: { id: 'RETENTION', digest: digest('c') },
+    riskPolicy: { id: 'RISK', digest: digest('d') },
+    timeoutPolicy: { id: 'TIMEOUT', digest: digest('e') },
+    runtimePolicy: { id: 'RUNTIME', digest: digest('f') },
+  }, created.runId as string, sourceRevision)
   const frozenArtifacts = { 'prd-manifest': prdManifest, 'acceptance-scope': acceptanceScope,
-    'requirement-model': requirement, 'coverage-universe': coverage }
+    'requirement-model': requirement, 'coverage-universe': coverage, 'project-policy': projectPolicy }
   const targetContract = createTargetContractFact({ schemaVersion: '1.0.0',
     targetUrl: 'https://example.test/', baseOrigin: 'https://example.test', environmentLabel: 'test',
     pageIdentityPolicy: { schemaVersion: '1.0.0', url: { origin: 'https://example.test', pathPattern: '/' },
