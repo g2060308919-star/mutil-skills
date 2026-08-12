@@ -42,6 +42,8 @@ Skill 版本与 Runtime 版本必须同为 `0.8.x`，并由 `skill.manifest.json
 
 调用者不需要构造 `RuntimeRequestEnvelope`，也不需要理解 requestId、project identity 或状态跳转。Skill 使用 Runtime 的 `Facade` 生成 envelope、跟随 `nextEdge`，并把 `reasonCode`、`remediation`、RunHandle 与最小缺失输入原样呈现。面向调用者和排障优先使用固定 launcher 的友好命令：
 
+首次验收的产品入口是 `acceptFromPrd`：调用者只提供 PRD、URL 和必要的 **Role/Data Need**；Skill 完成一次需求理解与确认后，由 Facade 准备内部输入并返回可恢复 RunHandle。日常回归使用 `replayRegression` 复用冻结资产，不再次调用生成器；Target、Approval 与 Lease freshness 仍按当次 Runtime `nextEdge` 验证。两个入口都不得要求调用者手写 Policy、Artifact、digest 或 JSON envelope。
+
 - `~/.mutil-skills/bin/repo-e2e status --run <RUN>`：读取当前阶段、condition、`semanticCases`、保留/失效资产和下一步，并刷新 `~/.mutil-skills/e2e/runs/<asset>/<run>/run-status.html`。
 - `~/.mutil-skills/bin/repo-e2e resolve-runtime --offline`：离线验证并选择当前受控 Runtime closure；`--pinned <exact-version> [--digest <sha256:...>]` 用于精确复现。未配置生产 TUF 服务时不得使用 `--stable`，`latest` 始终拒绝。
 - `~/.mutil-skills/bin/repo-e2e prepare-input`：从标准输入接收 Skill 已读取并确认的 PRD/契约/必要来源 bytes 以及已选择的 `runtimePolicy`，创建私有、不可变接入快照并输出 `create-run` payload；它不发起网络请求，也不替代需求理解。
@@ -49,6 +51,8 @@ Skill 版本与 Runtime 版本必须同为 `0.8.x`，并由 `skill.manifest.json
 - `~/.mutil-skills/bin/repo-e2e confirm-review --run <RUN> --digest <sha256:...>`：只确认当前语义审查摘要。
 - `~/.mutil-skills/bin/repo-e2e retry --run <RUN>`：仅重试 Runtime 明确标为可恢复的 Target Probe 或 preflight，不重放写操作。
 - `~/.mutil-skills/bin/repo-e2e report --run <RUN>`：读取正式最终报告；`--run-id` 仅保留为旧调用兼容别名。
+
+运行中可用正式 `cancel-run` 请求取消，并用 `get-health` 读取当前 Case/Action/Attempt、等待、Gateway、Cleanup 和 cancel progress。写已派发后取消不能自动重放，Cleanup/Reload 与 unknown-write 收口不能被跳过；health 只是诊断投影，不能改变 workflow 或 Verdict。
 
 内部仍通过下节 JSON 协议提交复杂声明式资产，这是 Skill/Facade 的实现细节，不得要求用户手写 JSON envelope。
 

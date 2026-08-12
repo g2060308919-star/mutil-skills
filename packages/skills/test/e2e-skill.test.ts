@@ -23,6 +23,14 @@ const workflowFiles = [
 ]
 
 describe('E2E skill package', () => {
+  test('产品入口只要求 PRD、URL、Role/Data Need，并说明 cancel/health 与 frozen replay', async () => {
+    const source = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+    expect(source).toContain('acceptFromPrd')
+    expect(source).toContain('replayRegression')
+    expect(source).toContain('cancel-run')
+    expect(source).toContain('get-health')
+    expect(source).toContain('Role/Data Need')
+  })
   test('registry exposes the E2E skill and its bundled workflow files', () => {
     const skill = resolveSkill('e2e')
 
