@@ -57,6 +57,28 @@ const manualDraft = {
 }
 
 describe('Runtime Host contracts', () => {
+  test('compile-executable-run 只接受 runId 与严格 binding，拒绝调用方注入审批和资产', () => {
+    const binding = {
+      schemaVersion: 'declarative-execution-binding/v1',
+      planCompilerDigest: `sha256:${'1'.repeat(64)}`,
+      targetProbeDigest: `sha256:${'2'.repeat(64)}`,
+      cases: [{ caseId: 'CASE-0001', executionLane: 'trusted-read-only',
+        pageIdentityPolicy: { schemaVersion: '1.0.0', url: { origin: 'https://example.test', pathPattern: '/' },
+          signals: [{ kind: 'role', role: 'main', name: '首页' }], match: { mode: 'all' } },
+        actions: [{ kind: 'assert-only', actionId: 'ACTION-0001-0001', effect: 'read',
+          pageScope: { page: 'current', frame: { kind: 'main' } }, locatorCandidates: [],
+          timeout: { timeoutMs: 5_000, retry: 'read-only-max-2' } }],
+        oracles: [{ kind: 'url', oracleId: 'ORACLE-0001-0001', actionId: 'ACTION-0001-0001',
+          comparator: 'equals', expected: 'https://example.test/', deadlineMs: 5_000,
+          evidenceKinds: ['url'] }], dataNeeds: [], cleanupIntents: [] }],
+    }
+    const request = { ...doctorRequest, command: 'compile-executable-run', projectRoot: '/tmp/project',
+      payload: { runId: 'RUN-1', binding } }
+    expect(RuntimeRequestEnvelopeSchema.safeParse(request).success).toBe(true)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({ ...request, payload: {
+      ...request.payload, approval: { approved: true }, artifacts: [], verdict: 'accepted',
+    } }).success).toBe(false)
+  })
   test('验收语义查看与确认使用独立严格命令并绑定 reviewDigest', () => {
     const base = {
       schemaVersion: '1.0.0', client: { name: 'e2e-skill', version: '1.0.0' },

@@ -55,6 +55,8 @@ import { authorizeRuntimeGenerationFinalizer } from '../src/runtime-generation-f
 import { authorizeRuntimeEvidenceQuarantine } from '../src/runtime-evidence-quarantine.js'
 import { createCaseSchedule } from '../src/multi-case-scheduler.js'
 import { authorizeTargetProbe } from '../src/target-probe.js'
+import { buildAcceptanceReview } from '../src/acceptance-review.js'
+import { createTargetContractFact } from '../src/target-contract.js'
 
 const digest = (character: string): string => `sha256:${character.repeat(64)}`
 
@@ -537,6 +539,65 @@ describe('E2ERuntimeHost', () => {
       state: 'pending',
     }])
     expect(persisted?.caseSchedule?.compilerDigest).toBe(response.compilerDigest)
+  })
+
+  test('compile-executable-run 在单次 Runtime 事务中生成并冻结可信可执行资产', async () => {
+    const fixture = await hostFixture()
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-EXECUTABLE-CREATE', fixture.roots.project),
+    ))
+    await seedExecutableCompilationReadyRun(fixture, created, 'REQUEST-EXECUTABLE-SEED')
+    const snapshot = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    if (!snapshot?.compiledPrdRun || !snapshot.targetProbe) throw new Error('seed failed')
+    expect(successResult(await handleRequest(fixture.host, getStatusRequest(
+      'REQUEST-EXECUTABLE-STATUS', fixture.roots.project, created.runId as string,
+    )))).toMatchObject({
+      state: 'preflight-readonly',
+      nextEdge: { command: 'compile-executable-run' },
+      minimumMissingInput: ['declarative-execution-binding'],
+    })
+    const binding = {
+      schemaVersion: 'declarative-execution-binding/v1' as const,
+      planCompilerDigest: snapshot.compiledPrdRun.compilerDigest,
+      targetProbeDigest: snapshot.targetProbe.diagnosticDigest,
+      cases: [{ caseId: 'CASE-0001', executionLane: 'trusted-read-only' as const,
+        pageIdentityPolicy: { schemaVersion: '1.0.0' as const,
+          url: { origin: 'https://example.test', pathPattern: '/' },
+          signals: [{ kind: 'role' as const, role: 'main' as const, name: '首页' }],
+          match: { mode: 'all' as const } },
+        actions: [{ kind: 'assert-only' as const, actionId: 'ACTION-0001-0001', effect: 'read' as const,
+          pageScope: { page: 'current' as const, frame: { kind: 'main' as const } }, locatorCandidates: [],
+          timeout: { timeoutMs: 5_000, retry: 'read-only-max-2' as const } }],
+        oracles: [{ kind: 'url' as const, oracleId: 'ORACLE-0001-0001', actionId: 'ACTION-0001-0001',
+          comparator: 'equals' as const, expected: 'https://example.test/', deadlineMs: 5_000,
+          evidenceKinds: ['url' as const] }], dataNeeds: [], cleanupIntents: [] }],
+    }
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-EXECUTABLE-COMPILE'), command: 'compile-executable-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId, binding },
+    })
+    const first = await handleRequest(fixture.host, request)
+    const replay = await handleRequest(fixture.host, request)
+    expect(first).toEqual(replay)
+    expect(successResult(first)).toMatchObject({
+      runId: created.runId, executableCaseIds: ['CASE-0001'], blockedCases: [],
+      artifactDigests: { 'test-cases': expect.stringMatching(/^sha256:/),
+        'browser-action-map': expect.stringMatching(/^sha256:/),
+        'execution-contract': expect.stringMatching(/^sha256:/) },
+      workflow: { current: 'awaiting-execution-approval' },
+    })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(Object.keys(persisted?.frozenArtifacts ?? {})).toEqual(expect.arrayContaining([
+      'test-cases', 'browser-action-map', 'execution-contract',
+    ]))
+    expect(persisted?.trustedExecutionFacts['executable-run-compilation']).toMatchObject({
+      compilerDigest: expect.stringMatching(/^sha256:/),
+    })
+    await fixture.store.close()
   })
 
   test('derives a publication-safe generation id from a protocol-valid lowercase request id', async () => {
@@ -3125,6 +3186,117 @@ async function seedCompiledRun(
     'test-seed-compiled', lock,
   )
   await lock.close()
+}
+
+async function seedExecutableCompilationReadyRun(
+  fixture: Awaited<ReturnType<typeof hostFixture>>,
+  created: Record<string, unknown>,
+  requestId: string,
+): Promise<void> {
+  await fixture.store.beginRequest(requestId, digest('7'))
+  const lock = await fixture.store.acquireRunLock(
+    created.projectIdentityDigest as string, created.runId as string,
+  )
+  const sourceRevision = created.prdRevision as string
+  const compiledPrdRun = {
+    schemaVersion: '1.0.0' as const,
+    contractProjectionDigest: digest('2'),
+    cases: [{ queueOrdinal: 0, caseId: 'CASE-0001', caseKey: 'home', title: '首页稳定', actor: 'auditor',
+      contractNodeIds: ['REQ-1'], failurePolicy: 'stop-required' as const,
+      actions: [{ actionId: 'ACTION-0001-0001', actionKey: 'observe', kind: 'full-playwright' as const,
+        effect: 'read' as const, statement: '观察首页' }],
+      oracles: [{ oracleId: 'ORACLE-0001-0001', oracleKey: 'home-url', actionId: 'ACTION-0001-0001',
+        contractNodeId: 'REQ-1', acceptanceCriterion: 'Product behavior is stable' }],
+    }],
+    compilerDigest: '',
+  }
+  compiledPrdRun.compilerDigest = digestCompiledPrdRunPlan(compiledPrdRun)
+  const prdManifest = runtimeHostArtifact('prd-manifest', '1.0.0', {
+    prdId: 'PRD-1', assetId: 'ASSET-1', revision: sourceRevision, normalizedPrdDigest: sourceRevision,
+    sources: [{ sourceId: 'PRD-BODY', digest: sourceRevision, byteLength: 1 }], attachments: [],
+    sourceCacheIndexDigest: digest('1'), clauses: [{ clauseId: 'CLAUSE-1', sourceId: 'PRD-BODY',
+      kind: 'functional', sourceSpan: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 14 },
+      originalText: 'A stable PRD.', normalizedText: 'A stable PRD.',
+      textDigest: digestPrdClause({ clauseId: 'CLAUSE-1', sourceId: 'PRD-BODY', kind: 'functional',
+        sourceSpan: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 14 },
+        originalText: 'A stable PRD.', normalizedText: 'A stable PRD.' }) }],
+    clauseInventoryDigest: digestPrdClauseInventory([{ clauseId: 'CLAUSE-1', sourceId: 'PRD-BODY',
+      kind: 'functional', sourceSpan: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 14 },
+      originalText: 'A stable PRD.', normalizedText: 'A stable PRD.',
+      textDigest: digestPrdClause({ clauseId: 'CLAUSE-1', sourceId: 'PRD-BODY', kind: 'functional',
+        sourceSpan: { startLine: 2, startColumn: 1, endLine: 2, endColumn: 14 },
+        originalText: 'A stable PRD.', normalizedText: 'A stable PRD.' }) }]),
+  }, created.runId as string, sourceRevision)
+  const acceptanceScope = runtimeHostArtifact('acceptance-scope', '2.0.0', {
+    includedReqCandidates: [{ reqId: 'REQ-1', sourceRefs: ['CLAUSE-1'] }], exclusions: [], ambiguities: [],
+    clauseDispositions: [{ clauseId: 'CLAUSE-1', disposition: 'modeled', requirementIds: ['REQ-1'] }],
+    dependencies: [], visualScope: { required: false, refs: [] },
+    browserScope: { browserIds: ['CHROME'], viewportIds: ['DEFAULT'] },
+    scopeDecision: { decisionId: 'SCOPE-1', status: 'pending' },
+  }, created.runId as string, sourceRevision)
+  const requirement = runtimeHostArtifact('requirement-model', '1.0.0', {
+    modelRevision: 1, coupledDimensions: [], applicabilityRules: ['actor:auditor'], modelDecisionDigest: digest('3'),
+    requirements: [{ reqId: 'REQ-1', revision: 1, title: '首页稳定', actors: ['auditor'], entities: ['HOME'],
+      contractNodeIds: ['REQ-1'], preconditions: [], rules: [{ ruleId: 'RULE-1', category: 'business',
+        statement: '首页稳定', sourceRefs: ['CLAUSE-1'], certainty: 'explicit', oracleIds: ['ORACLE-1'] }],
+      states: [], transitions: [], observableOutcomes: [{ oracleId: 'ORACLE-1', ruleId: 'RULE-1',
+        statement: 'Product behavior is stable', sourceRefs: ['CLAUSE-1'] }],
+      applicability: [{ dimension: 'actor', value: 'auditor', required: true }],
+      sourceRefs: ['CLAUSE-1'], status: 'active' }],
+  }, created.runId as string, sourceRevision)
+  const coverage = runtimeHostArtifact('coverage-universe', '1.0.0', {
+    coveragePolicyDigest: digest('4'), pairwiseSeed: 1, universeDigest: digest('5'),
+    obligations: [{ obligationId: 'OBL-1', reqId: 'REQ-1', clauseIds: ['CLAUSE-1'], ruleIds: ['RULE-1'],
+      oracleIds: ['ORACLE-1'], nodeIds: ['REQ-1'], actor: 'auditor', transitionId: 'not-applicable',
+      scenario: '首页稳定', necessity: 'required', applicabilityRuleId: 'actor:auditor',
+      disposition: { kind: 'automated', caseIds: ['CASE-0001'] } }],
+  }, created.runId as string, sourceRevision)
+  const frozenArtifacts = { 'prd-manifest': prdManifest, 'acceptance-scope': acceptanceScope,
+    'requirement-model': requirement, 'coverage-universe': coverage }
+  const targetContract = createTargetContractFact({ schemaVersion: '1.0.0',
+    targetUrl: 'https://example.test/', baseOrigin: 'https://example.test', environmentLabel: 'test',
+    pageIdentityPolicy: { schemaVersion: '1.0.0', url: { origin: 'https://example.test', pathPattern: '/' },
+      signals: [{ kind: 'role', role: 'main', name: '首页' }], match: { mode: 'all' } },
+    allowedNavigationOrigins: ['https://example.test'] })
+  await fixture.store.updateRunOutcome(
+    created.projectIdentityDigest as string, created.runId as string, requestId, digest('7'),
+    (snapshot) => {
+      const prepared = { ...snapshot, compiledPrdRun, frozenArtifacts,
+        artifactDigests: { ...snapshot.artifactDigests, 'prd-source': sourceRevision,
+          ...Object.fromEntries(Object.entries(frozenArtifacts).map(([type, artifact]) =>
+            [type, artifact.contentDigest])) }, targetContract }
+      const review = buildAcceptanceReview(prepared)
+      const receiptBody = { schemaVersion: '1.0.0' as const, reviewDigest: review.reviewDigest,
+        approver: 'local-caller' as const, approvalMode: 'local-confirmation' as const,
+        identityVerified: false as const, separationOfDutiesVerified: false as const,
+        confirmedAt: '2026-07-17T00:00:00.000Z' }
+      const receipt = { ...receiptBody,
+        receiptDigest: digestText('e2e-acceptance-review-receipt/v1', canonicalizeJson(receiptBody)) }
+      return { snapshot: { ...prepared,
+      trustedExecutionFacts: { ...snapshot.trustedExecutionFacts,
+        'acceptance-review': review, 'acceptance-review-receipt': receipt },
+      targetProbe: { schemaVersion: '1.0.0', trust: 'untrusted-diagnostic', runId: snapshot.runId,
+        targetContractDigest: targetContract.contractDigest, status: 'ready', observedUrl: 'https://example.test/',
+        observedTitle: '首页', identityMatched: true, diagnostics: { strategy: 'resource-closure', attempt: 1,
+          domPresent: true, visibleTextSummary: '首页', consoleErrors: [], failedRequests: [], pendingResources: [],
+          unapprovedResources: [], persistentConnections: [], advisories: [], resourceSummary: { observedCount: 1,
+            approvedCount: 1, pendingCount: 0, unapprovedCount: 0, persistentConnectionCount: 0,
+            closureComplete: true } }, probedAt: '2026-07-17T00:00:00.000Z', diagnosticDigest: digest('6') },
+      workflow: { current: 'preflight-readonly', sequence: 6, eventChainDigest: digest('8') },
+    }, response: { seeded: true } }
+    }, 'test-seed-executable-ready', lock,
+  )
+  await lock.close()
+}
+
+function runtimeHostArtifact(type: string, schemaVersion: string, content: unknown,
+  generationId: string, prdRevision: string): ArtifactDocument {
+  const candidate: Record<string, unknown> = { artifactId: `ARTIFACT-${type.toUpperCase()}`,
+    artifactType: type, schemaVersion, engineVersion: '0.0.0', assetId: 'ASSET-1', prdRevision,
+    generationId, createdAt: '2026-07-17T00:00:00.000Z', contentDigest: '', signatures: [],
+    dependencies: [], graph: { defines: [], references: [] }, content }
+  candidate.contentDigest = digestArtifactContent(`artifact-content/${schemaVersion}/${type}`, candidate)
+  return candidate as unknown as ArtifactDocument
 }
 
 async function seedDiagnosingRun(

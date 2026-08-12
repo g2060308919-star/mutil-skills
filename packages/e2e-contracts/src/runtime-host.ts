@@ -19,6 +19,7 @@ import {
   TargetProbeDiagnosticsSchema,
 } from './e2e-flow.js'
 import { TaskStateViewV1Schema } from './task-state-view.js'
+import { DeclarativeExecutionBindingV1Schema } from './declarative-execution-binding.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -109,6 +110,15 @@ const commandSchemas = [
     payload: z.object({
       runId: SafeIdSchema,
       design: AnyDeclarativePrdRunDesignSchema,
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('compile-executable-run'),
+    projectRoot: z.string().min(1),
+    payload: z.object({
+      runId: SafeIdSchema,
+      binding: DeclarativeExecutionBindingV1Schema,
     }).strict(),
   }).strict(),
   z.object({
@@ -275,7 +285,8 @@ export const RuntimeDoctorReportSchema = z.object({
 
 export const RuntimeStatusNextEdgeSchema = z.object({
   command: z.enum([
-    'prepare-prd-understanding', 'compile-prd-run', 'submit-candidate', 'open-approval', 'confirm-approval',
+    'prepare-prd-understanding', 'compile-prd-run', 'compile-executable-run',
+    'submit-candidate', 'open-approval', 'confirm-approval',
     'get-acceptance-review', 'confirm-acceptance-review',
     'configure-target', 'probe-target',
     'run-preflight', 'prepare-manual-result',
@@ -398,6 +409,25 @@ export const RuntimeCompilePrdRunResultSchema = z.object({
   nextRequiredDecision: z.literal('scope'),
 }).strict()
 
+export const RuntimeCompileExecutableRunResultSchema = z.object({
+  runId: SafeIdSchema,
+  compilerDigest: DigestSchema,
+  projectionDigest: DigestSchema,
+  artifactDigests: z.object({
+    'test-cases': DigestSchema,
+    'browser-action-map': DigestSchema,
+    'execution-contract': DigestSchema,
+  }).strict(),
+  executableCaseIds: z.array(SafeIdSchema).max(1_000),
+  blockedCases: z.array(z.object({
+    caseId: SafeIdSchema,
+    reason: z.enum(['needs-binding', 'unsupported']),
+    missingActionIds: z.array(SafeIdSchema).max(10_000),
+    missingOracleIds: z.array(SafeIdSchema).max(10_000),
+  }).strict()).max(1_000),
+  workflow: WorkflowStateSchema,
+}).strict()
+
 export const RuntimeAcceptanceReviewResultSchema = z.object({
   review: AcceptanceReviewSchema,
   confirmation: z.object({
@@ -438,6 +468,7 @@ export type RuntimePreparePrdUnderstandingResult = z.infer<
   typeof RuntimePreparePrdUnderstandingResultSchema
 >
 export type RuntimeCompilePrdRunResult = z.infer<typeof RuntimeCompilePrdRunResultSchema>
+export type RuntimeCompileExecutableRunResult = z.infer<typeof RuntimeCompileExecutableRunResultSchema>
 export type RuntimeAcceptanceReviewResult = z.infer<typeof RuntimeAcceptanceReviewResultSchema>
 
 function isPlainJsonObject(value: unknown): value is Record<string, JsonValue> {

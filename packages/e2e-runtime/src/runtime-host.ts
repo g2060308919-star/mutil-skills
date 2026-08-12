@@ -4,6 +4,7 @@ import {
   RuntimeDoctorReportSchema,
   RuntimeCreateRunResultSchema,
   RuntimeCompilePrdRunResultSchema,
+  RuntimeCompileExecutableRunResultSchema,
   RuntimeAcceptanceReviewResultSchema,
   AcceptanceReviewSchema,
   RuntimePreparePrdUnderstandingResultSchema,
@@ -117,7 +118,7 @@ import {
   assertPrdUnderstandingLinkedCandidate,
   preparePrdUnderstandingProjection,
 } from './prd-understanding-validator.js'
-import { compilePrdRun } from './prd-run-compiler.js'
+import { compileExecutableRun, compilePrdRun } from './prd-run-compiler.js'
 import { createCaseSchedule } from './multi-case-scheduler.js'
 import type { StandaloneEvidencePublisher } from './standalone-evidence-publisher.js'
 import {
@@ -139,6 +140,8 @@ import {
   type TargetProbeCapability,
 } from './target-probe.js'
 import { projectTaskStateViewV1 } from './task-state-view.js'
+import { projectRuntimeExecutableArtifacts } from './runtime-executable-artifact-projector.js'
+import { createExecutableRunCompilationFact } from './executable-run-compilation-fact.js'
 import type { RunStatusPublisher } from './run-status-publisher.js'
 import { assertCompiledCaseProjection } from './compiled-case-projection.js'
 import {
@@ -227,6 +230,7 @@ export class E2ERuntimeHost {
         && request.command !== 'open-approval'
         && request.command !== 'confirm-approval'
         && request.command !== 'compile-prd-run'
+        && request.command !== 'compile-executable-run'
         && request.command !== 'confirm-acceptance-review'
         && request.command !== 'configure-target'
         && request.command !== 'probe-target'
@@ -258,6 +262,9 @@ export class E2ERuntimeHost {
       }
       if (request.command === 'compile-prd-run') {
         return await this.compilePrdRun(request, requestDigest)
+      }
+      if (request.command === 'compile-executable-run') {
+        return await this.compileExecutableRun(request, requestDigest)
       }
       if (request.command === 'get-acceptance-review') {
         return await this.getAcceptanceReview(request, requestDigest)
@@ -685,6 +692,101 @@ export class E2ERuntimeHost {
         lock,
       )
       return RuntimeResponseEnvelopeSchema.parse(outcome)
+    })
+  }
+
+  private async compileExecutableRun(
+    request: Extract<RuntimeRequestEnvelope, { command: 'compile-executable-run' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      if (snapshot.workflow.current !== 'preflight-readonly') throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTABLE_COMPILE_STATE_MISMATCH', 'input',
+        '可执行编译只允许在 Target Probe ready 后的 preflight-readonly 状态执行',
+      )
+      if (snapshot.compiledPrdRun === undefined || snapshot.targetProbe === undefined) throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTABLE_PREREQUISITES_REQUIRED', 'input', '缺少语义计划或 Target Probe',
+      )
+      const review = buildAcceptanceReview(snapshot)
+      const receipt = AcceptanceReviewReceiptSchema.safeParse(
+        snapshot.trustedExecutionFacts['acceptance-review-receipt'],
+      )
+      if (!receipt.success) throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTABLE_REVIEW_NOT_CONFIRMED', 'input', 'Acceptance Review 尚未确认',
+      )
+      let compilation: ReturnType<typeof compileExecutableRun>
+      try {
+        compilation = compileExecutableRun({ compiledPlan: snapshot.compiledPrdRun,
+          acceptanceReview: review, acceptanceReviewReceipt: receipt.data,
+          targetProbe: snapshot.targetProbe, bindingCandidate: request.payload.binding })
+      } catch (cause) {
+        const code = safeExecutionCauseCode(cause)
+        if (code?.startsWith('E2E_RUNTIME_EXECUTABLE_') === true) throw runtimeHostError(
+          code, 'input', '声明式执行绑定未与当前语义、验收确认或 Target Probe 闭合', cause,
+        )
+        throw cause
+      }
+      if (compilation.blockedCases.length > 0) throw runtimeHostError(
+        'E2E_RUNTIME_EXECUTABLE_BINDING_INCOMPLETE', 'input',
+        `声明式执行绑定仍有 blocked Case；Runtime 未写入部分可执行资产：${
+          compilation.blockedCases.map((item) => item.caseId).join(',')}`,
+      )
+      const projection = projectRuntimeExecutableArtifacts({ snapshot, compilation,
+        createdAt: this.dependencies.now().toISOString(), engineVersion: this.dependencies.installation.version })
+      const artifactDigests = Object.fromEntries(Object.entries(projection.artifacts)
+        .map(([type, artifact]) => [type, artifact.contentDigest])) as {
+          'test-cases': string
+          'browser-action-map': string
+          'execution-contract': string
+        }
+      const compilationFact = createExecutableRunCompilationFact({
+        compilerDigest: compilation.compilerDigest,
+        projectionDigest: projection.projectionDigest,
+        planCompilerDigest: compilation.planCompilerDigest,
+        targetProbeDigest: compilation.targetProbeDigest,
+        bindingDigest: compilation.normalizedBinding.bindingDigest,
+        artifactDigests,
+        executableCaseIds: compilation.executableCases.map((testCase) => testCase.caseId),
+      })
+      const existing = snapshot.trustedExecutionFacts['executable-run-compilation']
+      if (existing !== undefined && canonicalizeJson(existing) !== canonicalizeJson(compilationFact)) {
+        throw runtimeHostError('E2E_RUNTIME_EXECUTABLE_ALREADY_COMPILED', 'input',
+          '同一 Run 已冻结不同的可执行编译结果')
+      }
+      let workflow = snapshot.workflow
+      workflow = transitionWorkflow({ state: workflow, next: 'binding-draft',
+        reason: `runtime projected browser binding ${projection.projectionDigest}`,
+        timestamp: this.dependencies.now().toISOString(), engineVersion: this.dependencies.installation.version }).state
+      workflow = transitionWorkflow({ state: workflow, next: 'awaiting-execution-approval',
+        reason: `runtime atomically froze executable artifacts ${compilation.compilerDigest}`,
+        timestamp: this.dependencies.now().toISOString(), engineVersion: this.dependencies.installation.version }).state
+      const response = this.successResponse(request.requestId, RuntimeCompileExecutableRunResultSchema.parse({
+        runId: snapshot.runId, compilerDigest: compilation.compilerDigest,
+        projectionDigest: projection.projectionDigest, artifactDigests,
+        executableCaseIds: compilation.executableCases.map((testCase) => testCase.caseId),
+        blockedCases: compilation.blockedCases, workflow,
+      }))
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+        identity.digest, snapshot.runId, request.requestId, requestDigest,
+        (current) => {
+          if (current.workflow.eventChainDigest !== snapshot.workflow.eventChainDigest
+            || current.targetProbe?.diagnosticDigest !== snapshot.targetProbe?.diagnosticDigest
+            || current.compiledPrdRun?.compilerDigest !== snapshot.compiledPrdRun?.compilerDigest) {
+            throw runtimeHostError('E2E_RUNTIME_EXECUTABLE_COMPILE_FENCED', 'safety',
+              '事务提交前语义计划、Target Probe 或 workflow 已变化')
+          }
+          return { snapshot: { ...current, workflow,
+            frozenArtifacts: { ...current.frozenArtifacts, ...projection.artifacts },
+            artifactDigests: { ...current.artifactDigests, ...artifactDigests },
+            trustedExecutionFacts: { ...current.trustedExecutionFacts,
+              'executable-run-compilation': compilationFact },
+            updatedAt: this.dependencies.now().toISOString() }, response }
+        }, 'executable-run-compiled', lock,
+      ))
     })
   }
 
@@ -3554,7 +3656,7 @@ const STATUS_COMMAND_BY_STATE: Partial<Record<WorkflowNode,
   ] },
   'coverage-audited': { command: 'open-approval', missing: ['discovery-approval'] },
   'discovery-approved': { command: 'run-preflight', missing: ['browser-preflight'] },
-  'preflight-readonly': { command: 'submit-candidate', missing: ['browser-action-map'] },
+  'preflight-readonly': { command: 'compile-executable-run', missing: ['declarative-execution-binding'] },
   'binding-draft': { command: 'submit-candidate', missing: ['test-cases', 'execution-contract'] },
   'lease-reserved': { command: 'open-approval', missing: ['execution-approval'] },
   'awaiting-execution-approval': { command: 'open-approval', missing: ['execution-approval'] },

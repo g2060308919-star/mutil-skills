@@ -4,6 +4,7 @@ import { describe, expect, test } from 'vitest'
 import type { RuntimeRunSnapshot } from '../src/run-store.js'
 import { migrateRuntimeRunSnapshot } from '../src/runtime-state-migration.js'
 import { createRuntimeOwnedResourceMarker, sealRuntimeWriteAttemptRecord } from '../src/write-attempt.js'
+import { createExecutableRunCompilationFact } from '../src/executable-run-compilation-fact.js'
 import { projectionFixture } from './trusted-action-runner.test.js'
 
 function currentSnapshot(): RuntimeRunSnapshot {
@@ -180,6 +181,37 @@ describe('runtime state migration', () => {
     })).toThrowError(expect.objectContaining({ code: 'E2E_RUNTIME_STATE_MIGRATION_REQUIRED' }))
     expect(() => migrateRuntimeRunSnapshot({
       ...snapshot, writeAttempts: { [record.attemptId]: { ...record, recordDigest: `sha256:${'e'.repeat(64)}` } },
+    })).toThrowError(expect.objectContaining({ code: 'E2E_RUNTIME_STATE_MIGRATION_REQUIRED' }))
+  })
+
+  test('严格校验可执行编译事实的摘要绑定，拒绝持久状态篡改', () => {
+    const snapshot = currentSnapshot()
+    const fact = createExecutableRunCompilationFact({
+      compilerDigest: `sha256:${'1'.repeat(64)}`,
+      projectionDigest: `sha256:${'2'.repeat(64)}`,
+      planCompilerDigest: `sha256:${'3'.repeat(64)}`,
+      targetProbeDigest: `sha256:${'4'.repeat(64)}`,
+      bindingDigest: `sha256:${'5'.repeat(64)}`,
+      artifactDigests: {
+        'test-cases': `sha256:${'6'.repeat(64)}`,
+        'browser-action-map': `sha256:${'7'.repeat(64)}`,
+        'execution-contract': `sha256:${'8'.repeat(64)}`,
+      },
+      executableCaseIds: ['CASE-0001'],
+    })
+    expect(migrateRuntimeRunSnapshot({
+      ...snapshot,
+      trustedExecutionFacts: {
+        ...snapshot.trustedExecutionFacts,
+        'executable-run-compilation': fact,
+      },
+    }).trustedExecutionFacts['executable-run-compilation']).toEqual(fact)
+    expect(() => migrateRuntimeRunSnapshot({
+      ...snapshot,
+      trustedExecutionFacts: {
+        ...snapshot.trustedExecutionFacts,
+        'executable-run-compilation': { ...fact, compilerDigest: `sha256:${'9'.repeat(64)}` },
+      },
     })).toThrowError(expect.objectContaining({ code: 'E2E_RUNTIME_STATE_MIGRATION_REQUIRED' }))
   })
 

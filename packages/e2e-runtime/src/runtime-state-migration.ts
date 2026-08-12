@@ -35,6 +35,7 @@ import {
 import { TargetContractFactSchema } from './target-contract.js'
 import { TargetProbeFactSchema } from './target-probe.js'
 import { AcceptanceReviewReceiptSchema } from './acceptance-review.js'
+import { ExecutableRunCompilationFactSchema } from './executable-run-compilation-fact.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const RunIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -117,6 +118,7 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     'approval-mode', 'pending-local-approval', 'prd-source-snapshot', 'prd-source-bundle',
     'prd-understanding-contract', 'prd-understanding-prepared', 'prd-semantic-confirmation',
     'acceptance-review', 'acceptance-review-receipt', 'target-contract-invalidation',
+    'executable-run-compilation',
   ])
   if (Object.keys(facts).length > allowed.size) context.addIssue({ code: 'custom', message: '可信执行事实数量超限' })
   let trustedFactBytes = 0
@@ -191,6 +193,12 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     if (key === 'target-contract-invalidation') {
       if (!TargetContractInvalidationFactSchema.safeParse(value).success) context.addIssue({
         code: 'custom', path: [key], message: 'TargetContract 失效事实结构非法',
+      })
+      continue
+    }
+    if (key === 'executable-run-compilation') {
+      if (!ExecutableRunCompilationFactSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: '可信可执行编译事实结构非法',
       })
       continue
     }
