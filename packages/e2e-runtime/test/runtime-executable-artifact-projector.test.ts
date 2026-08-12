@@ -26,6 +26,22 @@ describe('Runtime executable artifact projector', () => {
     expect(first.runBundleRecipe.schedule).toEqual([{
       ordinal: 0, caseId: 'CASE-0001', stepIds: ['STEP-CASE-0001-0001'], actionIds: ['ACTION-0001-0001'],
     }])
+    const execution = first.artifacts['execution-contract'].content as any
+    const actionMap = first.artifacts['browser-action-map'].content as any
+    expect(execution.readHttpRequests).toEqual([
+      expect.objectContaining({ requestId: 'REQUEST-DISCOVERED-0001', method: 'GET',
+        url: 'https://example.test/orders' }),
+      expect.objectContaining({ requestId: 'REQUEST-DISCOVERED-0002', method: 'GET',
+        url: 'https://example.test/app.js' }),
+    ])
+    expect(actionMap.actions[0]).toMatchObject({ requestIds: [
+      'REQUEST-DISCOVERED-0001', 'REQUEST-DISCOVERED-0002',
+    ], capabilities: expect.arrayContaining([
+      expect.objectContaining({ operation: 'local-navigation' }),
+      expect.objectContaining({ operation: 'dom-read' }),
+      expect.objectContaining({ operation: 'screenshot' }),
+      expect.objectContaining({ operation: 'http-request' }),
+    ]) })
     const graphArtifacts = [...Object.values(snapshot().frozenArtifacts), ...Object.values(first.artifacts)]
     const paths = new Map(graphArtifacts.map((artifact) => [
       artifact.artifactId, `artifacts/${artifact.artifactType}.json`,
@@ -46,6 +62,20 @@ describe('Runtime executable artifact projector', () => {
     expect(() => projectRuntimeExecutableArtifacts({ snapshot: snapshot(), compilation: value,
       createdAt: '2026-08-12T00:00:00.000Z', engineVersion: '0.8.0' }))
       .toThrow(/E2E_RUNTIME_EXECUTABLE_WRITE_PROJECTION_INCOMPLETE/)
+  })
+
+  test('healing 重投影使用单调 Action Map revision 并重算下游摘要', () => {
+    const baseline = projectRuntimeExecutableArtifacts({ snapshot: snapshot(), compilation: compilation(),
+      createdAt: '2026-08-12T00:00:00.000Z', engineVersion: '0.8.0' })
+    const revised = projectRuntimeExecutableArtifacts({ snapshot: snapshot(), compilation: compilation(),
+      actionMapRevision: 2, createdAt: '2026-08-12T00:00:00.000Z', engineVersion: '0.8.0' })
+    expect((revised.artifacts['browser-action-map'].content as any).actionMapRevision).toBe(2)
+    expect(revised.artifacts['browser-action-map'].contentDigest)
+      .not.toBe(baseline.artifacts['browser-action-map'].contentDigest)
+    expect(revised.artifacts['execution-contract'].contentDigest)
+      .not.toBe(baseline.artifacts['execution-contract'].contentDigest)
+    expect(revised.artifacts['run-bundle'].contentDigest)
+      .not.toBe(baseline.artifacts['run-bundle'].contentDigest)
   })
 })
 
@@ -96,7 +126,10 @@ function snapshot(): RuntimeRunSnapshot {
       targetContractDigest: d('target'), status: 'ready', observedUrl: 'https://example.test/orders',
       observedTitle: '订单', identityMatched: true, diagnostics: { strategy: 'resource-closure', attempt: 1,
         domPresent: true, visibleTextSummary: '订单', consoleErrors: [], failedRequests: [], pendingResources: [],
-        unapprovedResources: [], persistentConnections: [], advisories: [], resourceSummary: { observedCount: 1,
+        unapprovedResources: [], persistentConnections: [], observedResources: [
+          { method: 'GET', url: 'https://example.test/orders', resourceType: 'document' },
+          { method: 'GET', url: 'https://example.test/app.js', resourceType: 'script' },
+        ], advisories: [], resourceSummary: { observedCount: 2,
           approvedCount: 1, pendingCount: 0, unapprovedCount: 0, persistentConnectionCount: 0, closureComplete: true } },
       probedAt: '2026-08-12T00:00:00.000Z', diagnosticDigest: d('probe') },
     requestResponses: {}, createdAt: '2026-08-12T00:00:00.000Z', updatedAt: '2026-08-12T00:00:00.000Z' }

@@ -21,6 +21,8 @@ import {
 import { TaskStateViewV1Schema } from './task-state-view.js'
 import { DeclarativeExecutionBindingV1Schema } from './declarative-execution-binding.js'
 import { RunCancellationResultV1Schema, RunHealthSnapshotV1Schema } from './run-control.js'
+import { RuntimeHealingCandidateSchema } from './healing.js'
+import { ActorDataIntentV1Schema, ActorDataRequirementV1Schema } from './actor-data-fixture.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -82,6 +84,7 @@ const commandSchemas = [
         origin: z.object({ kind: z.enum(['file', 'url', 'text']), ref: z.string().min(1) }).strict(),
         relevance: z.literal('necessary-dependency'),
       }).strict()).max(100).optional(),
+      actorDataIntents: z.array(ActorDataIntentV1Schema).max(1000).optional(),
       understandingContract: z.object({
         header: PrdUnderstandingContractHeaderSchema,
         source: z.object({ kind: z.literal('file'), path: z.string().min(1) }).strict(),
@@ -127,6 +130,12 @@ const commandSchemas = [
     command: z.literal('get-acceptance-review'),
     projectRoot: z.string().min(1),
     payload: RunIdPayloadSchema,
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('propose-healing'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema.extend({ candidate: RuntimeHealingCandidateSchema }).strict(),
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
@@ -304,6 +313,7 @@ export const RuntimeStatusNextEdgeSchema = z.object({
     'configure-target', 'probe-target',
     'run-preflight', 'prepare-manual-result',
     'finalize-manual-result-role', 'execute-run', 'resume-run', 'finalize-run', 'render-report',
+    'propose-healing',
   ]),
   from: WorkflowNodeSchema,
   expectedState: WorkflowNodeSchema,
@@ -356,6 +366,7 @@ export const RuntimeStatusResultSchema = z.object({
     bindingStatus: z.enum(['pending', 'ready', 'blocked']),
     blockerReasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/).optional(),
   }).strict()).max(1_000).optional(),
+  actorDataRequirements: z.array(ActorDataRequirementV1Schema).max(1_000_000).optional(),
   remediation: z.array(z.string().min(1).max(64 * 1024)).max(32).optional(),
   target: z.object({
     schemaVersion: z.literal('1.0.0'),

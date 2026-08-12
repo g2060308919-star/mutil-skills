@@ -35,12 +35,15 @@ import {
   type SignedGrant,
   type WorkflowNode,
   PrdUnderstandingContractMachineViewSchema,
+  ActorDataIntentV1Schema,
+  ActorDataRequirementV1Schema,
 } from '@mutil-skills/e2e-contracts'
 import { randomUUID } from 'node:crypto'
 import {
   computePrdRevision,
   cancelWorkflow,
   createWorkflow,
+  invalidateForHealingRevision,
   invalidatePreflightForTargetChange,
   transitionWorkflow,
 } from '@mutil-skills/e2e-engine'
@@ -67,11 +70,13 @@ import { persistFinalizedApprovalOutcome } from './finalized-approval-outcome.js
 import {
   assertRuntimeReadSnapshotReady,
   executeRuntimeInjection,
+  executeRuntimeDeclarative,
   executeRuntimeFullPlaywright,
   executeScheduledRuntimeFullPlaywrightCases,
   executeRuntimeRead,
   executeRuntimeWrite,
   type RuntimeInjectionExecutorCapability,
+  type RuntimeDeclarativeExecutorCapability,
   type RuntimeFullPlaywrightExecutorCapability,
   type RuntimeReadExecutionOutput,
   type RuntimeReadExecutorCapability,
@@ -145,6 +150,7 @@ import {
 import { projectTaskStateViewV1 } from './task-state-view.js'
 import { projectRuntimeExecutableArtifacts } from './runtime-executable-artifact-projector.js'
 import { createExecutableRunCompilationFact } from './executable-run-compilation-fact.js'
+import { assertActorDataBinding, deriveActorDataRequirements } from './actor-data-binding.js'
 import type { RunStatusPublisher } from './run-status-publisher.js'
 import { assertCompiledCaseProjection } from './compiled-case-projection.js'
 import {
@@ -154,6 +160,11 @@ import {
   executeRuntimeReadWithBrowserExecutorProtocolV1,
   executeRuntimeWriteWithBrowserExecutorProtocolV1,
 } from './browser-executor-protocol.js'
+import {
+  authorizeRuntimeHealingReplay,
+  prepareRuntimeHealingRevision,
+  settleRuntimeHealingAudit,
+} from './runtime-bounded-healing.js'
 
 const EXTERNAL_SEMANTIC_ARTIFACT_TYPES = new Set<ArtifactType>([
   'project-policy', 'prd-request', 'prd-manifest', 'prd-diff', 'semantic-generation', 'acceptance-scope',
@@ -185,6 +196,7 @@ export interface RuntimeHostDependencies {
     | 'prepareManualResult' | 'requestManualResultRole' | 'recoverManualResultRole'>>>
   presentUserPresenceUrl?(url: string): void | Promise<void>
   readExecutor?: RuntimeReadExecutorCapability
+  declarativeExecutor?: RuntimeDeclarativeExecutorCapability
   browserExecutorProtocolV1?: {
     readRoute?: 'legacy' | 'shadow' | 'protocol'
     writeRoute?: 'legacy' | 'shadow' | 'protocol'
@@ -241,6 +253,7 @@ export class E2ERuntimeHost {
         && request.command !== 'submit-candidate'
         && request.command !== 'run-preflight'
         && request.command !== 'execute-run'
+        && request.command !== 'propose-healing'
         && request.command !== 'cancel-run'
         && request.command !== 'resume-run'
         && request.command !== 'finalize-run'
@@ -300,6 +313,9 @@ export class E2ERuntimeHost {
       }
       if (request.command === 'execute-run') {
         return await this.executeRun(request, requestDigest, requestWasPending)
+      }
+      if (request.command === 'propose-healing') {
+        return await this.proposeHealing(request, requestDigest)
       }
       if (request.command === 'resume-run') return await this.resumeRun(request, requestDigest)
       if (request.command === 'render-report') return await this.renderReport(request, requestDigest)
@@ -441,6 +457,9 @@ export class E2ERuntimeHost {
       frozenArtifacts: {},
       trustedExecutionFacts: {
         'approval-mode': this.dependencies.approvalMode ?? 'webauthn',
+        'actor-data-intents': ActorDataIntentV1Schema.array().parse(
+          request.payload.actorDataIntents ?? [],
+        ),
         'prd-source-snapshot': {
           schemaVersion: '1.0.0', sourceRef: request.payload.prdSource.path,
           normalizedText: normalizedPrd,
@@ -674,6 +693,18 @@ export class E2ERuntimeHost {
         }
         throw cause
       }
+      const actorDataIntents = ActorDataIntentV1Schema.array().parse(
+        snapshot.trustedExecutionFacts['actor-data-intents'] ?? [],
+      )
+      if (actorDataIntents.length > 0 && snapshot.targetContract === undefined) {
+        throw runtimeHostError(
+          'E2E_RUNTIME_ACTOR_DATA_TARGET_REQUIRED', 'input',
+          'Role/Data Need 必须在配置 TargetContract 后由 Runtime 绑定 Environment 与 Target',
+        )
+      }
+      const actorDataRequirements = snapshot.targetContract === undefined
+        ? []
+        : deriveActorDataRequirements({ intents: actorDataIntents, plan, target: snapshot.targetContract })
       if (snapshot.compiledPrdRun !== undefined
         && canonicalizeJson(snapshot.compiledPrdRun) !== canonicalizeJson(plan)) {
         throw runtimeHostError(
@@ -721,6 +752,10 @@ export class E2ERuntimeHost {
             ...current,
             compiledPrdRun: persistedPlan,
             caseSchedule: schedule,
+            trustedExecutionFacts: {
+              ...current.trustedExecutionFacts,
+              'actor-data-requirements': actorDataRequirements,
+            },
             updatedAt: this.dependencies.now().toISOString(),
           },
           response,
@@ -783,6 +818,18 @@ export class E2ERuntimeHost {
       if (!receipt.success) throw runtimeHostError(
         'E2E_RUNTIME_EXECUTABLE_REVIEW_NOT_CONFIRMED', 'input', 'Acceptance Review 尚未确认',
       )
+      const actorDataRequirements = ActorDataRequirementV1Schema.array().parse(
+        snapshot.trustedExecutionFacts['actor-data-requirements'] ?? [],
+      )
+      try {
+        assertActorDataBinding({ requirements: actorDataRequirements, binding: request.payload.binding })
+      } catch (cause) {
+        const code = safeExecutionCauseCode(cause)
+        if (code?.startsWith('E2E_RUNTIME_ACTOR_DATA_') === true) throw runtimeHostError(
+          code, 'input', '可执行绑定未完整引用 Runtime 冻结的 Role/Data Need', cause,
+        )
+        throw cause
+      }
       let compilation: ReturnType<typeof compileExecutableRun>
       try {
         compilation = compileExecutableRun({ compiledPlan: snapshot.compiledPrdRun,
@@ -1652,14 +1699,30 @@ export class E2ERuntimeHost {
               }
               return clearLocalConfirmation({
                 ...approvedSnapshot,
-                workflow: transitionWorkflow({
+                trustedExecutionFacts: factType === 'signed-execution-grant'
+                  && approvedSnapshot.trustedExecutionFacts['bounded-healing'] !== undefined
+                  ? { ...approvedSnapshot.trustedExecutionFacts,
+                    'bounded-healing': authorizeRuntimeHealingReplay(
+                      approvedSnapshot.trustedExecutionFacts['bounded-healing'],
+                    ) }
+                  : approvedSnapshot.trustedExecutionFacts,
+                workflow: (() => {
+                  const approved = transitionWorkflow({
                   state: approvedSnapshot.workflow,
                   next: factType === 'signed-discovery-grant' ? 'discovery-approved' : 'execution-approved',
                   reason: `${request.payload.approvalType} grant finalized`,
                   timestamp: this.dependencies.now().toISOString(),
                   engineVersion: this.dependencies.installation.version,
                   ...(factType === 'signed-execution-grant' ? { executionGrantValid: true } : {}),
-                }).state,
+                  }).state
+                  return factType === 'signed-execution-grant'
+                    && approvedSnapshot.trustedExecutionFacts['bounded-healing'] !== undefined
+                    ? transitionWorkflow({ state: approved, next: 'compiled',
+                      reason: 'fresh execution grant authorized bounded healing revision',
+                      timestamp: this.dependencies.now().toISOString(),
+                      engineVersion: this.dependencies.installation.version }).state
+                    : approved
+                })(),
                 updatedAt: this.dependencies.now().toISOString(),
               }, confirmed)
             },
@@ -2213,7 +2276,7 @@ export class E2ERuntimeHost {
     }
     const startLock = await this.dependencies.runStore.acquireRunLock(identity.digest, request.payload.runId)
     let started: Awaited<ReturnType<RuntimeRunStore['beginExecutionAttempt']>> | undefined
-    let executionMode: 'read' | 'write' | 'injection' | 'full-playwright' | undefined
+    let executionMode: 'read' | 'declarative' | 'write' | 'injection' | 'full-playwright' | undefined
     let startError: unknown
     try {
       const current = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
@@ -2233,7 +2296,11 @@ export class E2ERuntimeHost {
         'E2E_RUNTIME_WORKFLOW_STATE_MISMATCH', 'input', 'execute-run 仅允许 compiled Run',
       )
       executionMode = runtimeExecutionMode(current)
-      if (executionMode === 'read') {
+      if (executionMode === 'declarative') {
+        if (this.dependencies.declarativeExecutor === undefined) {
+          throw blockedError('E2E_RUNTIME_DECLARATIVE_EXECUTOR_NOT_READY')
+        }
+      } else if (executionMode === 'read') {
         if (this.dependencies.readExecutor === undefined) throw blockedError('E2E_RUNTIME_READ_EXECUTOR_NOT_READY')
         assertRuntimeReadSnapshotReady(current)
       } else if (executionMode === 'write') {
@@ -2337,7 +2404,12 @@ export class E2ERuntimeHost {
     const executionController = new AbortController()
     this.#executionControllers.set(started.snapshot.runId, executionController)
     try {
-      execution = await executeWithOwnerHeartbeat(started.owner, async () => executionMode === 'read'
+      execution = await executeWithOwnerHeartbeat(started.owner, async () => executionMode === 'declarative'
+        ? await executeRuntimeDeclarative(this.dependencies.declarativeExecutor!, {
+          snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
+          signal: executionController.signal,
+        })
+        : executionMode === 'read'
         ? await executeRuntimeReadWithBrowserExecutorProtocolV1(this.dependencies.readExecutor!, {
           snapshot: started!.snapshot, attemptId: started!.attempt.attemptId,
           route: this.dependencies.browserExecutorProtocolV1?.readRoute ?? 'protocol',
@@ -2431,7 +2503,7 @@ export class E2ERuntimeHost {
       }
     }
     let quarantinedEvidence: RuntimeQuarantinedEvidenceFacts | undefined
-    const ephemeralEvidence = executionMode === 'read'
+    const ephemeralEvidence = executionMode === 'read' || executionMode === 'declarative'
       ? (execution as RuntimeReadExecutionOutput).evidence
       : executionMode === 'write' || executionMode === 'full-playwright'
         ? (execution as Awaited<ReturnType<typeof executeRuntimeWrite>>).evidence
@@ -2475,7 +2547,8 @@ export class E2ERuntimeHost {
       timestamp: this.dependencies.now().toISOString(),
       engineVersion: this.dependencies.installation.version,
     }).state
-    const readExecution = executionMode === 'read' ? execution as RuntimeReadExecutionOutput : undefined
+    const readExecution = executionMode === 'read' || executionMode === 'declarative'
+      ? execution as RuntimeReadExecutionOutput : undefined
     const writeExecution = executionMode === 'write' || executionMode === 'full-playwright'
       ? execution as Awaited<ReturnType<typeof executeRuntimeWrite>> : undefined
     const persistedWriteExecution = writeExecution === undefined ? undefined
@@ -2514,9 +2587,18 @@ export class E2ERuntimeHost {
           ...snapshot,
           ...((quarantinedEvidence !== undefined || readExecution?.finalizationFacts !== undefined
             || writeExecution?.finalizationFacts !== undefined
-            || injectionExecution?.finalizationFacts !== undefined) ? {
+            || injectionExecution?.finalizationFacts !== undefined
+            || snapshot.trustedExecutionFacts['bounded-healing'] !== undefined) ? {
             trustedExecutionFacts: {
               ...snapshot.trustedExecutionFacts,
+              ...(snapshot.trustedExecutionFacts['bounded-healing'] === undefined ? {} : {
+                'bounded-healing': settleRuntimeHealingAudit({
+                  fact: snapshot.trustedExecutionFacts['bounded-healing'],
+                  finalAttemptId: started.attempt.attemptId,
+                  executionStatus: execution.status,
+                  oracleResults: readExecution?.oracleResults,
+                }),
+              }),
               ...(injectionExecution !== undefined && quarantinedEvidence !== undefined ? {
                 'quarantined-evidence': mergeDomainTrustedFact(
                   snapshot, 'quarantined-evidence', 'gatewayInjection',
@@ -2567,6 +2649,59 @@ export class E2ERuntimeHost {
           workflow: finalWorkflow, updatedAt: this.dependencies.now().toISOString(),
         }),
       })))
+  }
+
+  private async proposeHealing(
+    request: Extract<RuntimeRequestEnvelope, { command: 'propose-healing' }>,
+    requestDigest: string,
+  ): Promise<RuntimeResponseEnvelope> {
+    const identity = await resolveProjectIdentity(request.projectRoot, this.projectFileReader())
+    return await this.withRunLock(identity.digest, request.payload.runId, async (lock) => {
+      const snapshot = await this.dependencies.runStore.getRun(identity.digest, request.payload.runId)
+      if (snapshot === undefined) throw runtimeHostError('E2E_RUNTIME_RUN_NOT_FOUND', 'input', 'Run 不存在')
+      this.requireInstallation(snapshot)
+      let revision: ReturnType<typeof prepareRuntimeHealingRevision>
+      try {
+        revision = prepareRuntimeHealingRevision({ snapshot, candidate: request.payload.candidate,
+          createdAt: this.dependencies.now().toISOString(), engineVersion: this.dependencies.installation.version })
+      } catch (cause) {
+        throw runtimeHostError(safeExecutionCauseCode(cause) ?? 'E2E_RUNTIME_HEALING_REVIEW_REJECTED',
+          'safety', '有界修复未与当前失败 Attempt、语义、页面身份或审批主体闭合', cause)
+      }
+      const workflow = invalidateForHealingRevision({ state: snapshot.workflow,
+        reason: `bounded healing ${revision.auditFact.proposalId} revision ${revision.auditFact.revision}`,
+        approvalSubjectChanged: true, grantRevoked: true,
+        timestamp: this.dependencies.now().toISOString(), engineVersion: this.dependencies.installation.version }).state
+      const artifactDigests = Object.fromEntries(Object.entries(revision.artifacts)
+        .map(([type, artifact]) => [type, artifact.contentDigest]))
+      const { 'signed-execution-grant': _revokedGrant, 'pending-local-approval': _pendingApproval,
+        ...preservedFacts } = snapshot.trustedExecutionFacts
+      const response = this.successResponse(request.requestId, {
+        runId: snapshot.runId, status: 'awaiting-execution-approval',
+        review: revision.review, firstAttemptId: revision.auditFact.firstAttemptId,
+        firstEvidenceDigest: revision.auditFact.firstEvidenceDigest,
+        requiredOracleIds: revision.auditFact.requiredOracleIds,
+        artifactDigests, workflow,
+      })
+      return RuntimeResponseEnvelopeSchema.parse(await this.dependencies.runStore.updateRunOutcome(
+        identity.digest, snapshot.runId, request.requestId, requestDigest,
+        (current) => {
+          if (current.workflow.eventChainDigest !== snapshot.workflow.eventChainDigest
+            || canonicalizeJson(current.executionResults) !== canonicalizeJson(snapshot.executionResults)
+            || current.artifactDigests['browser-action-map'] !== snapshot.artifactDigests['browser-action-map']) {
+            throw runtimeHostError('E2E_RUNTIME_HEALING_FENCED', 'safety',
+              'healing 提交前失败 Attempt 或执行资产已变化')
+          }
+          return { snapshot: { ...current, workflow,
+            frozenArtifacts: { ...current.frozenArtifacts, ...revision.artifacts },
+            artifactDigests: { ...current.artifactDigests, ...artifactDigests },
+            trustedExecutionFacts: { ...preservedFacts,
+              'executable-run-compilation': revision.compilationFact,
+              'bounded-healing': revision.auditFact },
+            updatedAt: this.dependencies.now().toISOString() }, response }
+        }, 'bounded-healing-proposed', lock,
+      ))
+    })
   }
 
   private async executeMultiCaseFullPlaywrightRun(
@@ -3344,7 +3479,7 @@ function parseResumeDecision(input: unknown):
     expectedAttemptId: record.expectedAttemptId }
 }
 
-function runtimeExecutionMode(snapshot: RuntimeRunSnapshot): 'read' | 'write' | 'injection' | 'full-playwright' {
+function runtimeExecutionMode(snapshot: RuntimeRunSnapshot): 'read' | 'declarative' | 'write' | 'injection' | 'full-playwright' {
   const grant = snapshot.trustedExecutionFacts['signed-execution-grant']
   if (typeof grant === 'object' && grant !== null && !Array.isArray(grant)) {
     const capabilities = (grant as Record<string, unknown>).capabilities
@@ -3355,6 +3490,8 @@ function runtimeExecutionMode(snapshot: RuntimeRunSnapshot): 'read' | 'write' | 
   }
   const actionMap = snapshot.frozenArtifacts['browser-action-map']
   const content = actionMap?.content
+  if (typeof content === 'object' && content !== null && !Array.isArray(content)
+    && (content as Record<string, unknown>).executionProfile === 'declarative-browser') return 'declarative'
   if (typeof content === 'object' && content !== null && !Array.isArray(content)
     && (content as Record<string, unknown>).executionProfile === 'full-playwright') return 'full-playwright'
   const actions = typeof content === 'object' && content !== null && !Array.isArray(content)
@@ -3703,6 +3840,9 @@ function statusResult(
         : snapshot.preflightBlocker === undefined
           ? {} : { blockerReasonCode: snapshot.preflightBlocker.reasonCode }),
     })),
+    actorDataRequirements: ActorDataRequirementV1Schema.array().parse(
+      snapshot.trustedExecutionFacts['actor-data-requirements'] ?? [],
+    ),
     remediation: runtimeRemediation(snapshot, acceptanceReview, reviewConfirmed),
     ...projection,
     ...(acceptanceReview === undefined ? {} : {
@@ -3818,12 +3958,17 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
   const needsAcceptanceConfirmation = acceptanceReview !== undefined
     && (!acceptanceReceipt.success
       || acceptanceReceipt.data.reviewDigest !== acceptanceReview.reviewDigest)
-  const requiresTarget = snapshot.targetContract !== undefined
+  const actorDataIntents = ActorDataIntentV1Schema.array().parse(
+    snapshot.trustedExecutionFacts['actor-data-intents'] ?? [],
+  )
+  const requiresTarget = actorDataIntents.length > 0 || snapshot.targetContract !== undefined
     || snapshot.compiledPrdRun?.cases.some((testCase) => testCase.executionLane !== undefined) === true
   const targetProbeReady = snapshot.targetProbe?.status === 'ready'
     && snapshot.targetProbe.targetContractDigest === snapshot.targetContract?.contractDigest
   const intent = current === 'created' && !prepared.success
     ? { command: 'prepare-prd-understanding' as const, missing: ['prd-understanding-prepared'] }
+    : current === 'created' && actorDataIntents.length > 0 && snapshot.targetContract === undefined
+      ? { command: 'configure-target' as const, missing: ['target-contract'] }
     : current === 'created' && snapshot.compiledPrdRun === undefined
       ? { command: 'compile-prd-run' as const, missing: ['declarative-prd-run-design'] }
     : requiresTarget && snapshot.targetContract === undefined
@@ -3832,6 +3977,8 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
       ? { command: 'probe-target' as const, missing: ['target-probe-ready'] }
     : needsAcceptanceConfirmation
       ? { command: 'get-acceptance-review' as const, missing: ['acceptance-review-confirmation'] }
+    : current === 'diagnosing' && hasFailedHealingCandidate(snapshot)
+    ? { command: 'propose-healing' as const, missing: ['bounded-healing-candidate'] }
     : current === 'preflight-readonly' && snapshot.preflightBlocker !== undefined
     ? {
       command: 'run-preflight' as const,
@@ -3864,6 +4011,14 @@ function runtimeStatusProjection(snapshot: RuntimeRunSnapshot, now: Date): {
     },
     minimumMissingInput: missing,
   }
+}
+
+function hasFailedHealingCandidate(snapshot: RuntimeRunSnapshot): boolean {
+  const execution = snapshot.frozenArtifacts['execution-contract']?.content
+  return typeof execution === 'object' && execution !== null && !Array.isArray(execution)
+    && (execution as Record<string, unknown>).executionProfile === 'declarative-browser'
+    && Object.values(snapshot.executionResults?.readEnvironment ?? {})
+      .some((result) => result.status === 'failed')
 }
 
 function acceptanceReviewForStatus(snapshot: RuntimeRunSnapshot) {

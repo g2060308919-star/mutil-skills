@@ -56,8 +56,18 @@ function renderOracle(oracle: DeclarativeOracleObservation): string[] {
   if (oracle.kind === 'download') return [note,
     `const __downloadResult_${safe(oracle.oracleId)} = await __download_${safe(oracle.oracleId)}`,
     `expect(__downloadResult_${safe(oracle.oracleId)}.suggestedFilename()).toBe(${literal(oracle.fileName)})`,
+    ...(oracle.mediaType === undefined ? [] : [
+      `const __downloadResponse_${safe(oracle.oracleId)} = __downloadResponses_${safe(oracle.oracleId)}.find((response) => response.url() === __downloadResult_${safe(oracle.oracleId)}.url())`,
+      `expect(__downloadResponse_${safe(oracle.oracleId)}?.headers()['content-type']?.split(';', 1)[0]?.trim().toLowerCase()).toBe(${literal(oracle.mediaType.toLowerCase())})`,
+    ]),
+    ...(oracle.contentDigest === undefined && oracle.structuredContent === undefined ? [] : [
+      `const __downloadBytes_${safe(oracle.oracleId)} = await __readBytes(await __downloadResult_${safe(oracle.oracleId)}.createReadStream())`,
+    ]),
     ...(oracle.contentDigest === undefined ? [] : [
-      `expect(__bytesDigest(await __downloadResult_${safe(oracle.oracleId)}.createReadStream())).toBe(${literal(oracle.contentDigest)})`,
+      `expect(__bytesDigest(__downloadBytes_${safe(oracle.oracleId)})).toBe(${literal(oracle.contentDigest)})`,
+    ]),
+    ...(oracle.structuredContent === undefined ? [] : [
+      `expect(JSON.parse(Buffer.from(__downloadBytes_${safe(oracle.oracleId)}).toString('utf8'))).toEqual(${literal(oracle.structuredContent)})`,
     ])]
   if (oracle.kind === 'console') return [note,
     `expect(__console_${safe(oracle.oracleId)}.filter((message) => message.type() === ${literal(oracle.severity)}`
@@ -94,6 +104,8 @@ function renderOraclePreparation(oracle: DeclarativeOracleObservation): string[]
   ]
   if (oracle.kind === 'download') return [
     `const __download_${safe(oracle.oracleId)} = page.waitForEvent('download', { timeout: ${oracle.deadlineMs} })`,
+    `const __downloadResponses_${safe(oracle.oracleId)}: import('playwright').Response[] = []`,
+    `page.on('response', (response) => __downloadResponses_${safe(oracle.oracleId)}.push(response))`,
   ]
   if (oracle.kind === 'console') return [
     `const __console_${safe(oracle.oracleId)}: import('playwright').ConsoleMessage[] = []`,
@@ -141,6 +153,7 @@ function renderLocator(candidates: DeclarativeBrowserAction['locatorCandidates']
   if (!locator) throw rendererError('E2E_COMPILER_DECLARATIVE_LOCATOR_REQUIRED')
   if (locator.kind === 'role') return `page.getByRole(${literal(locator.role)}, { name: ${literal(locator.name)} })`
   if (locator.kind === 'test-id') return `page.getByTestId(${literal(locator.value)})`
+  if (locator.kind === 'label') return `page.getByLabel(${literal(locator.value)})`
   if (locator.kind === 'css') return `page.locator(${literal(locator.selector)})`
   return `page.getByText(${literal(locator.value)}, { exact: ${locator.exact} })`
 }

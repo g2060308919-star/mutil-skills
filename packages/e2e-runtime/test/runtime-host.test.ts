@@ -38,6 +38,7 @@ import {
   authorizeRuntimeInjectionExecutor,
   authorizeRuntimeFullPlaywrightExecutor,
   authorizeRuntimeReadExecutor,
+  authorizeRuntimeDeclarativeExecutor,
   authorizeRuntimeWriteExecutor,
 } from '../src/trusted-action-runner.js'
 import { authorizeRuntimePreflight } from '../src/runtime-preflight.js'
@@ -357,6 +358,41 @@ describe('E2ERuntimeHost', () => {
     await fixture.store.close()
   })
 
+  test('cancel-run 中断运行中只读执行，但由 Runtime 以独立取消事实收口', async () => {
+    let signal!: AbortSignal
+    let dispatched!: () => void
+    const started = new Promise<void>((resolve) => { dispatched = resolve })
+    const fixture = await hostFixture({ executeReadOnlyRun: async (input) => {
+      signal = input.signal!
+      dispatched()
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+      return { status: 'safety-blocked', result: { caseId: 'CASE-1', actionId: 'ACTION-1',
+        status: 'safety-blocked', expected: [], actual: [], evidence: [] },
+      gatewayAudit: { received: 0, forwarded: 0, blocked: 0, byIntent: {} },
+      gatewayAuditDigest: digest('d') }
+    } })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-CANCEL-RUNNING-CREATE', fixture.roots.project)))
+    await seedCompiledRun(fixture, created, 'REQUEST-CANCEL-RUNNING-SEED')
+    const execution = handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-CANCEL-RUNNING-EXECUTE'), command: 'execute-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    }))
+    await started
+    const cancellation = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-CANCEL-RUNNING'), command: 'cancel-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })))
+    expect(cancellation).toMatchObject({ phase: 'read-running', disposition: 'cancelling' })
+    expect(signal.aborted).toBe(true)
+    expect(successResult(await execution)).toMatchObject({ status: 'safety-blocked' })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string)
+    expect(persisted).toMatchObject({ workflow: { current: 'safety-blocked' }, cancellation: {
+      phase: 'read-running', disposition: 'cancelling' } })
+    await fixture.store.close()
+  })
+
   test('Target Probe 在需求理解与 Case lane 编译前 fail-closed', async () => {
     const probe = vi.fn(async () => ({
       status: 'ready' as const, observedUrl: 'http://localhost:3000/orders',
@@ -509,10 +545,31 @@ describe('E2ERuntimeHost', () => {
 
   test('compile-prd-run 原子持久化编译计划与 Case 调度', async () => {
     const fixture = await hostFixture()
+    const create = createRunRequest('REQUEST-COMPILE-CREATE', fixture.roots.project)
+    create.payload.actorDataIntents = [{
+      schemaVersion: 'actor-data-intent/v1', intentId: 'INTENT-AUDITOR',
+      actor: 'auditor', role: 'reviewer', credentialRef: 'secret://accounts/reviewer',
+      dataNeeds: [{ needId: 'ORDER-1', resourceType: 'order', initialState: { status: 'pending' },
+        access: 'reversible-write', seedStrategy: 'idempotent-seed', cleanupExpectation: 'delete' }],
+    }]
     const created = successResult(await handleRequest(fixture.host,
-      createRunRequest('REQUEST-COMPILE-CREATE', fixture.roots.project),
+      create,
     ))
     await prepareUnderstandingForRun(fixture, created, 'REQUEST-COMPILE-PREPARE')
+    expect(successResult(await handleRequest(fixture.host, getStatusRequest(
+      'REQUEST-COMPILE-BEFORE-TARGET', fixture.roots.project, created.runId as string,
+    )))).toMatchObject({ nextEdge: { command: 'configure-target' },
+      minimumMissingInput: ['target-contract'] })
+    const target = { schemaVersion: '1.0.0' as const, targetUrl: 'https://example.test/',
+      baseOrigin: 'https://example.test', environmentLabel: 'test',
+      pageIdentityPolicy: { schemaVersion: '1.0.0' as const,
+        url: { origin: 'https://example.test', pathPattern: '/' },
+        signals: [{ kind: 'role' as const, role: 'main' as const, name: '首页' }],
+        match: { mode: 'all' as const } }, allowedNavigationOrigins: ['https://example.test'] }
+    const configured = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-COMPILE-TARGET'), command: 'configure-target',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId, targetContract: target },
+    })))
     const response = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
       ...requestHeader('REQUEST-COMPILE-1'),
       command: 'compile-prd-run',
@@ -566,6 +623,18 @@ describe('E2ERuntimeHost', () => {
       state: 'pending',
     }])
     expect(persisted?.caseSchedule?.compilerDigest).toBe(response.compilerDigest)
+    expect(persisted?.trustedExecutionFacts['actor-data-intents']).toEqual(create.payload.actorDataIntents)
+    expect(persisted?.trustedExecutionFacts['actor-data-requirements']).toEqual([
+      expect.objectContaining({ caseId: 'CASE-0001', actor: 'auditor', role: 'reviewer',
+        environment: 'test', targetIdentity: (configured.target as { contractDigest: string }).contractDigest,
+        dataNeeds: [expect.objectContaining({ needId: 'ORDER-1' })] }),
+    ])
+    expect(successResult(await handleRequest(fixture.host, getStatusRequest(
+      'REQUEST-COMPILE-STATUS', fixture.roots.project, created.runId as string,
+    )))).toMatchObject({ actorDataRequirements: [
+      { caseId: 'CASE-0001', actor: 'auditor', role: 'reviewer', environment: 'test',
+        dataNeeds: [{ needId: 'ORDER-1' }] },
+    ] })
   })
 
   test('compile-executable-run 在单次 Runtime 事务中生成并冻结可信可执行资产', async () => {
@@ -624,6 +693,91 @@ describe('E2ERuntimeHost', () => {
     ]))
     expect(persisted?.trustedExecutionFacts['executable-run-compilation']).toMatchObject({
       compilerDigest: expect.stringMatching(/^sha256:/),
+    })
+    await fixture.store.close()
+  })
+
+  test('propose-healing 绑定失败 Attempt，撤销旧 Grant 并冻结单调 revision 后回到执行审批', async () => {
+    const fixture = await hostFixture({ executeDeclarativeRun: async ({ testCase }) => ({
+      status: 'passed', result: { caseId: testCase.caseId, actionId: testCase.actions.at(-1)!.actionId,
+        status: 'passed', expected: ['完成'], actual: ['完成'], evidence: [] },
+      gatewayAudit: { received: 0, forwarded: 0, blocked: 0, byIntent: {} },
+      gatewayAuditDigest: digest('d'),
+      oracleResults: testCase.oracles.map((oracle) => ({ oracleId: oracle.oracleId,
+        passed: true, expected: '完成', actual: '完成' })),
+    }) })
+    const created = successResult(await handleRequest(fixture.host,
+      createRunRequest('REQUEST-HEALING-CREATE', fixture.roots.project),
+    ))
+    await seedExecutableCompilationReadyRun(fixture, created, 'REQUEST-HEALING-SEED')
+    const ready = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    if (!ready?.compiledPrdRun || !ready.targetProbe) throw new Error('seed failed')
+    const binding = {
+      schemaVersion: 'declarative-execution-binding/v1' as const,
+      planCompilerDigest: ready.compiledPrdRun.compilerDigest,
+      targetProbeDigest: ready.targetProbe.diagnosticDigest,
+      cases: [{ caseId: 'CASE-0001', executionLane: 'trusted-read-only' as const,
+        pageIdentityPolicy: { schemaVersion: '1.0.0' as const,
+          url: { origin: 'https://example.test', pathPattern: '/' },
+          signals: [{ kind: 'role' as const, role: 'main' as const, name: '首页' }],
+          match: { mode: 'all' as const } },
+        actions: [{ kind: 'click' as const, actionId: 'ACTION-0001-0001', effect: 'read' as const,
+          pageScope: { page: 'current' as const, frame: { kind: 'main' as const } },
+          locatorCandidates: [{ kind: 'role' as const, role: 'button' as const, name: '旧名称' }],
+          timeout: { timeoutMs: 5_000, retry: 'read-only-max-2' as const } }],
+        oracles: [{ kind: 'text' as const, oracleId: 'ORACLE-0001-0001', actionId: 'ACTION-0001-0001',
+          locatorCandidates: [{ kind: 'test-id' as const, value: 'status' }], comparator: 'contains' as const,
+          expected: '完成', deadlineMs: 5_000, evidenceKinds: ['dom' as const] }],
+        dataNeeds: [], cleanupIntents: [] }],
+    }
+    await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-HEALING-COMPILE'), command: 'compile-executable-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId, binding },
+    }))
+    await seedFailedDeclarativeExecution(fixture, created, 'REQUEST-HEALING-FAILURE')
+
+    const request = RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-HEALING-PROPOSE'), command: 'propose-healing',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId, candidate: {
+        proposalId: 'HEAL-1', actionId: 'ACTION-0001-0001', caseTimeoutMs: 5_000,
+        mutations: [{ kind: 'locator-candidate',
+          before: [{ strategy: 'role', value: 'button:旧名称' }],
+          after: [{ strategy: 'test-id', value: 'stable-button' }] }],
+      } },
+    })
+    const first = await handleRequest(fixture.host, request)
+    const replay = await handleRequest(fixture.host, request)
+    expect(first).toEqual(replay)
+    expect(successResult(first)).toMatchObject({ status: 'awaiting-execution-approval',
+      review: { accepted: true, nextRevision: 2, requiresReapproval: true },
+      firstAttemptId: 'ATTEMPT-FIRST-FAILURE', requiredOracleIds: ['ORACLE-0001-0001'] })
+    const persisted = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(persisted?.workflow.current).toBe('awaiting-execution-approval')
+    expect(persisted?.trustedExecutionFacts).not.toHaveProperty('signed-execution-grant')
+    expect(persisted?.trustedExecutionFacts['bounded-healing']).toMatchObject({
+      firstAttemptId: 'ATTEMPT-FIRST-FAILURE', status: 'awaiting-execution-approval', revision: 2,
+    })
+    expect((persisted?.frozenArtifacts['browser-action-map'].content as any).actionMapRevision).toBe(2)
+    expect((persisted?.frozenArtifacts['execution-contract'].content as any)
+      .declarativeExecutionBinding.cases[0].actions[0].locatorCandidates)
+      .toEqual([{ kind: 'test-id', value: 'stable-button' }])
+    await seedApprovedHealingReplay(fixture, created, 'REQUEST-HEALING-APPROVED')
+    const executed = successResult(await handleRequest(fixture.host, RuntimeRequestEnvelopeSchema.parse({
+      ...requestHeader('REQUEST-HEALING-EXECUTE'), command: 'execute-run',
+      projectRoot: fixture.roots.project, payload: { runId: created.runId },
+    })))
+    expect(executed).toMatchObject({ status: 'passed' })
+    const healed = await fixture.store.getRun(
+      created.projectIdentityDigest as string, created.runId as string,
+    )
+    expect(healed?.trustedExecutionFacts['bounded-healing']).toMatchObject({
+      status: 'accepted', firstAttemptId: 'ATTEMPT-FIRST-FAILURE',
+      finalAttemptId: expect.stringMatching(/^ATTEMPT-/),
+      replayedOracleIds: ['ORACLE-0001-0001'],
     })
     await fixture.store.close()
   })
@@ -2704,6 +2858,7 @@ async function hostFixture(options: {
   roots?: Awaited<ReturnType<typeof createRuntimeTestRoots>>
   reader?: SecureProjectFileReader
   executeReadOnlyRun?: Parameters<typeof authorizeRuntimeReadExecutor>[0]
+  executeDeclarativeRun?: Parameters<typeof authorizeRuntimeDeclarativeExecutor>[0]
   executeWriteRun?: Parameters<typeof authorizeRuntimeWriteExecutor>[0]
   executeInjectionRun?: Parameters<typeof authorizeRuntimeInjectionExecutor>[0]
   executeFullPlaywrightRun?: Parameters<typeof authorizeRuntimeFullPlaywrightExecutor>[0]
@@ -2753,6 +2908,9 @@ async function hostFixture(options: {
     ...(options.reader === undefined ? {} : { projectFileReader: options.reader }),
     ...(options.executeReadOnlyRun === undefined ? {} : {
       readExecutor: authorizeRuntimeReadExecutor(options.executeReadOnlyRun),
+    }),
+    ...(options.executeDeclarativeRun === undefined ? {} : {
+      declarativeExecutor: authorizeRuntimeDeclarativeExecutor(options.executeDeclarativeRun),
     }),
     ...([options.browserExecutorProtocolReadRoute, options.browserExecutorProtocolWriteRoute,
       options.browserExecutorProtocolInjectionRoute, options.browserExecutorProtocolFullPlaywrightRoute]
@@ -3358,6 +3516,172 @@ async function seedDiagnosingRun(
       response: { seeded: true },
     }),
     'test-seed-diagnosing', lock,
+  )
+  await lock.close()
+}
+
+async function seedFailedDeclarativeExecution(
+  fixture: Awaited<ReturnType<typeof hostFixture>>,
+  created: Record<string, unknown>,
+  requestId: string,
+): Promise<void> {
+  await fixture.store.beginRequest(requestId, digest('4'))
+  const lock = await fixture.store.acquireRunLock(
+    created.projectIdentityDigest as string, created.runId as string,
+  )
+  await fixture.store.updateRunOutcome(
+    created.projectIdentityDigest as string, created.runId as string,
+    requestId, digest('4'),
+    (snapshot) => {
+      const execution = snapshot.frozenArtifacts['execution-contract']!
+      const actionMap = snapshot.frozenArtifacts['browser-action-map']!
+      const subject = {
+        schemaVersion: '2.1.0' as const, assetId: snapshot.assetId,
+        prdRevision: snapshot.artifactDigests['prd-source']!,
+        scopeDigest: digestApprovalProjection('acceptance-scope', snapshot.frozenArtifacts['acceptance-scope']!.content),
+        requirementModelDigest: digestApprovalProjection('requirement-model', snapshot.frozenArtifacts['requirement-model']!.content),
+        coveragePolicyDigest: digest('a'),
+        universeDigest: (snapshot.frozenArtifacts['coverage-universe']!.content as any).universeDigest,
+        caseDigest: digestApprovalProjection('test-cases', snapshot.frozenArtifacts['test-cases']!.content),
+        actionMapDigest: digestApprovalProjection('browser-action-map', actionMap.content),
+        policyDigest: digestApprovalProjection('project-policy', snapshot.frozenArtifacts['project-policy']!.content),
+        executionContractDigest: digestApprovalProjection('execution-contract', execution.content),
+        runBundleProjectionDigest: digestApprovalProjection('run-bundle', snapshot.frozenArtifacts['run-bundle']!.content),
+        environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'auditor',
+        discoveryGrantId: 'DISCOVERY-HEALING', preflightDigest: digest('b'), requests: [],
+        actions: [{ actionId: 'ACTION-0001-0001', operation: 'local-navigation' as const,
+          maxUses: 1, requestIds: [] }],
+      }
+      const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+      return { snapshot: { ...snapshot,
+        workflow: { current: 'diagnosing', sequence: 10, eventChainDigest: digest('5') },
+        trustedExecutionFacts: { ...snapshot.trustedExecutionFacts,
+          'signed-execution-grant': { grantId: 'GRANT-HEALING', issuer: 'authority', keyId: 'key',
+            proofScope: 'local-os-user', approver: { kind: 'local-caller' }, subject, subjectDigest,
+            approvalContext: { schemaVersion: '1.0.0', subject: 'local-caller', runId: snapshot.runId,
+              approvalType: 'execution', subjectDigest, installationDigest: snapshot.runtimeInstallationDigest,
+              origin: 'http://127.0.0.1:43210', issuedAt: '2026-07-17T00:00:00.000Z',
+              expiresAt: '2026-07-17T01:00:00.000Z' }, issuedAt: '2026-07-17T00:00:00.000Z',
+            expiresAt: '2026-07-17T01:00:00.000Z', capabilities: [{ capabilityId: 'CAP-HEALING',
+              nonce: '1'.repeat(64), transport: 'browser-local', effect: 'read',
+              actionId: 'ACTION-0001-0001', operation: 'local-navigation', maxUses: 1 }],
+            revocationSequence: 0, signature: 'A'.repeat(86) },
+        },
+        executionResults: { readEnvironment: { 'ACTION-0001-0001': {
+          attemptId: 'ATTEMPT-FIRST-FAILURE', caseId: 'CASE-0001', actionId: 'ACTION-0001-0001',
+          status: 'failed', result: { caseId: 'CASE-0001', actionId: 'ACTION-0001-0001',
+            status: 'failed', reasonCode: 'E2E_BROWSER_LOCATOR_NOT_FOUND', expected: ['完成'], actual: [],
+            observedIdentity: { url: 'https://example.test/', title: '首页', headings: ['首页'] },
+            evidence: [] }, gatewayAudit: { received: 0, forwarded: 0, blocked: 0, byIntent: {} },
+          gatewayAuditDigest: digest('c'),
+        } }, realEnvironment: {}, gatewayInjection: {} },
+      }, response: { seeded: true } }
+    },
+    'test-seed-healing-failure', lock,
+  )
+  await lock.close()
+}
+
+async function seedApprovedHealingReplay(
+  fixture: Awaited<ReturnType<typeof hostFixture>>,
+  created: Record<string, unknown>,
+  requestId: string,
+): Promise<void> {
+  await fixture.store.beginRequest(requestId, digest('7'))
+  const lock = await fixture.store.acquireRunLock(
+    created.projectIdentityDigest as string, created.runId as string,
+  )
+  await fixture.store.updateRunOutcome(
+    created.projectIdentityDigest as string, created.runId as string, requestId, digest('7'),
+    (snapshot) => {
+      const actionMap = snapshot.frozenArtifacts['browser-action-map']!
+      const execution = snapshot.frozenArtifacts['execution-contract']!
+      const subject = {
+        schemaVersion: '2.1.0' as const, assetId: snapshot.assetId,
+        prdRevision: snapshot.artifactDigests['prd-source']!,
+        scopeDigest: digestApprovalProjection('acceptance-scope', snapshot.frozenArtifacts['acceptance-scope']!.content),
+        requirementModelDigest: digestApprovalProjection('requirement-model', snapshot.frozenArtifacts['requirement-model']!.content),
+        coveragePolicyDigest: digest('a'),
+        universeDigest: (snapshot.frozenArtifacts['coverage-universe']!.content as any).universeDigest,
+        caseDigest: digestApprovalProjection('test-cases', snapshot.frozenArtifacts['test-cases']!.content),
+        actionMapDigest: digestApprovalProjection('browser-action-map', actionMap.content),
+        policyDigest: digestApprovalProjection('project-policy', snapshot.frozenArtifacts['project-policy']!.content),
+        executionContractDigest: digestApprovalProjection('execution-contract', execution.content),
+        runBundleProjectionDigest: digestApprovalProjection('run-bundle', snapshot.frozenArtifacts['run-bundle']!.content),
+        environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'auditor',
+        discoveryGrantId: 'DISCOVERY-HEALING', preflightDigest: digest('b'), requests: [],
+        actions: [
+          { actionId: 'ACTION-0001-0001', operation: 'local-navigation' as const, maxUses: 1, requestIds: [] },
+          { actionId: 'ACTION-0001-0001', operation: 'dom-read' as const, maxUses: 1, requestIds: [] },
+          { actionId: 'ACTION-0001-0001', operation: 'screenshot' as const, maxUses: 1, requestIds: [] },
+        ],
+      }
+      const capabilities = [
+        { capabilityId: 'CAP-HEAL-NAV', nonce: '1'.repeat(64), transport: 'browser-local' as const,
+          effect: 'read' as const, actionId: 'ACTION-0001-0001', operation: 'local-navigation' as const, maxUses: 1 },
+        { capabilityId: 'CAP-HEAL-DOM', nonce: '2'.repeat(64), transport: 'browser-local' as const,
+          effect: 'read' as const, actionId: 'ACTION-0001-0001', operation: 'dom-read' as const, maxUses: 1 },
+        { capabilityId: 'CAP-HEAL-SHOT', nonce: '3'.repeat(64), transport: 'browser-local' as const,
+          effect: 'read' as const, actionId: 'ACTION-0001-0001', operation: 'screenshot' as const, maxUses: 1 },
+      ]
+      const mapped = structuredClone(actionMap)
+      ;(mapped.content as any).actions[0].capabilities = capabilities.map((capability) => ({
+        operation: capability.operation, capabilityId: capability.capabilityId,
+      }))
+      mapped.contentDigest = digestArtifactContent(
+        `artifact-content/${mapped.schemaVersion}/${mapped.artifactType}`, mapped,
+      )
+      subject.actionMapDigest = digestApprovalProjection('browser-action-map', mapped.content)
+      const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+      const discoverySubject = {
+        schemaVersion: '1.1.0' as const, assetId: snapshot.assetId,
+        prdRevision: snapshot.artifactDigests['prd-source']!, scopeDigest: subject.scopeDigest,
+        environment: 'test' as const, baseOrigin: 'https://example.test', actor: 'auditor',
+        expectedPageIdentity: { url: 'https://example.test/', title: '首页', heading: '首页', ariaSignals: [] },
+        bootstrapIntentsDigest: digest('e'), requests: [],
+        actions: [{ actionId: 'PREFLIGHT-HEALING', operation: 'local-navigation' as const,
+          maxUses: 1 as const, requestIds: [] }],
+      }
+      const discoveryDigest = canonicalGrantApprovalSubjectDigest(discoverySubject)
+      return { snapshot: { ...snapshot, workflow: { current: 'compiled', sequence: 13,
+        eventChainDigest: digest('8') }, frozenArtifacts: { ...snapshot.frozenArtifacts,
+        'browser-action-map': mapped }, artifactDigests: { ...snapshot.artifactDigests,
+        'browser-action-map': mapped.contentDigest }, trustedExecutionFacts: {
+        ...snapshot.trustedExecutionFacts,
+        'signed-execution-grant': { grantId: 'GRANT-HEALING-REPLAY', issuer: 'authority', keyId: 'key',
+          proofScope: 'local-os-user', approver: { kind: 'local-caller' }, subject, subjectDigest,
+          approvalContext: { schemaVersion: '1.0.0', subject: 'local-caller', runId: snapshot.runId,
+            approvalType: 'execution', subjectDigest, installationDigest: snapshot.runtimeInstallationDigest,
+            origin: 'http://127.0.0.1:43210', issuedAt: '2026-07-17T00:00:00.000Z',
+            expiresAt: '2026-07-17T01:00:00.000Z' }, issuedAt: '2026-07-17T00:00:00.000Z',
+          expiresAt: '2026-07-17T01:00:00.000Z', capabilities,
+          revocationSequence: 0, signature: 'A'.repeat(86) },
+        'signed-discovery-grant': { grantId: 'DISCOVERY-HEALING', issuer: 'authority', keyId: 'key',
+          proofScope: 'local-os-user', approver: { kind: 'local-caller' }, subject: discoverySubject,
+          subjectDigest: discoveryDigest, approvalContext: { schemaVersion: '1.0.0',
+            subject: 'local-caller', runId: snapshot.runId, approvalType: 'discovery',
+            subjectDigest: discoveryDigest, installationDigest: snapshot.runtimeInstallationDigest,
+            origin: 'http://127.0.0.1:43210', issuedAt: '2026-07-17T00:00:00.000Z',
+            expiresAt: '2026-07-17T01:00:00.000Z' }, issuedAt: '2026-07-17T00:00:00.000Z',
+          expiresAt: '2026-07-17T01:00:00.000Z', capabilities: [{ capabilityId: 'CAP-PREFLIGHT-HEALING',
+            nonce: '4'.repeat(64), transport: 'browser-local', effect: 'read',
+            actionId: 'PREFLIGHT-HEALING', operation: 'local-navigation', maxUses: 1,
+            targetUrl: 'https://example.test/', actor: 'auditor',
+            expectedPageIdentityDigest: digestText('expected-page-identity/v1',
+              canonicalizeJson(discoverySubject.expectedPageIdentity)),
+            bootstrapIntentsDigest: discoverySubject.bootstrapIntentsDigest }],
+          revocationSequence: 0, signature: 'A'.repeat(86) },
+        'browser-preflight': { runId: snapshot.runId, discoveryGrantId: 'DISCOVERY-HEALING',
+          reservationId: 'RESERVATION-HEALING', preflightDigest: digest('b'), status: 'ready',
+          observedIdentityDigest: digest('1'), browserMeasurementDigest: digest('2'),
+          browserClosureDigest: digest('3'), browserExecutableDigest: digest('4'),
+          gatewaySessionMeasurementDigest: digest('5'), gatewayPolicyDigest: digest('6'),
+          gatewayAuditDigest: digest('7'), canaryProofDigest: digest('8'),
+          authorityOutcomeDigest: digest('9'), authorityReceiptDigest: digest('a') },
+        'bounded-healing': { ...(snapshot.trustedExecutionFacts['bounded-healing'] as any),
+          status: 'awaiting-replay' },
+      } }, response: { seeded: true } }
+    }, 'test-seed-healing-replay', lock,
   )
   await lock.close()
 }

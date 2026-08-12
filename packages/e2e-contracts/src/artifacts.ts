@@ -1126,7 +1126,15 @@ const browserEvidenceContent = z.object({
 
 const diagnosisContent = z.object({
   caseDiagnoses: z.array(z.object({ caseId: SafeIdSchema, category: SafeIdSchema, retrySafe: z.boolean(), digest: DigestSchema }).strict()).max(100_000),
-  healingAttempts: z.array(z.object({ caseId: SafeIdSchema, attemptId: SafeIdSchema, changeDigest: DigestSchema, status: z.enum(['accepted', 'rejected']) }).strict()).max(100_000),
+  healingAttempts: z.array(z.object({
+    caseId: SafeIdSchema,
+    attemptId: SafeIdSchema,
+    firstAttemptId: SafeIdSchema.optional(),
+    changeDigest: DigestSchema,
+    status: z.enum(['accepted', 'rejected']),
+    requiredOracleIds: z.array(SafeIdSchema).min(1).max(10_000).optional(),
+    replayedOracleIds: z.array(SafeIdSchema).max(10_000).optional(),
+  }).strict()).max(100_000),
   selectedAttemptExplanations: z.array(z.object({ caseId: SafeIdSchema, attemptId: SafeIdSchema, rationaleDigest: DigestSchema }).strict()).max(100_000),
 }).strict()
 

@@ -344,6 +344,8 @@ function renderDeclarativeBrowserSpec(input: Extract<CompilerInput, { schemaVers
     "const __bytesDigest = async (value: Uint8Array | NodeJS.ReadableStream) => { const hash = createHash('sha256');",
     "  if (value instanceof Uint8Array) hash.update(value); else for await (const chunk of value) hash.update(chunk as Uint8Array);",
     "  return `sha256:${hash.digest('hex')}` }",
+    "const __readBytes = async (value: NodeJS.ReadableStream | null) => { if (value === null) throw new Error('E2E_DECLARATIVE_DOWNLOAD_UNREADABLE');",
+    "  const chunks: Uint8Array[] = []; for await (const chunk of value) chunks.push(chunk as Uint8Array); return Buffer.concat(chunks) }",
     "const __requestBodyDigest = (request: import('playwright').Request) => { const body = request.postDataBuffer();",
     "  return body === null ? undefined : `sha256:${createHash('sha256').update(body).digest('hex')}` }", '']
   for (const testCase of input.cases) {

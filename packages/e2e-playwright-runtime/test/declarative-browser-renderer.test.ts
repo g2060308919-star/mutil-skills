@@ -8,6 +8,13 @@ const role = (roleName: 'button' | 'textbox' | 'checkbox', name: string) =>
   [{ kind: 'role' as const, role: roleName, name }]
 
 describe('declarative browser renderer', () => {
+  test('renders label locator candidates used by bounded healing', () => {
+    expect(renderDeclarativeBrowserCase({ caseId: 'CASE-1', actions: [action({
+      kind: 'fill', actionId: 'A-LABEL', locatorCandidates: [{ kind: 'label', value: '用户名' }],
+      value: 'auditor',
+    })], oracles: [] })).toContain("page.getByLabel(\"用户名\").fill(\"auditor\"")
+  })
+
   test('确定性覆盖首批动作、页面作用域与全部 Oracle，不接收自由源码', () => {
     const program: { caseId: string; actions: DeclarativeBrowserAction[]; oracles: DeclarativeOracleObservation[] } = {
       caseId: 'CASE-1',
@@ -66,7 +73,9 @@ describe('declarative browser renderer', () => {
     })], oracles: [
       oracle({ kind: 'network', oracleId: 'O-NET', actionId: 'A-1', evidenceKinds: ['network'],
         request: { method: 'POST', urlPattern: '/api/orders' }, response: { status: 201 } }),
-      oracle({ kind: 'download', oracleId: 'O-FILE', actionId: 'A-1', fileName: 'orders.csv' }),
+      oracle({ kind: 'download', oracleId: 'O-FILE', actionId: 'A-1', fileName: 'orders.json',
+        mediaType: 'application/json', contentDigest: `sha256:${'a'.repeat(64)}`,
+        structuredContent: { ok: true } }),
       oracle({ kind: 'console', oracleId: 'O-CONSOLE', actionId: 'A-1', evidenceKinds: ['console'],
         severity: 'error', allowlist: ['ResizeObserver'], expectedCount: 0 }),
       oracle({ kind: 'composite', oracleId: 'O-AND', actionId: 'A-1', evidenceKinds: ['dom'],
@@ -81,6 +90,10 @@ describe('declarative browser renderer', () => {
     expect(listenAt).toBeGreaterThanOrEqual(0)
     expect(listenAt).toBeLessThan(clickAt)
     expect(source).toContain("page.waitForEvent('download'")
+    expect(source).toContain("page.on('response'")
+    expect(source).toContain("headers()['content-type']")
+    expect(source).toContain('__readBytes(')
+    expect(source).toContain('JSON.parse(')
     expect(source).toContain("page.on('console'")
     expect(source).toContain('.every(Boolean)')
   })

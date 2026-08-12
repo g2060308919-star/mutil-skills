@@ -14,17 +14,30 @@ const JsonValueSchema: z.ZodType<unknown> = z.lazy(() => z.union([
   }),
 ]))
 
+const ActorDataNeedSchema = z.object({
+  needId: Id, resourceType: Text, initialState: JsonValueSchema,
+  access: z.enum(['read', 'reversible-write']),
+  seedStrategy: z.enum(['existing', 'allocate', 'idempotent-seed']),
+  cleanupExpectation: z.enum(['none', 'restore', 'delete']),
+}).strict()
+
+/** 用户/Skill 的产品级输入；Case、Environment 与 Target 只允许由 Runtime 权威派生。 */
+export const ActorDataIntentV1Schema = z.object({
+  schemaVersion: z.literal('actor-data-intent/v1'),
+  intentId: Id, actor: Text, role: Text, tenant: Text.optional(), credentialRef: Id.optional(),
+  dataNeeds: z.array(ActorDataNeedSchema).min(1).max(1000),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.dataNeeds.map((need) => need.needId)).size !== value.dataNeeds.length) {
+    context.addIssue({ code: 'custom', path: ['dataNeeds'], message: 'needId 必须在同一 Intent 内唯一' })
+  }
+})
+
 export const ActorDataRequirementV1Schema = z.object({
   schemaVersion: z.literal('actor-data-requirement/v1'),
   requirementId: Id, caseId: Id, actor: Text, role: Text,
   tenant: Text.optional(), environment: Text, targetIdentity: Id,
   credentialRef: Id.optional(),
-  dataNeeds: z.array(z.object({
-    needId: Id, resourceType: Text, initialState: JsonValueSchema,
-    access: z.enum(['read', 'reversible-write']),
-    seedStrategy: z.enum(['existing', 'allocate', 'idempotent-seed']),
-    cleanupExpectation: z.enum(['none', 'restore', 'delete']),
-  }).strict()).min(1).max(1000),
+  dataNeeds: z.array(ActorDataNeedSchema).min(1).max(1000),
 }).strict()
 
 export const ProvisionedFixtureV1Schema = z.object({
@@ -66,6 +79,7 @@ export const FixtureRecoveryOutcomeSchema = z.object({
 }).strict()
 
 export type ActorDataRequirementV1 = z.infer<typeof ActorDataRequirementV1Schema>
+export type ActorDataIntentV1 = z.infer<typeof ActorDataIntentV1Schema>
 export type ProvisionedFixtureV1 = z.infer<typeof ProvisionedFixtureV1Schema>
 export type FixtureCleanupOutcome = z.infer<typeof FixtureCleanupOutcomeSchema>
 export type FixtureRecoveryOutcome = z.infer<typeof FixtureRecoveryOutcomeSchema>

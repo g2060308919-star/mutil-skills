@@ -50,7 +50,7 @@ export interface E2EJourneyResult {
   runtimeState: RuntimeStatusResult['state']
   pending?: {
     kind: 'acceptance-review' | 'semantic-generation' | 'execution-binding' | 'scope-approval'
-      | 'lineage-approval' | 'execution-approval' | 'target-probe' | 'manual-input'
+      | 'lineage-approval' | 'execution-approval' | 'healing-review' | 'target-probe' | 'manual-input'
     command: RuntimeStatusResult['nextEdge'] extends infer _ ? string : never
     missingInput: string[]
   }
@@ -386,6 +386,7 @@ function pendingKind(command: JourneyCommand): NonNullable<E2EJourneyResult['pen
   if (command === 'compile-prd-run' || command === 'prepare-prd-understanding'
     || command === 'submit-candidate') return 'semantic-generation'
   if (command === 'compile-executable-run') return 'execution-binding'
+  if (command === 'propose-healing') return 'healing-review'
   if (command === 'probe-target' || command === 'configure-target' || command === 'run-preflight') return 'target-probe'
   if (command === 'open-approval' || command === 'confirm-approval') return 'execution-approval'
   return 'manual-input'

@@ -260,19 +260,24 @@ describe('Controlled Browser Host', () => {
       actionId: 'ACTION-1', capabilityId: 'CAP-HTTP', headers: {}, maxUses: 1,
       redirectRequestIds: [],
     }
-    const outcomes = await binding.executeWithCorrelations([
+    const correlations = [
       { ...base, requestId: 'REQUEST-PAGE', ruleId: digest('4'), stepOrdinal: 1,
         method: 'GET', url: 'https://example.test/orders', navigation: true },
       { ...base, requestId: 'REQUEST-API', ruleId: digest('5'), stepOrdinal: 2,
         method: 'GET', url: 'https://example.test/api/orders', navigation: false },
-    ], async () => await driver.dispatchRequests!([
+    ]
+    const outcomes = await binding.executeWithCorrelations(correlations, async () => await driver.dispatchRequests!([
       request('https://example.test/orders', 'document', true, true),
       request('https://example.test/api/orders', 'xhr', false, true),
-      request('https://example.test/unapproved', 'fetch', false, true),
-      request('https://example.test/api/orders', 'xhr', false, true),
     ]))
-
-    expect(outcomes).toEqual([true, true, false, false])
+    expect(outcomes).toEqual([true, true])
+    await expect(binding.executeWithCorrelations(correlations, async () => await driver.dispatchRequests!([
+      request('https://example.test/unapproved', 'fetch', false, true),
+    ]))).rejects.toThrow(/E2E_BROWSER_UNAPPROVED_REQUEST/)
+    await expect(binding.executeWithCorrelations(correlations, async () => await driver.dispatchRequests!([
+      request('https://example.test/api/orders', 'xhr', false, true),
+      request('https://example.test/api/orders', 'xhr', false, true),
+    ]))).rejects.toThrow(/E2E_BROWSER_UNAPPROVED_REQUEST/)
     await expect(binding.executeWithCorrelations([
       { ...base, requestId: 'REQUEST-1', ruleId: digest('6'), stepOrdinal: 1,
         method: 'GET', url: 'https://example.test/one', navigation: false },
@@ -307,6 +312,22 @@ describe('Controlled Browser Host', () => {
       request(url, resourceType, navigation, navigation))))
 
     expect(outcomes).toEqual([true, true, true, true, true])
+    await session.close()
+  })
+
+  test('无网络 action 遇到任何请求时同步 fail closed，不把 abort 当作成功', async () => {
+    const roots = await createRuntimeTestRoots()
+    const driver = fakeDriver()
+    const session = await new ControlledBrowserHost(driver).open({
+      homeDir: roots.home, runId: 'RUN-NO-NETWORK', installation: installation(),
+      gateway: gateway(vi.fn(async () => ({ approved: true, denied: true, proofDigest: digest('c') }))),
+    })
+    const binding = getControlledBrowserSessionBinding(session) as any
+
+    await expect(binding.executeWithoutNetwork(async () => await driver.dispatchRequests!([
+      request('https://example.test/unapproved-beacon', 'fetch', false, true),
+    ]))).rejects.toThrow(/E2E_BROWSER_UNAPPROVED_REQUEST/)
+
     await session.close()
   })
 

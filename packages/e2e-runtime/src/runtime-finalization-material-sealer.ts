@@ -13,6 +13,7 @@ import {
   digestText,
   E2EError,
   approvalAssuranceForMode,
+  RuntimeHealingAuditFactSchema,
   type ApprovalCapabilityRecord,
   type ArtifactDocument,
   type ArtifactType,
@@ -331,9 +332,8 @@ export class RuntimeFinalizationMaterialSealer {
       sanitizerProofs: [{ evidenceId, record: sanitized.record, attestation: sanitized.attestation }],
       privacyReviews: [{ evidenceId, status: 'not-required', derivationDigest: privacyDerivationDigest }],
     }, this.dependencies.authority))
-    documents.set('diagnosis', createArtifact(snapshot, 'diagnosis', {
-      caseDiagnoses: [], healingAttempts: [], selectedAttemptExplanations: [],
-    }, this.dependencies.authority))
+    documents.set('diagnosis', createArtifact(snapshot, 'diagnosis', diagnosisContent(snapshot),
+      this.dependencies.authority))
     documents.set('cleanup-results', createArtifact(snapshot, 'cleanup-results', { leaseResults: [] }, this.dependencies.authority))
 
     const artifacts = FACT_TYPES.map((type): PersistedRuntimeFinalizationArtifact => {
@@ -625,9 +625,8 @@ export class RuntimeFinalizationMaterialSealer {
       privacyReviews: [{ evidenceId: expectedEvidenceId, status: 'not-required',
         derivationDigest: privacyDerivationDigest }],
     }, this.dependencies.authority))
-    documents.set('diagnosis', createArtifact(snapshot, 'diagnosis', {
-      caseDiagnoses: [], healingAttempts: [], selectedAttemptExplanations: [],
-    }, this.dependencies.authority))
+    documents.set('diagnosis', createArtifact(snapshot, 'diagnosis', diagnosisContent(snapshot),
+      this.dependencies.authority))
     const cleanupResult = { leaseId: capability.dataLeaseId, status: write.cleanup.status,
       digest: write.cleanup.resultDigest, leaseReceiptDigest: write.cleanup.leaseReceiptDigest,
       plan: cleanupPlan }
@@ -1446,6 +1445,41 @@ async function writeOrVerifySanitized(
 
 function sanitizerReaderActor(): QuarantineActor {
   return { subject: 'runtime:finalization-sealer', roles: ['e2e-sanitizer'] }
+}
+
+function diagnosisContent(snapshot: RuntimeRunSnapshot) {
+  const candidate = snapshot.trustedExecutionFacts['bounded-healing']
+  if (candidate === undefined) return {
+    caseDiagnoses: [], healingAttempts: [], selectedAttemptExplanations: [],
+  }
+  const fact = RuntimeHealingAuditFactSchema.parse(candidate)
+  if (fact.status !== 'accepted' && fact.status !== 'rejected') {
+    throw sealerError('E2E_RUNTIME_FINALIZATION_HEALING_REPLAY_INCOMPLETE')
+  }
+  return {
+    caseDiagnoses: [],
+    healingAttempts: [{
+      caseId: fact.caseId,
+      attemptId: fact.finalAttemptId!,
+      firstAttemptId: fact.firstAttemptId,
+      changeDigest: fact.changeDigest,
+      status: fact.status,
+      requiredOracleIds: fact.requiredOracleIds,
+      replayedOracleIds: fact.replayedOracleIds!,
+    }],
+    selectedAttemptExplanations: [{
+      caseId: fact.caseId,
+      attemptId: fact.finalAttemptId!,
+      rationaleDigest: digestText('runtime-healing-selected-attempt/v1', canonicalizeJson({
+        proposalId: fact.proposalId,
+        firstAttemptId: fact.firstAttemptId,
+        finalAttemptId: fact.finalAttemptId,
+        requiredOracleIds: fact.requiredOracleIds,
+        replayedOracleIds: fact.replayedOracleIds,
+        status: fact.status,
+      })),
+    }],
+  }
 }
 
 function record(value: unknown, code = 'E2E_RUNTIME_FINALIZATION_FACT_INVALID'): Record<string, any> {

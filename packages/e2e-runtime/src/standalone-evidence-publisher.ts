@@ -28,7 +28,12 @@ export interface StandaloneEvidencePublishInput {
   runId: string
   generationDigest: string
   outputRoot?: string
-  rendered: { json: string; markdown: string; html: string }
+  rendered: {
+    json: string
+    markdown: string
+    html: string
+    explanation?: { json: string; markdown: string; html: string }
+  }
   evidence: StandaloneEvidenceFile[]
 }
 
@@ -188,6 +193,7 @@ async function readRuntimeEvidenceFile(
 
 interface OutputFile {
   kind: 'screenshot' | 'trace' | 'dom' | 'report-json' | 'report-markdown' | 'report-html'
+    | 'explanation-json' | 'explanation-markdown' | 'explanation-html'
   relativePath: string
   bytes: Uint8Array
   caseId?: string
@@ -210,6 +216,22 @@ function buildFiles(input: StandaloneEvidencePublishInput): OutputFile[] {
       bytes: Buffer.from(insertHtmlEvidence(standaloneRendered.html, evidenceSection.html)),
     },
   ]
+  if (input.rendered.explanation !== undefined) {
+    reportFiles.push(
+      {
+        kind: 'explanation-json', relativePath: 'execution-explanation.json',
+        bytes: Buffer.from(input.rendered.explanation.json),
+      },
+      {
+        kind: 'explanation-markdown', relativePath: 'execution-explanation.md',
+        bytes: Buffer.from(input.rendered.explanation.markdown),
+      },
+      {
+        kind: 'explanation-html', relativePath: 'execution-explanation.html',
+        bytes: Buffer.from(input.rendered.explanation.html),
+      },
+    )
+  }
   return [
     ...input.evidence.map((file): OutputFile => ({
       kind: file.kind, relativePath: file.relativePath, bytes: Buffer.from(file.bytes),

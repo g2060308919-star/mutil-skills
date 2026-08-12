@@ -11,6 +11,9 @@ import {
   WorkflowStateSchema,
   RunCancellationResultV1Schema,
   RunHealthSnapshotV1Schema,
+  RuntimeHealingAuditFactSchema,
+  ActorDataIntentV1Schema,
+  ActorDataRequirementV1Schema,
 } from '@mutil-skills/e2e-contracts'
 import { z } from 'zod'
 import type { RuntimeRunSnapshot } from './run-store.js'
@@ -121,6 +124,8 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     'prd-understanding-contract', 'prd-understanding-prepared', 'prd-semantic-confirmation',
     'acceptance-review', 'acceptance-review-receipt', 'target-contract-invalidation',
     'executable-run-compilation',
+    'bounded-healing',
+    'actor-data-intents', 'actor-data-requirements',
   ])
   if (Object.keys(facts).length > allowed.size) context.addIssue({ code: 'custom', message: '可信执行事实数量超限' })
   let trustedFactBytes = 0
@@ -201,6 +206,24 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     if (key === 'executable-run-compilation') {
       if (!ExecutableRunCompilationFactSchema.safeParse(value).success) context.addIssue({
         code: 'custom', path: [key], message: '可信可执行编译事实结构非法',
+      })
+      continue
+    }
+    if (key === 'bounded-healing') {
+      if (!RuntimeHealingAuditFactSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: '有界修复审计事实结构非法',
+      })
+      continue
+    }
+    if (key === 'actor-data-intents') {
+      if (!ActorDataIntentV1Schema.array().max(1000).safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: 'Actor/Data Intent 事实结构非法',
+      })
+      continue
+    }
+    if (key === 'actor-data-requirements') {
+      if (!ActorDataRequirementV1Schema.array().max(1_000_000).safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: 'Actor/Data Requirement 事实结构非法',
       })
       continue
     }

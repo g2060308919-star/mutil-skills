@@ -28,6 +28,7 @@ export interface RuntimeExecutableArtifactProjection {
 export function projectRuntimeExecutableArtifacts(input: {
   snapshot: RuntimeRunSnapshot
   compilation: ExecutableRunCompilation
+  actionMapRevision?: number
   createdAt: string
   engineVersion: string
 }): RuntimeExecutableArtifactProjection {
@@ -74,8 +75,19 @@ export function projectRuntimeExecutableArtifacts(input: {
   const pagePolicies = uniqueBy(input.compilation.executableCases.map((testCase) => testCase.pageIdentityPolicy),
     (policy) => canonicalizeJson(policy))
   const pageIdByPolicy = new Map(pagePolicies.map((policy, index) => [canonicalizeJson(policy), `PAGE-${index + 1}`]))
+  const observedRequests = input.snapshot.targetProbe?.diagnostics.observedResources ?? []
+  const firstActionId = input.compilation.executableCases[0]!.actions[0]!.actionId
+  const readHttpRequests = observedRequests.map((request, index) => ({
+    requestId: `REQUEST-DISCOVERED-${String(index + 1).padStart(4, '0')}`,
+    method: request.method,
+    url: request.url,
+    headers: [],
+    bodyDigest: digestText('runtime-http-signed-payload/v1', canonicalizeJson({ kind: 'no-body' })),
+    redirectPolicy: { mode: 'deny' as const },
+  }))
+  const requestIds = readHttpRequests.map((request) => request.requestId)
   const browserActionMapContent = {
-    actionMapRevision: 1,
+    actionMapRevision: input.actionMapRevision ?? 1,
     pageIdentities: pagePolicies.map((policy, index) => ({
       pageId: `PAGE-${index + 1}`, origin: policy.url.origin,
       assertionDigest: digestText('runtime-page-identity/v1', canonicalizeJson(policy)),
@@ -88,8 +100,14 @@ export function projectRuntimeExecutableArtifacts(input: {
       waits: [{ kind: 'bounded', timeoutMs: action.timeout.timeoutMs }],
       oracleIds: testCase.oracles.filter((oracle) => oracle.actionId === action.actionId)
         .map((oracle) => oracle.oracleId), effect: action.effect,
-      capabilities: [{ operation: action.kind === 'navigate' ? 'local-navigation' as const : 'dom-read' as const,
-        capabilityId: `PENDING-${action.actionId}` }], requestIds: [],
+      capabilities: [
+        ...(action.actionId === firstActionId || action.kind === 'navigate'
+          ? [{ operation: 'local-navigation' as const, capabilityId: `PENDING-${action.actionId}-NAV` }] : []),
+        { operation: 'dom-read' as const, capabilityId: `PENDING-${action.actionId}-DOM` },
+        { operation: 'screenshot' as const, capabilityId: `PENDING-${action.actionId}-SHOT` },
+        ...(action.actionId === firstActionId && requestIds.length > 0
+          ? [{ operation: 'http-request' as const, capabilityId: `PENDING-${action.actionId}-HTTP` }] : []),
+      ], requestIds: action.actionId === firstActionId ? requestIds : [],
     }))), unmappedSteps: [], discoveredRisks: [], executionProfile: 'declarative-browser' as const,
   }
   const executionContractContent = {
@@ -99,8 +117,9 @@ export function projectRuntimeExecutableArtifacts(input: {
     caseQueue: schedule.map(({ ordinal, caseId }) => ({ ordinal, caseId })),
     actionIntents: input.compilation.executableCases.flatMap((testCase) => testCase.actions.map((action) => ({
       actionId: action.actionId, effect: action.effect,
-      intentDigest: digestText('runtime-declarative-action-intent/v1', canonicalizeJson(action)), requestIds: [],
-    }))), readHttpRequests: [], dataNeeds: [], manualProcedures: [],
+      intentDigest: digestText('runtime-declarative-action-intent/v1', canonicalizeJson(action)),
+      requestIds: action.actionId === firstActionId ? requestIds : [],
+    }))), readHttpRequests, dataNeeds: [], manualProcedures: [],
     evidencePolicyDigest: digestText('runtime-declarative-evidence-policy/v1', 'screenshot,dom,url,network,console'),
     runtimeIsolation: null, unresolvedItems: [], executionProfile: 'declarative-browser' as const,
     declarativeExecutionBinding: withoutBindingDigest(input.compilation.normalizedBinding),

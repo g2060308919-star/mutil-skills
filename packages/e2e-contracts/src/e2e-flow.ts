@@ -116,6 +116,9 @@ export const TargetProbeDiagnosticsSchema = z.object({
   pendingResources: z.array(TargetProbeResourceSchema).max(256),
   unapprovedResources: z.array(TargetProbeResourceSchema).max(256).default([]),
   persistentConnections: z.array(TargetProbeResourceSchema).max(50).default([]),
+  observedResources: z.array(TargetProbeResourceSchema.extend({
+    method: z.enum(['GET', 'HEAD']),
+  }).strict()).max(256).optional(),
   advisories: z.array(ReasonCodeSchema).max(20).default([]),
   resourceSummary: z.object({
     observedCount: z.number().int().nonnegative(),
@@ -164,6 +167,7 @@ export const FixtureContractSchema = z.object({
 
 export const PageLocatorCandidateSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('test-id'), value: LimitedTextSchema.max(512) }).strict(),
+  z.object({ kind: z.literal('label'), value: LimitedTextSchema.max(512) }).strict(),
   z.object({
     kind: z.literal('role'), role: PageIdentityRoleSchema, name: LimitedTextSchema.max(512),
   }).strict(),

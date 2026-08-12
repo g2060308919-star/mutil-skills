@@ -1,7 +1,8 @@
 import { generateKeyPairSync, sign, verify } from 'node:crypto'
+import { rmSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
-import { arch, homedir, platform } from 'node:os'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { arch, homedir, platform, tmpdir } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
 import { chromium, type Browser, type Page } from 'playwright'
 import { LocalApprovalAuthority } from '@mutil-skills/e2e-authority'
@@ -46,8 +47,10 @@ if (!Number.isInteger(repetitions) || repetitions < 2 || repetitions > 20) {
   throw new Error('E2E_B2B_REPETITIONS_INVALID')
 }
 await mkdir(outputRoot, { recursive: true, mode: 0o700 })
-const artifactRoot = join(outputRoot, 'runtime-artifacts')
-await mkdir(artifactRoot, { recursive: true, mode: 0o700 })
+// Artifact Store 是 proof 构建过程的单次运行工作区，不是可复用 cache。固定目录会让
+// 上一轮 staging/journal 被下一轮误认作当前发布状态，导致正式 drill 无法幂等重跑。
+const artifactRoot = await mkdtemp(join(tmpdir(), 'mutil-e2e-b2b-artifacts-'))
+process.once('exit', () => rmSync(artifactRoot, { recursive: true, force: true }))
 const prd = createPrdFixture()
 const compiledPlan = compilePrdRun({ understanding: prd.understanding, design: prd.design })
 const caseSchedules = Array.from({ length: repetitions }, () =>
@@ -487,6 +490,7 @@ const proof = createB2BCoverageProof({
 await writeFile(join(outputRoot, 'executions.json'), `${JSON.stringify(executions, null, 2)}\n`, { mode: 0o600 })
 await writeFile(join(outputRoot, 'proof.json'), `${JSON.stringify(proof, null, 2)}\n`, { mode: 0o600 })
 await writeFile(join(outputRoot, 'report.md'), markdown(proof), { mode: 0o600 })
+await rm(artifactRoot, { recursive: true, force: true })
 process.stdout.write(`${JSON.stringify({ ok: proof.passed, gateEligible: proof.gateEligible,
   weightedCoverage: proof.weightedCoverage, outputRoot, proofDigest: proof.proofDigest })}\n`)
 if (!proof.passed) process.exitCode = 1

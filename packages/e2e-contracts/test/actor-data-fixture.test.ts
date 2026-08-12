@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import {
+  ActorDataIntentV1Schema,
   ActorDataRequirementV1Schema,
   ProvisionedFixtureV1Schema,
 } from '../src/actor-data-fixture.js'
@@ -15,6 +16,18 @@ const requirement = {
 }
 
 describe('Actor/Data 与 Provisioned Fixture 契约', () => {
+  test('产品入口只声明 Role/Data Need，不要求调用者预先知道 Case 或 Target 摘要', () => {
+    const intent = {
+      schemaVersion: 'actor-data-intent/v1' as const,
+      intentId: 'INTENT-AUDITOR', actor: 'auditor', role: 'reviewer', tenant: 'tenant-a',
+      credentialRef: 'secret://accounts/reviewer',
+      dataNeeds: requirement.dataNeeds,
+    }
+    expect(ActorDataIntentV1Schema.parse(intent)).toEqual(intent)
+    expect(() => ActorDataIntentV1Schema.parse({ ...intent, targetIdentity: 'caller-controlled' }))
+      .toThrow()
+  })
+
   test('只接受角色、数据需要与 Secret reference', () => {
     expect(ActorDataRequirementV1Schema.parse(requirement)).toEqual(requirement)
   })

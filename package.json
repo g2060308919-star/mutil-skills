@@ -37,7 +37,7 @@
     "verify:e2e-host": "node --import tsx scripts/e2e-host-proof.ts",
     "verify:e2e-prd-gold": "node --import tsx scripts/e2e-prd-gold-benchmark.ts",
     "verify:e2e-real-project": "node --import tsx scripts/e2e-real-project.ts",
-    "verify:e2e-full-journey": "E2E_RUNTIME_RUN_CROSS_REPO=1 vitest run scripts/e2e-runtime-cross-repo.golden.test.ts",
+    "verify:e2e-full-journey": "E2E_RUNTIME_RUN_CROSS_REPO=1 vitest run --config vitest.e2e.config.ts scripts/e2e-runtime-cross-repo.golden.test.ts",
     "verify:e2e-run-isolation": "node --import tsx scripts/e2e-run-isolation-proof.ts",
     "verify:e2e-browser-capabilities": "node --import tsx scripts/e2e-browser-capability-matrix.ts",
     "verify:e2e-browser-capabilities:local": "E2E_COMPONENT_PROOF_PATH=.artifacts/e2e-b2b-proof.json E2E_REAL_PROJECT_PROOF_PATH=.artifacts/e2e-real-project-proof.json node --import tsx scripts/e2e-browser-capability-matrix.ts",

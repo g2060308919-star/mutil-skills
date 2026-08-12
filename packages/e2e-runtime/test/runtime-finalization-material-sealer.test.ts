@@ -126,6 +126,66 @@ describe('RuntimeFinalizationMaterialSealer', () => {
     expect(authority.appendAttemptEvent).toHaveBeenCalledTimes(2)
   })
 
+  test('有界修复最终化保留首次失败、最终 Attempt 与全部 Oracle 重跑结论', async () => {
+    const fixture = completeGenerationFixture()
+    const built = buildCompleteGeneration(fixture)
+    const facts = built.artifacts.filter((artifact) =>
+      !['final-report', 'generation-manifest'].includes(artifact.artifactType))
+    const frozenArtifacts = Object.fromEntries(facts.filter((artifact) => ![
+      'approval-grants', 'manual-results', 'data-leases', 'browser-preflight', 'run-bundle',
+      'workflow-events', 'browser-results', 'gateway-audit', 'browser-evidence', 'diagnosis',
+      'cleanup-results',
+    ].includes(artifact.artifactType)).map((artifact) => [artifact.artifactType,
+      artifact.artifactType === 'project-policy' ? withEvidencePolicy(artifact) : artifact]))
+    const projection = projectionFixture()
+    const dom = Buffer.from(JSON.stringify({
+      format: 'dom-tree/1', roots: [{ tag: 'main', text: 'Home', assertionRelevant: true }],
+    }))
+    const prepared = snapshot({ frozenArtifacts, projection, fixture, dom })
+    prepared.trustedExecutionFacts['bounded-healing'] = {
+      schemaVersion: 'runtime-healing-audit/v1', proposalId: 'HEAL-1', caseId: 'CASE-1',
+      actionId: 'ACTION-1', firstAttemptId: 'ATTEMPT-FIRST', finalAttemptId: 'ATTEMPT-1',
+      firstEvidenceDigest: digestText('test/v1', 'first-failure'),
+      requiredOracleIds: ['ORACLE-1'], replayedOracleIds: ['ORACLE-1'], revision: 2,
+      changeDigest: digestText('test/v1', 'healing-change'), status: 'accepted',
+    }
+    ;(prepared.trustedExecutionFacts['browser-preflight'] as any).gatewayPolicyDigest =
+      (fixture.drafts['gateway-audit'].content as any).policyDigest
+    const stored = new Map<string, Buffer>([['raw/ATTEMPT-1/dom.bin', dom]])
+    const workflow = (fixture.drafts['workflow-events'].content as any).attemptCases[0]
+    const grants = (fixture.drafts['approval-grants'].content as any).grants
+    const authority = {
+      ...fixture.authority,
+      stateProtectionLevel: 'local-crash-integrity' as const,
+      artifactVerifierMaterial: { publicKeyDigest: digestText('test/v1', 'artifact') },
+      approvalFreshnessVerifierMaterial: { kind: 'test' }, decisionVerifierMaterial: { kind: 'test' },
+      privacyReviewVerifierMaterial: { kind: 'test' }, attemptEventVerifierMaterial: { kind: 'test' },
+      signDigest: fixture.authority.signArtifactDigest,
+      verifySignature: (signature: any) => fixture.authority.verifyArtifactSignature(signature, signature.signedDigest),
+      issueApprovalFreshnessReceipt: vi.fn(async () => grants[0]),
+      appendAttemptEvent: vi.fn(({ event }: any) => event.sequence === 1
+        ? { event: workflow.events[0], eventChainDigest: workflow.events[1].previousChainDigest }
+        : { event: workflow.events[1], eventChainDigest: workflow.selection.eventChainDigest }),
+      close: vi.fn(), credentialCount: 1,
+    }
+    const material = await new RuntimeFinalizationMaterialSealer({
+      quarantine: {
+        readEvidence: async ({ relativePath }: any) => Buffer.from(stored.get(relativePath)!),
+        writeEvidence: async ({ relativePath, plaintext }: any) => {
+          stored.set(relativePath, Buffer.from(plaintext)); return {} as never
+        },
+      }, authority: authority as never,
+      runtimeVersion: '0.1.0', contractsVersion: '0.1.0', engineVersion: '0.1.0',
+      playwrightVersion: '1.61.1',
+    }).seal(prepared)
+    const diagnosis = material.artifacts.find(({ artifact }) => artifact.artifactType === 'diagnosis')!.artifact
+    expect((diagnosis.content as any).healingAttempts).toEqual([{
+      caseId: 'CASE-1', attemptId: 'ATTEMPT-1', firstAttemptId: 'ATTEMPT-FIRST',
+      changeDigest: digestText('test/v1', 'healing-change'), status: 'accepted',
+      requiredOracleIds: ['ORACLE-1'], replayedOracleIds: ['ORACLE-1'],
+    }])
+  })
+
   test('缺少任何外部语义资产时阻止最终化，不补空资产', async () => {
     const fixture = completeGenerationFixture()
     const projection = projectionFixture()

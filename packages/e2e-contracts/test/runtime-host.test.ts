@@ -57,6 +57,20 @@ const manualDraft = {
 }
 
 describe('Runtime Host contracts', () => {
+  test('bounded healing 只接受严格 proposal，不接受调用方注入执行、审批或结果', () => {
+    const candidate = {
+      proposalId: 'HEAL-1', actionId: 'ACTION-1', caseTimeoutMs: 5_000,
+      mutations: [{ kind: 'locator-candidate',
+        before: [{ strategy: 'role', value: 'button:旧名称' }],
+        after: [{ strategy: 'test-id', value: 'stable-button' }] }],
+    }
+    const request = { ...doctorRequest, command: 'propose-healing', projectRoot: '/tmp/project',
+      payload: { runId: 'RUN-1', candidate } }
+    expect(RuntimeRequestEnvelopeSchema.safeParse(request).success).toBe(true)
+    expect(RuntimeRequestEnvelopeSchema.safeParse({ ...request, payload: {
+      ...request.payload, approved: true, execute: 'now', oracleResults: [],
+    } }).success).toBe(false)
+  })
   test('compile-executable-run 只接受 runId 与严格 binding，拒绝调用方注入审批和资产', () => {
     const binding = {
       schemaVersion: 'declarative-execution-binding/v1',

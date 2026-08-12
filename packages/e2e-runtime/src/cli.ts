@@ -779,6 +779,7 @@ export async function runCli(
         ...(browserCapabilities === undefined ? {} : {
           preflightExecutor: browserCapabilities.preflight,
           readExecutor: browserCapabilities.read,
+          declarativeExecutor: browserCapabilities.declarative,
         }),
         ...(targetProbe === undefined ? {} : { targetProbe }),
         ...(writeExecutor === undefined ? {} : { writeExecutor }),

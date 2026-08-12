@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import type { WorkflowState } from '@mutil-skills/e2e-contracts'
 import {
-  createWorkflow, invalidatePreflightForTargetChange, pauseWorkflow, resumeWorkflow,
+  createWorkflow, invalidateForHealingRevision, invalidatePreflightForTargetChange, pauseWorkflow, resumeWorkflow,
   transitionWorkflow, workflowResumeAuthorizationDigest,
 } from '../src/index.js'
 
@@ -126,6 +126,21 @@ describe('transitionWorkflow', () => {
       next: 'awaiting-execution-approval',
       reason: 'silent return',
     })).toThrowError(expect.objectContaining({ code: 'E2E_WORKFLOW_SUBJECT_CHANGE_REQUIRED' }))
+  })
+
+  test('healing 修订只能从 diagnosing 回到执行审批且必须显式撤销旧 Grant', () => {
+    expect(invalidateForHealingRevision({
+      state: state('diagnosing'), reason: 'bounded locator repair',
+      approvalSubjectChanged: true, grantRevoked: true,
+    }).state.current).toBe('awaiting-execution-approval')
+    expect(() => invalidateForHealingRevision({
+      state: state('diagnosing'), reason: 'silent repair',
+      approvalSubjectChanged: true, grantRevoked: false,
+    })).toThrowError(expect.objectContaining({ code: 'E2E_WORKFLOW_HEALING_GRANT_REVOCATION_REQUIRED' }))
+    expect(() => invalidateForHealingRevision({
+      state: state('compiled'), reason: 'wrong recovery point',
+      approvalSubjectChanged: true, grantRevoked: true,
+    })).toThrowError(expect.objectContaining({ code: 'E2E_WORKFLOW_HEALING_INVALIDATION_DENIED' }))
   })
 
   test('目标身份变化以审计事件回退到 Discovery 前且不能从任意状态调用', () => {
