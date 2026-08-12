@@ -296,17 +296,55 @@ describe('E2EFacade', () => {
 
   test('frozen replay 不调用生成器，只返回当次 probe/approval/lease 的下一合法边', async () => {
     const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
-    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => success(request.requestId,
-      statusResult(handle, false, { command: 'probe-target', from: 'preflight-readonly',
-        expectedState: 'preflight-readonly' }))) }
+    let probed = false
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      if (request.command === 'probe-target') probed = true
+      return success(request.requestId, statusResult(handle, false, probed
+        ? { command: 'open-approval', from: 'coverage-audited', expectedState: 'coverage-audited' }
+        : { command: 'probe-target', from: 'preflight-readonly', expectedState: 'preflight-readonly' }))
+    }) }
     const facade = new E2EFacade({ projectRoot: '/project', host,
       requestId: () => 'REQUEST-REPLAY-1' })
     const generator = vi.fn()
 
     await expect(facade.replayRegression({ handle, generator })).resolves.toMatchObject({
-      status: 'pending-decision', pending: { kind: 'target-probe' }, metrics: { generatorCalls: 0 },
+      status: 'pending-decision', pending: { kind: 'execution-approval' },
+      metrics: { generatorCalls: 0, automaticSteps: 1 },
     })
     expect(generator).not.toHaveBeenCalled()
+  })
+
+  test('journey 只按 Runtime nextEdge 自动推进安全边，直到完成或需要决策', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const commands: string[] = []
+    const edges = [
+      { command: 'probe-target', from: 'preflight-readonly', expectedState: 'preflight-readonly' },
+      { command: 'run-preflight', from: 'preflight-readonly', expectedState: 'preflight-readonly' },
+      { command: 'execute-run', from: 'compiled', expectedState: 'compiled' },
+      { command: 'finalize-run', from: 'diagnosing', expectedState: 'diagnosing' },
+    ]
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'get-status') {
+        const index = commands.filter((command) => command === 'get-status').length - 1
+        if (index >= edges.length) return success(request.requestId, {
+          ...statusResult(handle, false), state: 'accepted',
+          workflow: { current: 'accepted', sequence: 10, eventChainDigest: d('4') }, nextEdge: null,
+        })
+        return success(request.requestId, statusResult(handle, false, edges[index]))
+      }
+      return success(request.requestId, { runId: 'RUN-1' })
+    }) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+
+    await expect(facade.continueJourney(handle)).resolves.toMatchObject({
+      status: 'completed', runtimeState: 'accepted', metrics: { automaticSteps: 4 },
+    })
+    expect(commands).toEqual([
+      'get-status', 'probe-target', 'get-status', 'run-preflight', 'get-status',
+      'execute-run', 'get-status', 'finalize-run', 'get-status',
+    ])
   })
 
   test('cancel 与 health 通过公开 Facade 调用 Runtime，不由 Facade 推断副作用状态', async () => {
