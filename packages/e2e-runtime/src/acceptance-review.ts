@@ -32,6 +32,9 @@ export function confirmAcceptanceReview(input: {
   if (review.reviewDigest !== input.expectedReviewDigest) {
     throw reviewError('E2E_ACCEPTANCE_REVIEW_DIGEST_MISMATCH')
   }
+  if (review.unresolvedItems.length > 0) {
+    throw reviewError('E2E_ACCEPTANCE_REVIEW_NOT_CONFIRMABLE')
+  }
   const material = {
     schemaVersion: '1.0.0' as const,
     reviewDigest: review.reviewDigest,
@@ -105,6 +108,13 @@ export function buildAcceptanceReview(snapshot: RuntimeRunSnapshot): AcceptanceR
   const dispositionByClause = uniqueMap(dispositions, (item) => item.clauseId)
   const requirementById = uniqueMap(requirements, (item) => item.reqId)
   const compiledCaseIds = new Set(plan.cases.map((testCase) => testCase.caseId))
+  for (const obligation of obligations) {
+    if (obligation.necessity !== 'required') continue
+    if (obligation.disposition.kind === 'automated'
+      && (obligation.disposition.caseIds === undefined || obligation.disposition.caseIds.length === 0)) {
+      throw reviewError('E2E_ACCEPTANCE_REVIEW_REQUIRED_OBLIGATION_INCOMPLETE')
+    }
+  }
 
   const links = clauses.map((clause) => {
     const disposition = dispositionByClause.get(clause.clauseId)

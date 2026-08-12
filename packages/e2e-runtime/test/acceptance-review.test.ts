@@ -85,7 +85,9 @@ describe('AcceptanceReview', () => {
   })
 
   test('本地确认回执绑定 reviewDigest 并如实报告无身份与职责分离保证', () => {
-    const review = buildAcceptanceReview(reviewSnapshot())
+    const snapshot = reviewSnapshot()
+    ;((snapshot.frozenArtifacts['acceptance-scope']!.content as any).ambiguities) = []
+    const review = buildAcceptanceReview(snapshot)
     const receipt = confirmAcceptanceReview({
       review,
       expectedReviewDigest: review.reviewDigest,
@@ -100,6 +102,24 @@ describe('AcceptanceReview', () => {
     expect(() => confirmAcceptanceReview({
       review, expectedReviewDigest: d('f'), confirmedAt: '2026-08-02T01:00:00.000Z',
     })).toThrowError(expect.objectContaining({ code: 'E2E_ACCEPTANCE_REVIEW_DIGEST_MISMATCH' }))
+  })
+
+  test('pending ambiguity 与 required 自动义务空链都禁止语义确认', () => {
+    const ambiguous = buildAcceptanceReview(reviewSnapshot())
+    expect(() => confirmAcceptanceReview({ review: ambiguous,
+      expectedReviewDigest: ambiguous.reviewDigest,
+      confirmedAt: '2026-08-02T01:00:00.000Z' })).toThrowError(expect.objectContaining({
+      code: 'E2E_ACCEPTANCE_REVIEW_NOT_CONFIRMABLE',
+    }))
+
+    const snapshot = reviewSnapshot()
+    ;((snapshot.frozenArtifacts['acceptance-scope']!.content as any).ambiguities) = []
+    ;((snapshot.frozenArtifacts['coverage-universe']!.content as any).obligations[0].disposition) = {
+      kind: 'automated', caseIds: [],
+    }
+    expect(() => buildAcceptanceReview(snapshot)).toThrowError(expect.objectContaining({
+      code: 'E2E_ACCEPTANCE_REVIEW_REQUIRED_OBLIGATION_INCOMPLETE',
+    }))
   })
 })
 
