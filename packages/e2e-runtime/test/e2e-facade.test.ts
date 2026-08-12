@@ -202,6 +202,42 @@ describe('E2EFacade', () => {
       'get-status', 'open-approval', 'get-status', 'confirm-approval', 'get-status',
     ])
   })
+
+  test('声明式执行绑定通过高层门面一次编译，不暴露 Artifact 顺序', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const commands: string[] = []
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'get-status') return success(request.requestId, statusResult(handle, false))
+      if (request.command === 'compile-executable-run') return success(request.requestId, {
+        runId: 'RUN-1', compilerDigest: d('2'), projectionDigest: d('3'),
+        artifactDigests: { 'test-cases': d('4'), 'browser-action-map': d('5'),
+          'execution-contract': d('6'), 'run-bundle': d('7') },
+        executableCaseIds: ['CASE-1'], blockedCases: [],
+        workflow: { current: 'awaiting-execution-approval', sequence: 6, eventChainDigest: d('8') },
+      })
+      throw new Error(request.command)
+    }) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+    const binding = { schemaVersion: 'declarative-execution-binding/v1' as const,
+      planCompilerDigest: d('a'), targetProbeDigest: d('b'), cases: [{ caseId: 'CASE-1',
+        executionLane: 'trusted-read-only' as const,
+        pageIdentityPolicy: { schemaVersion: '1.0.0' as const,
+          url: { origin: 'https://example.test', pathPattern: '/' },
+          signals: [{ kind: 'test-id' as const, value: 'home' }], match: { mode: 'all' as const } },
+        actions: [{ kind: 'assert-only' as const, actionId: 'ACTION-1', effect: 'read' as const,
+          pageScope: { page: 'current' as const, frame: { kind: 'main' as const } }, locatorCandidates: [],
+          timeout: { timeoutMs: 5_000, retry: 'read-only-max-2' as const } }],
+        oracles: [{ kind: 'url' as const, oracleId: 'ORACLE-1', actionId: 'ACTION-1',
+          comparator: 'equals' as const, expected: 'https://example.test/', deadlineMs: 5_000,
+          evidenceKinds: ['url' as const] }], dataNeeds: [], cleanupIntents: [] }] }
+
+    await expect(facade.compileExecutable(handle, binding)).resolves.toMatchObject({
+      executableCaseIds: ['CASE-1'], artifactDigests: { 'run-bundle': d('7') },
+    })
+    expect(commands).toEqual(['get-status', 'compile-executable-run'])
+  })
 })
 
 function success(requestId: string, result: unknown): RuntimeResponseEnvelope {
@@ -219,10 +255,11 @@ function statusResult(handle: { assetId: string; runId: string; revision: number
     workflow: { current: 'preflight-readonly', sequence: 5, eventChainDigest: d('4') },
     artifactDigests: { 'prd-source': d('3') }, state: 'preflight-readonly',
     nextEdge: blocked ? { command: 'run-preflight', from: 'preflight-readonly',
-      expectedState: 'preflight-readonly' } : { command: 'submit-candidate', from: 'preflight-readonly',
+      expectedState: 'preflight-readonly' } : { command: 'compile-executable-run', from: 'preflight-readonly',
       expectedState: 'preflight-readonly' },
     verifiedDigests: { runtimeInstallation: d('9'), workflowEventChain: d('4') },
-    minimumMissingInput: blocked ? ['browser-preflight-retry:E2E_RUNTIME_PAGE_MISMATCH'] : [],
+    minimumMissingInput: blocked ? ['browser-preflight-retry:E2E_RUNTIME_PAGE_MISMATCH']
+      : ['declarative-execution-binding'],
     handle, stage: 'preflight', condition: blocked
       ? { kind: 'blocked-retryable', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH', resumeStage: 'preflight' }
       : { kind: 'ready' },

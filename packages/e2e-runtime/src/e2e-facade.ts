@@ -1,5 +1,6 @@
 import {
   RuntimeAcceptanceReviewResultSchema,
+  RuntimeCompileExecutableRunResultSchema,
   RuntimeRequestEnvelopeSchema,
   RuntimeResponseEnvelopeSchema,
   RuntimeStatusResultSchema,
@@ -8,11 +9,13 @@ import {
   type RunHandle,
   type ApprovalGrantSubject,
   type RuntimeAcceptanceReviewResult,
+  type RuntimeCompileExecutableRunResult,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
   type RuntimeStatusResult,
   type TaskStateViewV1,
   type TargetContract,
+  type DeclarativeExecutionBindingV1,
 } from '@mutil-skills/e2e-contracts'
 import { randomUUID } from 'node:crypto'
 import { RUNTIME_PACKAGE_VERSION } from './protocol.js'
@@ -138,6 +141,22 @@ export class E2EFacade {
       runId: handle.runId, reviewDigest,
     }, handle.runId)
     return await this.#statusByRunId(handle.runId)
+  }
+
+  async compileExecutable(
+    handle: RunHandle,
+    binding: DeclarativeExecutionBindingV1,
+  ): Promise<RuntimeCompileExecutableRunResult> {
+    const status = await this.status(handle)
+    if (status.nextEdge?.command !== 'compile-executable-run') throw new E2EFacadeError({
+      code: 'E2E_FACADE_EXECUTABLE_COMPILE_EDGE_UNAVAILABLE', category: 'input',
+      message: 'Runtime 当前状态不允许编译声明式执行绑定', retryable: false,
+      requestId: 'FACADE-LOCAL', runId: handle.runId,
+      details: { nextEdge: status.nextEdge, minimumMissingInput: status.minimumMissingInput },
+    })
+    return RuntimeCompileExecutableRunResultSchema.parse(
+      await this.#invoke('compile-executable-run', { runId: handle.runId, binding }, handle.runId),
+    )
   }
 
   async approveExecution(

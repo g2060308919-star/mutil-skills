@@ -407,11 +407,13 @@ describe('E2E skill package', () => {
     for (const command of [
       'create-run', 'prepare-prd-understanding', 'compile-prd-run',
       'configure-target', 'probe-target', 'get-acceptance-review',
-      'confirm-acceptance-review',
+      'confirm-acceptance-review', 'compile-executable-run',
     ]) {
       expect(entry).toContain(`\`${command}\``)
     }
     expect(entry).toContain('`submit-candidate` 不属于新 Run 的默认主线')
+    expect(entry).toContain('声明式执行绑定')
+    expect(entry).toContain('不需要知道 Artifact 创建顺序')
     expect(entry).toContain('Skill 版本与 Runtime 版本必须同为 `0.8.x`')
   })
 
