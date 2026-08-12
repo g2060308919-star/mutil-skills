@@ -238,6 +238,36 @@ describe('E2EFacade', () => {
     })
     expect(commands).toEqual(['get-status', 'compile-executable-run'])
   })
+
+  test('高层 journey 只跟随 Runtime nextEdge，并在语义审阅处返回 typed pending', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => success(request.requestId,
+      statusResult(handle, false, { command: 'get-acceptance-review', from: 'coverage-audited',
+        expectedState: 'coverage-audited' }))) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => 'REQUEST-JOURNEY-1' })
+
+    await expect(facade.continueJourney(handle)).resolves.toMatchObject({
+      schemaVersion: 'e2e-journey-result/v1', status: 'pending-decision', handle,
+      pending: { kind: 'acceptance-review', command: 'get-acceptance-review' },
+    })
+    expect(host.handle).toHaveBeenCalledTimes(1)
+  })
+
+  test('frozen replay 不调用生成器，只返回当次 probe/approval/lease 的下一合法边', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => success(request.requestId,
+      statusResult(handle, false, { command: 'probe-target', from: 'preflight-readonly',
+        expectedState: 'preflight-readonly' }))) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => 'REQUEST-REPLAY-1' })
+    const generator = vi.fn()
+
+    await expect(facade.replayRegression({ handle, generator })).resolves.toMatchObject({
+      status: 'pending-decision', pending: { kind: 'target-probe' }, metrics: { generatorCalls: 0 },
+    })
+    expect(generator).not.toHaveBeenCalled()
+  })
 })
 
 function success(requestId: string, result: unknown): RuntimeResponseEnvelope {
@@ -248,15 +278,15 @@ function success(requestId: string, result: unknown): RuntimeResponseEnvelope {
 }
 
 function statusResult(handle: { assetId: string; runId: string; revision: number; generationDigest: string },
-  blocked = true) {
+  blocked = true, nextEdge?: Record<string, unknown>) {
   return JSON.parse(canonicalizeJson({
     runId: 'RUN-1', assetId: 'ASSET-1', projectIdentityDigest: d('2'),
     runtimeInstallationDigest: d('9'), generationId: 'RUN-1', prdRevision: d('3'),
     workflow: { current: 'preflight-readonly', sequence: 5, eventChainDigest: d('4') },
     artifactDigests: { 'prd-source': d('3') }, state: 'preflight-readonly',
-    nextEdge: blocked ? { command: 'run-preflight', from: 'preflight-readonly',
+    nextEdge: nextEdge ?? (blocked ? { command: 'run-preflight', from: 'preflight-readonly',
       expectedState: 'preflight-readonly' } : { command: 'compile-executable-run', from: 'preflight-readonly',
-      expectedState: 'preflight-readonly' },
+      expectedState: 'preflight-readonly' }),
     verifiedDigests: { runtimeInstallation: d('9'), workflowEventChain: d('4') },
     minimumMissingInput: blocked ? ['browser-preflight-retry:E2E_RUNTIME_PAGE_MISMATCH']
       : ['declarative-execution-binding'],

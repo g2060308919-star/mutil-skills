@@ -39,6 +39,20 @@ export interface E2EFacadeOptions {
   inputPreparer?: Pick<E2EInputPreparer, 'prepare'>
 }
 
+export interface E2EJourneyResult {
+  schemaVersion: 'e2e-journey-result/v1'
+  status: 'pending-decision' | 'completed'
+  handle: RunHandle
+  runtimeState: RuntimeStatusResult['state']
+  pending?: {
+    kind: 'acceptance-review' | 'semantic-generation' | 'execution-binding' | 'scope-approval'
+      | 'lineage-approval' | 'execution-approval' | 'target-probe' | 'manual-input'
+    command: RuntimeStatusResult['nextEdge'] extends infer _ ? string : never
+    missingInput: string[]
+  }
+  metrics: { generatorCalls: number; humanInteractions: number }
+}
+
 export class E2EFacadeError extends Error {
   readonly code: string
   readonly category: string
@@ -227,6 +241,32 @@ export class E2EFacade {
     }, handle.runId))
   }
 
+  /**
+   * 只解释 Runtime 的当前投影，不在 Facade 复制 workflow 或自动批准高风险边。
+   * 具体输入准备仍通过已有窄方法提交；恢复时始终重新读取 Runtime nextEdge。
+   */
+  async continueJourney(handle: RunHandle): Promise<E2EJourneyResult> {
+    const status = await this.status(handle)
+    const currentHandle = status.handle!
+    if (['accepted', 'rejected', 'incomplete'].includes(status.state)) return {
+      schemaVersion: 'e2e-journey-result/v1', status: 'completed', handle: currentHandle,
+      runtimeState: status.state, metrics: { generatorCalls: 0, humanInteractions: 0 },
+    }
+    const command = status.nextEdge?.command
+    return {
+      schemaVersion: 'e2e-journey-result/v1', status: 'pending-decision', handle: currentHandle,
+      runtimeState: status.state,
+      pending: { kind: pendingKind(command), command: command ?? 'get-status',
+        missingInput: status.minimumMissingInput },
+      metrics: { generatorCalls: 0, humanInteractions: humanEdge(command) ? 1 : 0 },
+    }
+  }
+
+  /** Frozen replay 只复用已冻结语义；不接触 generator，当次 Target/Approval/Lease 仍由 Runtime 要求。 */
+  async replayRegression(input: { handle: RunHandle; generator?: () => unknown }): Promise<E2EJourneyResult> {
+    return await this.continueJourney(input.handle)
+  }
+
   async #statusByRunId(
     runId: string,
     expected?: RunHandle,
@@ -280,6 +320,23 @@ export class E2EFacade {
     }
     return response.result
   }
+}
+
+type JourneyCommand = NonNullable<RuntimeStatusResult['nextEdge']>['command'] | undefined
+
+function pendingKind(command: JourneyCommand): NonNullable<E2EJourneyResult['pending']>['kind'] {
+  if (command === 'get-acceptance-review' || command === 'confirm-acceptance-review') return 'acceptance-review'
+  if (command === 'compile-prd-run' || command === 'prepare-prd-understanding'
+    || command === 'submit-candidate') return 'semantic-generation'
+  if (command === 'compile-executable-run') return 'execution-binding'
+  if (command === 'probe-target' || command === 'configure-target' || command === 'run-preflight') return 'target-probe'
+  if (command === 'open-approval' || command === 'confirm-approval') return 'execution-approval'
+  return 'manual-input'
+}
+
+function humanEdge(command: JourneyCommand): boolean {
+  return command === 'get-acceptance-review' || command === 'confirm-acceptance-review'
+    || command === 'open-approval' || command === 'confirm-approval'
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
