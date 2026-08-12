@@ -78,6 +78,7 @@ export function evaluateRegressionAssetValidity(input: {
     runtimeVersion: string
     browserCapabilities: string[]
   }
+  probe?: { status: 'not-run' | 'locator-drift'; refs: string[] }
 }): RegressionAssetValidity {
   const asset = AcceptedRegressionAssetV1Schema.parse(input.asset)
   const blocked = [] as Array<{ code: string; ref: string }>
@@ -113,7 +114,114 @@ export function evaluateRegressionAssetValidity(input: {
       currentDigest: digestText('accepted-regression-validity-side/v1',
         canonicalizeJson(changed.map(([binding, , current]) => [binding, current]))) },
   })
+  if (input.probe !== undefined) return RegressionAssetValiditySchema.parse({
+    status: 'probe-required',
+    reasons: input.probe.status === 'locator-drift'
+      ? input.probe.refs.map((ref) => ({ code: 'E2E_REGRESSION_LOCATOR_DRIFT', ref }))
+      : [{ code: 'E2E_REGRESSION_TARGET_PROBE_REQUIRED', ref: asset.assetId }],
+  })
   return { status: 'valid' }
+}
+
+export function replayFrozenRegressionAsset(input: {
+  asset: AcceptedRegressionAssetV1
+  runtimeVersion: string
+  browserCapabilities: string[]
+}): {
+  assetDigest: string
+  generatorInvoked: false
+  semanticMutationAllowed: false
+  requiredFreshFacts: ['target-probe', 'execution-approval', 'data-lease']
+  validity: RegressionAssetValidity
+} {
+  const asset = AcceptedRegressionAssetV1Schema.parse(input.asset)
+  const incompatibleReasons = [
+    ...(!runtimeCompatible(asset.runtimeCompatibility.range, input.runtimeVersion)
+      ? [{ code: 'E2E_REGRESSION_RUNTIME_INCOMPATIBLE', ref: input.runtimeVersion }] : []),
+    ...asset.browserCapabilities.filter((capability) => !input.browserCapabilities.includes(capability))
+      .map((ref) => ({ code: 'E2E_REGRESSION_BROWSER_CAPABILITY_MISSING', ref })),
+  ]
+  const validity = incompatibleReasons.length > 0
+    ? RegressionAssetValiditySchema.parse({ status: 'execution-blocked', reasons: incompatibleReasons })
+    : RegressionAssetValiditySchema.parse({ status: 'probe-required', reasons: [{
+      code: 'E2E_REGRESSION_TARGET_PROBE_REQUIRED', ref: asset.assetId,
+    }] })
+  return {
+    assetDigest: asset.assetDigest,
+    generatorInvoked: false,
+    semanticMutationAllowed: false,
+    requiredFreshFacts: ['target-probe', 'execution-approval', 'data-lease'],
+    validity,
+  }
+}
+
+export function amendAcceptedRegressionAsset(input: {
+  previous: AcceptedRegressionAssetV1
+  actor: string
+  reason: string
+  changedAt: string
+}): AcceptedRegressionAssetV1 {
+  const previous = AcceptedRegressionAssetV1Schema.parse(input.previous)
+  const amendmentBase = {
+    amendmentId: `AMENDMENT-${previous.version + 1}`,
+    actor: input.actor,
+    reason: input.reason,
+    changedAt: input.changedAt,
+    previousAssetDigest: previous.assetDigest,
+  }
+  const amendment = {
+    ...amendmentBase,
+    amendmentDigest: digestText('accepted-regression-amendment/v1', canonicalizeJson(amendmentBase)),
+  }
+  const { assetDigest: _assetDigest, ...previousBody } = previous
+  const body = {
+    ...previousBody,
+    version: previous.version + 1,
+    humanAmendments: [...previous.humanAmendments, amendment],
+    createdAt: input.changedAt,
+  }
+  return AcceptedRegressionAssetV1Schema.parse({ ...body,
+    assetDigest: computeAcceptedRegressionAssetDigest(body) })
+}
+
+export function regenerateAcceptedRegressionAsset(input: {
+  previous: AcceptedRegressionAssetV1
+  candidate: AcceptedRegressionAssetV1
+  actor: string
+  reason: string
+  changedAt: string
+}): {
+  asset: AcceptedRegressionAssetV1
+  diff: { changedBindings: string[]; previousDigest: string; currentDigest: string }
+} {
+  const previous = AcceptedRegressionAssetV1Schema.parse(input.previous)
+  const candidate = AcceptedRegressionAssetV1Schema.parse(input.candidate)
+  if (candidate.assetId !== previous.assetId || candidate.version !== previous.version + 1) {
+    throw new Error('E2E_REGRESSION_VERSION_LINEAGE_INVALID')
+  }
+  const bindings = [
+    ['source', previous.sourceRevision, candidate.sourceRevision],
+    ['understanding', previous.understandingDigest, candidate.understandingDigest],
+    ['semantic-plan', previous.semanticPlanDigest, candidate.semanticPlanDigest],
+    ['execution-binding', previous.executableCompilationDigest, candidate.executableCompilationDigest],
+    ['target', canonicalizeJson(previous.targetIdentityContract), canonicalizeJson(candidate.targetIdentityContract)],
+    ['actor-data', previous.actorDataContractDigest, candidate.actorDataContractDigest],
+    ['runtime', canonicalizeJson(previous.runtimeCompatibility), canonicalizeJson(candidate.runtimeCompatibility)],
+    ['browser-capability', canonicalizeJson(previous.browserCapabilities), canonicalizeJson(candidate.browserCapabilities)],
+  ] as const
+  const changedBindings = bindings.filter(([, left, right]) => left !== right).map(([name]) => name)
+  if (changedBindings.length === 0) throw new Error('E2E_REGRESSION_REGENERATE_NO_CHANGE')
+  const amendmentBase = { amendmentId: `AMENDMENT-${candidate.version}`, actor: input.actor,
+    reason: input.reason, changedAt: input.changedAt, previousAssetDigest: previous.assetDigest }
+  const amendment = { ...amendmentBase,
+    amendmentDigest: digestText('accepted-regression-amendment/v1', canonicalizeJson(amendmentBase)) }
+  const { assetDigest: _assetDigest, ...candidateBody } = candidate
+  const body = { ...candidateBody,
+    humanAmendments: [...previous.humanAmendments, amendment], createdAt: input.changedAt }
+  const asset = AcceptedRegressionAssetV1Schema.parse({ ...body,
+    assetDigest: computeAcceptedRegressionAssetDigest(body) })
+  return { asset, diff: { changedBindings,
+    previousDigest: previous.assetDigest, currentDigest: asset.assetDigest } }
 }
 
 function sanitizeIdentities(value: unknown): unknown[] {

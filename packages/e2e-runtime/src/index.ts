@@ -38,7 +38,13 @@ export {
 } from './e2e-input-preparer.js'
 export { RunStatusPublisher } from './run-status-publisher.js'
 export { describeRuntimeCompatibility } from './runtime-compatibility.js'
-export { createAcceptedRegressionAsset, evaluateRegressionAssetValidity } from './accepted-regression-asset.js'
+export {
+  amendAcceptedRegressionAsset,
+  createAcceptedRegressionAsset,
+  evaluateRegressionAssetValidity,
+  regenerateAcceptedRegressionAsset,
+  replayFrozenRegressionAsset,
+} from './accepted-regression-asset.js'
 export {
   RuntimeResolverPolicySchema,
   resolveRuntimeInstallation,

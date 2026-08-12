@@ -1,5 +1,11 @@
-import { describe, expect, test } from 'vitest'
-import { createAcceptedRegressionAsset, evaluateRegressionAssetValidity } from '../src/accepted-regression-asset.js'
+import { describe, expect, test, vi } from 'vitest'
+import {
+  amendAcceptedRegressionAsset,
+  createAcceptedRegressionAsset,
+  evaluateRegressionAssetValidity,
+  regenerateAcceptedRegressionAsset,
+  replayFrozenRegressionAsset,
+} from '../src/accepted-regression-asset.js'
 import { createTargetContractFact } from '../src/target-contract.js'
 import type { RuntimeRunSnapshot } from '../src/run-store.js'
 import { createExecutableRunCompilationFact } from '../src/executable-run-compilation-fact.js'
@@ -38,6 +44,60 @@ describe('Runtime accepted regression asset', () => {
       semanticPlanDigest: asset.semanticPlanDigest, targetIdentityContract: asset.targetIdentityContract,
       actorDataContractDigest: d('f'), runtimeVersion: '0.8.3', browserCapabilities: asset.browserCapabilities,
     } }).status).toBe('execution-blocked')
+  })
+
+  test('纯 locator 漂移只要求 Probe，而页面身份、角色和 Fixture 变化不会被 healing 吞掉', () => {
+    const asset = createAcceptedRegressionAsset({ snapshot: fixture(), runtimeVersion: '0.8.0', version: 1,
+      createdAt: '2026-08-12T00:00:00.000Z' })
+    const current = {
+      sourceRevision: asset.sourceRevision, understandingDigest: asset.understandingDigest,
+      semanticPlanDigest: asset.semanticPlanDigest, targetIdentityContract: asset.targetIdentityContract,
+      actorDataContractDigest: asset.actorDataContractDigest, runtimeVersion: '0.8.2',
+      browserCapabilities: asset.browserCapabilities,
+    }
+    expect(evaluateRegressionAssetValidity({ asset, current, probe: {
+      status: 'locator-drift', refs: ['CASE-1:ACTION-1'],
+    } })).toEqual({ status: 'probe-required', reasons: [{
+      code: 'E2E_REGRESSION_LOCATOR_DRIFT', ref: 'CASE-1:ACTION-1',
+    }] })
+    expect(evaluateRegressionAssetValidity({ asset, current: { ...current,
+      targetIdentityContract: { ...current.targetIdentityContract, pageIdentityPolicyDigest: d('f') },
+    } }).status).toBe('review-required')
+  })
+
+  test('replay 不调用 generator，且强制新的 Probe、Execution Approval 与 Lease', () => {
+    const generator = vi.fn()
+    const asset = createAcceptedRegressionAsset({ snapshot: fixture(), runtimeVersion: '0.8.0', version: 1,
+      createdAt: '2026-08-12T00:00:00.000Z' })
+    const replay = replayFrozenRegressionAsset({ asset, runtimeVersion: '0.8.1',
+      browserCapabilities: asset.browserCapabilities })
+    expect(generator).not.toHaveBeenCalled()
+    expect(replay).toMatchObject({ generatorInvoked: false, semanticMutationAllowed: false,
+      requiredFreshFacts: ['target-probe', 'execution-approval', 'data-lease'],
+      validity: { status: 'probe-required' } })
+    expect(replay.assetDigest).toBe(asset.assetDigest)
+  })
+
+  test('PRD regenerate 创建新版本和结构化 diff，人工 amendment 可追溯且不覆写旧资产', () => {
+    const previous = createAcceptedRegressionAsset({ snapshot: fixture(), runtimeVersion: '0.8.0', version: 1,
+      createdAt: '2026-08-12T00:00:00.000Z' })
+    const changedSnapshot = fixture()
+    changedSnapshot.artifactDigests['prd-source'] = d('f')
+    const candidate = createAcceptedRegressionAsset({ snapshot: changedSnapshot, runtimeVersion: '0.8.0', version: 2,
+      createdAt: '2026-08-13T00:00:00.000Z' })
+    const regenerated = regenerateAcceptedRegressionAsset({ previous, candidate,
+      actor: 'local-caller', reason: 'PRD 新增撤销规则', changedAt: '2026-08-13T00:00:00.000Z' })
+    expect(regenerated.diff.changedBindings).toContain('source')
+    expect(regenerated.asset).toMatchObject({ version: 2, humanAmendments: [{
+      actor: 'local-caller', reason: 'PRD 新增撤销规则', previousAssetDigest: previous.assetDigest,
+    }] })
+    expect(previous).toMatchObject({ version: 1, humanAmendments: [] })
+
+    const amended = amendAcceptedRegressionAsset({ previous: regenerated.asset, actor: 'reviewer',
+      reason: '确认边界说明', changedAt: '2026-08-14T00:00:00.000Z' })
+    expect(amended.version).toBe(3)
+    expect(amended.humanAmendments).toHaveLength(2)
+    expect(regenerated.asset.humanAmendments).toHaveLength(1)
   })
 })
 
