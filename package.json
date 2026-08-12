@@ -35,6 +35,7 @@
     "verify:e2e-host": "node --import tsx scripts/e2e-host-proof.ts",
     "verify:e2e-prd-gold": "node --import tsx scripts/e2e-prd-gold-benchmark.ts",
     "verify:e2e-real-project": "node --import tsx scripts/e2e-real-project.ts",
+    "verify:e2e-run-isolation": "node --import tsx scripts/e2e-run-isolation-proof.ts",
     "verify:e2e-browser-capabilities": "node --import tsx scripts/e2e-browser-capability-matrix.ts",
     "verify:e2e-browser-capabilities:local": "E2E_COMPONENT_PROOF_PATH=.artifacts/e2e-b2b-proof.json E2E_REAL_PROJECT_PROOF_PATH=.artifacts/e2e-real-project-proof.json node --import tsx scripts/e2e-browser-capability-matrix.ts",
     "verify:e2e-host-matrix": "node --import tsx scripts/e2e-host-proof.ts --require=loopback,process,filesystem,profile,browser && E2E_REQUIRED_TEST_CAPABILITIES=loopback vitest run packages/e2e-runtime/test/gateway-proxy-host.test.ts packages/e2e-runtime/test/gateway-proxy-security.test.ts packages/e2e-runtime/test/runtime-owned-resource-production.test.ts"
