@@ -34,13 +34,13 @@ import {
   captureTrustedCompilerRuntimeMeasurement,
   createTrustedCompilerControlledWriteLauncher,
   createTrustedCompilerExecutionTrust, createTrustedCompilerProjectorTrust,
-  createTestWriteRuntimeSession,
   createRegressionDiscoveryVerifier, executeTrustedCompilerProject, prepareTrustedCompilerRun,
   projectCompilerInputFromArtifacts,
   runBrowserPreflight, startTrustedCompilerControlledWriteBridge,
   runReversibleWriteCase,
   type ObservedPageIdentity, type ReversibleWriteCaseResult, type WriteBrowserPageAdapter,
 } from '@mutil-skills/e2e-playwright-runtime'
+import { createTestWriteRuntimeSession } from '../packages/e2e-playwright-runtime/src/production-isolation.js'
 import { createGoldenAttemptProof } from './e2e-golden-attempt.js'
 import { resolveChromeExecutablePath } from './e2e-browser-runtime.js'
 import {

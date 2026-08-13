@@ -15,6 +15,8 @@ import {
   TrustedActionRunner,
   TrustedReadActionProjector,
   authorizeRuntimeReadExecutor,
+  authorizeRuntimeDeclarativeExecutor,
+  executeRuntimeDeclarative,
   executeRuntimeRead,
   projectRuntimeReadGatewayAudit,
 } from '../src/trusted-action-runner.js'
@@ -22,6 +24,49 @@ import {
 const d = (label: string) => digestText('trusted-action-test/v1', label)
 
 describe('TrustedReadActionProjector', () => {
+  test('声明式 executor 必须返回冻结 Case 的完整 Oracle 集', async () => {
+    const fixture = projectionFixture()
+    const executionContract = structuredClone(fixture.frozenArtifacts['execution-contract'])
+    ;(executionContract.content as any).executionProfile = 'declarative-browser'
+    ;(executionContract.content as any).declarativeExecutionBinding = {
+      schemaVersion: 'declarative-execution-binding/v1', planCompilerDigest: d('compiler'),
+      targetProbeDigest: d('probe'), cases: [{ caseId: 'CASE-1', executionLane: 'trusted-read-only',
+        pageIdentityPolicy: { schemaVersion: '1.0.0', url: { origin: 'https://test.example.com', pathPattern: '/orders' },
+          signals: [{ kind: 'test-id', value: 'orders' }], match: { mode: 'all' } },
+        actions: [{ kind: 'assert-only', actionId: 'ACTION-1', effect: 'read',
+          pageScope: { page: 'current', frame: { kind: 'main' } }, locatorCandidates: [],
+          timeout: { timeoutMs: 5_000, retry: 'read-only-max-2' } }],
+        oracles: [
+          { kind: 'url', oracleId: 'ORACLE-1', actionId: 'ACTION-1', comparator: 'equals',
+            expected: 'https://test.example.com/orders', deadlineMs: 5_000, evidenceKinds: ['url'] },
+          { kind: 'text', oracleId: 'ORACLE-2', actionId: 'ACTION-1',
+            locatorCandidates: [{ kind: 'test-id', value: 'status' }], comparator: 'contains',
+            expected: '完成', deadlineMs: 5_000, evidenceKinds: ['dom'] },
+        ], dataNeeds: [], cleanupIntents: [] }],
+    }
+    const subject = { ...structuredClone(fixture.grant.subject),
+      executionContractDigest: digestApprovalProjection('execution-contract', executionContract.content) }
+    const subjectDigest = canonicalGrantApprovalSubjectDigest(subject)
+    const grant = { ...structuredClone(fixture.grant), subject, subjectDigest,
+      approvalContext: { ...fixture.grant.approvalContext, subjectDigest } }
+    const snapshot = { schemaVersion: '1.1.0', runId: fixture.runId, assetId: 'ASSET-1',
+      projectIdentityDigest: d('project'), runtimeInstallationDigest: fixture.runtimeInstallationDigest,
+      workflow: { current: 'compiled', sequence: 1, eventChainDigest: d('chain') },
+      artifactDigests: { 'prd-source': subject.prdRevision },
+      frozenArtifacts: { ...fixture.frozenArtifacts, 'execution-contract': executionContract },
+      trustedExecutionFacts: { ...fixture.trustedExecutionFacts, 'signed-execution-grant': grant },
+      requestResponses: {},
+      createdAt: '2026-07-17T00:00:00.000Z', updatedAt: '2026-07-17T00:00:00.000Z' } as any
+    const capability = authorizeRuntimeDeclarativeExecutor(async () => ({ status: 'passed',
+      result: { caseId: 'CASE-1', actionId: 'ACTION-1', status: 'passed', expected: [], actual: [], evidence: [] },
+      gatewayAudit: { received: 0, forwarded: 0, blocked: 0, byIntent: {} }, gatewayAuditDigest: d('audit'),
+      oracleResults: [{ oracleId: 'ORACLE-1', passed: true, expected: 'x', actual: 'x' }],
+    }))
+
+    await expect(executeRuntimeDeclarative(capability, { snapshot, attemptId: 'ATTEMPT-1' }))
+      .rejects.toThrow(/E2E_RUNTIME_DECLARATIVE_EXECUTOR_OUTPUT_INVALID/)
+  })
+
   test('只读 Gateway 审计投影排除其他执行模式的 injected 计数', () => {
     expect(projectRuntimeReadGatewayAudit({
       received: 2, forwarded: 1, blocked: 1, injected: 9, byIntent: { READ: 2 },
@@ -233,7 +278,7 @@ export function projectionFixture() {
 
 function artifact(type: 'test-cases' | 'execution-contract' | 'browser-action-map', content: unknown): ArtifactDocument {
   const schemaVersion = type === 'browser-action-map' ? '2.1.0'
-    : type === 'execution-contract' ? '1.1.0' : '1.0.0'
+    : type === 'execution-contract' ? '1.2.0' : '1.0.0'
   const document: Record<string, unknown> = {
     artifactId: `ARTIFACT-${type}`, artifactType: type, schemaVersion, engineVersion: '0.1.0',
     assetId: 'ASSET-1', prdRevision: d('prd'), generationId: 'RUN-1',

@@ -12,6 +12,8 @@ import {
   type ReadApprovalSubject,
   type SignedReadGrant,
   type SignedDiscoveryGrant,
+  DeclarativeExecutionBindingV1Schema,
+  type DeclarativeExecutionBindingV1,
 } from '@mutil-skills/e2e-contracts'
 import {
   PlaywrightPageAdapter,
@@ -19,6 +21,7 @@ import {
   type BrowserPageAdapter,
   type ReadAuthorityClient,
   type ReadOnlyCaseResult,
+  type DeclarativeBrowserCaseResult,
 } from '@mutil-skills/e2e-playwright-runtime'
 import { z } from 'zod'
 import { projectGatewayRules, type ApprovedGatewayRequest } from './gateway-rule-projector.js'
@@ -80,6 +83,10 @@ declare const runtimeReadExecutorCapabilityBrand: unique symbol
 export interface RuntimeReadExecutorCapability {
   readonly [runtimeReadExecutorCapabilityBrand]: true
 }
+declare const runtimeDeclarativeExecutorCapabilityBrand: unique symbol
+export interface RuntimeDeclarativeExecutorCapability {
+  readonly [runtimeDeclarativeExecutorCapabilityBrand]: true
+}
 
 export interface RuntimeReadExecutionOutput {
   status: 'passed' | 'failed' | 'input-blocked' | 'environment-blocked' | 'safety-blocked'
@@ -93,6 +100,7 @@ export interface RuntimeReadExecutionOutput {
     browserMeasurements: Record<string, unknown>
     isolationMeasurements: Record<string, unknown>
   }
+  oracleResults?: DeclarativeBrowserCaseResult['oracleResults']
 }
 
 type RuntimeReadExecutorBackend = (input: {
@@ -101,20 +109,31 @@ type RuntimeReadExecutorBackend = (input: {
   grant: SignedReadGrant
   currentSubject: ReadApprovalSubject
   attemptId: string
+  signal?: AbortSignal
 }) => Promise<RuntimeReadExecutionOutput>
 
 const runtimeReadExecutors = new WeakMap<object, RuntimeReadExecutorBackend>()
+type RuntimeDeclarativeExecutorBackend = (input: {
+  snapshot: RuntimeRunSnapshot
+  attemptId: string
+  testCase: DeclarativeExecutionBindingV1['cases'][number]
+  grant: SignedReadGrant
+  currentSubject: ReadApprovalSubject
+  signal?: AbortSignal
+}) => Promise<RuntimeReadExecutionOutput>
+const runtimeDeclarativeExecutors = new WeakMap<object, RuntimeDeclarativeExecutorBackend>()
 
 type RuntimeWriteExecutorBackend = (input: {
-  runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot
+  runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot; signal?: AbortSignal
 }) => Promise<RuntimeWriteExecutionOutput>
 type RuntimeInjectionExecutorBackend = (input: {
-  runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot
+  runId: string; attemptId: string; caseId: string; actionId: string; snapshot?: RuntimeRunSnapshot; signal?: AbortSignal
 }) => Promise<RuntimeInjectionExecutionOutput>
 type RuntimeFullPlaywrightExecutorBackend = (input: {
   snapshot: RuntimeRunSnapshot
   attemptId: string
   projection: RuntimeFullPlaywrightProjection
+  signal?: AbortSignal
 }) => Promise<RuntimeWriteExecutionOutput>
 
 declare const runtimeWriteExecutorCapabilityBrand: unique symbol
@@ -132,6 +151,93 @@ export interface RuntimeFullPlaywrightExecutorCapability {
 const runtimeWriteExecutors = new WeakMap<object, RuntimeWriteExecutorBackend>()
 const runtimeInjectionExecutors = new WeakMap<object, RuntimeInjectionExecutorBackend>()
 const runtimeFullPlaywrightExecutors = new WeakMap<object, RuntimeFullPlaywrightExecutorBackend>()
+
+/** 仅由生产声明式 Browser/Gateway 装配层签发。 */
+export function authorizeRuntimeDeclarativeExecutor(
+  backend: RuntimeDeclarativeExecutorBackend,
+): RuntimeDeclarativeExecutorCapability {
+  const capability = Object.freeze({}) as RuntimeDeclarativeExecutorCapability
+  runtimeDeclarativeExecutors.set(capability, backend)
+  return capability
+}
+
+export async function executeRuntimeDeclarative(
+  capability: RuntimeDeclarativeExecutorCapability,
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; signal?: AbortSignal },
+): Promise<RuntimeReadExecutionOutput> {
+  const backend = runtimeDeclarativeExecutors.get(capability)
+  if (!backend) throw trustedActionError('E2E_RUNTIME_DECLARATIVE_EXECUTOR_CAPABILITY_INVALID',
+    'Declarative executor capability 未由生产装配层签发')
+  const projected = projectRuntimeDeclarativeSnapshot(input.snapshot)
+  const testCase = projected.testCase
+  const output = parseRuntimeDeclarativeExecutionOutput(await backend({
+    snapshot: structuredClone(input.snapshot), attemptId: input.attemptId,
+    testCase: structuredClone(testCase), grant: structuredClone(projected.grant),
+    currentSubject: structuredClone(projected.grant.subject),
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
+  }))
+  const expectedActionId = testCase.actions.at(-1)!.actionId
+  const expectedOracleIds = testCase.oracles.map((oracle) => oracle.oracleId).sort()
+  const actualOracleIds = output.oracleResults?.map((oracle) => oracle.oracleId).sort() ?? []
+  if (output.result.caseId !== testCase.caseId || output.result.actionId !== expectedActionId
+    || output.status !== output.result.status
+    || canonicalizeJson(actualOracleIds) !== canonicalizeJson(expectedOracleIds)) {
+    throw trustedActionError('E2E_RUNTIME_DECLARATIVE_EXECUTOR_OUTPUT_INVALID',
+      'Declarative executor 输出未闭合 frozen Case/Action/Oracle')
+  }
+  return output
+}
+
+function projectRuntimeDeclarativeSnapshot(snapshot: RuntimeRunSnapshot): {
+  testCase: DeclarativeExecutionBindingV1['cases'][number]
+  grant: SignedReadGrant
+} {
+  const executionArtifact = parseFrozen(snapshot.frozenArtifacts, 'execution-contract')
+  const actionMap = parseFrozen(snapshot.frozenArtifacts, 'browser-action-map')
+  const testCases = parseFrozen(snapshot.frozenArtifacts, 'test-cases')
+  const execution = executionArtifact.content as Record<string, unknown>
+  if (execution.executionProfile !== 'declarative-browser') throw trustedActionError(
+    'E2E_RUNTIME_DECLARATIVE_PROFILE_REQUIRED', '执行合同不是 declarative-browser')
+  const binding = DeclarativeExecutionBindingV1Schema.parse(execution.declarativeExecutionBinding)
+  if (binding.cases.length !== 1 || binding.cases[0]!.actions.some((action) => action.effect !== 'read')) {
+    throw trustedActionError('E2E_RUNTIME_DECLARATIVE_CASE_SET_UNSUPPORTED',
+      '当前声明式 Runtime 执行要求唯一只读 Case')
+  }
+  const grant = parseReadGrant(snapshot.trustedExecutionFacts['signed-execution-grant'])
+  const subject = grant.subject
+  const discovery = parseDiscoveryGrant(snapshot.trustedExecutionFacts['signed-discovery-grant'])
+  const preflight = BrowserPreflightFactSchema.parse(snapshot.trustedExecutionFacts['browser-preflight'])
+  if (grant.approvalContext.runId !== snapshot.runId
+    || grant.approvalContext.installationDigest !== snapshot.runtimeInstallationDigest
+    || discovery.approvalContext.runId !== snapshot.runId
+    || discovery.grantId !== subject.discoveryGrantId
+    || preflight.runId !== snapshot.runId || preflight.discoveryGrantId !== subject.discoveryGrantId
+    || preflight.preflightDigest !== subject.preflightDigest
+    || subject.caseDigest !== digestApprovalProjection('test-cases', testCases.content)
+    || subject.actionMapDigest !== digestApprovalProjection('browser-action-map', actionMap.content)
+    || subject.executionContractDigest !== digestApprovalProjection('execution-contract', executionArtifact.content)
+    || subject.assetId !== snapshot.assetId || subject.prdRevision !== snapshot.artifactDigests['prd-source']) {
+    throw trustedActionError('E2E_RUNTIME_DECLARATIVE_GRANT_BINDING_MISMATCH',
+      'Declarative Grant/Preflight/Artifact 未绑定当前 Run')
+  }
+  const actionMapActions = (actionMap.content as Record<string, unknown>).actions
+  if (!Array.isArray(actionMapActions)) throw trustedActionError(
+    'E2E_RUNTIME_DECLARATIVE_ACTION_MAP_INVALID', 'Action Map 缺少 actions')
+  const expected = binding.cases[0]!.actions.flatMap((action) => {
+    const mapped = actionMapActions.find((candidate) => isPlainAction(candidate)
+      && candidate.actionId === action.actionId)
+    if (!isPlainAction(mapped) || !Array.isArray(mapped.capabilities)) return []
+    return mapped.capabilities.map((candidate) => isPlainAction(candidate)
+      ? `${action.actionId}\0${String(candidate.operation)}\0${String(candidate.capabilityId)}` : '')
+  }).sort()
+  const actual = grant.capabilities.map((capability) =>
+    `${capability.actionId}\0${capability.operation}\0${capability.capabilityId}`).sort()
+  if (expected.length !== actual.length || canonicalizeJson(expected) !== canonicalizeJson(actual)) {
+    throw trustedActionError('E2E_RUNTIME_DECLARATIVE_CAPABILITY_BINDING_MISMATCH',
+      'Declarative action/grant capability 集合不闭合')
+  }
+  return { testCase: binding.cases[0]!, grant }
+}
 
 /** 仅由 Runtime 生产装配层签发；backend 应闭合 Gateway reservation/outcome/cleanup 全链。 */
 export function authorizeRuntimeWriteExecutor(
@@ -162,7 +268,7 @@ export function authorizeRuntimeFullPlaywrightExecutor(
 
 export async function executeRuntimeFullPlaywright(
   capability: RuntimeFullPlaywrightExecutorCapability,
-  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; signal?: AbortSignal },
 ): Promise<RuntimeWriteExecutionOutput> {
   const projection = projectRuntimeFullPlaywrightSnapshot(input.snapshot)
   return await executeRuntimeFullPlaywrightProjection(capability, { ...input, projection })
@@ -170,7 +276,7 @@ export async function executeRuntimeFullPlaywright(
 
 export async function executeRuntimeFullPlaywrightProjection(
   capability: RuntimeFullPlaywrightExecutorCapability,
-  input: { snapshot: RuntimeRunSnapshot; attemptId: string; projection: RuntimeFullPlaywrightProjection },
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; projection: RuntimeFullPlaywrightProjection; signal?: AbortSignal },
 ): Promise<RuntimeWriteExecutionOutput> {
   const backend = runtimeFullPlaywrightExecutors.get(capability)
   if (!backend) throw trustedActionError(
@@ -179,6 +285,7 @@ export async function executeRuntimeFullPlaywrightProjection(
   )
   const output = parseRuntimeWriteExecutionOutput(await backend({
     snapshot: structuredClone(input.snapshot), attemptId: input.attemptId, projection: input.projection,
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
   }))
   if (output.caseId !== input.projection.caseId || output.actionId !== input.projection.actionId) {
     throw trustedActionError('E2E_RUNTIME_FULL_PLAYWRIGHT_EXECUTOR_OUTPUT_INVALID',
@@ -230,6 +337,7 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
     schedule: RuntimeCaseSchedule
     attemptIds: string[]
     resumeAttemptId?: string
+    signal?: AbortSignal
     now(): string
     persistSchedule(schedule: RuntimeCaseSchedule): Promise<void>
     prepareCase?(input: {
@@ -247,6 +355,7 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
       snapshot: RuntimeRunSnapshot
       attemptId: string
       projection: RuntimeFullPlaywrightProjection
+      signal?: AbortSignal
     }): Promise<RuntimeWriteExecutionOutput>
   },
 ): Promise<{ outputs: RuntimeWriteExecutionOutput[]; schedule: RuntimeCaseSchedule }> {
@@ -269,6 +378,10 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
   }
   const outputs: RuntimeWriteExecutionOutput[] = []
   for (const [index, projection] of projections.entries()) {
+    if (input.signal?.aborted) throw trustedActionError(
+      'E2E_RUNTIME_FULL_PLAYWRIGHT_CANCELLED_BEFORE_CASE_DISPATCH',
+      '多 Case Full Playwright 在下一个 Case 派发前已取消',
+    )
     const scheduled = schedule.cases[index]
     const resuming = scheduled?.state === 'running'
       && scheduled.attemptId === input.resumeAttemptId
@@ -293,8 +406,10 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
         snapshot: structuredClone(executionSnapshot),
         attemptId,
         projection,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       })))
-      : await input.executeCase({ snapshot: executionSnapshot, attemptId, projection })
+      : await input.executeCase({ snapshot: executionSnapshot, attemptId, projection,
+        ...(input.signal === undefined ? {} : { signal: input.signal }) })
     outputs.push(output)
     schedule = completeCase(schedule, {
       caseId: projection.caseId,
@@ -316,19 +431,19 @@ export async function executeScheduledRuntimeFullPlaywrightCases(
 
 export async function executeRuntimeWrite(
   capability: RuntimeWriteExecutorCapability,
-  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; signal?: AbortSignal },
 ): Promise<RuntimeWriteExecutionOutput> {
   const action = projectSingleRuntimeAction(input.snapshot, 'reversible-write')
   const batch = new RuntimeExecutionBatch({ runId: input.snapshot.runId, attemptId: input.attemptId })
   return await new TrustedActionRunner().executeWrite({
     executor: capability, batch, runId: input.snapshot.runId, attemptId: input.attemptId,
-    ...action, snapshot: input.snapshot,
+    ...action, snapshot: input.snapshot, ...(input.signal === undefined ? {} : { signal: input.signal }),
   })
 }
 
 export async function executeRuntimeInjection(
   capability: RuntimeInjectionExecutorCapability,
-  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; signal?: AbortSignal },
 ): Promise<RuntimeInjectionExecutionOutput> {
   const action = projectSingleRuntimeAction(input.snapshot)
   const batch = new RuntimeExecutionBatch({
@@ -338,7 +453,7 @@ export async function executeRuntimeInjection(
   })
   return await new TrustedActionRunner().executeInjection({
     executor: capability, batch, runId: input.snapshot.runId, attemptId: input.attemptId,
-    ...action, snapshot: input.snapshot,
+    ...action, snapshot: input.snapshot, ...(input.signal === undefined ? {} : { signal: input.signal }),
   })
 }
 
@@ -376,7 +491,7 @@ export function authorizeRuntimeReadExecutor(
 
 export async function executeRuntimeRead(
   capability: RuntimeReadExecutorCapability,
-  input: { snapshot: RuntimeRunSnapshot; attemptId: string },
+  input: { snapshot: RuntimeRunSnapshot; attemptId: string; signal?: AbortSignal },
 ): Promise<RuntimeReadExecutionOutput> {
   const backend = runtimeReadExecutors.get(capability)
   if (!backend) throw trustedActionError(
@@ -386,6 +501,7 @@ export async function executeRuntimeRead(
   const output = await backend({
     snapshot: structuredClone(input.snapshot), action: projected.action, grant: projected.grant,
     currentSubject: projected.grant.subject, attemptId: input.attemptId,
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
   })
   return parseRuntimeReadExecutionOutput(output, projected.action)
 }
@@ -638,6 +754,7 @@ export class TrustedActionRunner {
     caseId: string
     actionId: string
     snapshot?: RuntimeRunSnapshot
+    signal?: AbortSignal
   }): Promise<RuntimeWriteExecutionOutput> {
     assertBatchBinding(input.batch, input.runId, input.attemptId)
     const backend = runtimeWriteExecutors.get(input.executor)
@@ -647,6 +764,7 @@ export class TrustedActionRunner {
     const output = parseRuntimeWriteExecutionOutput(await backend({
       runId: input.runId, attemptId: input.attemptId, caseId: input.caseId, actionId: input.actionId,
       ...(input.snapshot === undefined ? {} : { snapshot: structuredClone(input.snapshot) }),
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
     }))
     if (output.caseId !== input.caseId || output.actionId !== input.actionId) throw trustedActionError(
       'E2E_RUNTIME_WRITE_EXECUTOR_OUTPUT_INVALID', 'Write executor 输出 caseId/actionId 不闭合',
@@ -662,6 +780,7 @@ export class TrustedActionRunner {
     caseId: string
     actionId: string
     snapshot?: RuntimeRunSnapshot
+    signal?: AbortSignal
   }): Promise<RuntimeInjectionExecutionOutput> {
     assertBatchBinding(input.batch, input.runId, input.attemptId)
     const backend = runtimeInjectionExecutors.get(input.executor)
@@ -673,6 +792,7 @@ export class TrustedActionRunner {
       output = parseRuntimeInjectionExecutionOutput(await backend({
         runId: input.runId, attemptId: input.attemptId, caseId: input.caseId, actionId: input.actionId,
         ...(input.snapshot === undefined ? {} : { snapshot: structuredClone(input.snapshot) }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       }))
     } catch (cause) {
       if (cause instanceof E2EError && cause.code === 'E2E_RUNTIME_INJECTION_EXECUTOR_OUTPUT_INVALID') throw cause
@@ -900,6 +1020,31 @@ function parseRuntimeReadExecutionOutput(
     'E2E_RUNTIME_READ_EXECUTOR_EVIDENCE_CLOSURE_INVALID', 'Read executor 证据摘要与 Gateway 审计未闭合',
   )
   return parsed.data as RuntimeReadExecutionOutput
+}
+
+function parseRuntimeDeclarativeExecutionOutput(value: unknown): RuntimeReadExecutionOutput {
+  const parsed = z.object({
+    status: z.enum(['passed', 'failed', 'input-blocked', 'environment-blocked', 'safety-blocked']),
+    result: ReadOnlyCaseResultSchema,
+    gatewayAudit: GatewayAuditSchema,
+    gatewayAuditDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    evidence: z.object({
+      screenshot: z.custom<Uint8Array>((bytes) => bytes instanceof Uint8Array),
+      dom: z.custom<Uint8Array>((bytes) => bytes instanceof Uint8Array),
+    }).strict().optional(),
+    oracleResults: z.array(z.object({
+      oracleId: SafeIdSchema, passed: z.boolean(), expected: z.string(), actual: z.string(),
+    }).strict()).min(1).max(10_000),
+    finalizationFacts: z.object({
+      gatewayAudit: z.record(z.unknown()), gatewayAuditVerifierMaterial: z.record(z.unknown()),
+      browserMeasurements: z.record(z.unknown()), isolationMeasurements: z.record(z.unknown()),
+    }).strict().optional(),
+  }).strict().safeParse(value)
+  if (!parsed.success) throw trustedActionError('E2E_RUNTIME_DECLARATIVE_EXECUTOR_OUTPUT_INVALID',
+    'Declarative executor 输出未通过严格 schema', parsed.error)
+  if (!runtimeEvidenceCloses(parsed.data)) throw trustedActionError(
+    'E2E_RUNTIME_DECLARATIVE_EVIDENCE_CLOSURE_INVALID', 'Declarative executor 证据摘要未闭合')
+  return parsed.data
 }
 
 function runtimeEvidenceCloses(output: RuntimeReadExecutionOutput): boolean {

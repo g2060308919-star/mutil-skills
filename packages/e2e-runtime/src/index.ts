@@ -1,5 +1,9 @@
 export { RUNTIME_PACKAGE_VERSION } from './protocol.js'
 export {
+  createSupportedHostProof, createSupportedHostProofFromCapabilityProof,
+  type CreateSupportedHostProofInput,
+} from './supported-host-proof.js'
+export {
   AcceptanceReviewReceiptSchema,
   buildAcceptanceReview,
   confirmAcceptanceReview,
@@ -34,6 +38,13 @@ export {
 } from './e2e-input-preparer.js'
 export { RunStatusPublisher } from './run-status-publisher.js'
 export { describeRuntimeCompatibility } from './runtime-compatibility.js'
+export {
+  amendAcceptedRegressionAsset,
+  createAcceptedRegressionAsset,
+  evaluateRegressionAssetValidity,
+  regenerateAcceptedRegressionAsset,
+  replayFrozenRegressionAsset,
+} from './accepted-regression-asset.js'
 export {
   RuntimeResolverPolicySchema,
   resolveRuntimeInstallation,

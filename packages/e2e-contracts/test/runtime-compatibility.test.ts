@@ -12,10 +12,11 @@ const descriptor = {
     protocol: { major: 1, envelopeSchemaVersion: '1.0.0' },
   },
   state: {
-    currentSnapshotSchemaVersion: '1.8.0',
+    currentSnapshotSchemaVersion: '1.9.0',
     migrationSourceSchemaVersions: [
       '1.0.0', '1.1.0', '1.2.0', '1.3.0',
       '1.4.0', '1.5.0', '1.6.0', '1.7.0',
+      '1.8.0',
     ],
     restrictions: [{ schemaVersion: '1.0.0', condition: 'created-workflow-only' }],
   },

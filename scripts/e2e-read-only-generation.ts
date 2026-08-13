@@ -1116,7 +1116,7 @@ function predictedContentDigest(context: {
 
 function artifactSchemaVersion(artifactType: string): string {
   if (artifactType === 'browser-action-map') return '2.1.0'
-  if (artifactType === 'execution-contract') return '1.1.0'
+  if (artifactType === 'execution-contract') return '1.2.0'
   if (artifactType === 'prd-request') return '2.0.0'
   return ['approval-grants', 'browser-preflight', 'run-bundle',
     'project-policy', 'browser-evidence', 'acceptance-scope', 'prd-diff'].includes(artifactType) ? '2.0.0' : '1.0.0'

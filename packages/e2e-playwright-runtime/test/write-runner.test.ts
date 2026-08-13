@@ -9,10 +9,10 @@ import {
 } from '@mutil-skills/e2e-authority'
 import {
   runReversibleWriteCase,
-  createTestWriteRuntimeSession,
   type RunReversibleWriteCaseInput,
   type WriteBrowserPageAdapter,
 } from '../src/index.js'
+import { createTestWriteRuntimeSession } from '../src/production-isolation.js'
 
 const inProcessRuntime = () => createTestWriteRuntimeSession({
   sandboxHealthy: true, gatewayConnected: true, authorityTransport: 'in-process-test',

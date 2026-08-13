@@ -9,6 +9,11 @@ import {
   canonicalizeJson,
   E2EError,
   WorkflowStateSchema,
+  RunCancellationResultV1Schema,
+  RunHealthSnapshotV1Schema,
+  RuntimeHealingAuditFactSchema,
+  ActorDataIntentV1Schema,
+  ActorDataRequirementV1Schema,
 } from '@mutil-skills/e2e-contracts'
 import { z } from 'zod'
 import type { RuntimeRunSnapshot } from './run-store.js'
@@ -35,6 +40,7 @@ import {
 import { TargetContractFactSchema } from './target-contract.js'
 import { TargetProbeFactSchema } from './target-probe.js'
 import { AcceptanceReviewReceiptSchema } from './acceptance-review.js'
+import { ExecutableRunCompilationFactSchema } from './executable-run-compilation-fact.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const RunIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -117,6 +123,9 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     'approval-mode', 'pending-local-approval', 'prd-source-snapshot', 'prd-source-bundle',
     'prd-understanding-contract', 'prd-understanding-prepared', 'prd-semantic-confirmation',
     'acceptance-review', 'acceptance-review-receipt', 'target-contract-invalidation',
+    'executable-run-compilation',
+    'bounded-healing',
+    'actor-data-intents', 'actor-data-requirements',
   ])
   if (Object.keys(facts).length > allowed.size) context.addIssue({ code: 'custom', message: '可信执行事实数量超限' })
   let trustedFactBytes = 0
@@ -191,6 +200,30 @@ const TrustedExecutionFactsSchema = z.record(z.unknown()).superRefine((facts, co
     if (key === 'target-contract-invalidation') {
       if (!TargetContractInvalidationFactSchema.safeParse(value).success) context.addIssue({
         code: 'custom', path: [key], message: 'TargetContract 失效事实结构非法',
+      })
+      continue
+    }
+    if (key === 'executable-run-compilation') {
+      if (!ExecutableRunCompilationFactSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: '可信可执行编译事实结构非法',
+      })
+      continue
+    }
+    if (key === 'bounded-healing') {
+      if (!RuntimeHealingAuditFactSchema.safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: '有界修复审计事实结构非法',
+      })
+      continue
+    }
+    if (key === 'actor-data-intents') {
+      if (!ActorDataIntentV1Schema.array().max(1000).safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: 'Actor/Data Intent 事实结构非法',
+      })
+      continue
+    }
+    if (key === 'actor-data-requirements') {
+      if (!ActorDataRequirementV1Schema.array().max(1_000_000).safeParse(value).success) context.addIssue({
+        code: 'custom', path: [key], message: 'Actor/Data Requirement 事实结构非法',
       })
       continue
     }
@@ -388,7 +421,7 @@ const RuntimePublicationRecordSchema = z.object({
 }).strict()
 
 const RuntimeRunSnapshotSchema = z.object({
-  schemaVersion: z.literal('1.8.0'),
+  schemaVersion: z.literal('1.9.0'),
   runId: RunIdSchema,
   assetId: AssetIdSchema,
   projectIdentityDigest: DigestSchema,
@@ -412,6 +445,8 @@ const RuntimeRunSnapshotSchema = z.object({
   artifactDigests: z.record(DigestSchema),
   frozenArtifacts: FrozenArtifactsSchema,
   trustedExecutionFacts: TrustedExecutionFactsSchema,
+  cancellation: RunCancellationResultV1Schema.optional(),
+  health: RunHealthSnapshotV1Schema.optional(),
   compiledPrdRun: CompiledPrdRunPlanSchema.optional(),
   caseSchedule: z.custom<RuntimeCaseSchedule>((value) => {
     try {
@@ -533,6 +568,10 @@ export const RuntimeStateMigrationRegistry: Readonly<Record<string, RuntimeState
     ...snapshot,
     schemaVersion: '1.8.0',
   }),
+  '1.8.0': (snapshot) => ({
+    ...snapshot,
+    schemaVersion: '1.9.0',
+  }),
 })
 
 export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
@@ -544,7 +583,7 @@ export function migrateRuntimeRunSnapshot(input: unknown): RuntimeRunSnapshot {
   }
   let candidateVersion = sourceVersion
   const visited = new Set<string>()
-  while (candidateVersion !== '1.8.0') {
+  while (candidateVersion !== '1.9.0') {
     if (visited.has(candidateVersion)) throw migrationRequired(sourceVersion)
     visited.add(candidateVersion)
     const migrator = RuntimeStateMigrationRegistry[candidateVersion]

@@ -11,6 +11,7 @@ import {
 import {
   PlaywrightPageAdapter,
   createRuntimeHostFullPlaywrightSession,
+  runDeclarativeBrowserCase,
   runBrowserPreflight,
   runFullPlaywrightCase,
   type FullPlaywrightEvidenceStage,
@@ -35,6 +36,8 @@ import {
   type SignedInjectionGrant,
   type SignedDiscoveryGrant,
   type SignedGrant,
+  type SignedReadGrant,
+  type ReadApprovalSubject,
   type CapabilityReservation,
   type ApprovalFreshnessReceipt,
   type ArtifactAuthorityVerifierMaterial,
@@ -93,6 +96,8 @@ import {
   type RuntimeWriteExecutorCapability,
   authorizeRuntimeFullPlaywrightExecutor,
   type RuntimeFullPlaywrightExecutorCapability,
+  authorizeRuntimeDeclarativeExecutor,
+  type RuntimeDeclarativeExecutorCapability,
 } from './trusted-action-runner.js'
 import {
   projectRuntimeFullPlaywrightCases,
@@ -357,7 +362,8 @@ export function createProductionBrowserCapabilities(input: {
   projectRoot: string
   installation: RuntimeInstallation
   authorityHost(): Promise<RuntimeAuthorityHost>
-}): { preflight: RuntimePreflightCapability; read: RuntimeReadExecutorCapability } {
+}): { preflight: RuntimePreflightCapability; read: RuntimeReadExecutorCapability;
+  declarative: RuntimeDeclarativeExecutorCapability } {
   const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
   const preflight = authorizeRuntimePreflight({
     prepare: async ({ snapshot, grant, attemptId }) => {
@@ -543,7 +549,9 @@ export function createProductionBrowserCapabilities(input: {
     },
   })
 
-  const read = authorizeRuntimeReadExecutor(async ({ snapshot, action, grant, currentSubject, attemptId }) => {
+  const read = authorizeRuntimeReadExecutor(async ({ snapshot, action, grant, currentSubject, attemptId, signal }) => {
+    if (signal?.aborted) throw new E2EError({ code: 'E2E_BROWSER_EXECUTOR_CANCELLED_BEFORE_DISPATCH',
+      category: 'safety', message: '只读执行在 Browser dispatch 前取消', retryable: true })
     const authorityHost = await input.authorityHost()
     const activated = await activateRuntimeGrant(authorityHost, grant)
     const authority = activated.consumeConnection((consumed) =>
@@ -643,7 +651,11 @@ export function createProductionBrowserCapabilities(input: {
       ], proofInput)
     }
   })
-  return { preflight, read }
+  const declarative = authorizeRuntimeDeclarativeExecutor(async ({
+    snapshot, testCase, grant, currentSubject, attemptId, signal,
+  }) => await executeProductionDeclarativeCase({ input, browserInstallation, snapshot, testCase,
+    grant, currentSubject, attemptId, signal }))
+  return { preflight, read, declarative }
 }
 
 export function createProductionTargetProbeCapability(input: {
@@ -785,6 +797,7 @@ export function createProductionTargetProbeCapability(input: {
               url: request.url, resourceType: request.resourceType,
             })),
             persistentConnections: [...persistentConnections.values()],
+            observedResources: [...observed.values()].slice(0, 256),
             advisories: [
               ...(additions.length > 0 ? ['E2E_TARGET_PROBE_RESOURCE_CLOSURE_LIMIT'] : []),
               ...(activeRequests.size > 0 ? ['E2E_TARGET_PROBE_RESOURCE_TIMEOUT'] : []),
@@ -866,13 +879,168 @@ export function createProductionTargetProbeCapability(input: {
   })
 }
 
+async function executeProductionDeclarativeCase(input: {
+  input: { homeDir: string; projectRoot: string; installation: RuntimeInstallation;
+    authorityHost(): Promise<RuntimeAuthorityHost> }
+  browserInstallation(): Promise<BrowserInstallation>
+  snapshot: RuntimeRunSnapshot
+  testCase: import('@mutil-skills/e2e-contracts').DeclarativeExecutionBindingV1['cases'][number]
+  grant: SignedReadGrant
+  currentSubject: ReadApprovalSubject
+  attemptId: string
+  signal?: AbortSignal
+}) {
+  if (input.signal?.aborted) throw new E2EError({ code: 'E2E_BROWSER_EXECUTOR_CANCELLED_BEFORE_DISPATCH',
+    category: 'safety', message: '声明式执行在 Browser dispatch 前取消', retryable: true })
+  const authorityHost = await input.input.authorityHost()
+  const activated = await activateRuntimeGrant(authorityHost, input.grant)
+  const authority = activated.consumeConnection((consumed) => createAuthorityReadRpcClient({
+    credential: consumed.credential, verifierMaterial: consumed.verifierMaterial,
+    expectedPublicKeyDigest: consumed.verifierMaterial.publicKeyDigest,
+    transport: createAuthenticatedRpcHttpTransport(consumed.endpoint), approvalBinding: consumed.approvalBinding,
+  }))
+  const requests = new Map(input.currentSubject.requests.map((request) => [request.requestId, request]))
+  const approvedRequests: ApprovedGatewayRequest[] = []
+  for (const subjectAction of input.currentSubject.actions.filter((action) => action.operation === 'http-request')) {
+    const capability = input.grant.capabilities.find((candidate) => candidate.actionId === subjectAction.actionId
+      && candidate.transport === 'http')
+    if (capability?.transport !== 'http') throw new E2EError({
+      code: 'E2E_RUNTIME_DECLARATIVE_HTTP_CAPABILITY_MISSING', category: 'safety',
+      message: '声明式请求闭包缺少 HTTP capability', retryable: false })
+    for (const requestId of subjectAction.requestIds) {
+      const request = requests.get(requestId)
+      if (request === undefined) throw new E2EError({ code: 'E2E_RUNTIME_DECLARATIVE_REQUEST_MISSING',
+        category: 'safety', message: '声明式请求闭包引用未知 requestId', retryable: false })
+      approvedRequests.push({ actionId: subjectAction.actionId, capabilityId: capability.capabilityId,
+        requestId, method: request.method, url: request.url, maxUses: capability.maxUses,
+        signedBodyDigest: request.bodyDigest, headers: request.headers,
+        redirectRequestIds: request.redirectPolicy.mode === 'follow-approved'
+          ? request.redirectPolicy.requestIds : [], behavior: { kind: 'pass-through' } })
+    }
+  }
+  let gateway: Awaited<ReturnType<typeof startGatewayProxyHostForRuntime>> | undefined
+  let browser: Awaited<ReturnType<ControlledBrowserHost['open']>> | undefined
+  let primary: unknown
+  let recorder: TrustedGatewayPublicationAuditRecorder | undefined
+  let verifierMaterial: Record<string, unknown> | undefined
+  let auditedAuthority: RuntimeReadAuthority | undefined
+  const pendingReservations = new Set<string>()
+  try {
+    gateway = await startGatewayProxyHostForRuntime({ runId: input.snapshot.runId,
+      mode: 'real-environment', authorityRoot: runtimeLayout(input.input.homeDir).authority,
+      approvedRequests, policyObjects: { factory: ({ signer, recorder: auditRecorder }) => {
+        recorder = auditRecorder
+        verifierMaterial = signer.exportVerifierMaterial() as unknown as Record<string, unknown>
+        return {}
+      } } })
+    if (recorder === undefined) throw new E2EError({ code: 'E2E_RUNTIME_DECLARATIVE_AUDIT_MISSING',
+      category: 'safety', message: '声明式 Gateway audit recorder 未装配', retryable: false })
+    auditedAuthority = createAuditedRuntimeReadAuthority(authority, recorder)
+    browser = await new ControlledBrowserHost().open({ homeDir: input.input.homeDir,
+      runId: input.snapshot.runId, installation: await input.browserInstallation(), gateway })
+    const browserBinding = getControlledBrowserSessionBinding(browser)
+    const rules = projectGatewayRules({ runId: input.snapshot.runId, approvedRequests }).rules
+    const reserved: CapabilityReservation[] = []
+    const capabilities = input.grant.capabilities
+    for (const capability of capabilities) {
+      const reservation = await auditedAuthority.reserveForSubject({
+        grant: input.grant, currentSubject: input.currentSubject, capabilityId: capability.capabilityId,
+        actionId: capability.actionId, attemptId: input.attemptId,
+      })
+      reserved.push(reservation)
+      pendingReservations.add(reservation.reservationId)
+    }
+    const pageAdapter = new PlaywrightPageAdapter(browser.page)
+    const firstActionId = input.testCase.actions[0]!.actionId
+    const firstRules = rules.filter((rule) => rule.actionId === firstActionId)
+    const result = await runDeclarativeBrowserCase({ page: browser.page, testCase: input.testCase,
+      signal: input.signal, evaluatePageIdentity: async (policy) => await pageAdapter.evaluateIdentity(policy),
+      preparePage: async () => {
+        if (firstRules.length === 0) return {}
+        await browserBinding.executeWithCorrelations(toBrowserCorrelations(firstRules, input.testCase),
+          async () => await browser!.page.goto(input.snapshot.targetProbe!.observedUrl, { waitUntil: 'domcontentloaded' }))
+        return { executedActionId: input.testCase.actions[0]!.kind === 'navigate' ? firstActionId : undefined }
+      },
+      runAction: async (action, operation) => {
+        const actionRules = rules.filter((rule) => rule.actionId === action.actionId)
+        if (actionRules.length === 0) await browserBinding.executeWithoutNetwork(operation)
+        else await browserBinding.executeWithCorrelations(toBrowserCorrelations(actionRules, input.testCase), operation)
+      } })
+    const summary = gateway.handle.auditSummary()
+    const publication = await gateway.handle.finalize()
+    const gatewayAudit = { received: summary.received, forwarded: summary.forwarded,
+      blocked: summary.blocked, byIntent: { ...summary.byIntent } }
+    const gatewayAuditText = canonicalizeJson(gatewayAudit)
+    const gatewayEvidence = { kind: 'gateway-audit' as const,
+      byteLength: Buffer.byteLength(gatewayAuditText),
+      digest: digestText('runtime-evidence/gateway-audit/v1', gatewayAuditText) }
+    const outputResult = { caseId: result.caseId, actionId: result.actionId, status: result.status,
+      ...(result.reasonCode === undefined ? {} : { reasonCode: result.reasonCode }),
+      expected: result.oracleResults.map((oracle) => oracle.expected),
+      actual: result.oracleResults.map((oracle) => oracle.actual),
+      evidence: [...result.evidence, gatewayEvidence] }
+    const outcomeDigest = digestText('declarative-case-result/v1', canonicalizeJson(outputResult))
+    for (const reservation of reserved) {
+      await auditedAuthority.complete(reservation.reservationId, outcomeDigest)
+      pendingReservations.delete(reservation.reservationId)
+    }
+    if (verifierMaterial === undefined) throw new E2EError({ code: 'E2E_RUNTIME_DECLARATIVE_VERIFIER_MISSING',
+      category: 'safety', message: '声明式 Gateway verifier material 未装配', retryable: false })
+    return { status: result.status, result: outputResult, gatewayAudit,
+      gatewayAuditDigest: digestText('gateway-publication-audit/v1', canonicalizeJson(publication)),
+      oracleResults: result.oracleResults,
+      ...(result.rawEvidence === undefined ? {} : { evidence: result.rawEvidence }),
+      finalizationFacts: { gatewayAudit: publication as unknown as Record<string, unknown>,
+        gatewayAuditVerifierMaterial: verifierMaterial,
+        browserMeasurements: browser.measurement as unknown as Record<string, unknown>,
+        isolationMeasurements: browser.measurement as unknown as Record<string, unknown> } }
+  } catch (error) {
+    primary = error
+    const recoveryErrors: unknown[] = []
+    if (auditedAuthority !== undefined) {
+      for (const reservationId of pendingReservations) {
+        try {
+          await auditedAuthority.markUnknown(
+            reservationId,
+            `declarative execution interrupted before capability completion; attempt=${input.attemptId}`,
+          )
+        } catch (recoveryError) { recoveryErrors.push(recoveryError) }
+      }
+    }
+    if (recoveryErrors.length > 0) {
+      primary = new AggregateError([error, ...recoveryErrors], 'E2E_RUNTIME_DECLARATIVE_RESERVATION_RECOVERY_FAILED')
+    }
+    throw primary
+  }
+  finally {
+    await settleRuntimeBrowserResources(primary, [
+      ...(browser === undefined ? [] : [async () => await browser!.close()]),
+      ...(gateway === undefined ? [] : [async () => await gateway!.handle.close()]),
+      async () => (auditedAuthority ?? authority).destroy(),
+    ])
+  }
+}
+
+function toBrowserCorrelations(
+  rules: ReturnType<typeof projectGatewayRules>['rules'],
+  testCase: import('@mutil-skills/e2e-contracts').DeclarativeExecutionBindingV1['cases'][number],
+) {
+  const navigationUrl = testCase.actions.find((action) => action.kind === 'navigate')?.url
+  return rules.map((rule) => ({ requestId: rule.requestId!, ruleId: rule.ruleId,
+    stepOrdinal: rule.stepOrdinal, method: rule.method, url: rule.url, channel: 'http' as const,
+    bodyDigest: rule.bodyDigest, actionId: rule.actionId, capabilityId: rule.capabilityId,
+    signedBodyDigest: rule.signedBodyDigest!, redirectRequestIds: [...rule.redirectRequestIds],
+    navigation: rule.method === 'GET' && rule.url === navigationUrl,
+    maxUses: rule.maxUses, headers: { ...rule.requestHeaders } }))
+}
+
 function emptyProductionTargetProbeDiagnostics(
   strategy: TargetProbeDiagnostics['strategy'], attempt: number,
 ): TargetProbeDiagnostics {
   return {
     strategy, attempt, domPresent: false, visibleTextSummary: '', consoleErrors: [],
     failedRequests: [], pendingResources: [], unapprovedResources: [],
-    persistentConnections: [], advisories: [],
+    persistentConnections: [], observedResources: [], advisories: [],
     resourceSummary: {
       observedCount: 0, approvedCount: 0, pendingCount: 0,
       unapprovedCount: 0, persistentConnectionCount: 0, closureComplete: true,
@@ -1213,7 +1381,7 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
   secretBroker?: SecretTemplateBroker
 }): RuntimeFullPlaywrightExecutorCapability {
   const browserInstallation = async () => await resolveRuntimeBrowserInstallation(input)
-  return authorizeRuntimeFullPlaywrightExecutor(async ({ snapshot, attemptId, projection }) => {
+  return authorizeRuntimeFullPlaywrightExecutor(async ({ snapshot, attemptId, projection, signal }) => {
     const writeAttempt = snapshot.writeAttempts?.[attemptId]
     if (writeAttempt === undefined || writeAttempt.state !== 'prepared') {
       throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_ATTEMPT_NOT_PREPARED')
@@ -1533,7 +1701,8 @@ export function createProductionFullPlaywrightBrowserCapability(input: {
               freshnessReceipt, freshnessAuthority, authority: authority.writeApproval },
             lease: { leaseId: projection.capability.dataLeaseId, fencingToken: projection.capability.fencingToken,
               targetFingerprint: projection.targetFingerprint, authority: authority.lease },
-            runtime: assembled.runtime, session: assembled.session })))
+            runtime: assembled.runtime, session: assembled.session,
+            ...(signal === undefined ? {} : { signal }) })))
       if (!result.reservationId || !result.cleanup || !result.finalization?.leaseReceiptDigest) {
         throw writeWiringError('E2E_RUNTIME_FULL_PLAYWRIGHT_TERMINAL_RECOVERY_REQUIRED')
       }

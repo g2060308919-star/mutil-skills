@@ -18,6 +18,7 @@ export {
 export * from './trusted-source-audit.js'
 export * from './read-only-runner.js'
 export * from './playwright-page-adapter.js'
+export * from './declarative-browser-runner.js'
 export * from './page-identity-policy.js'
 export * from './write-runner.js'
 export * from './full-playwright-runner.js'
@@ -27,7 +28,6 @@ export {
 } from './runtime-host-full-playwright-session.js'
 export {
   LocalRuntimeIsolationAuthority,
-  createTestWriteRuntimeSession,
   createProductionWriteRuntimeSession,
   getWriteRuntimeSessionBinding,
 } from './production-isolation.js'

@@ -18,6 +18,8 @@ Skill 唯一调用固定 launcher `~/.mutil-skills/bin/repo-e2e rpc`，按 JSON 
 
 Runtime 内部必须调用 Engine `classify()`、持久化 attempt 审计、attempt slot 验链/选择和 retry policy；执行器只向 Attempt Authority 的 `appendAttemptEvent()` 提交完整上下文和事件，由 Authority 自行验证状态转换、计算链摘要并签名；使用独立 verifier 验证每个 event proof。需要修订时重新计算 ApprovalSubject 并由 Authority 撤销旧 grant。
 
+Locator/wait 小漂移只能进入有界 healing：候选必须绑定原失败 Attempt、页面身份和 Evidence，每个 Case/Action 不得超过 Runtime 配置的次数上限；产生新 revision 和新 Attempt 后，必须重跑该 Requirement 的全部 Oracle。页面身份、角色、权限、effect、network intent、Oracle 或 Fixture contract 变化一律拒绝 healing；Oracle 未完整重跑或仍失败要记录误修复样本，不能 accepted。
+
 ## 执行步骤
 
 在运行状态内按页面身份、角色、数据、Gateway、环境、oracle、自动化顺序诊断单次失败；先从落盘 artifact 重算初始链、事件链和 workflowDigest，校验 generation/asset/PRD/run/case 绑定、slot 连续性、started→terminal 顺序、事件时间单调、proof purpose/keyId/signature 与前后摘要。再把每个 terminal 的 status、mode、effect、effectObservation、reservationSafeToVoid 与 `browser-results v2` 精确对齐；`passed|failed` 还必须把 terminal 的 reservationId/outcomeDigest 与 Gateway 签名 reservation 精确对齐；只有 effect-aware retry 规则允许时才生成下一 slot。所有 slot 结束再进入 `diagnosing`，冻结 final attempt、分类、change digest 和 assertionChanged=false，然后请求 `finalizing`。

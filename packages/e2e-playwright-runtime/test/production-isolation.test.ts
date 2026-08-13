@@ -7,10 +7,10 @@ import {
 import {
   LocalRuntimeIsolationAuthority,
   createProductionWriteRuntimeSession,
-  createTestWriteRuntimeSession,
   getWriteRuntimeSessionBinding,
   type RuntimeIsolationClaims,
 } from '../src/index.js'
+import { createTestWriteRuntimeSession } from '../src/production-isolation.js'
 
 const NOW = new Date('2026-07-14T10:00:00.000Z')
 const digest = (value: string) => digestText('production-isolation-test/v1', value)

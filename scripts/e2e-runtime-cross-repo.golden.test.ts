@@ -108,6 +108,18 @@ describe('portable E2E runtime', () => {
       expect(standaloneHtml).toContain('<img src="evidence/CASE-0001/')
       expect(standaloneHtml).toContain('下载 Playwright Trace')
       expect(standaloneHtml).toContain('原始 DOM 未在独立报告中发布')
+      await expect(readFile(join(
+        result.fullPlaywright.standaloneReportRoot,
+        'execution-explanation.json',
+      ), 'utf8')).resolves.toContain('execution-explanation/v1')
+      await expect(access(join(
+        result.fullPlaywright.standaloneReportRoot,
+        'execution-explanation.md',
+      ))).resolves.toBeUndefined()
+      await expect(access(join(
+        result.fullPlaywright.standaloneReportRoot,
+        'execution-explanation.html',
+      ))).resolves.toBeUndefined()
       const standaloneEvidenceLinks = [...standaloneHtml.matchAll(
         /(?:href|src)="(evidence\/[^"]+)"/g,
       )].map((match) => match[1]!)

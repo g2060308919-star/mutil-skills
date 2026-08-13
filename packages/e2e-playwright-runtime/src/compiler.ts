@@ -4,15 +4,16 @@ import {
   E2EError,
   digestText,
   findForbiddenRegressionTestDispositions,
-  type CompilerInputV1,
+  type CompilerInput,
 } from '@mutil-skills/e2e-contracts'
 import { inspectTrustedCompilerInput, TRUSTED_TYPESCRIPT_VERSION,
   type TrustedCompilerInput } from './compiler-input-projector.js'
 import { validateFullPlaywrightFunctionBody } from './full-playwright-source-validation.js'
 import { assertFreshOutputRoot } from './regression-source-set.js'
 import { auditTrustedRegressionSourceSet } from './trusted-source-audit.js'
+import { renderDeclarativeBrowserCase } from './declarative-browser-renderer.js'
 
-type CompilerAction = CompilerInputV1['cases'][number]['actions'][number]
+type CompilerAction = CompilerInput['cases'][number]['actions'][number]
 
 export interface CompileTrustedProjectInput {
   outputDir: string
@@ -63,10 +64,12 @@ export async function compileTrustedProject(input: CompileTrustedProjectInput): 
   ].join('\n'))
   const writeMode = compilerInput.cases.some((testCase) => testCase.actions.some((action) => action.kind === 'reversibleWrite'))
   const fullPlaywrightMode = compilerInput.executionProfile === 'full-playwright'
+  const declarativeBrowserMode = compilerInput.executionProfile === 'declarative-browser'
   if (fullPlaywrightMode) assertFullPlaywrightFragments(compilerInput)
-  if (!fullPlaywrightMode) files.set('fixtures/safe-page.ts', renderSafePageFixture(writeMode))
-  else files.set('fixtures/full-playwright-runtime.ts', renderFullPlaywrightRuntime())
-  const generatedSpec = fullPlaywrightMode ? renderFullPlaywrightSpec(compilerInput) : renderSpec(compilerInput)
+  if (fullPlaywrightMode) files.set('fixtures/full-playwright-runtime.ts', renderFullPlaywrightRuntime())
+  else if (!declarativeBrowserMode) files.set('fixtures/safe-page.ts', renderSafePageFixture(writeMode))
+  const generatedSpec = declarativeBrowserMode ? renderDeclarativeBrowserSpec(compilerInput)
+    : fullPlaywrightMode ? renderFullPlaywrightSpec(compilerInput) : renderSpec(compilerInput)
   if (findForbiddenRegressionTestDispositions(generatedSpec).length > 0) {
     throw compilerError('受信编译器不得生成 skip/fixme/fail/only/todo 测试')
   }
@@ -74,10 +77,11 @@ export async function compileTrustedProject(input: CompileTrustedProjectInput): 
   files.set('README.md', renderReadme(compilerInput, writeMode, fullPlaywrightMode))
   files.set('safety-policy.json', prettyJson({
     schemaVersion: '1.0.0', failClosed: true, runGateRequired: true,
-    directBusinessPageAccess: fullPlaywrightMode, nativeNetworkForbidden: true,
+    directBusinessPageAccess: fullPlaywrightMode || declarativeBrowserMode, nativeNetworkForbidden: true,
     executionOutcomeReceipt: fullPlaywrightMode || writeMode
       ? 'independent-ed25519-verification-required' : 'not-applicable',
-    readExecution: fullPlaywrightMode ? 'not-applicable' : writeMode ? 'not-applicable' : 'loopback-controlled-runner-bridge',
+    readExecution: fullPlaywrightMode ? 'not-applicable' : declarativeBrowserMode
+      ? 'trusted-declarative-browser' : writeMode ? 'not-applicable' : 'loopback-controlled-runner-bridge',
     writeExecution: fullPlaywrightMode ? 'trusted-full-playwright-runtime'
       : writeMode ? 'loopback-controlled-runner-bridge' : 'not-applicable',
     ...(fullPlaywrightMode ? {
@@ -89,12 +93,13 @@ export async function compileTrustedProject(input: CompileTrustedProjectInput): 
   }))
   files.set('network-policy.json', prettyJson({
     schemaVersion: '1.0.0', transport: 'external-safety-gateway',
-    browserDirectEgress: 'forbidden', allowedBridge: fullPlaywrightMode
+    browserDirectEgress: declarativeBrowserMode ? 'gateway-only' : 'forbidden', allowedBridge: fullPlaywrightMode
       ? { protocol: 'gateway-proxy', authorization: 'frozen-program-request-set' }
       : writeMode
       ? { protocol: 'http:', hostname: '127.0.0.1', exactPath: '/v1/reversible-write' }
       : { protocol: 'http:', hostname: '127.0.0.1', exactPath: '/v1/read-assertion' },
-    ...(fullPlaywrightMode ? { executionProfile: 'full-playwright' } : {}),
+    ...(fullPlaywrightMode ? { executionProfile: 'full-playwright' }
+      : declarativeBrowserMode ? { executionProfile: 'declarative-browser' } : {}),
   }))
   files.set('evidence-policy.json', prettyJson({
     schemaVersion: '1.0.0', required: ['screenshot', 'dom', 'gateway-audit'],
@@ -107,7 +112,8 @@ export async function compileTrustedProject(input: CompileTrustedProjectInput): 
   }))
   files.set('template-manifest.json', prettyJson({
     schemaVersion: '1.0.0', template: 'mutil-skills-controlled-regression', templateVersion: '2.3.0',
-    actionKinds: fullPlaywrightMode ? ['fullPlaywright'] : writeMode ? ['reversibleWrite'] : ['assertText'],
+    actionKinds: fullPlaywrightMode ? ['fullPlaywright'] : declarativeBrowserMode
+      ? ['declarativeBrowser'] : writeMode ? ['reversibleWrite'] : ['assertText'],
     ...(fullPlaywrightMode ? { executionProfile: 'full-playwright' } : {}),
   }))
   files.set('run-bundle.json', prettyJson({
@@ -121,7 +127,8 @@ export async function compileTrustedProject(input: CompileTrustedProjectInput): 
     baseOrigin: compilerInput.baseOrigin,
     approvalDigest: compilerInput.approvalDigest,
     approvalFreshnessReceipt: compilerInput.approvalFreshnessReceipt,
-    mode: fullPlaywrightMode ? 'full-playwright' : writeMode ? 'controlled-reversible-write' : 'read-only',
+    mode: fullPlaywrightMode ? 'full-playwright' : declarativeBrowserMode
+      ? 'declarative-browser' : writeMode ? 'controlled-reversible-write' : 'read-only',
     ...(fullPlaywrightMode ? { executionProfile: 'full-playwright' } : {}),
     runGateRequired: true,
     caseIds: compilerInput.cases.map((testCase) => testCase.caseId),
@@ -288,7 +295,7 @@ function renderExecutionOutcomeVerifier(): string[] {
   ]
 }
 
-function renderSpec(input: CompilerInputV1): string {
+function renderSpec(input: Extract<CompilerInput, { schemaVersion: 'compiler-input/v1' }>): string {
   const lines = ["import { test } from '../fixtures/safe-page.js'", '']
   const writeMode = input.cases.some((testCase) => testCase.actions.some((action) => action.kind === 'reversibleWrite'))
   if (writeMode) {
@@ -332,7 +339,38 @@ function renderSpec(input: CompilerInputV1): string {
   return `${lines.join('\n')}\n`
 }
 
-function renderFullPlaywrightSpec(input: CompilerInputV1): string {
+function renderDeclarativeBrowserSpec(input: Extract<CompilerInput, { schemaVersion: 'compiler-input/v2' }>): string {
+  const lines = ["import { test, expect } from '@playwright/test'", "import { createHash } from 'node:crypto'", '',
+    "const __bytesDigest = async (value: Uint8Array | NodeJS.ReadableStream) => { const hash = createHash('sha256');",
+    "  if (value instanceof Uint8Array) hash.update(value); else for await (const chunk of value) hash.update(chunk as Uint8Array);",
+    "  return `sha256:${hash.digest('hex')}` }",
+    "const __readBytes = async (value: NodeJS.ReadableStream | null) => { if (value === null) throw new Error('E2E_DECLARATIVE_DOWNLOAD_UNREADABLE');",
+    "  const chunks: Uint8Array[] = []; for await (const chunk of value) chunks.push(chunk as Uint8Array); return Buffer.concat(chunks) }",
+    "const __requestBodyDigest = (request: import('playwright').Request) => { const body = request.postDataBuffer();",
+    "  return body === null ? undefined : `sha256:${createHash('sha256').update(body).digest('hex')}` }", '']
+  for (const testCase of input.cases) {
+    lines.push(`test(${literal(`${testCase.caseId} ${testCase.title}`)}, async ({ page }) => {`)
+    lines.push('  test.info().annotations.push(')
+    lines.push(`    { type: 'assetId', description: ${literal(input.assetId)} },`)
+    lines.push(`    { type: 'prdRevision', description: ${literal(input.prdRevision)} },`)
+    lines.push(`    { type: 'caseId', description: ${literal(testCase.caseId)} },`)
+    for (const reqId of testCase.reqIds) lines.push(`    { type: 'reqId', description: ${literal(reqId)} },`)
+    for (const ruleId of testCase.ruleIds) lines.push(`    { type: 'ruleId', description: ${literal(ruleId)} },`)
+    for (const obligationId of testCase.obligationIds) {
+      lines.push(`    { type: 'obligationId', description: ${literal(obligationId)} },`)
+    }
+    lines.push("    { type: 'executionProfile', description: 'declarative-browser' },")
+    lines.push('  )')
+    const actions = testCase.actions.map((entry) => entry.action)
+    const oracles = testCase.actions.flatMap((entry) => entry.oracles)
+    for (const sourceLine of renderDeclarativeBrowserCase({ caseId: testCase.caseId, actions, oracles })
+      .trimEnd().split('\n')) lines.push(`  ${sourceLine}`)
+    lines.push('})', '')
+  }
+  return `${lines.join('\n')}\n`
+}
+
+function renderFullPlaywrightSpec(input: Extract<CompilerInput, { schemaVersion: 'compiler-input/v1' }>): string {
   const lines = [
     "import { test, expect } from '@playwright/test'",
     "import { executeFullPlaywrightAction } from '../fixtures/full-playwright-runtime.js'",
@@ -382,7 +420,7 @@ function renderFullPlaywrightSpec(input: CompilerInputV1): string {
   return `${lines.join('\n')}\n`
 }
 
-function assertFullPlaywrightFragments(input: CompilerInputV1): void {
+function assertFullPlaywrightFragments(input: Extract<CompilerInput, { schemaVersion: 'compiler-input/v1' }>): void {
   for (const testCase of input.cases) {
     for (const action of testCase.actions) {
       if (action.kind !== 'fullPlaywright') throw compilerError('full-playwright Project 不得混合 legacy action')
@@ -517,7 +555,7 @@ function renderFullPlaywrightRuntime(): string {
   ].join('\n')
 }
 
-function renderReadme(input: CompilerInputV1, writeMode: boolean, fullPlaywrightMode: boolean): string {
+function renderReadme(input: CompilerInput, writeMode: boolean, fullPlaywrightMode: boolean): string {
   return [
     '# 受控 E2E 回归项目',
     '',

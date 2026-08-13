@@ -124,6 +124,7 @@ interface TrustedBrowserSessionBinding {
   gatewaySessionMeasurementDigest: string
   executeWithCorrelation<T>(correlation: RequestCorrelation, operation: () => Promise<T>): Promise<T>
   executeWithCorrelations<T>(correlations: readonly ActionRequestCorrelation[], operation: () => Promise<T>): Promise<T>
+  executeWithoutNetwork<T>(operation: () => Promise<T>): Promise<T>
 }
 
 const controlledSessions = new WeakMap<object, TrustedBrowserSessionBinding>()
@@ -306,6 +307,10 @@ export class ControlledBrowserHost {
         if (correlation === undefined || (currentResolver === undefined
           && (!request.isNavigationRequest || !request.isMainFrame || request.resourceType !== 'document'
             || request.url !== correlation.url || request.method.toUpperCase() !== correlation.method))) {
+          if (currentResolver !== undefined) interceptionFailure ??= browserHostError(
+            'E2E_BROWSER_UNAPPROVED_REQUEST',
+            `Action 发起了未被已签请求闭包批准的网络请求：${request.method.toUpperCase()} ${request.url}`,
+          )
           await request.abort()
           return
         }
@@ -401,6 +406,15 @@ export class ControlledBrowserHost {
             throw browserHostError('E2E_BROWSER_SESSION_BUSY', 'Browser session 已关闭或存在并发 Action')
           }
           currentResolver = createActionRequestResolver(correlations)
+          try { return await runBrowserOperation(operation) } finally { currentResolver = undefined }
+        },
+        executeWithoutNetwork: async <T>(operation: () => Promise<T>) => {
+          if (closed || currentCorrelation !== undefined || currentResolver !== undefined) {
+            throw browserHostError('E2E_BROWSER_SESSION_BUSY', 'Browser session 已关闭或存在并发 Action')
+          }
+          // 空 resolver 表示当前 action 明确没有任何已批准网络请求；发生请求即 abort，
+          // runBrowserOperation 会把 interceptor failure 同步返回调用方。
+          currentResolver = { correlations: [], remaining: new Map(), consumed: new Map() }
           try { return await runBrowserOperation(operation) } finally { currentResolver = undefined }
         },
       })

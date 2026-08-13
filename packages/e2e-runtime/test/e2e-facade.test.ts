@@ -202,6 +202,177 @@ describe('E2EFacade', () => {
       'get-status', 'open-approval', 'get-status', 'confirm-approval', 'get-status',
     ])
   })
+
+  test('声明式执行绑定通过高层门面一次编译，不暴露 Artifact 顺序', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const commands: string[] = []
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'get-status') return success(request.requestId, statusResult(handle, false))
+      if (request.command === 'compile-executable-run') return success(request.requestId, {
+        runId: 'RUN-1', compilerDigest: d('2'), projectionDigest: d('3'),
+        artifactDigests: { 'test-cases': d('4'), 'browser-action-map': d('5'),
+          'execution-contract': d('6'), 'run-bundle': d('7') },
+        executableCaseIds: ['CASE-1'], blockedCases: [],
+        workflow: { current: 'awaiting-execution-approval', sequence: 6, eventChainDigest: d('8') },
+      })
+      throw new Error(request.command)
+    }) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+    const binding = { schemaVersion: 'declarative-execution-binding/v1' as const,
+      planCompilerDigest: d('a'), targetProbeDigest: d('b'), cases: [{ caseId: 'CASE-1',
+        executionLane: 'trusted-read-only' as const,
+        pageIdentityPolicy: { schemaVersion: '1.0.0' as const,
+          url: { origin: 'https://example.test', pathPattern: '/' },
+          signals: [{ kind: 'test-id' as const, value: 'home' }], match: { mode: 'all' as const } },
+        actions: [{ kind: 'assert-only' as const, actionId: 'ACTION-1', effect: 'read' as const,
+          pageScope: { page: 'current' as const, frame: { kind: 'main' as const } }, locatorCandidates: [],
+          timeout: { timeoutMs: 5_000, retry: 'read-only-max-2' as const } }],
+        oracles: [{ kind: 'url' as const, oracleId: 'ORACLE-1', actionId: 'ACTION-1',
+          comparator: 'equals' as const, expected: 'https://example.test/', deadlineMs: 5_000,
+          evidenceKinds: ['url' as const] }], dataNeeds: [], cleanupIntents: [] }] }
+
+    await expect(facade.compileExecutable(handle, binding)).resolves.toMatchObject({
+      executableCaseIds: ['CASE-1'], artifactDigests: { 'run-bundle': d('7') },
+    })
+    expect(commands).toEqual(['get-status', 'compile-executable-run'])
+  })
+
+  test('高层 journey 只跟随 Runtime nextEdge，并在语义审阅处返回 typed pending', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => success(request.requestId,
+      statusResult(handle, false, { command: 'get-acceptance-review', from: 'coverage-audited',
+        expectedState: 'coverage-audited' }))) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => 'REQUEST-JOURNEY-1' })
+
+    await expect(facade.continueJourney(handle)).resolves.toMatchObject({
+      schemaVersion: 'e2e-journey-result/v1', status: 'pending-decision', handle,
+      pending: { kind: 'acceptance-review', command: 'get-acceptance-review' },
+    })
+    expect(host.handle).toHaveBeenCalledTimes(1)
+  })
+
+  test('acceptFromPrd 只接收已理解 intake 与 Target，并返回可恢复 RunHandle', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 1, generationDigest: d('1') }
+    const commands: string[] = []
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'create-run') return success(request.requestId, { runId: 'RUN-1' })
+      if (request.command === 'configure-target') return success(request.requestId, { runId: 'RUN-1' })
+      return success(request.requestId, statusResult(handle, false, {
+        command: 'prepare-prd-understanding', from: 'created', expectedState: 'created',
+      }))
+    }) }
+    const inputPreparer = { prepare: vi.fn(async () => ({ schemaVersion: '1.0.0' as const,
+      intakeId: 'INTAKE-1', projectRoot: '/project', create: {
+        assetId: 'ASSET-1', prdSource: { kind: 'file' as const, path: 'prd.md',
+          origin: { kind: 'text' as const, ref: 'caller' } },
+        understandingContract: { header: { schemaVersion: '1.0.0' as const,
+          contractId: 'CONTRACT-1', contractVersion: 1, contractStatus: 'confirmed-by-caller' as const,
+          authorization: { status: 'confirmed-by-caller' as const, contractVersion: 1,
+            confirmedAt: '2026-08-12T00:00:00.000Z' } },
+        source: { kind: 'file' as const, path: 'contract.md' } }, projectPolicyPath: 'policy.json',
+      },
+    })) }
+    const facade = new E2EFacade({ projectRoot: '/project', host, inputPreparer,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+    const result = await facade.acceptFromPrd({
+      intake: {} as never,
+      targetContract: { schemaVersion: '1.0.0', targetUrl: 'https://example.test/',
+        baseOrigin: 'https://example.test', environmentLabel: 'test',
+        allowedNavigationOrigins: ['https://example.test'], pageIdentityPolicy: {
+          schemaVersion: '1.0.0', url: { origin: 'https://example.test', pathPattern: '/' },
+          signals: [{ kind: 'test-id', value: 'home' }], match: { mode: 'all' },
+        } },
+    })
+
+    expect(result).toMatchObject({ status: 'pending-decision', handle,
+      pending: { kind: 'semantic-generation', command: 'prepare-prd-understanding' },
+      metrics: { generatorCalls: 0, humanInteractions: 0, elapsedMs: expect.any(Number) } })
+    expect(commands).toEqual(['create-run', 'configure-target', 'get-status'])
+  })
+
+  test('frozen replay 不调用生成器，只返回当次 probe/approval/lease 的下一合法边', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    let probed = false
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      if (request.command === 'probe-target') probed = true
+      return success(request.requestId, statusResult(handle, false, probed
+        ? { command: 'open-approval', from: 'coverage-audited', expectedState: 'coverage-audited' }
+        : { command: 'probe-target', from: 'preflight-readonly', expectedState: 'preflight-readonly' }))
+    }) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => 'REQUEST-REPLAY-1' })
+    const generator = vi.fn()
+
+    await expect(facade.replayRegression({ handle, generator })).resolves.toMatchObject({
+      status: 'pending-decision', pending: { kind: 'execution-approval' },
+      metrics: { generatorCalls: 0, automaticSteps: 1 },
+    })
+    expect(generator).not.toHaveBeenCalled()
+  })
+
+  test('journey 只按 Runtime nextEdge 自动推进安全边，直到完成或需要决策', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const commands: string[] = []
+    const edges = [
+      { command: 'probe-target', from: 'preflight-readonly', expectedState: 'preflight-readonly' },
+      { command: 'run-preflight', from: 'preflight-readonly', expectedState: 'preflight-readonly' },
+      { command: 'execute-run', from: 'compiled', expectedState: 'compiled' },
+      { command: 'finalize-run', from: 'diagnosing', expectedState: 'diagnosing' },
+    ]
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'get-status') {
+        const index = commands.filter((command) => command === 'get-status').length - 1
+        if (index >= edges.length) return success(request.requestId, {
+          ...statusResult(handle, false), state: 'accepted',
+          workflow: { current: 'accepted', sequence: 10, eventChainDigest: d('4') }, nextEdge: null,
+        })
+        return success(request.requestId, statusResult(handle, false, edges[index]))
+      }
+      return success(request.requestId, { runId: 'RUN-1' })
+    }) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+
+    await expect(facade.continueJourney(handle)).resolves.toMatchObject({
+      status: 'completed', runtimeState: 'accepted', metrics: { automaticSteps: 4 },
+    })
+    expect(commands).toEqual([
+      'get-status', 'probe-target', 'get-status', 'run-preflight', 'get-status',
+      'execute-run', 'get-status', 'finalize-run', 'get-status',
+    ])
+  })
+
+  test('cancel 与 health 通过公开 Facade 调用 Runtime，不由 Facade 推断副作用状态', async () => {
+    const handle = { assetId: 'ASSET-1', runId: 'RUN-1', revision: 2, generationDigest: d('1') }
+    const commands: string[] = []
+    const host = { handle: vi.fn(async (request: RuntimeRequestEnvelope) => {
+      commands.push(request.command)
+      if (request.command === 'get-status') return success(request.requestId, statusResult(handle))
+      if (request.command === 'cancel-run') return success(request.requestId, {
+        schemaVersion: 'run-cancellation-result/v1', runId: 'RUN-1', requestId: request.requestId,
+        phase: 'read-running', disposition: 'cancelling', repeated: false, cleanupRequired: false,
+        requestedAt: '2026-08-12T00:00:00.000Z',
+      })
+      if (request.command === 'get-health') return success(request.requestId, {
+        schemaVersion: 'run-health-snapshot/v1', runId: 'RUN-1', observedWorkflowState: 'running-real',
+        observedWorkflowSequence: 9, lastProgressAt: '2026-08-12T00:00:00.000Z', status: 'cancelling',
+        active: { attemptId: 'ATTEMPT-1' }, cancel: { requested: true, phase: 'read-running' },
+        cleanup: { status: 'not-applicable', residualCount: 0 }, resources: { queueDepth: 0, lockCount: 1,
+          gatewayReservations: 0, childProcesses: 1, rssBytes: 0, evidenceBytes: 0 },
+      })
+      throw new Error(request.command)
+    }) }
+    const facade = new E2EFacade({ projectRoot: '/project', host,
+      requestId: () => `REQUEST-${commands.length + 1}` })
+    await expect(facade.cancel(handle)).resolves.toMatchObject({ disposition: 'cancelling' })
+    await expect(facade.health(handle)).resolves.toMatchObject({ status: 'cancelling' })
+    expect(commands).toEqual(['get-status', 'cancel-run', 'get-status', 'get-health'])
+  })
 })
 
 function success(requestId: string, result: unknown): RuntimeResponseEnvelope {
@@ -212,17 +383,18 @@ function success(requestId: string, result: unknown): RuntimeResponseEnvelope {
 }
 
 function statusResult(handle: { assetId: string; runId: string; revision: number; generationDigest: string },
-  blocked = true) {
+  blocked = true, nextEdge?: Record<string, unknown>) {
   return JSON.parse(canonicalizeJson({
     runId: 'RUN-1', assetId: 'ASSET-1', projectIdentityDigest: d('2'),
     runtimeInstallationDigest: d('9'), generationId: 'RUN-1', prdRevision: d('3'),
     workflow: { current: 'preflight-readonly', sequence: 5, eventChainDigest: d('4') },
     artifactDigests: { 'prd-source': d('3') }, state: 'preflight-readonly',
-    nextEdge: blocked ? { command: 'run-preflight', from: 'preflight-readonly',
-      expectedState: 'preflight-readonly' } : { command: 'submit-candidate', from: 'preflight-readonly',
-      expectedState: 'preflight-readonly' },
+    nextEdge: nextEdge ?? (blocked ? { command: 'run-preflight', from: 'preflight-readonly',
+      expectedState: 'preflight-readonly' } : { command: 'compile-executable-run', from: 'preflight-readonly',
+      expectedState: 'preflight-readonly' }),
     verifiedDigests: { runtimeInstallation: d('9'), workflowEventChain: d('4') },
-    minimumMissingInput: blocked ? ['browser-preflight-retry:E2E_RUNTIME_PAGE_MISMATCH'] : [],
+    minimumMissingInput: blocked ? ['browser-preflight-retry:E2E_RUNTIME_PAGE_MISMATCH']
+      : ['declarative-execution-binding'],
     handle, stage: 'preflight', condition: blocked
       ? { kind: 'blocked-retryable', reasonCode: 'E2E_RUNTIME_PAGE_MISMATCH', resumeStage: 'preflight' }
       : { kind: 'ready' },

@@ -23,6 +23,14 @@ const workflowFiles = [
 ]
 
 describe('E2E skill package', () => {
+  test('产品入口只要求 PRD、URL、Role/Data Need，并说明 cancel/health 与 frozen replay', async () => {
+    const source = await readFile(new URL('../skills/testing/e2e/SKILL.md', import.meta.url), 'utf8')
+    expect(source).toContain('acceptFromPrd')
+    expect(source).toContain('replayRegression')
+    expect(source).toContain('cancel-run')
+    expect(source).toContain('get-health')
+    expect(source).toContain('Role/Data Need')
+  })
   test('registry exposes the E2E skill and its bundled workflow files', () => {
     const skill = resolveSkill('e2e')
 
@@ -407,11 +415,13 @@ describe('E2E skill package', () => {
     for (const command of [
       'create-run', 'prepare-prd-understanding', 'compile-prd-run',
       'configure-target', 'probe-target', 'get-acceptance-review',
-      'confirm-acceptance-review',
+      'confirm-acceptance-review', 'compile-executable-run',
     ]) {
       expect(entry).toContain(`\`${command}\``)
     }
     expect(entry).toContain('`submit-candidate` 不属于新 Run 的默认主线')
+    expect(entry).toContain('声明式执行绑定')
+    expect(entry).toContain('不需要知道 Artifact 创建顺序')
     expect(entry).toContain('Skill 版本与 Runtime 版本必须同为 `0.8.x`')
   })
 

@@ -84,7 +84,7 @@ export function runtimeFullPlaywrightProjectionFixture(): RuntimeRunSnapshot {
     unmappedSteps: [], discoveredRisks: [],
   }
   const testCases = artifact('test-cases', '1.0.0', testCasesContent)
-  const execution = artifact('execution-contract', '1.1.0', executionContent)
+  const execution = artifact('execution-contract', '1.2.0', executionContent)
   const actionMap = artifact('browser-action-map', '2.1.0', actionMapContent)
   const capability = {
     capabilityId: 'CAP-FULL', nonce: '1'.repeat(64), transport: 'browser-local' as const,
@@ -306,6 +306,47 @@ describe('Runtime full Playwright strict projector', () => {
       { caseId: 'CASE-2', attemptId: 'ATTEMPT-2' },
       { caseId: 'CASE-3', attemptId: 'ATTEMPT-3' },
     ])
+  })
+
+  test('多 Case 在取消后不派发下一 Case，并把同一 signal 传给运行中的 Case', async () => {
+    const snapshot = multiCaseFixture()
+    const projections = projectRuntimeFullPlaywrightCases(snapshot)
+    const draft = {
+      schemaVersion: '1.0.0' as const,
+      contractProjectionDigest: d('cancel-contract'),
+      cases: projections.map((projection, index) => ({
+        queueOrdinal: index, caseId: projection.caseId, caseKey: `cancel-${index}`,
+        title: projection.caseId, actor: 'auditor', contractNodeIds: [`REQ-${index}`],
+        actions: [{ actionId: projection.actionId, actionKey: `action-${index}`,
+          kind: 'full-playwright' as const, effect: 'reversible-write' as const,
+          statement: projection.actionId }],
+        oracles: [{ oracleId: `ORACLE-${index}`, oracleKey: `oracle-${index}`,
+          actionId: projection.actionId, contractNodeId: `REQ-${index}`,
+          acceptanceCriterion: projection.caseId }],
+        failurePolicy: 'continue' as const,
+      })),
+    }
+    const plan = { ...draft, compilerDigest: digestCompiledPrdRunPlan(draft) }
+    const controller = new AbortController()
+    const seen: AbortSignal[] = []
+    const capability = authorizeRuntimeFullPlaywrightExecutor(async ({ projection }) =>
+      runtimeFullPlaywrightOutput(projection.caseId, projection.actionId))
+
+    await expect(executeScheduledRuntimeFullPlaywrightCases(capability, {
+      snapshot,
+      schedule: createCaseSchedule(plan, '2026-07-22T00:00:00.000Z'),
+      attemptIds: ['ATTEMPT-1', 'ATTEMPT-2', 'ATTEMPT-3'],
+      signal: controller.signal,
+      now: () => '2026-07-22T00:01:00.000Z',
+      persistSchedule: async () => undefined,
+      executeCase: async ({ projection, signal }) => {
+        expect(signal).toBe(controller.signal)
+        seen.push(signal!)
+        controller.abort()
+        return runtimeFullPlaywrightOutput(projection.caseId, projection.actionId)
+      },
+    })).rejects.toMatchObject({ code: 'E2E_RUNTIME_FULL_PLAYWRIGHT_CANCELLED_BEFORE_CASE_DISPATCH' })
+    expect(seen).toHaveLength(1)
   })
 })
 

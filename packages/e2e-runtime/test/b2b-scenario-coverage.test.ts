@@ -82,6 +82,14 @@ function executions(): B2BScenarioExecution[] {
 }
 
 describe('B 端场景覆盖证明', () => {
+  test('自建 B2B proof 固定归类为 browser-capability，不能自报真实项目或完整旅程', () => {
+    const proof = createB2BCoverageProof({ corpus, executions: executions(), environmentEligible: true,
+      runtimeChainProof: runtimeChainProof() })
+    expect(proof.proofKind).toBe('browser-capability')
+    expect(proof).not.toHaveProperty('realProject')
+    expect(proof).not.toHaveProperty('fullProductJourney')
+  })
+
   test('只有全部类别真实闭环且环境登记后才可作为 90% 门禁', () => {
     expect(createB2BCoverageProof({ corpus, executions: executions(), environmentEligible: true,
       runtimeChainProof: runtimeChainProof() }))

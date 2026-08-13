@@ -123,7 +123,7 @@ export function runtimeWriteProjectionFixture(): RuntimeRunSnapshot {
     secretRefs: ['SECRET.API'], runtimePolicyDigest: d('runtime-policy'), runtimeIsolationPolicyDigest: 'not-applicable',
   }
   const testCases = artifact('test-cases', '1.0.0', testCasesContent)
-  const execution = artifact('execution-contract', '1.1.0', executionContent)
+  const execution = artifact('execution-contract', '1.2.0', executionContent)
   const actionMap = artifact('browser-action-map', '2.1.0', actionMapContent)
   const runBundle = artifact('run-bundle', '2.0.0', runBundleContent)
   const subject: WriteApprovalSubject = {

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 import { canonicalizeJson, deriveExecutionResultId, digestBytes, digestText,
   type VerdictInput } from '@mutil-skills/e2e-contracts'
 import {
-  auditArtifactGraph, auditArtifactSemantics, auditFinalVerdict, auditGenerationFiles,
+  auditArtifactGraph, auditArtifactSemantics, auditExecutableCompilationClosure, auditFinalVerdict, auditGenerationFiles,
   auditVerdictFactBinding, computeVerdict,
   collectGenerationFiles, computeFinalizationSnapshotDigest, computeGenerationRootDigest, validateGeneration,
   migrateCleanupResultsV1,
@@ -29,6 +29,22 @@ function artifact(overrides: Partial<AuditableArtifact> = {}): AuditableArtifact
 }
 
 describe('代际引用图审计', () => {
+  test('执行编译要求 plan、binding 与投影资产一一闭合', () => {
+    expect(auditExecutableCompilationClosure({
+      plan: { cases: [{ caseId: 'CASE-1', actionIds: ['ACTION-1'], oracleIds: ['ORACLE-1'] }] },
+      binding: { cases: [{ caseId: 'CASE-1', actionIds: ['ACTION-1'], oracleIds: ['ORACLE-1'] }] },
+      artifacts: { cases: [{ caseId: 'CASE-1', actionIds: ['ACTION-1'], oracleIds: ['ORACLE-1'] }] },
+    })).toEqual({ valid: true, findings: [] })
+    expect(auditExecutableCompilationClosure({
+      plan: { cases: [{ caseId: 'CASE-1', actionIds: ['ACTION-1'], oracleIds: ['ORACLE-1'] }] },
+      binding: { cases: [{ caseId: 'CASE-1', actionIds: ['ACTION-2'], oracleIds: ['ORACLE-1'] }] },
+      artifacts: { cases: [] },
+    }).findings.map((finding) => finding.code)).toEqual([
+      'E2E_EXECUTABLE_ARTIFACT_CASE_MISSING',
+      'E2E_EXECUTABLE_BINDING_ACTION_MISMATCH',
+    ])
+  })
+
   test('接受同代、摘要闭合且引用可解析的图', () => {
     const source = artifact({ graph: { defines: [{ kind: 'REQ', id: 'REQ-1' }], references: [] } })
     const dependent = artifact({

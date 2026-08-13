@@ -4,11 +4,12 @@ import { describe, expect, test } from 'vitest'
 import type { RuntimeRunSnapshot } from '../src/run-store.js'
 import { migrateRuntimeRunSnapshot } from '../src/runtime-state-migration.js'
 import { createRuntimeOwnedResourceMarker, sealRuntimeWriteAttemptRecord } from '../src/write-attempt.js'
+import { createExecutableRunCompilationFact } from '../src/executable-run-compilation-fact.js'
 import { projectionFixture } from './trusted-action-runner.test.js'
 
 function currentSnapshot(): RuntimeRunSnapshot {
   return {
-    schemaVersion: '1.8.0',
+    schemaVersion: '1.9.0',
     runId: 'RUN-1',
     assetId: 'ASSET-1',
     projectIdentityDigest: `sha256:${'a'.repeat(64)}`,
@@ -35,7 +36,7 @@ describe('runtime state migration', () => {
     expect(migrated).not.toBe(snapshot)
   })
 
-  test('explicitly migrates 1.0 through 1.8 and preserves legacy WebAuthn approval semantics', () => {
+  test('explicitly migrates 1.0 through 1.9 and preserves legacy WebAuthn approval semantics', () => {
     const current = currentSnapshot()
     const legacy = {
       ...current,
@@ -53,7 +54,7 @@ describe('runtime state migration', () => {
     })
   })
 
-  test('explicitly migrates 1.1 to strict 1.8 with WebAuthn and empty WriteAttempt/execution result maps', () => {
+  test('explicitly migrates 1.1 to strict 1.9 with WebAuthn and empty WriteAttempt/execution result maps', () => {
     const current = currentSnapshot()
     const legacy = {
       ...current, schemaVersion: '1.1.0', trustedExecutionFacts: {},
@@ -64,7 +65,7 @@ describe('runtime state migration', () => {
     })
   })
 
-  test('explicitly migrates 1.2 to 1.8 and adds the read result domain', () => {
+  test('explicitly migrates 1.2 to 1.9 and adds the read result domain', () => {
     const current = currentSnapshot()
     const legacy = { ...current, schemaVersion: '1.2.0', trustedExecutionFacts: {} } as const
     expect(migrateRuntimeRunSnapshot(legacy)).toEqual({
@@ -72,7 +73,7 @@ describe('runtime state migration', () => {
     })
   })
 
-  test('explicitly migrates 1.3 to 1.8 without conflating read, write and injection domains', () => {
+  test('explicitly migrates 1.3 to 1.9 without conflating read, write and injection domains', () => {
     const current = currentSnapshot()
     const legacy = {
       ...current,
@@ -94,11 +95,11 @@ describe('runtime state migration', () => {
     }).trustedExecutionFacts).toEqual({ 'approval-mode': 'local-confirmation' })
   })
 
-  test('1.5 Run 显式迁移为 1.8，缺少 understand-prd 冻结事实时不伪造事实', () => {
+  test('1.5 Run 显式迁移为 1.9，缺少 understand-prd 冻结事实时不伪造事实', () => {
     const current = currentSnapshot()
     const legacy = { ...current, schemaVersion: '1.5.0' } as const
     const migrated = migrateRuntimeRunSnapshot(legacy)
-    expect(migrated.schemaVersion).toBe('1.8.0')
+    expect(migrated.schemaVersion).toBe('1.9.0')
     expect(migrated.trustedExecutionFacts['prd-understanding-contract']).toBeUndefined()
     expect(migrated.trustedExecutionFacts['prd-understanding-prepared']).toBeUndefined()
   })
@@ -116,7 +117,7 @@ describe('runtime state migration', () => {
 
     const migrated = migrateRuntimeRunSnapshot(legacy)
 
-    expect(migrated.schemaVersion).toBe('1.8.0')
+    expect(migrated.schemaVersion).toBe('1.9.0')
     expect(migrated.compiledPrdRun).toBeUndefined()
     expect(migrated.caseSchedule?.cases).toMatchObject([{
       queueOrdinal: 0,
@@ -126,7 +127,7 @@ describe('runtime state migration', () => {
     }])
   })
 
-  test.each(['1.9.0', '2.0.0', 'invalid'])(
+  test.each(['1.10.0', '2.0.0', 'invalid'])(
     'blocks unsupported snapshot version %s instead of guessing a migration',
     (schemaVersion) => {
       expect(() => migrateRuntimeRunSnapshot({ ...currentSnapshot(), schemaVersion }))
@@ -180,6 +181,38 @@ describe('runtime state migration', () => {
     })).toThrowError(expect.objectContaining({ code: 'E2E_RUNTIME_STATE_MIGRATION_REQUIRED' }))
     expect(() => migrateRuntimeRunSnapshot({
       ...snapshot, writeAttempts: { [record.attemptId]: { ...record, recordDigest: `sha256:${'e'.repeat(64)}` } },
+    })).toThrowError(expect.objectContaining({ code: 'E2E_RUNTIME_STATE_MIGRATION_REQUIRED' }))
+  })
+
+  test('严格校验可执行编译事实的摘要绑定，拒绝持久状态篡改', () => {
+    const snapshot = currentSnapshot()
+    const fact = createExecutableRunCompilationFact({
+      compilerDigest: `sha256:${'1'.repeat(64)}`,
+      projectionDigest: `sha256:${'2'.repeat(64)}`,
+      planCompilerDigest: `sha256:${'3'.repeat(64)}`,
+      targetProbeDigest: `sha256:${'4'.repeat(64)}`,
+      bindingDigest: `sha256:${'5'.repeat(64)}`,
+      artifactDigests: {
+        'test-cases': `sha256:${'6'.repeat(64)}`,
+        'browser-action-map': `sha256:${'7'.repeat(64)}`,
+        'execution-contract': `sha256:${'8'.repeat(64)}`,
+        'run-bundle': `sha256:${'a'.repeat(64)}`,
+      },
+      executableCaseIds: ['CASE-0001'],
+    })
+    expect(migrateRuntimeRunSnapshot({
+      ...snapshot,
+      trustedExecutionFacts: {
+        ...snapshot.trustedExecutionFacts,
+        'executable-run-compilation': fact,
+      },
+    }).trustedExecutionFacts['executable-run-compilation']).toEqual(fact)
+    expect(() => migrateRuntimeRunSnapshot({
+      ...snapshot,
+      trustedExecutionFacts: {
+        ...snapshot.trustedExecutionFacts,
+        'executable-run-compilation': { ...fact, compilerDigest: `sha256:${'9'.repeat(64)}` },
+      },
     })).toThrowError(expect.objectContaining({ code: 'E2E_RUNTIME_STATE_MIGRATION_REQUIRED' }))
   })
 

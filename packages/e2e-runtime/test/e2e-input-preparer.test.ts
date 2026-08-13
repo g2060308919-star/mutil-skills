@@ -28,6 +28,7 @@ describe('E2EInputPreparer', () => {
         source: { kind: 'file' } },
       supportingSources: [{ sourceId: 'RULES', relevance: 'necessary-dependency' }],
       runtimePolicy: draft.runtimePolicy,
+      actorDataIntents: [{ intentId: 'INTENT-AUDITOR', actor: 'auditor', role: 'reviewer' }],
     })
     for (const path of [
       first.create.prdSource.path,
@@ -132,6 +133,14 @@ function inputDraft() {
           confirmedAt: '2026-08-03T00:00:00.000Z' },
       },
     },
+    actorDataIntents: [{
+      schemaVersion: 'actor-data-intent/v1' as const,
+      intentId: 'INTENT-AUDITOR', actor: 'auditor', role: 'reviewer',
+      credentialRef: 'secret://accounts/reviewer',
+      dataNeeds: [{ needId: 'ORDER-1', resourceType: 'order', initialState: { status: 'pending' },
+        access: 'reversible-write' as const, seedStrategy: 'idempotent-seed' as const,
+        cleanupExpectation: 'delete' as const }],
+    }],
     supportingSources: [{ sourceId: 'RULES', text: '仅验证预览。', mediaType: 'text/plain',
       origin: { kind: 'text' as const, ref: 'caller-context' } }],
   }

@@ -154,6 +154,9 @@ export class ProjectPublisher {
       json: { path: 'final-report.json', text: input.rendered.json },
       markdown: { path: 'final-report.md', text: input.rendered.markdown },
       html: { path: 'final-report.html', text: input.rendered.html },
+      explanationJson: { path: 'execution-explanation.json', text: input.rendered.explanation.json },
+      explanationMarkdown: { path: 'execution-explanation.md', text: input.rendered.explanation.markdown },
+      explanationHtml: { path: 'execution-explanation.html', text: input.rendered.explanation.html },
     } as const
     const manifest = {
       schemaVersion: '1.0.0', assetId: input.assetId, generationId: input.generationId,

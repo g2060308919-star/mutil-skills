@@ -45,6 +45,7 @@ export function approvedCompilerArtifacts(options: {
   generationId?: string
   mismatchedApprovalProjection?: boolean
   additionalReadAction?: boolean
+  declarativeBinding?: boolean
 } = {}): unknown[] {
   const effect = options.effect ?? 'read'
   const additionalReadAction = effect === 'read' && options.additionalReadAction === true
@@ -216,6 +217,28 @@ export function approvedCompilerArtifacts(options: {
       grants: [approvalReceipt],
     },
   }
+  if (options.declarativeBinding) {
+    const declarativeCase = {
+      caseId, executionLane: 'trusted-read-only',
+      pageIdentityPolicy: { schemaVersion: '1.0.0',
+        url: { origin: 'https://example.test', pathPattern: '/orders' },
+        signals: [{ kind: 'role', role: 'main', name: '订单' }], match: { mode: 'all' } },
+      actions: [{ kind: 'fill', actionId, effect: 'read',
+        pageScope: { page: 'current', frame: { kind: 'main' } },
+        locatorCandidates: [{ kind: 'role', role: 'textbox', name: '搜索订单' }],
+        timeout: { timeoutMs: 5_000, retry: 'read-only-max-2' }, value: '待审核' }],
+      oracles: [{ kind: 'text', oracleId: 'ORACLE-1', actionId,
+        locatorCandidates: [{ kind: 'text', value: '待审核', exact: true }],
+        comparator: 'contains', expected: '待审核', deadlineMs: 5_000, evidenceKinds: ['screenshot', 'dom'] }],
+      dataNeeds: [], cleanupIntents: [],
+    }
+    const binding = { schemaVersion: 'declarative-execution-binding/v1',
+      planCompilerDigest: digest('plan-compiler'), targetProbeDigest: digest('target-probe'), cases: [declarativeCase] }
+    ;(contents['browser-action-map'] as Record<string, unknown>).executionProfile = 'declarative-browser'
+    Object.assign(contents['execution-contract'] as Record<string, unknown>, {
+      executionProfile: 'declarative-browser', declarativeExecutionBinding: binding,
+    })
+  }
   Object.assign(approvalSubject, {
     scopeDigest: digestApprovalProjection('acceptance-scope', contents['acceptance-scope']),
     requirementModelDigest: digestApprovalProjection('requirement-model', contents['requirement-model']),
@@ -249,7 +272,7 @@ export function approvedCompilerArtifacts(options: {
   const schemaVersions: Record<string, string> = {
     'prd-manifest': '1.0.0', 'prd-diff': '2.0.0', 'acceptance-scope': '2.0.0',
     'project-policy': '2.0.0', 'requirement-model': '1.0.0', 'coverage-universe': '1.0.0',
-    'test-cases': '1.0.0', 'browser-action-map': '2.1.0', 'execution-contract': '1.1.0', 'approval-grants': '2.0.0',
+    'test-cases': '1.0.0', 'browser-action-map': '2.1.0', 'execution-contract': '1.2.0', 'approval-grants': '2.0.0',
     'run-bundle': '2.0.0',
   }
   return Object.entries(contents).map(([artifactType, content]) => seal({
@@ -268,7 +291,7 @@ const fixtureReadiness = createTrustedCompilerReadiness({
   verifyArtifactSignature: artifactAuthority.verifyArtifactSignature.bind(artifactAuthority),
   verifyDecisionReceipt: verifyFixtureDecisionReceipt,
 })
-export const compilerArtifactVerification = { nodeVersion: '24.18.0', typescriptVersion: '5.9.3', trust: createTrustedCompilerProjectorTrust({
+export const compilerArtifactVerification = { nodeVersion: process.versions.node, typescriptVersion: '5.9.3', trust: createTrustedCompilerProjectorTrust({
   artifactAuthority: { material: artifactAuthority.artifactVerifierMaterial,
     expectedPublicKeyDigest: artifactAuthority.artifactVerifierMaterial.publicKeyDigest },
   approvalFreshnessAuthority: { material: freshnessMaterial,

@@ -19,6 +19,10 @@ import {
   TargetProbeDiagnosticsSchema,
 } from './e2e-flow.js'
 import { TaskStateViewV1Schema } from './task-state-view.js'
+import { DeclarativeExecutionBindingV1Schema } from './declarative-execution-binding.js'
+import { RunCancellationResultV1Schema, RunHealthSnapshotV1Schema } from './run-control.js'
+import { RuntimeHealingCandidateSchema } from './healing.js'
+import { ActorDataIntentV1Schema, ActorDataRequirementV1Schema } from './actor-data-fixture.js'
 
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
@@ -80,6 +84,7 @@ const commandSchemas = [
         origin: z.object({ kind: z.enum(['file', 'url', 'text']), ref: z.string().min(1) }).strict(),
         relevance: z.literal('necessary-dependency'),
       }).strict()).max(100).optional(),
+      actorDataIntents: z.array(ActorDataIntentV1Schema).max(1000).optional(),
       understandingContract: z.object({
         header: PrdUnderstandingContractHeaderSchema,
         source: z.object({ kind: z.literal('file'), path: z.string().min(1) }).strict(),
@@ -113,9 +118,24 @@ const commandSchemas = [
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
+    command: z.literal('compile-executable-run'),
+    projectRoot: z.string().min(1),
+    payload: z.object({
+      runId: SafeIdSchema,
+      binding: DeclarativeExecutionBindingV1Schema,
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
     command: z.literal('get-acceptance-review'),
     projectRoot: z.string().min(1),
     payload: RunIdPayloadSchema,
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('propose-healing'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema.extend({ candidate: RuntimeHealingCandidateSchema }).strict(),
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
@@ -206,6 +226,18 @@ const commandSchemas = [
   }).strict(),
   z.object({
     ...RuntimeRequestHeaderShape,
+    command: z.literal('cancel-run'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema,
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
+    command: z.literal('get-health'),
+    projectRoot: z.string().min(1),
+    payload: RunIdPayloadSchema,
+  }).strict(),
+  z.object({
+    ...RuntimeRequestHeaderShape,
     command: z.literal('resume-run'),
     projectRoot: z.string().min(1),
     payload: z.object({ runId: SafeIdSchema, decision: JsonValueSchema }).strict(),
@@ -275,11 +307,13 @@ export const RuntimeDoctorReportSchema = z.object({
 
 export const RuntimeStatusNextEdgeSchema = z.object({
   command: z.enum([
-    'prepare-prd-understanding', 'compile-prd-run', 'submit-candidate', 'open-approval', 'confirm-approval',
+    'prepare-prd-understanding', 'compile-prd-run', 'compile-executable-run',
+    'submit-candidate', 'open-approval', 'confirm-approval',
     'get-acceptance-review', 'confirm-acceptance-review',
     'configure-target', 'probe-target',
     'run-preflight', 'prepare-manual-result',
     'finalize-manual-result-role', 'execute-run', 'resume-run', 'finalize-run', 'render-report',
+    'propose-healing',
   ]),
   from: WorkflowNodeSchema,
   expectedState: WorkflowNodeSchema,
@@ -332,6 +366,7 @@ export const RuntimeStatusResultSchema = z.object({
     bindingStatus: z.enum(['pending', 'ready', 'blocked']),
     blockerReasonCode: z.string().regex(/^E2E_[A-Z0-9_]+$/).optional(),
   }).strict()).max(1_000).optional(),
+  actorDataRequirements: z.array(ActorDataRequirementV1Schema).max(1_000_000).optional(),
   remediation: z.array(z.string().min(1).max(64 * 1024)).max(32).optional(),
   target: z.object({
     schemaVersion: z.literal('1.0.0'),
@@ -355,6 +390,7 @@ export const RuntimeStatusResultSchema = z.object({
   }).strict().optional(),
   pendingDecision: JsonValueSchema.optional(),
   taskState: TaskStateViewV1Schema.optional(),
+  health: RunHealthSnapshotV1Schema.optional(),
 }).strict()
 
 export const RuntimeCreateRunResultSchema = z.object({
@@ -398,6 +434,26 @@ export const RuntimeCompilePrdRunResultSchema = z.object({
   nextRequiredDecision: z.literal('scope'),
 }).strict()
 
+export const RuntimeCompileExecutableRunResultSchema = z.object({
+  runId: SafeIdSchema,
+  compilerDigest: DigestSchema,
+  projectionDigest: DigestSchema,
+  artifactDigests: z.object({
+    'test-cases': DigestSchema,
+    'browser-action-map': DigestSchema,
+    'execution-contract': DigestSchema,
+    'run-bundle': DigestSchema,
+  }).strict(),
+  executableCaseIds: z.array(SafeIdSchema).max(1_000),
+  blockedCases: z.array(z.object({
+    caseId: SafeIdSchema,
+    reason: z.enum(['needs-binding', 'unsupported']),
+    missingActionIds: z.array(SafeIdSchema).max(10_000),
+    missingOracleIds: z.array(SafeIdSchema).max(10_000),
+  }).strict()).max(1_000),
+  workflow: WorkflowStateSchema,
+}).strict()
+
 export const RuntimeAcceptanceReviewResultSchema = z.object({
   review: AcceptanceReviewSchema,
   confirmation: z.object({
@@ -438,7 +494,10 @@ export type RuntimePreparePrdUnderstandingResult = z.infer<
   typeof RuntimePreparePrdUnderstandingResultSchema
 >
 export type RuntimeCompilePrdRunResult = z.infer<typeof RuntimeCompilePrdRunResultSchema>
+export type RuntimeCompileExecutableRunResult = z.infer<typeof RuntimeCompileExecutableRunResultSchema>
 export type RuntimeAcceptanceReviewResult = z.infer<typeof RuntimeAcceptanceReviewResultSchema>
+export const RuntimeCancelRunResultSchema = RunCancellationResultV1Schema
+export const RuntimeRunHealthResultSchema = RunHealthSnapshotV1Schema
 
 function isPlainJsonObject(value: unknown): value is Record<string, JsonValue> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)

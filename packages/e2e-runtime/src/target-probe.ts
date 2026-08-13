@@ -22,6 +22,7 @@ const emptyDiagnostics = {
   pendingResources: [] as TargetProbeDiagnostics['pendingResources'],
   unapprovedResources: [] as TargetProbeDiagnostics['unapprovedResources'],
   persistentConnections: [] as TargetProbeDiagnostics['persistentConnections'],
+  observedResources: [] as TargetProbeDiagnostics['observedResources'],
   advisories: [] as string[],
   resourceSummary: {
     observedCount: 0, approvedCount: 0, pendingCount: 0,

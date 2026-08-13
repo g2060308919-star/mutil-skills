@@ -1280,7 +1280,7 @@ function artifact(
   content: unknown,
 ) {
   const schemaVersion = type === 'browser-action-map' ? '2.1.0'
-    : type === 'execution-contract' ? '1.1.0'
+    : type === 'execution-contract' ? '1.2.0'
       : type === 'regression-manifest' ? '2.0.0' : '1.0.0'
   const document: Record<string, unknown> = {
     artifactId: `ARTIFACT-${type.toUpperCase()}`, artifactType: type, schemaVersion, engineVersion: '0.1.0',

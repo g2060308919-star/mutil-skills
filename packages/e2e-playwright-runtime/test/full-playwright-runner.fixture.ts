@@ -17,11 +17,11 @@ import {
 } from '@mutil-skills/e2e-contracts'
 import { LocalApprovalAuthority, LocalLeaseAuthority } from '@mutil-skills/e2e-authority'
 import {
-  createTestWriteRuntimeSession,
   runFullPlaywrightCase,
   type FullPlaywrightBindings,
   type FullPlaywrightEvidenceStage,
 } from '../src/index.js'
+import { createTestWriteRuntimeSession } from '../src/production-isolation.js'
 import { authorizeFullPlaywrightControlledSession,
   createFullPlaywrightBrowserFacade } from '../src/full-playwright-session-internal.js'
 import { registerTrustedCompilerWriteRuntimeSession } from '../src/production-isolation.js'
@@ -407,6 +407,31 @@ describe('runFullPlaywrightCase', () => {
     expect(fixture.authority.getReservation(result.reservationId!)).toMatchObject({
       status: 'completed', outcomeDigest: result.outcome?.signedDigest,
     })
+  })
+
+  test('program 派发后取消会退休 program context，继续独立 cleanup，并隔离 unknown 写结果', async () => {
+    const fixture = await readyFixture({
+      source: 'await page.never()',
+      programTimeoutMs: 5_000,
+    })
+    const controller = new AbortController()
+
+    const execution = runFullPlaywrightCase({ ...fixture.input, signal: controller.signal })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    controller.abort()
+    const result = await execution
+
+    expect(result).toMatchObject({
+      status: 'failed', effectObservation: 'unknown', retryAllowed: false,
+      cleanup: { status: 'verified-clean' },
+      primaryError: { message: 'E2E_FULL_PLAYWRIGHT_CANCELLED_EFFECT_UNKNOWN_NO_RETRY' },
+    })
+    expect(fixture.events).toEqual(expect.arrayContaining([
+      'gateway-reserve', 'retire-program', 'cleanup-page-close',
+      'retire-cleanup', 'gateway-terminal-unknown', 'gateway-publish',
+    ]))
+    expect(fixture.terminalCalls.quarantine).toBe(1)
+    expect(fixture.terminalCalls.release).toBe(0)
   })
 
   test('缺失 Oracle checkpoint 时不能通过', async () => {

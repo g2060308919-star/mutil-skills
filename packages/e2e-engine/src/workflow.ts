@@ -23,11 +23,11 @@ const allowedTransitions: Readonly<Record<WorkflowNode, readonly WorkflowNode[]>
   'lease-reserved': ['awaiting-execution-approval', 'input-blocked', 'safety-blocked'],
   'awaiting-execution-approval': ['execution-approved', 'pending-decision'],
   'execution-approved': ['compiled', 'binding-draft', 'safety-blocked'],
-  compiled: ['running-real', 'awaiting-execution-approval', 'safety-blocked'],
-  'running-real': ['running-injection', 'diagnosing', 'safety-blocked', 'environment-blocked', 'automation-blocked'],
-  'running-injection': ['diagnosing', 'safety-blocked', 'environment-blocked', 'automation-blocked'],
+  compiled: ['running-real', 'awaiting-execution-approval', 'safety-blocked', 'cancelled'],
+  'running-real': ['running-injection', 'diagnosing', 'safety-blocked', 'environment-blocked', 'automation-blocked', 'cancelled'],
+  'running-injection': ['diagnosing', 'safety-blocked', 'environment-blocked', 'automation-blocked', 'cancelled'],
   diagnosing: [
-    'execution-approved', 'finalizing', 'pending-decision', 'input-blocked',
+    'awaiting-execution-approval', 'execution-approved', 'finalizing', 'pending-decision', 'input-blocked',
     'environment-blocked', 'safety-blocked', 'automation-blocked',
   ],
   finalizing: ['publication-ready', 'artifact-blocked', 'migration-required'],
@@ -45,6 +45,7 @@ const allowedTransitions: Readonly<Record<WorkflowNode, readonly WorkflowNode[]>
   'automation-blocked': [],
   'artifact-blocked': [],
   'migration-required': [],
+  cancelled: [],
 }
 
 export function createWorkflow(): WorkflowState {
@@ -56,6 +57,21 @@ export function createWorkflow(): WorkflowState {
       canonicalizeJson({ initial: 'created' }),
     ),
   }
+}
+
+/** RuntimeHost 调用的唯一取消状态决策；终态与 safety convergence 阶段不能被覆盖。 */
+export function cancelWorkflow(input: {
+  state: WorkflowState
+  reason: string
+  timestamp?: string
+  engineVersion?: string
+}): TransitionWorkflowResult {
+  if (['accepted', 'rejected', 'incomplete', 'cancelled', 'finalizing', 'publication-ready']
+    .includes(input.state.current)) throw workflowError(
+      'E2E_WORKFLOW_CANCEL_DENIED', `节点 ${input.state.current} 不能直接取消`,
+    )
+  return recordWorkflowEvent({ state: input.state, next: 'cancelled', reason: input.reason,
+    timestamp: input.timestamp, engineVersion: input.engineVersion })
 }
 
 export interface TransitionWorkflowInput {
@@ -80,6 +96,39 @@ export interface InvalidatePreflightForTargetChangeInput {
   reason: string
   timestamp?: string
   engineVersion?: string
+}
+
+/**
+ * 有界 healing 变更执行资产后撤销旧 Grant，并回到同一条 Runtime 执行审批边。
+ * 该函数只决定 workflow；proposal 审核和 Artifact 重编译仍由各自深模块负责。
+ */
+export function invalidateForHealingRevision(input: {
+  state: WorkflowState
+  reason: string
+  approvalSubjectChanged: boolean
+  grantRevoked: boolean
+  timestamp?: string
+  engineVersion?: string
+}): TransitionWorkflowResult {
+  if (input.state.current !== 'diagnosing') throw workflowError(
+    'E2E_WORKFLOW_HEALING_INVALIDATION_DENIED',
+    'healing 只能绑定已完成的失败 Attempt，并从 diagnosing 回到执行审批',
+  )
+  if (!input.approvalSubjectChanged) throw workflowError(
+    'E2E_WORKFLOW_HEALING_SUBJECT_CHANGE_REQUIRED',
+    'healing revision 必须形成可审计的新执行审批主体',
+  )
+  if (!input.grantRevoked) throw workflowError(
+    'E2E_WORKFLOW_HEALING_GRANT_REVOCATION_REQUIRED',
+    '执行资产修订前必须撤销旧 Grant',
+  )
+  return recordWorkflowEvent({
+    state: input.state,
+    next: 'awaiting-execution-approval',
+    reason: input.reason,
+    ...(input.timestamp === undefined ? {} : { timestamp: input.timestamp }),
+    ...(input.engineVersion === undefined ? {} : { engineVersion: input.engineVersion }),
+  })
 }
 
 /**

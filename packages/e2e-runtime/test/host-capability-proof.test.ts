@@ -12,7 +12,8 @@ describe('HostCapabilityProof', () => {
       operations: operations({
         loopback: async () => ({ endpointClass: 'ipv4-loopback' }),
         process: async () => ({ childExitCode: 0 }),
-        filesystem: async () => ({ posixMode: '0700/0600', hardlinkChecked: true }),
+      filesystem: async () => ({ posixMode: '0700/0600', hardlinkChecked: true }),
+        sandbox: async () => ({ backend: 'test-sandbox' }),
       }),
       environment: { platform: 'test', arch: 'test', node: 'v24.0.0' },
     })
@@ -57,6 +58,7 @@ function operations(overrides: Partial<HostCapabilityOperations>): HostCapabilit
     filesystem: undefined,
     browser: undefined,
     profile: undefined,
+    sandbox: undefined,
     gatewayCanary: undefined,
     ...overrides,
   }
@@ -78,6 +80,8 @@ function proofFixture(
       filesystem: { status: 'executed', reasonCode: 'E2E_HOST_FILESYSTEM_EXECUTED', proofDigest: `sha256:${'c'.repeat(64)}` },
       browser: { status: 'not-executed', reasonCode: 'E2E_HOST_BROWSER_NOT_PROBED', proofDigest: `sha256:${'d'.repeat(64)}` },
       profile: { status: 'not-executed', reasonCode: 'E2E_HOST_PROFILE_NOT_PROBED', proofDigest: `sha256:${'e'.repeat(64)}` },
+      sandbox: { status: 'not-executed', reasonCode: 'E2E_HOST_SANDBOX_NOT_PROBED',
+        proofDigest: `sha256:${'1'.repeat(64)}` },
       'gateway-canary': { status: 'not-executed', reasonCode: 'E2E_HOST_GATEWAY_CANARY_NOT_PROBED',
         proofDigest: `sha256:${'f'.repeat(64)}` },
     },

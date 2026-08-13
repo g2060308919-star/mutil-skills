@@ -1,5 +1,8 @@
 import {
   RuntimeAcceptanceReviewResultSchema,
+  RuntimeCompileExecutableRunResultSchema,
+  RunCancellationResultV1Schema,
+  RunHealthSnapshotV1Schema,
   RuntimeRequestEnvelopeSchema,
   RuntimeResponseEnvelopeSchema,
   RuntimeStatusResultSchema,
@@ -8,11 +11,15 @@ import {
   type RunHandle,
   type ApprovalGrantSubject,
   type RuntimeAcceptanceReviewResult,
+  type RuntimeCompileExecutableRunResult,
+  type RunCancellationResultV1,
+  type RunHealthSnapshotV1,
   type RuntimeRequestEnvelope,
   type RuntimeResponseEnvelope,
   type RuntimeStatusResult,
   type TaskStateViewV1,
   type TargetContract,
+  type DeclarativeExecutionBindingV1,
 } from '@mutil-skills/e2e-contracts'
 import { randomUUID } from 'node:crypto'
 import { RUNTIME_PACKAGE_VERSION } from './protocol.js'
@@ -34,6 +41,25 @@ export interface E2EFacadeOptions {
   requestId?: () => string
   clientVersion?: string
   inputPreparer?: Pick<E2EInputPreparer, 'prepare'>
+}
+
+export interface E2EJourneyResult {
+  schemaVersion: 'e2e-journey-result/v1'
+  status: 'pending-decision' | 'completed'
+  handle: RunHandle
+  runtimeState: RuntimeStatusResult['state']
+  pending?: {
+    kind: 'acceptance-review' | 'semantic-generation' | 'execution-binding' | 'scope-approval'
+      | 'lineage-approval' | 'execution-approval' | 'healing-review' | 'target-probe' | 'manual-input'
+    command: RuntimeStatusResult['nextEdge'] extends infer _ ? string : never
+    missingInput: string[]
+  }
+  metrics: { generatorCalls: number; humanInteractions: number; automaticSteps: number; elapsedMs?: number }
+}
+
+export interface AcceptFromPrdInput {
+  intake: E2EInputDraft
+  targetContract: TargetContract
 }
 
 export class E2EFacadeError extends Error {
@@ -99,6 +125,13 @@ export class E2EFacade {
     })
   }
 
+  /** 首次验收产品入口：只接收已确认的 PRD intake 与目标，不暴露 Runtime envelope。 */
+  async acceptFromPrd(input: AcceptFromPrdInput): Promise<E2EJourneyResult> {
+    const startedAt = Date.now()
+    const status = await this.startFromInput(input)
+    return withElapsed(await this.#driveJourney(status), Date.now() - startedAt)
+  }
+
   async start(input: {
     create: CreateRunRequest['payload']
     targetContract?: TargetContract
@@ -138,6 +171,22 @@ export class E2EFacade {
       runId: handle.runId, reviewDigest,
     }, handle.runId)
     return await this.#statusByRunId(handle.runId)
+  }
+
+  async compileExecutable(
+    handle: RunHandle,
+    binding: DeclarativeExecutionBindingV1,
+  ): Promise<RuntimeCompileExecutableRunResult> {
+    const status = await this.status(handle)
+    if (status.nextEdge?.command !== 'compile-executable-run') throw new E2EFacadeError({
+      code: 'E2E_FACADE_EXECUTABLE_COMPILE_EDGE_UNAVAILABLE', category: 'input',
+      message: 'Runtime 当前状态不允许编译声明式执行绑定', retryable: false,
+      requestId: 'FACADE-LOCAL', runId: handle.runId,
+      details: { nextEdge: status.nextEdge, minimumMissingInput: status.minimumMissingInput },
+    })
+    return RuntimeCompileExecutableRunResultSchema.parse(
+      await this.#invoke('compile-executable-run', { runId: handle.runId, binding }, handle.runId),
+    )
   }
 
   async approveExecution(
@@ -208,6 +257,52 @@ export class E2EFacade {
     }, handle.runId))
   }
 
+  async cancel(handle: RunHandle): Promise<RunCancellationResultV1> {
+    await this.status(handle)
+    return RunCancellationResultV1Schema.parse(
+      await this.#invoke('cancel-run', { runId: handle.runId }, handle.runId),
+    )
+  }
+
+  async health(handle: RunHandle): Promise<RunHealthSnapshotV1> {
+    await this.status(handle)
+    return RunHealthSnapshotV1Schema.parse(
+      await this.#invoke('get-health', { runId: handle.runId }, handle.runId),
+    )
+  }
+
+  /**
+   * 只解释 Runtime 的当前投影，不在 Facade 复制 workflow 或自动批准高风险边。
+   * 具体输入准备仍通过已有窄方法提交；恢复时始终重新读取 Runtime nextEdge。
+   */
+  async continueJourney(handle: RunHandle): Promise<E2EJourneyResult> {
+    const status = await this.status(handle)
+    return await this.#driveJourney(status)
+  }
+
+  /** Frozen replay 只复用已冻结语义；不接触 generator，当次 Target/Approval/Lease 仍由 Runtime 要求。 */
+  async replayRegression(input: { handle: RunHandle; generator?: () => unknown }): Promise<E2EJourneyResult> {
+    return await this.continueJourney(input.handle)
+  }
+
+  async #driveJourney(initial: RuntimeStatusResult): Promise<E2EJourneyResult> {
+    let status = initial
+    let automaticSteps = 0
+    for (; automaticSteps < 100; automaticSteps += 1) {
+      const command = status.nextEdge?.command
+      if (isTerminalJourneyState(status.state) || !isSafeAutomaticJourneyEdge(command)) {
+        return withAutomaticSteps(journeyFromStatus(status), automaticSteps)
+      }
+      await this.#invoke(command, { runId: status.runId }, status.runId)
+      status = await this.#statusByRunId(status.runId)
+    }
+    throw new E2EFacadeError({
+      code: 'E2E_FACADE_AUTOMATIC_STEP_LIMIT_REACHED', category: 'safety',
+      message: 'Runtime 连续返回过多自动边，已停止以避免失控循环', retryable: false,
+      requestId: 'FACADE-LOCAL', runId: status.runId,
+    })
+  }
+
   async #statusByRunId(
     runId: string,
     expected?: RunHandle,
@@ -261,6 +356,55 @@ export class E2EFacade {
     }
     return response.result
   }
+}
+
+function journeyFromStatus(status: RuntimeStatusResult): E2EJourneyResult {
+  const currentHandle = status.handle!
+  if (['accepted', 'rejected', 'incomplete', 'cancelled'].includes(status.state)) return {
+    schemaVersion: 'e2e-journey-result/v1', status: 'completed', handle: currentHandle,
+    runtimeState: status.state, metrics: { generatorCalls: 0, humanInteractions: 0, automaticSteps: 0 },
+  }
+  const command = status.nextEdge?.command
+  return { schemaVersion: 'e2e-journey-result/v1', status: 'pending-decision', handle: currentHandle,
+    runtimeState: status.state, pending: { kind: pendingKind(command), command: command ?? 'get-status',
+      missingInput: status.minimumMissingInput },
+    metrics: { generatorCalls: 0, humanInteractions: humanEdge(command) ? 1 : 0, automaticSteps: 0 } }
+}
+
+function withAutomaticSteps(result: E2EJourneyResult, automaticSteps: number): E2EJourneyResult {
+  return { ...result, metrics: { ...result.metrics, automaticSteps } }
+}
+
+function withElapsed(result: E2EJourneyResult, elapsedMs: number): E2EJourneyResult {
+  return { ...result, metrics: { ...result.metrics, elapsedMs } }
+}
+
+type JourneyCommand = NonNullable<RuntimeStatusResult['nextEdge']>['command'] | undefined
+
+function pendingKind(command: JourneyCommand): NonNullable<E2EJourneyResult['pending']>['kind'] {
+  if (command === 'get-acceptance-review' || command === 'confirm-acceptance-review') return 'acceptance-review'
+  if (command === 'compile-prd-run' || command === 'prepare-prd-understanding'
+    || command === 'submit-candidate') return 'semantic-generation'
+  if (command === 'compile-executable-run') return 'execution-binding'
+  if (command === 'propose-healing') return 'healing-review'
+  if (command === 'probe-target' || command === 'configure-target' || command === 'run-preflight') return 'target-probe'
+  if (command === 'open-approval' || command === 'confirm-approval') return 'execution-approval'
+  return 'manual-input'
+}
+
+function humanEdge(command: JourneyCommand): boolean {
+  return command === 'get-acceptance-review' || command === 'confirm-acceptance-review'
+    || command === 'open-approval' || command === 'confirm-approval'
+}
+
+function isTerminalJourneyState(state: RuntimeStatusResult['state']): boolean {
+  return ['accepted', 'rejected', 'incomplete', 'cancelled'].includes(state)
+}
+
+function isSafeAutomaticJourneyEdge(command: JourneyCommand): command is
+  'probe-target' | 'run-preflight' | 'execute-run' | 'finalize-run' {
+  return command === 'probe-target' || command === 'run-preflight'
+    || command === 'execute-run' || command === 'finalize-run'
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

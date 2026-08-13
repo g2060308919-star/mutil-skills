@@ -831,7 +831,7 @@ function predictedContentDigest(artifactType: string, artifactDraft: any): strin
 
 function predictedContentDigestFor(contextValue: BuildCompleteGenerationInput['context'], artifactType: string, artifactDraft: any): string {
   const schemaVersion = artifactType === 'browser-action-map' ? '2.1.0'
-    : artifactType === 'execution-contract' ? '1.1.0'
+    : artifactType === 'execution-contract' ? '1.2.0'
       : artifactType === 'prd-request' ? '2.0.0'
       : ['approval-grants', 'browser-preflight', 'run-bundle', 'project-policy']
           .includes(artifactType) ? '2.0.0' : '1.0.0'

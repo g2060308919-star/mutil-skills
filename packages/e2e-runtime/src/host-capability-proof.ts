@@ -13,9 +13,11 @@ import {
   stat,
   symlink,
   writeFile,
+  readFile,
 } from 'node:fs/promises'
 import { arch, platform, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { SandboxedOneShotExecutor } from './sandboxed-one-shot-executor.js'
 
 export type HostCapabilityName =
   | 'loopback'
@@ -23,6 +25,7 @@ export type HostCapabilityName =
   | 'filesystem'
   | 'browser'
   | 'profile'
+  | 'sandbox'
   | 'gateway-canary'
 
 export interface HostCapabilityOperations {
@@ -31,6 +34,7 @@ export interface HostCapabilityOperations {
   filesystem?: () => Promise<Record<string, unknown>>
   browser?: () => Promise<Record<string, unknown>>
   profile?: () => Promise<Record<string, unknown>>
+  sandbox?: () => Promise<Record<string, unknown>>
   gatewayCanary?: () => Promise<Record<string, unknown>>
 }
 
@@ -62,6 +66,7 @@ export async function probeHostCapabilities(options?: {
     ['filesystem', operations.filesystem],
     ['browser', operations.browser],
     ['profile', operations.profile],
+    ['sandbox', operations.sandbox],
     ['gateway-canary', operations.gatewayCanary],
   ]
   const capabilities = Object.fromEntries(await Promise.all(entries.map(async ([name, operation]) =>
@@ -92,6 +97,7 @@ export function realHostOperations(): HostCapabilityOperations {
     filesystem: probeFilesystem,
     browser: probeBrowser,
     profile: probeProfile,
+    sandbox: probeSandbox,
   }
 }
 
@@ -217,10 +223,42 @@ async function probeBrowser(): Promise<Record<string, unknown>> {
     : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser']
   for (const candidate of candidates) {
     if (await access(candidate).then(() => true).catch(() => false)) {
-      return { source: candidate.includes('chromium') ? 'managed-or-system-chromium' : 'system-chrome' }
+      const versionOutput = await runCommand(candidate, ['--version'])
+      const version = versionOutput.match(/\d+(?:\.\d+){1,3}/)?.[0]
+      if (!version) throw new Error('E2E_HOST_BROWSER_VERSION_UNAVAILABLE')
+      const bytes = await readFile(candidate)
+      return {
+        channel: candidate.includes('chromium') ? 'chromium' : 'chrome', version,
+        source: candidate.includes('chromium') ? 'managed-chromium' : 'system-chrome',
+        executablePath: candidate,
+        executableDigest: digestText('e2e-host-browser-executable/v1', bytes.toString('base64url')),
+      }
     }
   }
   throw Object.assign(new Error('E2E_HOST_BROWSER_UNAVAILABLE'), { capabilityUnavailable: true })
+}
+
+async function probeSandbox(): Promise<Record<string, unknown>> {
+  const executor = await SandboxedOneShotExecutor.create()
+  const result = await executor.execute({
+    command: process.execPath, args: ['-e', 'process.stdout.write("sandbox-ok")'],
+    cwd: process.cwd(), readOnlyRoots: [process.execPath, process.cwd()], timeoutMs: 10_000,
+  })
+  if (result.exitCode !== 0 || result.stdout !== 'sandbox-ok') throw new Error('E2E_HOST_SANDBOX_FAILED')
+  return { backend: result.backend, proofDigest: result.proofDigest, networkPolicy: 'denied' }
+}
+
+async function runCommand(command: string, args: string[]): Promise<string> {
+  return await new Promise<string>((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], shell: false })
+    let stdout = ''; let stderr = ''
+    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8') })
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8') })
+    child.once('error', rejectPromise)
+    child.once('close', (code) => code === 0 ? resolvePromise(`${stdout}\n${stderr}`) : rejectPromise(
+      new Error('E2E_HOST_BROWSER_VERSION_UNAVAILABLE'),
+    ))
+  })
 }
 
 function reasonName(name: HostCapabilityName): string {

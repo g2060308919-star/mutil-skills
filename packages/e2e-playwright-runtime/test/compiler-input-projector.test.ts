@@ -93,6 +93,20 @@ describe('Artifact → Compiler Input Projector', () => {
     }])
   })
 
+  test('从 execution-contract v1.2 完整投影声明式动作和 Oracle，不从语义字符串猜测', () => {
+    const input = inspectTrustedCompilerInput(projectCompilerInputFromArtifacts({
+      artifacts: approvedCompilerArtifacts({ declarativeBinding: true }), playwrightVersion: '1.61.1',
+      ...compilerArtifactVerification,
+    }))
+    expect(input).toMatchObject({ schemaVersion: 'compiler-input/v2', executionProfile: 'declarative-browser',
+      cases: [{ caseId: 'CASE-READ-1', actions: [{ kind: 'declarativeBrowser', actionId: 'ACTION-READ-1',
+        action: { kind: 'fill', value: '待审核' },
+        oracles: [{ kind: 'text', oracleId: 'ORACLE-1', comparator: 'contains', expected: '待审核' }],
+      }] }],
+    })
+    expect(JSON.stringify(input)).not.toContain('source')
+  })
+
   test('full Playwright 拒绝未按签名 ordinal canonical 排列的 Step，而不在 Projector 内排序', () => {
     expect(() => projectCompilerInputFromArtifacts({
       artifacts: approvedFullPlaywrightCompilerArtifacts({ stepOrdinal: 1 }), playwrightVersion: '1.61.1',

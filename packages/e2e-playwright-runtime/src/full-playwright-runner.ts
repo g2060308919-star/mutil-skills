@@ -51,6 +51,7 @@ const HostAsyncFunction = Object.getPrototypeOf(async function () {}).constructo
 ) => (...values: unknown[]) => Promise<unknown>
 const programDeadlines = new WeakSet<object>()
 const cleanupDeadlines = new WeakSet<object>()
+const programCancellations = new WeakSet<object>()
 const pendingFinalizations = new WeakMap<object, Map<string, () => Promise<FullPlaywrightCaseResult>>>()
 
 export interface FullPlaywrightBindings {
@@ -190,6 +191,7 @@ export interface RunFullPlaywrightCaseInput {
   }
   runtime: TrustedWriteRuntimeSession
   session: ControlledFullPlaywrightSession
+  signal?: AbortSignal
 }
 
 export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): Promise<FullPlaywrightCaseResult> {
@@ -228,6 +230,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   let primaryCaught = false
   let primaryError: unknown
   let programTimedOut = false
+  let programCancelled = false
   let cleanupCaught = false
   let cleanupError: unknown
   let cleanupTimedOut = false
@@ -285,7 +288,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
 
   try {
     await withDeadline(
-      () => executeSource(program.source, session.programBindings, checkpoint), program.timeoutMs, 'program',
+      () => executeSource(program.source, session.programBindings, checkpoint), program.timeoutMs, 'program', input.signal,
     )
     if (oracleCheckpoints.length !== program.oracleCheckpoints.length) {
       throw new HostError('E2E_ORACLE_CHECKPOINT_MISSING')
@@ -294,7 +297,8 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     primaryCaught = true
     primaryError = error
     programTimedOut = isDeadline(error, 'program')
-    if (programTimedOut) await retireProgram()
+    programCancelled = isProgramCancellation(error)
+    if (programTimedOut || programCancelled) await retireProgram()
   }
 
   try { evidence.push(...await captureChecked(session, 'after')) }
@@ -351,7 +355,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
     return await finalizeUnexpectedUnknown(input, session, reservation.reservationId, evidence,
       'effect-observation-failed', error)
   }
-  const unknown = programTimedOut || cleanupCaught || retireCaught
+  const unknown = programTimedOut || programCancelled || cleanupCaught || retireCaught
     || gateway.summary.blocked > 0 || observedEffect === 'unknown'
   const effectObservation = unknown ? 'unknown' as const : observedEffect
   const status = !primaryCaught && !unknown && effectObservation === 'applied' ? 'passed' as const : 'failed' as const
@@ -390,6 +394,7 @@ export async function runFullPlaywrightCase(input: RunFullPlaywrightCaseInput): 
   let publishedGateway: FullPlaywrightGatewayResult | undefined
   const unknownObservation = unknown
     ? programTimedOut ? 'full-playwright-program-timeout-effect-unknown'
+      : programCancelled ? 'full-playwright-program-cancelled-effect-unknown'
       : retireCaught ? 'full-playwright-browser-retire-failed-effect-unknown'
       : gateway.summary.blocked > 0 ? 'full-playwright-gateway-blocked-effect-unknown'
         : 'full-playwright-cleanup-unverified-effect-unknown'
@@ -630,8 +635,9 @@ async function executeSource(source: string, bindings: FullPlaywrightBindings,
 }
 
 async function withDeadline(operation: () => Promise<unknown>, timeoutMs: number,
-  kind: 'program' | 'cleanup'): Promise<unknown> {
+  kind: 'program' | 'cleanup', signal?: AbortSignal): Promise<unknown> {
   let timer: ReturnType<typeof setTimeout> | undefined
+  let cancelListener: (() => void) | undefined
   const deadline = new HostPromise<never>((_resolve, reject) => {
     timer = HostSetTimeout(() => {
       const error = new HostError(kind === 'program'
@@ -641,13 +647,29 @@ async function withDeadline(operation: () => Promise<unknown>, timeoutMs: number
       reject(error)
     }, timeoutMs)
   })
-  try { return await HostPromiseRace([operation(), deadline]) }
-  finally { if (timer !== undefined) HostClearTimeout(timer) }
+  const cancelled = signal === undefined || kind === 'cleanup' ? undefined : new HostPromise<never>((_resolve, reject) => {
+    cancelListener = () => {
+      const error = new HostError('E2E_FULL_PLAYWRIGHT_CANCELLED_EFFECT_UNKNOWN_NO_RETRY')
+      programCancellations.add(error)
+      reject(error)
+    }
+    if (signal.aborted) cancelListener()
+    else signal.addEventListener('abort', cancelListener, { once: true })
+  })
+  try { return await HostPromiseRace(cancelled === undefined ? [operation(), deadline] : [operation(), deadline, cancelled]) }
+  finally {
+    if (timer !== undefined) HostClearTimeout(timer)
+    if (signal !== undefined && cancelListener !== undefined) signal.removeEventListener('abort', cancelListener)
+  }
 }
 
 function isDeadline(error: unknown, kind: 'program' | 'cleanup'): boolean {
   return typeof error === 'object' && error !== null
     && (kind === 'program' ? programDeadlines : cleanupDeadlines).has(error)
+}
+
+function isProgramCancellation(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && programCancellations.has(error)
 }
 
 async function captureChecked(session: FullPlaywrightControlledSessionBackend, stage: FullPlaywrightEvidenceStage) {

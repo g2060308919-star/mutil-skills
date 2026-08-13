@@ -29,6 +29,7 @@ export const WorkflowNodeSchema = z.enum([
   'automation-blocked',
   'artifact-blocked',
   'migration-required',
+  'cancelled',
 ])
 
 export const WorkflowStateSchema = z.object({

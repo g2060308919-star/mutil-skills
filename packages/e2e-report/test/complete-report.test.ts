@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest'
+import { projectExecutionExplanation } from '../src/execution-explanation.js'
 import { deriveExecutionResultId, digestOracleCheckpointValue } from '@mutil-skills/e2e-contracts'
 import * as reportModule from '../src/index.js'
 import { finalReportFixture as finalReport } from './final-report.fixture.js'
@@ -6,6 +7,16 @@ import { finalReportFixture as finalReport } from './final-report.fixture.js'
 const digest = (character: string) => `sha256:${character.repeat(64)}`
 
 describe('renderCompleteReport', () => {
+  test('从最终报告事实投影 Timeline、失败责任与可信声明，不自行改变 Verdict', () => {
+    const explanation = projectExecutionExplanation(finalReport)
+    expect(explanation).toMatchObject({
+      schemaVersion: 'execution-explanation/v1', runId: finalReport.generationId,
+      verdict: finalReport.content.verdict,
+      claims: expect.arrayContaining([expect.objectContaining({ component: 'browser-product' })]),
+    })
+    expect(explanation.timeline.some((event) => event.phase === 'oracle')).toBe(true)
+    expect(explanation.lineageDigest).toMatch(/^sha256:/)
+  })
   test('用同一张策略决策表区分计划级批准与动作级 Gateway 执行', () => {
     const report = reportModule.renderCompleteReport(finalReport)
     expect(report.markdown).toContain('计划级批准')

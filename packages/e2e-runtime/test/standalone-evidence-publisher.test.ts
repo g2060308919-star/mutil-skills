@@ -18,7 +18,14 @@ describe('StandaloneEvidencePublisher', () => {
     const published = await new StandaloneEvidencePublisher({ homeDir: join(root, 'home') }).publish({
       assetId: 'ASSET-1', runId: 'RUN-1', generationDigest: `sha256:${'a'.repeat(64)}`,
       outputRoot,
-      rendered: { json: '{"ok":true}', markdown: '# 验收', html: '<!doctype html><p>验收</p>' },
+      rendered: {
+        json: '{"ok":true}', markdown: '# 验收', html: '<!doctype html><p>验收</p>',
+        explanation: {
+          json: '{"schemaVersion":"execution-explanation/v1"}',
+          markdown: '# 执行解释',
+          html: '<!doctype html><p>执行解释</p>',
+        },
+      },
       evidence: [{
         caseId: 'CASE-1', checkpointId: 'CHECKPOINT-1', kind: 'screenshot',
         relativePath: 'evidence/CASE-1/CHECKPOINT-1.png', bytes: screenshot,
@@ -36,6 +43,11 @@ describe('StandaloneEvidencePublisher', () => {
     const markdown = await readFile(join(published, 'final-report.md'), 'utf8')
     expect(markdown).toContain('![CASE-1 / CHECKPOINT-1](evidence/CASE-1/CHECKPOINT-1.png)')
     expect(markdown).toContain('[下载 Trace](evidence/CASE-1/playwright-trace.zip)')
+    expect(await readFile(join(published, 'execution-explanation.json'), 'utf8'))
+      .toContain('execution-explanation/v1')
+    expect(await readFile(join(published, 'execution-explanation.md'), 'utf8')).toBe('# 执行解释')
+    expect(await readFile(join(published, 'execution-explanation.html'), 'utf8'))
+      .toContain('执行解释')
     expect((await stat(published)).mode & 0o777).toBe(0o700)
     expect((await stat(join(published, 'evidence/CASE-1/CHECKPOINT-1.png'))).mode & 0o777).toBe(0o600)
     const manifest = JSON.parse(await readFile(join(published, 'manifest.json'), 'utf8'))
@@ -45,6 +57,9 @@ describe('StandaloneEvidencePublisher', () => {
       },
       'evidence/CASE-1/playwright-trace.zip': {
         kind: 'trace', digest: expect.stringMatching(/^sha256:/), byteLength: trace.byteLength,
+      },
+      'execution-explanation.json': {
+        kind: 'explanation-json', digest: expect.stringMatching(/^sha256:/),
       },
     })
   })

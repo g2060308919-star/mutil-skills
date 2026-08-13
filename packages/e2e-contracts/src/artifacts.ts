@@ -58,6 +58,7 @@ import {
 import { E2ECaseExecutionFieldsSchema } from './e2e-flow.js'
 import { AssertionResultV1Schema, projectAssertionResultV1 } from './assertion-result.js'
 import { PolicyDecisionViewV1Schema } from './policy-decision-view.js'
+import { DeclarativeExecutionBindingV1Schema } from './declarative-execution-binding.js'
 
 const DigestSchema = z.string().regex(/^sha256:[a-f0-9]{64}$/)
 const SafeIdSchema = z.string().min(1).max(256).regex(/^[A-Za-z0-9._:-]+$/)
@@ -66,6 +67,7 @@ const UniqueIdsSchema = z.array(SafeIdSchema).max(100_000)
   .refine((values) => new Set(values).size === values.length, 'ID 必须唯一')
 const ExecutionProfileSchema = z.enum([
   'trusted-read-only', 'trusted-reversible-write', 'production-isolated', 'full-playwright',
+  'declarative-browser',
 ])
 
 const FullPlaywrightContentTypeSchema = z.string().min(1).max(8 * 1024)
@@ -672,10 +674,22 @@ export const ExecutionContractV11ContentSchema = ExecutionContractV10ContentSche
   writeHttpActions: z.array(RuntimeWriteHttpActionSchema).max(100_000).optional(),
   writeCleanupPlans: z.array(CleanupPlanDefinitionSchema).max(100_000).optional(),
   fullPlaywrightPrograms: z.array(FullPlaywrightProgramSchema).max(100_000).optional(),
+  // 使用 unknown 控制 Artifact 总类型复杂度；superRefine 仍以严格版本化 Schema 完整解析。
+  declarativeExecutionBinding: z.unknown().optional(),
   actionIntents: z.array(ExecutionActionIntentV10Schema.extend({
     requestIds: z.array(SafeIdSchema).max(1_000),
   }).strict()).max(100_000),
 }).strict().superRefine((content, context) => {
+  if ((content.executionProfile === 'declarative-browser')
+    !== (content.declarativeExecutionBinding !== undefined)) {
+    context.addIssue({ code: 'custom', path: ['declarativeExecutionBinding'],
+      message: 'declarative-browser Profile 必须且只能携带声明式执行绑定' })
+  }
+  if (content.declarativeExecutionBinding !== undefined) {
+    const parsed = DeclarativeExecutionBindingV1Schema.safeParse(content.declarativeExecutionBinding)
+    if (!parsed.success) context.addIssue({ code: 'custom', path: ['declarativeExecutionBinding'],
+      message: '声明式执行绑定未通过严格 Schema 校验' })
+  }
   const actionIds = content.actionIntents.map((action) => action.actionId)
   if (new Set(actionIds).size !== actionIds.length) {
     context.addIssue({ code: 'custom', message: 'actionId 必须唯一', path: ['actionIntents'] })
@@ -1112,7 +1126,15 @@ const browserEvidenceContent = z.object({
 
 const diagnosisContent = z.object({
   caseDiagnoses: z.array(z.object({ caseId: SafeIdSchema, category: SafeIdSchema, retrySafe: z.boolean(), digest: DigestSchema }).strict()).max(100_000),
-  healingAttempts: z.array(z.object({ caseId: SafeIdSchema, attemptId: SafeIdSchema, changeDigest: DigestSchema, status: z.enum(['accepted', 'rejected']) }).strict()).max(100_000),
+  healingAttempts: z.array(z.object({
+    caseId: SafeIdSchema,
+    attemptId: SafeIdSchema,
+    firstAttemptId: SafeIdSchema.optional(),
+    changeDigest: DigestSchema,
+    status: z.enum(['accepted', 'rejected']),
+    requiredOracleIds: z.array(SafeIdSchema).min(1).max(10_000).optional(),
+    replayedOracleIds: z.array(SafeIdSchema).max(10_000).optional(),
+  }).strict()).max(100_000),
   selectedAttemptExplanations: z.array(z.object({ caseId: SafeIdSchema, attemptId: SafeIdSchema, rationaleDigest: DigestSchema }).strict()).max(100_000),
 }).strict()
 
@@ -1534,7 +1556,7 @@ function createArtifactSchema<T extends ArtifactType>(
   return ArtifactEnvelopeSchema.extend({
     artifactType: z.literal(artifactType),
     schemaVersion: artifactType === 'execution-contract'
-      ? z.literal('1.1.0')
+      ? z.literal('1.2.0')
       : artifactType === 'browser-action-map'
         ? z.literal('2.1.0')
         : artifactType === 'final-report'
@@ -1590,7 +1612,7 @@ export function parseArtifactDocument(candidate: unknown): ArtifactDocument {
     })
   }
   if ((typeResult.data.artifactType === 'execution-contract'
-      && (!versionResult.success || versionResult.data.schemaVersion !== '1.1.0'))
+      && (!versionResult.success || versionResult.data.schemaVersion !== '1.2.0'))
     || (typeResult.data.artifactType === 'browser-action-map'
       && (!versionResult.success || versionResult.data.schemaVersion !== '2.1.0'))) {
     throw new E2EError({

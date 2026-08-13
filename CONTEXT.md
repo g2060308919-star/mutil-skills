@@ -123,6 +123,10 @@ _避免使用_：loose JSON files、Skill-owned state
 Runtime 拥有的持久串行 Case 调度器。每个 Case 有独立 actor、attempt、Gateway/Lease 绑定、Evidence、Cleanup 和 terminal；已完成 Case 不因后续失败或恢复而重放。
 _避免使用_：mega Case、for-loop in Skill
 
+**Fixture Coordinator**：
+Runtime 内协调 Actor、Role、Tenant、Environment、Target、Data Need、Lease、Cleanup 与 Reload Oracle 的深模块。业务 adapter 必须先经 Authority/Gateway 组装边界授权；资源名按 Run/Attempt fencing，Crash 恢复只检查和收敛 owner resource，绝不重放不确定写。Fixture 可以证明浏览器产品行为，但 Mock backend/database/IdP 必须在报告中保持 substituted/not-verified。
+_避免使用_：明文账号资产、共享测试记录、Mock 证明真实后端
+
 **Case Attempt**：
 一个 Case 的单次受控执行身份。写操作的 effect 为 unknown 时，不得自动创建新 Attempt。
 _避免使用_：retry counter only、replayed write
@@ -130,6 +134,18 @@ _避免使用_：retry counter only、replayed write
 **Runtime Host**：
 E2E 唯一 RPC、工作流和恢复权威。它协调 Contracts、Engine、Authority、Gateway、Browser Runtime、Artifact Store 和 Report；Skill 不复制其状态机。
 _避免使用_：backend service、Skill runtime
+
+**E2E Facade**：
+Skill 面向用户的高层产品入口。它接收已确认 PRD、Target 与必要 Role/Data Need，只读取 Runtime 返回的 `nextEdge`；安全且无需新输入的 Probe、Preflight、Execute、Finalize 可自动推进，语义审阅、执行绑定、批准与高风险副作用必须返回 typed pending decision。Facade 不计算 workflow、Grant、Evidence 或 Verdict。
+_避免使用_：CLI envelope builder in Skill、second workflow、automatic approval
+
+**Execution Explanation**：
+从已验签 active final-report 投影的只读 Timeline、失败责任和 Claim Classification。它与 JSON/Markdown/HTML 完整报告一起发布，严格区分 observed、verified、inferred、not-executed 与 unsupported；只能解释 Engine/Runtime 事实，不能提升或重算 Verdict。
+_避免使用_：report verdict logic、screenshot means passed、mock backend verified
+
+**Bounded Healing**：
+只允许 Capability Matrix 已证明安全的 locator、scope 与明确 wait 小漂移。候选绑定原失败 Attempt、页面身份、Evidence、语义和审批摘要；Engine 审阅后产生版本化 revision，必要时重新批准，再由 Runtime 创建新 Attempt 并重跑同一 Requirement 的全部 Oracle。权限、Target、effect、network、Oracle 或 Fixture 改变一律 fail-closed。
+_避免使用_：autonomous exploration、silent selector rewrite、retry unknown write
 
 **Runtime Resolver**：
 只从受控 Runtime closure 中选择执行版本，并把精确 installation digest 固化到 Run。友好 CLI 提供 `resolve-runtime --offline` 与 `resolve-runtime --pinned <exact-version> [--digest <sha256:...>]`；查询结果的同一策略通过 `prepare-input.runtimePolicy` 进入 `create-run`，在安装锁内重新解析并原子固化，省略时明确使用 offline；已有 Run 按原摘要恢复，活跃引用阻止卸载或 GC。`stable` 客户端只在生产 TUF/doctor/canary 门禁配置齐全时启用，`latest` 继续 fail-closed。

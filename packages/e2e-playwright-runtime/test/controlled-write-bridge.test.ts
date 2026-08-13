@@ -10,7 +10,6 @@ import {
   createControlledWriteLauncher,
   createProductionWriteRuntimeSession,
   createProductionControlledWriteLauncher,
-  createTestWriteRuntimeSession,
   LocalRuntimeIsolationAuthority,
   LocalCleanupPlanRegistry,
   startControlledWriteBridge,
@@ -18,6 +17,7 @@ import {
   type ControlledWriteBridgeRequest,
   type ControlledWriteBridgeProof,
 } from '../src/index.js'
+import { createTestWriteRuntimeSession } from '../src/production-isolation.js'
 
 const handles: ControlledWriteBridgeHandle[] = []
 afterEach(async () => {

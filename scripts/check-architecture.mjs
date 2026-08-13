@@ -1,5 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
+import { analyzeArchitectureHealth } from './e2e-architecture-health.mjs'
 
 const root = process.cwd()
 const failures = []
@@ -11,6 +12,7 @@ await assertRecoveryHasNoExecutionImports()
 await assertHostCannotAcceptRawWriteRecovery()
 await assertFoundationHasNoBin()
 await assertWorkspacePackages()
+await assertArchitectureHealth()
 
 if (failures.length > 0) {
   for (const failure of failures) {
@@ -112,6 +114,13 @@ async function assertWorkspacePackages() {
     'hooks',
   ]) {
     if (!packages.has(name)) failures.push(`missing workspace package: ${name}`)
+  }
+}
+
+async function assertArchitectureHealth() {
+  const report = await analyzeArchitectureHealth(root)
+  for (const finding of report.findings) {
+    if (finding.severity === 'error') failures.push(`${finding.code}: ${finding.location}`)
   }
 }
 

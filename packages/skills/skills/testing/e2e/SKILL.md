@@ -11,7 +11,7 @@ description: 当用户要求依据 PRD 完成浏览器 E2E 验收、真实链路
 
 ## Runtime 0.8.x 工作流契约
 
-Skill 版本与 Runtime 版本必须同为 `0.8.x`，并由 `skill.manifest.json` 的精确版本和 `doctor --json` 返回值进一步闭合。新 Run 的高层主线固定为：`create-run` 冻结来源，`prepare-prd-understanding` 固化唯一语义投影，`compile-prd-run` 编译 Case/Action/Oracle，`configure-target` 配置目标，`probe-target` 做无副作用浏览器诊断，随后 `get-acceptance-review` 与 `confirm-acceptance-review` 完成执行前语义确认。每条业务边之后立即执行 `get-status`，只按 Runtime 返回的 `nextEdge` 继续。
+Skill 版本与 Runtime 版本必须同为 `0.8.x`，并由 `skill.manifest.json` 的精确版本和 `doctor --json` 返回值进一步闭合。新 Run 的高层主线固定为：`create-run` 冻结来源，`prepare-prd-understanding` 固化唯一语义投影，`compile-prd-run` 编译 Case/Action/Oracle，`configure-target` 配置目标，`probe-target` 做无副作用浏览器诊断，随后 `get-acceptance-review` 与 `confirm-acceptance-review` 完成执行前语义确认；只读预检闭合后，Skill 提交不含批准、摘要、证据或源码的声明式执行绑定，由 `compile-executable-run` 一次生成并冻结可执行资产。Skill 不需要知道 Artifact 创建顺序，也不得逐个拼装 `test-cases`、`browser-action-map`、`execution-contract` 或 `run-bundle`。每条业务边之后立即执行 `get-status`，只按 Runtime 返回的 `nextEdge` 继续。
 
 `submit-candidate` 不属于新 Run 的默认主线，只为 Runtime 明确返回该边的旧 Run/旧 Artifact 流程保留。不得因为旧文档示例存在该命令，就跳过 `compile-prd-run`、目标配置、目标探测或语义确认。严格 JSON 只由 Skill/Facade 构造；当 Runtime 拒绝输入时，向调用者展示 `validationIssues` 的字段路径、约束与修复建议，而不是只返回“envelope 无效”。
 
@@ -42,6 +42,8 @@ Skill 版本与 Runtime 版本必须同为 `0.8.x`，并由 `skill.manifest.json
 
 调用者不需要构造 `RuntimeRequestEnvelope`，也不需要理解 requestId、project identity 或状态跳转。Skill 使用 Runtime 的 `Facade` 生成 envelope、跟随 `nextEdge`，并把 `reasonCode`、`remediation`、RunHandle 与最小缺失输入原样呈现。面向调用者和排障优先使用固定 launcher 的友好命令：
 
+首次验收的产品入口是 `acceptFromPrd`：调用者只提供 PRD、URL 和必要的 **Role/Data Need**；Skill 完成一次需求理解与确认后，由 Facade 准备内部输入并返回可恢复 RunHandle。日常回归使用 `replayRegression` 复用冻结资产，不再次调用生成器；Target、Approval 与 Lease freshness 仍按当次 Runtime `nextEdge` 验证。两个入口都不得要求调用者手写 Policy、Artifact、digest 或 JSON envelope。
+
 - `~/.mutil-skills/bin/repo-e2e status --run <RUN>`：读取当前阶段、condition、`semanticCases`、保留/失效资产和下一步，并刷新 `~/.mutil-skills/e2e/runs/<asset>/<run>/run-status.html`。
 - `~/.mutil-skills/bin/repo-e2e resolve-runtime --offline`：离线验证并选择当前受控 Runtime closure；`--pinned <exact-version> [--digest <sha256:...>]` 用于精确复现。未配置生产 TUF 服务时不得使用 `--stable`，`latest` 始终拒绝。
 - `~/.mutil-skills/bin/repo-e2e prepare-input`：从标准输入接收 Skill 已读取并确认的 PRD/契约/必要来源 bytes 以及已选择的 `runtimePolicy`，创建私有、不可变接入快照并输出 `create-run` payload；它不发起网络请求，也不替代需求理解。
@@ -49,6 +51,8 @@ Skill 版本与 Runtime 版本必须同为 `0.8.x`，并由 `skill.manifest.json
 - `~/.mutil-skills/bin/repo-e2e confirm-review --run <RUN> --digest <sha256:...>`：只确认当前语义审查摘要。
 - `~/.mutil-skills/bin/repo-e2e retry --run <RUN>`：仅重试 Runtime 明确标为可恢复的 Target Probe 或 preflight，不重放写操作。
 - `~/.mutil-skills/bin/repo-e2e report --run <RUN>`：读取正式最终报告；`--run-id` 仅保留为旧调用兼容别名。
+
+运行中可用正式 `cancel-run` 请求取消，并用 `get-health` 读取当前 Case/Action/Attempt、等待、Gateway、Cleanup 和 cancel progress。写已派发后取消不能自动重放，Cleanup/Reload 与 unknown-write 收口不能被跳过；health 只是诊断投影，不能改变 workflow 或 Verdict。
 
 内部仍通过下节 JSON 协议提交复杂声明式资产，这是 Skill/Facade 的实现细节，不得要求用户手写 JSON envelope。
 
@@ -58,9 +62,9 @@ Skill 版本与 Runtime 版本必须同为 `0.8.x`，并由 `skill.manifest.json
 
 `ok:true` 时先按该命令的结果契约读取业务结果；每个业务命令成功后必须立即调用 `get-status`，发送新的严格请求。只有 `get-status` 的 `result` 是公共状态投影，并且必须严格拒绝未知字段、完整提供 `state`、`nextEdge`、`verifiedDigests`、`minimumMissingInput`。Skill 只原样转述该投影，不补值、不猜测下一边、不自行计算摘要。`ok:false` 时只转述 `error.code/category/terminalState/resumeState/details`；响应版本、requestId、Runtime 身份或字段闭包不合法时进入 `environment-blocked`，不得把传输成功当业务成功。
 
-`prepare-prd-understanding` 后必须先消费 `get-status` 返回的 `compile-prd-run` 边，并提交一份严格 `DeclarativePrdRunDesign`。Runtime 负责完整性检查、稳定 ID、摘要和串行 Case 调度；Skill 不得提交 `compilerDigest`、Artifact ID、审批事实或 verdict。`submit-candidate` 仅作为旧 Run 的兼容 interface；若 `get-status` 明确返回该边，仍只能按 `minimumMissingInput` 补交 Runtime 要求的兼容资产，不得自行跳过高层编译、状态边或阶段门。
+`prepare-prd-understanding` 后必须先消费 `get-status` 返回的 `compile-prd-run` 边，并提交一份严格 `DeclarativePrdRunDesign`。Runtime 负责完整性检查、稳定 ID、摘要和串行 Case 调度；Skill 不得提交 `compilerDigest`、Artifact ID、审批事实或 verdict。Target Probe、AcceptanceReview 确认与只读预检闭合后，消费 `compile-executable-run` 边并提交严格 `DeclarativeExecutionBindingV1`；遇到 `needs-binding` 或 `unsupported` 必须展示具体 Case/Action/Oracle 缺口，不得生成占位断言。`submit-candidate` 仅作为旧 Run 的兼容 interface；若 `get-status` 明确返回该边，仍只能按 `minimumMissingInput` 补交 Runtime 要求的兼容资产，不得自行跳过高层编译、状态边或阶段门。
 
-真实命令包括 `create-run`、`prepare-prd-understanding`、`compile-prd-run`、`get-acceptance-review`、`confirm-acceptance-review`、`configure-target`、`probe-target`、兼容用 `submit-candidate`、`open-approval`、`confirm-approval`、`run-preflight`、`execute-run`、`prepare-manual-result`、`finalize-manual-result-role`、`finalize-run`、`get-status`、`"command":"resume-run"` 和 `"command":"render-report"`。恢复必须发送新的严格 `resume-run` envelope。本地模式下，人工 obligation 的 executor 与 reviewer 各需要一次独立、不可复用的确认；WebAuthn 模式继续使用两个不同登记身份。进入 `diagnosing` 且所需自动、人工和 N/A 事实齐全后发送 `finalize-run`，成功后再发送 `render-report`。不能把读取状态、重新执行或 Skill 自行渲染冒充恢复、最终化或报告命令。审批只认 Runtime 的主题绑定确认和 Authority 签名结果，不得把 `approved: true` 当作审批；secret 只传 `secretRef`，绝不传 secret value。
+真实命令包括 `create-run`、`prepare-prd-understanding`、`compile-prd-run`、`get-acceptance-review`、`confirm-acceptance-review`、`configure-target`、`probe-target`、`compile-executable-run`、兼容用 `submit-candidate`、`open-approval`、`confirm-approval`、`run-preflight`、`execute-run`、`prepare-manual-result`、`finalize-manual-result-role`、`finalize-run`、`get-status`、`"command":"resume-run"` 和 `"command":"render-report"`。恢复必须发送新的严格 `resume-run` envelope。本地模式下，人工 obligation 的 executor 与 reviewer 各需要一次独立、不可复用的确认；WebAuthn 模式继续使用两个不同登记身份。进入 `diagnosing` 且所需自动、人工和 N/A 事实齐全后发送 `finalize-run`，成功后再发送 `render-report`。不能把读取状态、重新执行或 Skill 自行渲染冒充恢复、最终化或报告命令。审批只认 Runtime 的主题绑定确认和 Authority 签名结果，不得把 `approved: true` 当作审批；secret 只传 `secretRef`，绝不传 secret value。
 
 ## 权威状态决策
 

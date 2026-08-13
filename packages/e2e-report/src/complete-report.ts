@@ -4,11 +4,13 @@ import {
   type FinalReportArtifact,
   type Metric,
 } from '@mutil-skills/e2e-contracts'
+import { projectExecutionExplanation, renderExecutionExplanation } from './execution-explanation.js'
 
 export interface RenderedCompleteReport {
   json: string
   markdown: string
   html: string
+  explanation: { json: string; markdown: string; html: string }
 }
 
 interface MarkdownFragment { readonly kind: 'markdown-fragment'; readonly value: string }
@@ -34,6 +36,10 @@ const SECTION_TITLES = [
   'PRD 原文到 Oracle 语义追踪',
 ] as const
 
+function renderExplanationForReport(report: FinalReportArtifact) {
+  return renderExecutionExplanation(projectExecutionExplanation(report))
+}
+
 export function renderCompleteReport(input: unknown): RenderedCompleteReport {
   const parsed = ArtifactSchemaRegistry['final-report'].safeParse(input)
   if (!parsed.success) {
@@ -45,6 +51,7 @@ export function renderCompleteReport(input: unknown): RenderedCompleteReport {
     json: `${JSON.stringify(report, null, 2)}\n`,
     markdown: renderMarkdown(report),
     html: renderHtml(report),
+    explanation: renderExplanationForReport(report),
   }
 }
 

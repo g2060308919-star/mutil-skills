@@ -1,4 +1,5 @@
 import {
+  ActorDataIntentV1Schema,
   PrdUnderstandingContractHeaderSchema,
   canonicalizeJson,
   digestBytes,
@@ -49,12 +50,17 @@ export const E2EInputDraftSchema = z.object({
     mediaType: z.string().min(1).max(256),
     origin: OriginSchema,
   }).strict()).max(100).default([]),
+  actorDataIntents: z.array(ActorDataIntentV1Schema).max(1000).default([]),
 }).strict().superRefine((value, context) => {
   const sourceBytes = Buffer.byteLength(value.prd.text, 'utf8')
     + value.supportingSources.reduce((total, source) => total + Buffer.byteLength(source.text, 'utf8'), 0)
   if (sourceBytes > 8 * 1024 * 1024) context.addIssue({
     code: 'custom', path: ['supportingSources'],
     message: 'PRD 与 supporting sources 总量不得超过 8 MiB',
+  })
+  const intentIds = value.actorDataIntents.map((intent) => intent.intentId)
+  if (new Set(intentIds).size !== intentIds.length) context.addIssue({
+    code: 'custom', path: ['actorDataIntents'], message: 'intentId 必须唯一',
   })
 })
 
@@ -113,6 +119,7 @@ export class E2EInputPreparer {
         mediaType: source.mediaType, origin: source.origin,
         relevance: 'necessary-dependency',
       })),
+      actorDataIntents: draft.actorDataIntents,
     }
     return { schemaVersion: '1.0.0', intakeId, projectRoot: root, create: payload }
   }

@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import {
+  AcceptanceReviewSchema,
+  canonicalizeJson,
   digestPrdUnderstandingProjection,
   digestPrdUnderstandingQuote,
   digestText,
@@ -7,7 +9,8 @@ import {
   type DeclarativePrdRunDesignV2,
   type PrdUnderstandingProjection,
 } from '@mutil-skills/e2e-contracts'
-import { compilePrdRun } from '../src/prd-run-compiler.js'
+import { compileExecutableRun, compilePrdRun, compileSemanticRun } from '../src/prd-run-compiler.js'
+import { confirmAcceptanceReview } from '../src/acceptance-review.js'
 
 describe('PRDRunCompiler', () => {
   test('deterministically compiles three Cases and binds every acceptance criterion', () => {
@@ -19,6 +22,46 @@ describe('PRDRunCompiler', () => {
     expect(first.cases.flatMap((item) => item.oracles).map((item) => item.acceptanceCriterion))
       .toEqual(['结果 1 可见', '结果 2 可见', '结果 3 可见'])
     expect(first.compilerDigest).toMatch(/^sha256:/)
+    expect(compileSemanticRun(input)).toEqual(first)
+  })
+
+  test('已确认 Review 与 ready Probe 把完整绑定确定性编译为 executable cases', () => {
+    const semanticInput = inputFixture()
+    const compiledPlan = compileSemanticRun(semanticInput)
+    const review = acceptanceReview(compiledPlan)
+    const receipt = confirmAcceptanceReview({
+      review, expectedReviewDigest: review.reviewDigest, confirmedAt: '2026-08-12T00:00:00.000Z',
+    })
+    const first = compileExecutableRun({ compiledPlan, acceptanceReview: review,
+      acceptanceReviewReceipt: receipt, targetProbe: targetProbe(), bindingCandidate: binding(compiledPlan) })
+    const second = compileExecutableRun({ compiledPlan, acceptanceReview: review,
+      acceptanceReviewReceipt: receipt, targetProbe: targetProbe(), bindingCandidate: binding(compiledPlan) })
+    expect(first).toEqual(second)
+    expect(first.executableCases.map((item) => item.caseId)).toEqual(['CASE-0001', 'CASE-0002', 'CASE-0003'])
+    expect(first.blockedCases).toEqual([])
+    expect(first.compilerDigest).toMatch(/^sha256:/)
+  })
+
+  test('缺失绑定形成 needs-binding，额外 action 与过期 Probe fail closed', () => {
+    const compiledPlan = compileSemanticRun(inputFixture())
+    const review = acceptanceReview(compiledPlan)
+    const receipt = confirmAcceptanceReview({ review, expectedReviewDigest: review.reviewDigest,
+      confirmedAt: '2026-08-12T00:00:00.000Z' })
+    const partial = binding(compiledPlan)
+    partial.cases.pop()
+    expect(compileExecutableRun({ compiledPlan, acceptanceReview: review, acceptanceReviewReceipt: receipt,
+      targetProbe: targetProbe(), bindingCandidate: partial }).blockedCases).toEqual([{
+      caseId: 'CASE-0003', reason: 'needs-binding', missingActionIds: ['ACTION-0003-0001'],
+      missingOracleIds: ['ORACLE-0003-0001'],
+    }])
+    const forged = binding(compiledPlan) as any
+    forged.cases[0].actions[0].actionId = 'ACTION-FORGED'
+    forged.cases[0].oracles[0].actionId = 'ACTION-FORGED'
+    expect(() => compileExecutableRun({ compiledPlan, acceptanceReview: review, acceptanceReviewReceipt: receipt,
+      targetProbe: targetProbe(), bindingCandidate: forged })).toThrow(/E2E_RUNTIME_EXECUTABLE_BINDING_ACTION_UNAUTHORIZED/)
+    expect(() => compileExecutableRun({ compiledPlan, acceptanceReview: review, acceptanceReviewReceipt: receipt,
+      targetProbe: { ...targetProbe(), status: 'environment-blocked' }, bindingCandidate: binding(compiledPlan) }))
+      .toThrow(/E2E_RUNTIME_EXECUTABLE_TARGET_NOT_READY/)
   })
 
   test('允许多个独立场景覆盖同一验收条件', () => {
@@ -91,6 +134,58 @@ describe('PRDRunCompiler', () => {
     })
   })
 })
+
+function acceptanceReview(plan: ReturnType<typeof compilePrdRun>) {
+  const draft = {
+    schemaVersion: '1.0.0' as const, runId: 'RUN-1', contractProjectionDigest: plan.contractProjectionDigest,
+    compilerDigest: plan.compilerDigest, links: [{
+      clauseId: 'CLAUSE-1', sourceSpan: { sourceId: 'PRD', startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 },
+      sourceText: '需求', disposition: 'modeled' as const, requirementIds: ['REQ-1'], ruleIds: ['RULE-1'],
+      oracleIds: ['ORACLE-0001-0001'], caseIds: ['CASE-0001'],
+    }], semanticCatalog: {
+      requirements: [], rules: [], oracles: [], obligations: [], cases: [],
+    }, includedClauseIds: [], excludedClauseIds: [], unresolvedItems: [],
+  }
+  return AcceptanceReviewSchema.parse({ ...draft,
+    reviewDigest: digestText('e2e-acceptance-review/v1', canonicalizeJson(draft)) })
+}
+
+function targetProbe() {
+  const base = {
+    schemaVersion: '1.0.0' as const, trust: 'untrusted-diagnostic' as const, runId: 'RUN-1',
+    targetContractDigest: digestText('test', 'target'), status: 'ready' as const,
+    observedUrl: 'https://example.test/orders', observedTitle: '订单', identityMatched: true,
+    diagnostics: { strategy: 'resource-closure' as const, attempt: 1, domPresent: true,
+      visibleTextSummary: '订单', consoleErrors: [], failedRequests: [], pendingResources: [],
+      unapprovedResources: [], persistentConnections: [], advisories: [], resourceSummary: {
+        observedCount: 1, approvedCount: 1, pendingCount: 0, unapprovedCount: 0,
+        persistentConnectionCount: 0, closureComplete: true,
+      } }, probedAt: '2026-08-12T00:00:00.000Z',
+  }
+  return { ...base, diagnosticDigest: digestText('e2e-target-probe-diagnostic/v1', JSON.stringify(base)) }
+}
+
+function binding(plan: ReturnType<typeof compilePrdRun>) {
+  return {
+    schemaVersion: 'declarative-execution-binding/v1' as const,
+    planCompilerDigest: plan.compilerDigest,
+    targetProbeDigest: targetProbe().diagnosticDigest,
+    cases: plan.cases.map((testCase) => ({
+      caseId: testCase.caseId, executionLane: 'trusted-read-only' as const,
+      pageIdentityPolicy: { schemaVersion: '1.0.0' as const,
+        url: { origin: 'https://example.test', pathPattern: '/orders' },
+        signals: [{ kind: 'role' as const, role: 'main' as const, name: '订单' }], match: { mode: 'all' as const } },
+      actions: testCase.actions.map((action) => ({ kind: 'assert-only' as const, actionId: action.actionId,
+        effect: 'read' as const, pageScope: { page: 'current' as const, frame: { kind: 'main' as const } },
+        locatorCandidates: [{ kind: 'text' as const, value: '结果', exact: false }],
+        timeout: { timeoutMs: 5_000, retry: 'read-only-max-2' as const } })),
+      oracles: testCase.oracles.map((oracle) => ({ kind: 'text' as const, oracleId: oracle.oracleId,
+        actionId: oracle.actionId, locatorCandidates: [{ kind: 'text' as const, value: '结果', exact: false }],
+        comparator: 'contains' as const, expected: oracle.acceptanceCriterion, deadlineMs: 5_000,
+        evidenceKinds: ['dom' as const] })), dataNeeds: [], cleanupIntents: [],
+    })),
+  }
+}
 
 function inputFixture(): {
   understanding: PrdUnderstandingProjection
